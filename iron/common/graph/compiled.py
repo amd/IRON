@@ -566,23 +566,7 @@ class Graph:
             if dev is not None
             else contextlib.nullcontext()
         ):
-            recording = self.record(**shapes)
-            recording.code_weights()
-            profile = self._profile()
-            fused: tuple[Fusion, ...] = ()
-            packing = Packing()
-            if not check and profile is not None:
-                recording, fused, packing = apply_profile(
-                    recording, profile, require_device()
-                )
-            chosen = plan(
-                require_device(),
-                recording,
-                full_elf,
-                check,
-                step_words=_step_words(recording),
-                fusions=fused,
-            )
+            recording, chosen, fused, packing = self._planned(full_elf, check, shapes)
             logger.info(
                 "%s",
                 "\n".join(
@@ -610,6 +594,50 @@ class Graph:
                 )
             self._versions[recording.version] = version
             return version
+
+    def _planned(
+        self, full_elf: bool | None, check: bool, shapes: Mapping[str, Any]
+    ) -> tuple[Recording, Plan, tuple[Fusion, ...], Packing]:
+        """Record the version for ``shapes`` as ``compile`` builds it on the current device: weights coded, profile applied, planned."""
+        recording = self.record(**shapes)
+        recording.code_weights()
+        profile = self._profile()
+        fused: tuple[Fusion, ...] = ()
+        packing = Packing()
+        if not check and profile is not None:
+            recording, fused, packing = apply_profile(
+                recording, profile, require_device()
+            )
+        chosen = plan(
+            require_device(),
+            recording,
+            full_elf,
+            check,
+            step_words=_step_words(recording),
+            fusions=fused,
+        )
+        return recording, chosen, fused, packing
+
+    def held_bytes(
+        self, versions: Sequence[Mapping[str, Any]], dev: Device | None = None
+    ) -> int:
+        """Bytes the versions for ``versions`` (each one's input shapes) hold on the device once loaded, built as ``compile`` builds them but laid out only.
+
+        Their shared arena and each one's own buffers outside it (``Image.held_bytes``).
+        """
+        arena = ArenaPlan(ALIGNMENT)
+        held = 0
+        with (
+            aie_utils.set_current_device(dev)
+            if dev is not None
+            else contextlib.nullcontext()
+        ):
+            for shapes in versions:
+                recording, chosen, fused, packing = self._planned(None, False, shapes)
+                held += unbuilt_image(
+                    recording, chosen, arena=arena, fusions=fused, packing=packing
+                ).held_bytes()
+        return held + arena.size
 
     def _emit(
         self, recording: Recording, chosen: Plan, feeds: CompiledGraph | None
@@ -775,6 +803,34 @@ def apply_profile(
     return recording, fused, packing
 
 
+def unbuilt_image(
+    recording: Recording,
+    plan: Plan,
+    *,
+    check: bool = False,
+    arena: ArenaPlan | None = None,
+    fusions: Sequence[Fusion] = (),
+    packing: Packing = Packing(),
+) -> Image:
+    """Return ``recording``'s image under ``plan`` as ``CompiledGraph`` builds it, laid out (``Image.prepare``) and not built.
+
+    Its residents placed in ``arena`` where given, as a graph's versions share one.
+    """
+    _, shared = _words(recording, share=plan.full_elf, extents=not plan.full_elf)
+    if not plan.full_elf:
+        merged = merges(recording, fusions, packing, require_device())
+        fusions = sorted((*fusions, *merged), key=lambda f: f.steps[0])
+    packaging = (
+        FullELF(commands=plan.commands, shared_words=shared, packing=packing)
+        if plan.full_elf
+        else PerStep(check)
+    )
+    placement: dict[str, Any] = (
+        {} if arena is None else dict(arena=arena, residents=recording.residents)
+    )
+    return Image(recording, packaging, fusions=fusions, **placement).prepare()
+
+
 class CompiledGraph:
     """A recorded graph built into an image, ready to call.
 
@@ -799,21 +855,13 @@ class CompiledGraph:
         self.words, self.shared = _words(
             recording, share=plan.full_elf, extents=not plan.full_elf
         )
-        if not plan.full_elf:
-            merged = merges(recording, fusions, packing, require_device())
-            fusions = sorted((*fusions, *merged), key=lambda f: f.steps[0])
-        packaging = (
-            FullELF(commands=plan.commands, shared_words=self.shared, packing=packing)
-            if plan.full_elf
-            else PerStep(check)
-        )
-        placement: dict[str, Any] = (
-            {}
-            if arena is None
-            else dict(arena=arena.plan, residents=recording.residents)
-        )
-        self.sequence = Image(
-            recording, packaging, fusions=fusions, **placement
+        self.sequence = unbuilt_image(
+            recording,
+            plan,
+            check=check,
+            arena=None if arena is None else arena.plan,
+            fusions=fusions,
+            packing=packing,
         ).compile()
         self.image = self.sequence.image
         self.artifacts = self.sequence.artifacts
