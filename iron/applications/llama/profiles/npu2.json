@@ -26,7 +26,12 @@
   {"operator": "GEMV", "M": 128256, "K": 3072, "tile_size_input": 2, "tile_size_output": 32},
   {"operator": "RMSNorm", "weighted": true, "rows": 2048, "tile_size": 3072, "num_aie_columns": 8},
   {"operator": "MHA", "num_heads": 24, "num_KV_heads": 8, "d": 128, "seq_pad": 2048, "num_pipelines": 8},
-  {"operator": "ElementwiseAdd", "size": 6291456, "tile_size": 2048}
+  {"operator": "ElementwiseAdd", "size": 6291456, "tile_size": 2048},
+  {"operator": "GEMV", "M": 8192, "K": 3072, "num_batches": 1, "tile_size_input": 2, "tile_size_output": 1024, "coded_a": true},
+  {"operator": "GEMV", "M": 1024, "K": 3072, "num_batches": 1, "tile_size_input": 2, "coded_a": true},
+  {"operator": "GEMV", "M": 128256, "K": 3072, "num_batches": 1, "tile_size_input": 2, "tile_size_output": 32, "coded_a": true},
+  {"operator": "GEMV", "M": 3072, "K": 8192, "num_batches": 1, "tile_size_input": 1, "tile_size_output": 384, "coded_a": true},
+  {"operator": "GEMV", "M": 3072, "K": 3072, "num_batches": 1, "tile_size_input": 2, "tile_size_output": 384, "coded_a": true}
 ],
 "fusions": [
   {"kind": "fold", "steps": [{"operator": "SiLU", "size": 16777216}, {"operator": "ElementwiseMul", "size": 16777216}], "edges": [[0, "y", 1, "a"]], "versions": [{"ids": [[2048], "int32"]}]}
