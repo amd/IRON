@@ -93,7 +93,17 @@ timestamp tick is 0.02 s:
 | 96 s LibriSpeech clip | 97.0 s | 4 | 0.00940 | — | words exact; timestamp deltas `5, 0, 1, 0` ticks | 2.3% | 323.7 s |
 
 These are full-checkpoint Phoenix measurements of the revised NPU frontend
-and token-selection path, not the earlier host-preprocessing baseline.
+and token-selection path, not the earlier host-preprocessing baseline. The
+table was collected before the final unfinished-segment trimming correction.
+
+After that correction, all eight fixed-input Phoenix device tests passed,
+including the 35 s two-window utterance `4507-16021-0047`: its per-window
+text and timestamps matched the float32 reference, with zero timestamp
+delta. Teacher-forced decoding over the short and medium clips had zero
+top-1 mismatches, mean KL at most `0.000213`, and maximum KL at most
+`0.000724`. Alternating pretrained-weight calls were bit-identical.
+The 2 s short-clip encoder/decoder window measured 4.48 s Latency
+(excluding frontend extraction, compilation and weight loading).
 
 ## Testing
 

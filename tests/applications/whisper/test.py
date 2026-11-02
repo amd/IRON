@@ -44,7 +44,7 @@ pytestmark = pytest.mark.supported_devices("npu1", "npu2")
 
 # Measured on Phoenix (npu1): 1st-percentile token cosine >= 0.9519 (across all
 # 1500 rows, including trailing silence; whole-array cosine >= 0.9991), and
-# whole-array relative error (NRMSE) 0.022 to 0.041 across LibriSpeech clips.
+# whole-array relative error (NRMSE) 0.022 to 0.044 across LibriSpeech clips.
 ENCODER_MIN_COSINE = 0.95
 ENCODER_MAX_ERROR = 0.05
 
@@ -142,7 +142,7 @@ def test_whisper_short(model, reference, record_property):
             hf.window(audio, list(PROMPT), policy)[0], np.int32
         ),
     )
-    assert tokens == list(want_tokens)
+    assert tokens == want_tokens.astype(np.int32).tolist()
 
 
 @pytest.mark.extensive
@@ -227,8 +227,12 @@ def test_whisper_long_form(model, reference, record_property):
                 np.int32,
             ),
         )
-        ok, diff = windows_match(w["tokens"], list(expected), tokenizer=model.tokenizer)
-        assert ok, f"window {i} (seek {seek}): {w['tokens']} != {list(expected)}"
+        # Golden stores every result as float32, including recorded token IDs.
+        expected_tokens = expected.astype(np.int32).tolist()
+        ok, diff = windows_match(
+            w["tokens"], expected_tokens, tokenizer=model.tokenizer
+        )
+        assert ok, f"window {i} (seek {seek}): {w['tokens']} != {expected_tokens}"
         if diff is not None:
             worst = max(worst, diff)
     record_property("DifferingTokens", worst)
