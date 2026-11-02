@@ -150,7 +150,12 @@ def main():
     )  # Ignore empty/non-existant all.csv on first run
     latest_rows = get_rows(args.latest)
 
-    output_rows = all_rows + latest_rows
+    # A run merged again, as by a re-run job, replaces its rows.
+    output_rows = list(
+        {
+            (row_key(row), row.get("Date")): row for row in all_rows + latest_rows
+        }.values()
+    )
     add_empty_columns(output_rows)
 
     if args.prune:
