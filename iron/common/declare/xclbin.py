@@ -74,7 +74,7 @@ class Xclbin(NPUKernel):
             directory = Path(NPU_CACHE_HOME) / "prebuilt"
         target = Path(directory) / self.filename
         # Windows cannot replace a target another fetch is reading to hash it.
-        with file_lock(target.with_name(f".{target.name}.lock")):
+        with file_lock(target.with_name(f".{target.name}.lock").absolute()):
             return self._fetch_locked(target)
 
     def _fetch_locked(self, target: Path) -> Path:

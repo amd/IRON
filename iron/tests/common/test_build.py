@@ -766,7 +766,10 @@ def test_concurrent_fetches_validate_and_publish_one_download(tmp_path, monkeypa
     assert not list(tmp_path.glob("*.part"))
 
 
-def test_a_fetch_replaces_corrupt_content_under_its_lock(tmp_path, monkeypatch):
+@pytest.mark.parametrize("relative", [False, True])
+def test_a_fetch_replaces_corrupt_content_under_its_lock(
+    tmp_path, monkeypatch, relative
+):
     """A stale cache entry is still replaced, not accepted as a concurrent success."""
     data = b"pinned xclbin contents"
     image = Xclbin(
@@ -776,8 +779,9 @@ def test_a_fetch_replaces_corrupt_content_under_its_lock(tmp_path, monkeypatch):
     )
     target = tmp_path / image.filename
     target.write_bytes(b"corrupt")
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: io.BytesIO(data))
-    assert image.fetch(tmp_path).read_bytes() == data
+    assert image.fetch("." if relative else tmp_path).read_bytes() == data
 
 
 def test_one_configuration_records_at_one_size():
