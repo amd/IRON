@@ -121,7 +121,9 @@ def test_a_fused_cores_estimate_holds_what_it_declares(device, seq_len, f32_scor
             estimate = op.split_core_bytes(dev, op.B_kv, op.kv_lanes, op.lane_heads)
             kernel = op.fused_kernel(dev, op.B_q, op.B_kv, 1, op.lane_heads)
         else:
-            estimate = op.fused_core_bytes(dev, op.B_q, op.B_kv, op.f32_scores)
+            estimate = op.fused_core_bytes(
+                dev, op.B_q, op.B_kv, op.f32_scores, op.kv_depth
+            )
             kernel = op.fused_kernel(dev, op.B_q, op.B_kv, op.group, f32=op.f32_scores)
         room = (
             estimate

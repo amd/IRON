@@ -401,6 +401,9 @@ class MHA(Operator):
     fused: bool = tunable(repr=False, init=False)
     # Fused, the cores a column holds, each a query block of a round.
     column_cores: int = tunable(repr=False, init=False)
+    # Fused, the key blocks a core's L1 holds: two, so the next streams in
+    # while one is attended, unless only one fits.
+    kv_depth: int = tunable(repr=False, init=False)
     # The query heads a block packs a position, position-major: fused, a KV
     # group's; else 1.
     group: int = tunable(repr=False, init=False)
@@ -868,6 +871,7 @@ class MHA(Operator):
             lane_heads=1,
             query_heads=0,
             f32_scores=False,
+            kv_depth=2,
         )
 
     # Fused, the key block per head dimension, as today's pipeline takes it
@@ -878,8 +882,9 @@ class MHA(Operator):
         """``resolve`` for one core a query block: every core of ``num_pipelines`` columns.
 
         A KV group's heads packed a position; ``B_q`` the widest block of whole
-        positions dividing 64 whose core fits L1, unless given. One query is
-        split over keys (``split_mapping``).
+        positions dividing 64 whose core fits L1, unless given: with two key
+        blocks in L1 where any block fits so, else one. One query is split over
+        keys (``split_mapping``).
 
         Raises:
             Unresolvable: No device, neither AIE2 nor AIE2P, K and V apart, a
@@ -940,16 +945,17 @@ class MHA(Operator):
                 if self.B_q is not None
                 else [b for b in range(64, 7, -8) if not b % group]
             )
-            fit = next(
+            fit, kv_depth = next(
                 (
-                    b
+                    (b, depth)
+                    for depth in (2, 1)
                     for b in blocks
                     if not 64 % (b // group or 1)
                     and not self.seq_pad % (b // group * cores)
-                    and self.fused_core_bytes(dev, b, B_kv, f32)
+                    and self.fused_core_bytes(dev, b, B_kv, f32, depth)
                     <= dev.core_memory_bytes
                 ),
-                None,
+                (None, None),
             )
             if fit is None:
                 raise Unresolvable(
@@ -968,6 +974,7 @@ class MHA(Operator):
                 lane_heads=1,
                 query_heads=0,
                 f32_scores=f32,
+                kv_depth=kv_depth,
             )
         return self.replace(
             **mapping,
@@ -1012,13 +1019,13 @@ class MHA(Operator):
         )
 
     def fused_core_bytes(
-        self, dev: Device, B_q: int, B_kv: int, f32: bool = False
+        self, dev: Device, B_q: int, B_kv: int, f32: bool = False, kv_depth: int = 2
     ) -> int:
-        """Return a fused core's L1 bytes: Q, two key blocks, O's two forms, S (float32 where ``f32``), P, state, words and stack."""
+        """Return a fused core's L1 bytes: Q, ``kv_depth`` key blocks, O's two forms, S (float32 where ``f32``), P, state, words and stack."""
         d = self.d
         data = (
             2 * B_q * d  # Q, one block deep
-            + 2 * 4 * B_kv * d  # K and V, two blocks deep
+            + kv_depth * 4 * B_kv * d  # K and V
             + 2 * B_q * d  # O as it leaves
             + 4 * B_q * d  # O accumulating
             + (4 if f32 else 2) * B_q * B_kv  # S
@@ -1095,6 +1102,7 @@ class MHA(Operator):
             lane_heads=heads,
             query_heads=self.num_heads,
             f32_scores=False,
+            kv_depth=2,
         )
 
     def split_drain(self) -> tuple[list[int], list[int]] | None:
@@ -1858,7 +1866,7 @@ class MHA(Operator):
                 core,
                 fn_args=[
                     memQ[c].cons(),
-                    memKV.cons(),
+                    memKV.cons(depth=self.kv_depth),
                     outO[c].prod(),
                     attend,
                     init,
