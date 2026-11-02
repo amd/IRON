@@ -327,10 +327,11 @@ class Model(iron.Graph):
         random_weights: int | None = None,
         max_seq_len: int | None = None,
         config: Mapping[str, Any] | None = None,
+        budget: int | None = None,
     ) -> Self:
         """Return the model of a Hugging Face repository's files, not yet loaded.
 
-        Its context is ``max_seq_len`` or else fitted to this host (``fit``).
+        Its context is ``max_seq_len`` or else fitted to ``budget`` (``fit``).
 
         Args:
             path: A directory holding ``config.json``, weights and
@@ -341,6 +342,9 @@ class Model(iron.Graph):
                 checkpoint's own.
             config: Fields of the checkpoint's config given other values
                 (``config_argument``'s).
+            budget: The bytes its arena may hold without ``max_seq_len``
+                (default ``host_budget()``); half of it where two models
+                are held at once.
 
         Raises:
             ValueError: ``max_seq_len`` is past the checkpoint's own.
@@ -358,7 +362,7 @@ class Model(iron.Graph):
         weights = weights_file(directory)
         shape = dataclasses.replace(cls.default_config(weights), **(config or {}))
         if max_seq_len is None:
-            shape = cls.fit(shape, weights)
+            shape = cls.fit(shape, weights, budget)
         else:
             assert isinstance(shape, DecoderConfig), "a context is a decoder's"
             if max_seq_len > shape.max_seq_len:
