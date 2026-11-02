@@ -31,6 +31,7 @@ from pretty_common import (
     UNKNOWN_OPERATOR,
     comparable,
     operator_name,
+    spread,
     row_key,
     select_bench_rows,
     tracked_metrics,
@@ -125,15 +126,13 @@ def verdict(metric: str, pct: float) -> str:
 def within_spread(curr, prev, metric, sigma):
     """Report whether the move sits inside the spread the two runs measured.
 
-    Each run repeats its test and records the standard deviation of the repeats.
-    A move smaller than that spread says nothing about the code. A run that
-    records no spread cannot answer, so it suppresses nothing.
+    Each run records the median absolute deviation over its timed calls (see
+    ``spread``). A move smaller than that spread says nothing about the code. A
+    run that records no spread cannot answer, so it suppresses nothing.
     """
     if not sigma:
         return False
-    deviations = [
-        try_parse_float(row.get(f"{metric} (stddev)")) for row in (curr, prev)
-    ]
+    deviations = [spread(row, metric) for row in (curr, prev)]
     deviations = [d for d in deviations if d is not None]
     if not deviations:
         return False

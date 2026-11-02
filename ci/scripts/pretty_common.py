@@ -54,6 +54,11 @@ METRICS = {
 }
 UNKNOWN_METRIC = Metric("", None)
 
+# A metric whose figure is another's spread: a latency's MAD over its timed calls.
+SPREADS = {"Latency": "Latency MAD"}
+# A figure computed from another's median carries that one's relative spread.
+RELATIVE_SPREADS = {"Bandwidth": "Latency", "Throughput": "Latency"}
+
 # The units of a timing, whose figure depends on the NPU's power mode.
 TIMED_UNITS = {"µs", "GB/s", "GOP/s", "s", "tokens/s"}
 
@@ -70,6 +75,22 @@ def provenance_fields(line: str) -> Dict[str, str]:
         if key and value:
             fields[key] = value
     return fields
+
+
+def spread(row: Dict[str, str], metric: str) -> Optional[float]:
+    """A run's ± spread of ``metric``: its own MAD, or a rate's share of the latency's."""
+    if metric in SPREADS:
+        return try_parse_float(row.get(SPREADS[metric] + MEAN_SUFFIX))
+    base = RELATIVE_SPREADS.get(metric)
+    if base is None:
+        return None
+    mad, median, value = (
+        try_parse_float(row.get(column + MEAN_SUFFIX))
+        for column in (SPREADS[base], base, metric)
+    )
+    if mad is None or not median or value is None:
+        return None
+    return value * mad / median
 
 
 def comparable(curr: Dict[str, str], prev: Dict[str, str], metric: str) -> bool:

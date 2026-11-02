@@ -26,6 +26,8 @@ from pretty_common import (
     ARCHS,
     MEAN_SUFFIX,
     METRICS,
+    RELATIVE_SPREADS,
+    SPREADS,
     SUITES,
     TIMED_UNITS,
     UNKNOWN_METRIC,
@@ -51,10 +53,6 @@ SUITE_NAMES = {
     "nightly": ("Models", "Nightly"),
 }
 
-# A metric whose figure is another's spread is drawn with it, not on its own.
-SPREADS = {"Latency": "Latency MAD"}
-# A figure computed from another's median carries that one's relative spread.
-RELATIVE_SPREADS = {"Bandwidth": "Latency", "Throughput": "Latency"}
 
 # The trends the page leads with, one per benchmark and checkpoint: the first
 # suite, then the first metric, any device still runs; beside a TPS, its TTFT.

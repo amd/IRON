@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
+
 SCRIPTS = Path(__file__).resolve().parents[3] / "ci" / "scripts"
 PAGE = "https://amd.github.io/IRON/benchmarks/"
 
@@ -364,3 +366,27 @@ def test_a_timing_across_a_power_mode_change_is_not_called_a_move(tmp_path):
     assert [p[4] for p in run["points"]] == ["default", "turbo"]
     assert "Latency" not in run["changes"]
     assert run["changes"]["Cosine"][1] == "worse"
+
+
+@pytest.mark.parametrize("mad,verdict", [(1.0, None), (0.1, "worse")])
+def test_a_move_inside_twice_the_runs_spread_is_not_called(tmp_path, mad, verdict):
+    _write(
+        tmp_path / "krackan" / "extensive" / "all.csv",
+        [
+            _row(
+                night,
+                GEMV,
+                "npu2-GEMV-M_1",
+                Latency=latency,
+                Throughput=100 / latency,
+                **{"Latency MAD": mad},
+            )
+            for night, latency in zip(NIGHTS, (10.0, 11.0))
+        ],
+    )
+    (series,) = _page_data(tmp_path)["benchmarks"]["GEMV"]["suites"]["extensive"][
+        "series"
+    ]
+    changes = series["devices"]["krackan"]["changes"]
+    assert changes["Latency"][1] == verdict
+    assert changes["Throughput"][1] == verdict
