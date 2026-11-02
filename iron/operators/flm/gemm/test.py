@@ -266,7 +266,14 @@ def b_col_maj_params(device: str):
         pytest.param(
             *p.values,
             precision,
-            marks=[*p.marks, pytest.mark.supported_devices(device)],
+            marks=[
+                *p.marks,
+                pytest.mark.supported_devices(device),
+                pytest.mark.skipif(
+                    dev.arch is AIEArch.AIE2,
+                    reason="NPU1's B-column-major memtile runtime does not complete",
+                ),
+            ],
             id=f"{device}-{p.id}-{precision}",
         )
         for precision in levels

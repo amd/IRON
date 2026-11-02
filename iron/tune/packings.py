@@ -37,7 +37,6 @@ from aie.utils.compile.jit.params import widths
 
 from iron.common.declare import Operator, Profile
 from iron.common.declare.profile import PackingEntry, Version
-from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import apply_profile
 from iron.common.image.step import FusionKind
 

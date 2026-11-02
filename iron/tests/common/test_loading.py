@@ -167,6 +167,18 @@ def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks(npu2, capl
     assert "--max-seq-len asks for up to 1024" in short_log.message
 
 
+def test_from_checkpoint_fits_the_budget_it_is_given(npu2, tmp_path):
+    """Half the budget where validate or a tune holds two models: 512 of 1024 positions."""
+
+    class Native(Small):
+        config = dataclasses.replace(SMALL, max_seq_len=1024)
+
+    directory = _directory(tmp_path, Native.config)
+    budget = _held(Native.config, 512)
+    model = Native.from_checkpoint(directory, random_weights=1, budget=budget)
+    assert model.config.max_seq_len == 512
+
+
 def test_a_model_fits_its_context_with_no_device_bound(tmp_path):
     """``fit`` records the model, whose profile is per device.
 

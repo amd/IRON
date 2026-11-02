@@ -39,7 +39,9 @@ validation:
 
 theme:
   name: material
-  logo: assets/images/XDNA2.png
+  icon:
+    logo: material/arm-flex
+  favicon: assets/images/iron-favicon.svg
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -123,6 +125,8 @@ plugins:
 # Drops the Programming Guide nav section when its tree isn't symlinked in.
 hooks:
   - docs/hooks/conditional_nav.py
+  # A page's title is its first H1 only when nothing precedes it.
+  - docs/hooks/spdx_header.py
   # Rewrites links that escape the doc tree into repo source to GitHub URLs.
   - docs/hooks/rewrite_source_links.py
 
@@ -150,8 +154,8 @@ markdown_extensions:
   - toc:
       permalink: true
       # GitHub-compatible slugifier, so heading anchors match what GitHub
-      # generates. Matters for pages like installation.md that render the
-      # same source (README.md) on both the docs site and GitHub.
+      # generates. Matters for pages like agents.md that render the same
+      # source (AGENTS.md) on both the docs site and GitHub.
       slugify: !!python/object/apply:pymdownx.slugs.slugify
         kwds:
           case: lower
@@ -161,6 +165,16 @@ nav:
   - Installation: installation.md
   - Programming Guide:
     - programming_guide/README.md
+    - programming_guide/section-0/README.md
+    - programming_guide/section-1/README.md
+    - programming_guide/section-2/README.md
+    - programming_guide/section-3/README.md
+    - programming_guide/section-4/README.md
+    - programming_guide/section-5/README.md
+    - programming_guide/section-6/README.md
+    - programming_guide/section-7/README.md
+    - programming_guide/section-8/README.md
+    - programming_guide/section-9/README.md
   - Models: models.md
   - API:
     - api/index.md

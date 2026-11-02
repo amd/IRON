@@ -6,7 +6,7 @@
 """MkDocs hook: rewrite relative links that point at repo source into GitHub URLs.
 
 Several doc pages are symlinks to files that live elsewhere in the repo
-(``docs/installation.md`` -> ``../README.md``, ``docs/programming_guide`` ->
+(``docs/agents.md`` -> ``../AGENTS.md``, ``docs/programming_guide`` ->
 ``../programming_guide``, ...), so their relative links -
 ``[AGENTS.md](AGENTS.md#environment)``, ``[model.py](model.py)`` - stay correct
 when the same file is browsed on GitHub. Those links resolve correctly from
@@ -42,7 +42,6 @@ _TREE_BASE = f"https://github.com/{GITHUB_REPO}/tree/{GITHUB_BRANCH}"
 # another name. A link to one of these from elsewhere in the docs should land
 # on that doc page, not bounce out to GitHub.
 _ROOT_DOC_SYMLINKS = {
-    "README.md": "installation.md",
     "CONTRIBUTING.md": "contributing.md",
     "AGENTS.md": "agents.md",
 }
@@ -137,7 +136,7 @@ def _rewrite_target(target, page_dir_link, page_dir_real, docs_dir, repo_root):
     resolved = os.path.realpath(os.path.join(page_dir_real, decoded_path))
     real_docs = os.path.realpath(docs_dir)
 
-    # --- Symlinked repo-root page (docs/installation.md -> ../README.md) -----
+    # --- Symlinked repo-root page (docs/agents.md -> ../AGENTS.md) -----------
     # The page is served from inside docs/, but its own links are repo-root-
     # relative. Map a link back to one of the known doc tree targets.
     if page_dir_real == repo_root:
@@ -202,13 +201,6 @@ def on_page_markdown(markdown, page, config, files):
     page_dir_real = os.path.dirname(os.path.realpath(abs_src))
     docs_dir = os.path.abspath(config["docs_dir"])
     repo_root = os.path.dirname(os.path.realpath(docs_dir))
-
-    # installation.md's source is README.md, whose H1 is the project name -
-    # correct on GitHub, but on the site it duplicates the Home page's H1.
-    if os.path.realpath(abs_src) == os.path.join(repo_root, "README.md"):
-        markdown = re.sub(
-            r"^#[ \t]+.*$", "# Installation", markdown, count=1, flags=re.MULTILINE
-        )
 
     def _sub(match):
         target = match.group("target")

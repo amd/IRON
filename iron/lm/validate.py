@@ -45,7 +45,7 @@ from iron.tune.verify import touches
 from .causal import CausalLM
 from .cli import application_model, config_argument
 from .generation import Sampler, accuracy, differing_steps, greedy_logits, kl_stats
-from .model import Model
+from .model import Model, host_budget
 
 
 def version_labels(model: Model) -> list[str]:
@@ -169,14 +169,15 @@ def load_model(
     max_seq_len: int | None,
     profile,
     config: Mapping[str, Any] | None = None,
+    budget: int | None = None,
 ) -> Model:
-    """``model_class.from_checkpoint(checkpoint)`` with ``config``'s fields.
+    """``model_class.from_checkpoint(checkpoint)`` with ``config``'s fields, fitted to ``budget``.
 
     Under ``profile`` (a directory, or None for the model's own), every version compiled
     as the device packages it (``Graph.compile``) and loaded.
     """
     model = model_class.from_checkpoint(
-        checkpoint, max_seq_len=max_seq_len, config=config
+        checkpoint, max_seq_len=max_seq_len, config=config, budget=budget
     )
     if profile is not None:
         model.profile = profile
@@ -299,6 +300,7 @@ def bisect(
     tokens,
     decode_steps: int,
     config: Mapping[str, Any] | None = None,
+    budget: int | None = None,
 ) -> dict:
     """Narrow a bit-identity mismatch to one version's entries, then to a prefix of them.
 
@@ -309,7 +311,7 @@ def bisect(
     summary; the first version to reproduce the mismatch wins.
     """
     probe = model_class.from_checkpoint(
-        checkpoint, max_seq_len=max_seq_len, config=config
+        checkpoint, max_seq_len=max_seq_len, config=config, budget=budget
     )
     labels = version_labels(probe)
     recordings = {k: probe.record(**s) for k, s in zip(labels, probe.shapes())}
@@ -323,7 +325,9 @@ def bisect(
         profile_dir = out_dir / f"bisect-{label}"
         profile_dir.mkdir(parents=True, exist_ok=True)
         build_variant(stock_profile, tags).save(profile_dir / f"{dev.name}.json")
-        variant = load_model(model_class, checkpoint, max_seq_len, profile_dir, config)
+        variant = load_model(
+            model_class, checkpoint, max_seq_len, profile_dir, config, budget
+        )
         assert isinstance(variant, CausalLM), "model_class is a CausalLM"
         mismatch = bit_identity(stock, variant, tokens, decode_steps)
         variant.release()
@@ -340,7 +344,7 @@ def bisect(
                 profile_dir / f"{dev.name}.json"
             )
             variant = load_model(
-                model_class, checkpoint, max_seq_len, profile_dir, config
+                model_class, checkpoint, max_seq_len, profile_dir, config, budget
             )
             assert isinstance(variant, CausalLM), "model_class is a CausalLM"
             mismatch = bit_identity(stock, variant, tokens, decode_steps)
@@ -508,8 +512,8 @@ def validate(
         candidate: The profile validated, or a directory holding one per device.
         stock: The profile it is validated against, or such a directory; the model's own
             where None.
-        max_seq_len: The longest context the two models serve; fitted to the host where
-            None.
+        max_seq_len: The longest context the two models serve; where None, fitted to
+            the host's budget shared by every model held at once.
         prompt_chars: Characters of the prompt a decoder is run on.
         decode_steps: Decode steps compared for bit identity.
         accuracy_tokens: Tokens judged against the golden.
@@ -535,13 +539,15 @@ def validate(
     stock_profile, candidate_profile = profiles
     report: dict[str, Any] = {"candidate": str(candidate)}
 
+    # Stock and candidate are held at once, and a bisection's variant beside them.
+    budget = host_budget() // (2 if bisect_into is None else 3)
     print("loading stock model (real weights)...")
     stock_model = load_model(
-        model_class, checkpoint, max_seq_len, stock_profile, config
+        model_class, checkpoint, max_seq_len, stock_profile, config, budget
     )
     print("loading candidate model...")
     candidate_model = load_model(
-        model_class, checkpoint, max_seq_len, candidate_profile, config
+        model_class, checkpoint, max_seq_len, candidate_profile, config, budget
     )
 
     report["stock_live"] = verify_live("stock", stock_model)
@@ -587,6 +593,7 @@ def validate(
                 tokens,
                 decode_steps,
                 config,
+                budget,
             )
 
         if config:

@@ -5,8 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # Section 0 - Getting Set Up
 
-This guide assumes IRON is installed as the top-level
-[README](../../README.md#installation-linux) describes: the XDNA driver,
+This guide assumes IRON is installed as the
+[installation guide](../../docs/installation.md) describes: the XDNA driver,
 XRT, and `pip install -r requirements.txt`, which also installs this
 checkout in editable mode.
 

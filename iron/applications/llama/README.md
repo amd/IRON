@@ -14,8 +14,8 @@ no torch.
 
 Llama's own part, Llama 3's RoPE scaling, is in
 [`model.py`](model.py); its tunables are in
-[`profiles/`](profiles). How to run, test and tune a model is the README's
-[Models](../../../README.md#models); the shared library is
+[`profiles/`](profiles). How to run, test and tune a model is in
+[Models](../../../docs/models.md#running-testing-and-tuning-a-text-decoder); the shared library is
 [AGENTS.md](../../../AGENTS.md#language-models).
 
 ## Weights and tokenizer
@@ -70,7 +70,7 @@ top-k must be at most 64.
   4 GiB of caches, the default where it fits the host; a log line says
   what was chosen); the compile is the same at any of them. A prompt chunk
   is one command, the deepest the longest, which the driver's timeout must
-  cover ([installation](../../../README.md#installation-linux))
+  cover ([installation](../../../docs/installation.md))
 - `--temperature`, `--top-k`: the sampler's, at `Sampler`'s defaults
 - `--check-accuracy`: instead of sampling, compare each step's logits with
   the reference's and print the KL divergence and top-1 agreement

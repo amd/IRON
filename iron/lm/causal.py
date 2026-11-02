@@ -31,7 +31,7 @@ from .blocks import DecoderLayer, Embedding, KVCache, Linear, RMSNorm, Rope
 from .checkpoint import Checkpoint, renamed, weights_file
 from .config import DecoderConfig
 from .generation import Sampler
-from .model import Model
+from .model import Model, host_budget
 from .session import Session
 
 logger = logging.getLogger(__name__)
@@ -377,6 +377,8 @@ class CausalLM(Model):
 
         weights = weights_file(args.checkpoint)
         config = dataclasses.replace(cls.default_config(weights), **dict(args.config))
+        # A tune's checks hold a call built under two profiles, and validate two models.
+        config = cls.fit(config, weights, host_budget() // 2)
         assert isinstance(config, DecoderConfig), "a decoder's"
         layers = config.num_hidden_layers
         model = cls(config, Checkpoint(weights).tree(layers=layers))

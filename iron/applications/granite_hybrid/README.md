@@ -57,9 +57,9 @@ prompt chunk's scan streams all 2048 rows whatever the prompt's length.
 Time to first token and tokens per second are recorded to CI
 ([benchmarks](https://amd.github.io/IRON/benchmarks/)).
 
-On NPU1 the each-step tests (`TestEachStep`) and `long_context`'s run from
-an empty `profiles/npu1.json` (every operator's device defaults): measured
-on Phoenix, `TestEachStep`'s KL over 20 teacher-forced steps mean 0.0021,
-max 0.0089, two of twenty top-1 draws off; `long_context`'s deepest decode
-step at 4096 measured KL 0.0046, its deepest prompt chunk 5.3e-6, and its
-whole-context prompt's time to first token 86.7 s.
+On NPU1 the each-step tests (`TestEachStep`) and `long_context`'s run
+nightly, with an empty `profiles/npu1.json` (every operator's device
+defaults). Measured on Phoenix, `TestEachStep`'s KL over 20 teacher-forced
+steps is mean 0.0021, max 0.0089, two of twenty top-1 draws off;
+`long_context`'s deepest decode step at 4096 measured KL 0.0046 and its
+deepest prompt chunk 5.3e-6.

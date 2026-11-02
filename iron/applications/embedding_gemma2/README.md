@@ -26,8 +26,8 @@ Its audio and vision towers are Gemma 4's, in
 ## Weights and tokenizer
 
 The checkpoint directory holds `model.safetensors`, `tokenizer.json` and
-`config.json`. Install `requirements_examples.txt` as the README's
-[Models](../../../README.md#models) says.
+`config.json`. Install `requirements_examples.txt` as
+[Models](../../../docs/models.md#running-testing-and-tuning-a-text-decoder) says.
 
 ## Running
 

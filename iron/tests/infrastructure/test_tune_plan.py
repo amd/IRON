@@ -13,6 +13,8 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Profile
+from iron.common.graph.compiled import apply_profile
+from iron.common.image.step import FusionKind
 from iron.lm.tune import contexts
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
@@ -118,6 +120,58 @@ def test_a_seeded_shape_records_coded():
         (E, E // 2): True,
         (E // 4, E // 4): False,
     }
+
+
+def plain_packing() -> list:
+    """``wide`` and ``square`` packed, each read plain there, as a profile tuned before coding gives them."""
+    return [
+        (GEMV, {"M": 2 * E, "K": E}, {"tile_size_input": 4, "coded_a": False}),
+        (GEMV, {"M": E, "K": E}, {"tile_size_input": 4, "coded_a": False}),
+    ]
+
+
+def test_a_packed_step_reads_its_weight_as_recorded():
+    """A packing giving ``coded_a=False`` to a shape its entry codes still reads the coded rows its slot holds, not as bf16."""
+    record = recorder("none")
+    dev = aie_utils.ensure_current_device()
+    profile = coded_seed(record, dev, Profile())
+    profile.add_packing(plain_packing())
+    [call] = record(profile)
+    call.recording.code_weights()
+    recording, _, packing = apply_profile(call.recording, profile, dev)
+    assert packing.groups
+    weights = {h.ref().root for _, h in recording.weights.values()}
+    reads = [
+        (s.op.M, s.op.K, slot.name, np.dtype(b.host_dtype), np.dtype(slot.dtype))
+        for s in recording.steps
+        if isinstance(s.op, GEMV)
+        for b, slot in zip(s.op.buffers, s.slots)
+        if slot.ref().root in weights
+    ]
+    assert [r for r in reads if r[3] != r[4]] == []
+    assert {(r[0], r[1]): r[3] for r in reads} == {
+        (2 * E, E): np.dtype(np.uint8),
+        (E, E): np.dtype(np.uint8),
+        (E, E // 2): np.dtype(np.uint8),
+    }
+
+
+def test_the_seed_codes_a_shape_in_the_packings_and_fusions_naming_it():
+    start = Profile()
+    start.add_packing(plain_packing())
+    start.add_fusion(
+        FusionKind.STAGED,
+        [(GEMV, {"M": E, "K": E // 2}, {"coded_a": False}), (SiLU, {}, None)],
+        [(0, "C", 1, "x")],
+    )
+    seed = coded_seed(recorder("none"), aie_utils.ensure_current_device(), start)
+    [(_, steps, _, _)] = seed.fusions()
+    [packing] = seed.packings()
+    assert [t for _, _, t in packing.members] == [
+        {"tile_size_input": 4, "coded_a": True},
+        {"tile_size_input": 4, "coded_a": True},
+    ]
+    assert [t for _, _, t in steps] == [{"coded_a": True}, None]
 
 
 def surveyed(

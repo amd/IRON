@@ -65,7 +65,7 @@ def _layer(geometry, layer_type):
 
 
 def _record_metrics(record, op, bufs, context_len, max_l):
-    """Time one more dispatch and record its latency, bandwidth and throughput.
+    """Time more dispatches and record their median latency, bandwidth and throughput.
 
     Bytes count the weights and K/V rows read, FLOPs the projections and
     attention.
@@ -81,8 +81,6 @@ def _record_metrics(record, op, bufs, context_len, max_l):
         *bufs,
         bytes_moved=total_bytes,
         ops=flops,
-        warmup=1,
-        iters=1,
         record=record,
         context_len=context_len,
         max_l=max_l,
@@ -166,8 +164,11 @@ def test_matches_reference(geometry, layer_type, context_len, record_property):
     bufs = _tensors(op, inputs)
     full = [b.numpy().copy() for b in bufs]
     op(*bufs, context_len=context_len, max_l=MAX_L)
-    check_outputs(op, context_len, MAX_L, full, bufs[0].numpy(), bufs[4].numpy())
+    x_out, kv_out = bufs[0].numpy().copy(), bufs[4].numpy().copy()
+    # Before the reference: numpy's BLAS threads spin on after a matmul and
+    # slow the host's timing of the calls.
     _record_metrics(record_property, op, bufs, context_len, MAX_L)
+    check_outputs(op, context_len, MAX_L, full, x_out, kv_out)
 
 
 @pytest.mark.supported_devices("npu2")
@@ -239,14 +240,15 @@ def test_captured_case(case, record_property):
     bufs = _tensors(op, [np.fromfile(files[k], np.uint8) for k in names])
     full = [b.numpy().copy() for b in bufs]
     op(*bufs, context_len=ctx, max_l=max_l)
-    check_outputs(op, ctx, max_l, full, bufs[0].numpy(), bufs[4].numpy())
-    for buf, key in ((bufs[0], "x_out"), (bufs[4], "kv_cache_out")):
+    x_out, kv_out = bufs[0].numpy().copy(), bufs[4].numpy().copy()
+    _record_metrics(record_property, op, bufs, ctx, max_l)
+    check_outputs(op, ctx, max_l, full, x_out, kv_out)
+    for out, key in ((x_out, "x_out"), (kv_out, "kv_cache_out")):
         if key in files:
             want = np.fromfile(files[key], np.uint8)
-            got = buf.numpy().reshape(-1).view(np.uint8)
+            got = out.reshape(-1).view(np.uint8)
             n = min(want.size, got.size)
             assert np.array_equal(got[:n], want[:n]), f"{key} differs from the engine's"
-    _record_metrics(record_property, op, bufs, ctx, max_l)
 
 
 def _ops(op):

@@ -95,6 +95,7 @@ class Sampler:
 
 
 def greedy(logits: np.ndarray) -> int:
+    """Return the id of the largest of ``logits``."""
     return int(np.argmax(np.asarray(logits, dtype=np.float32).reshape(-1)))
 
 
