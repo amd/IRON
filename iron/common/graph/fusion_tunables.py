@@ -14,6 +14,8 @@ import dataclasses
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from aie.utils.compile.jit.params import OperatorParam
+
 from ..declare import Profile
 from ..image.step import Fusion
 from .record import Recording
@@ -49,14 +51,24 @@ def rebuild(
 ) -> Recording:
     """Return ``recording`` with each step ``tunables`` names, by index, rebuilt at its tunables there.
 
-    The per-call values bound to its operator bound to the rebuilt one.
+    The per-call values bound to its operator bound to the rebuilt one. A flag that
+    reads an operand coded (``In(coded=)``) keeps its recorded value: the step's slot
+    already holds the weight coded or plain (``Recording.code_weights``).
     """
     steps = list(recording.steps)
     rebuilt: dict[int, list] = {}
     for i, t in tunables.items():
+        op = recording.steps[i].op
+        coding = {
+            b.declared_coded.name
+            for b in op.buffers
+            if isinstance(b.declared_coded, OperatorParam)
+        }
         # From the recorded operator: a tunable resolved at its old widths
         # resolves again at the new ones.
-        narrowed = recording.steps[i].op._with_tunables(**t).resolved(dev)
+        narrowed = op._with_tunables(
+            **{n: v for n, v in t.items() if n not in coding}
+        ).resolved(dev)
         rebuilt.setdefault(id(recording.steps[i].op), []).append(narrowed)
         steps[i] = dataclasses.replace(steps[i], op=narrowed)
     if not rebuilt:

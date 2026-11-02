@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Hashable, Sequence
+from typing import Any
 
 from iron.common.declare import Profile
 
@@ -23,6 +24,20 @@ from .survey import Survey
 # version, or this long: an untuned version's share understates it.
 ESTIMATE_SHARE = 0.01
 ESTIMATE_US = 1000.0
+
+
+def _coded_member(
+    member: tuple[type, dict[str, Any], dict[str, Any] | None],
+    coded: Sequence[tuple[type, dict[str, Any], set[str]]],
+) -> tuple[type, dict[str, Any], dict[str, Any] | None]:
+    """``member``, a fusion step or packing member, with each coding flag its tunables name set where it matches a resolved shape in ``coded``."""
+    cls, dims, tunables = member
+    if tunables is None:
+        return member
+    for kind, resolved, names in coded:
+        if issubclass(kind, cls) and Profile.matches(dims, resolved):
+            tunables = {**tunables, **{n: True for n in names if n in tunables}}
+    return cls, dims, tunables
 
 
 def coded_seed(
@@ -43,6 +58,8 @@ def coded_seed(
     resolved = [s.op.resolved(dev) for c in calls for s in c.recording.steps]
     shapes: dict[Hashable, Shape] = {}
     flags: dict[Hashable, set[str]] = {}
+    # A fusion or packing entry names the dims a resolved operator holds.
+    dims: dict[Hashable, dict[str, Any]] = {}
     arrays: dict[Hashable, set[Hashable]] = {}
     for call in calls:
         for step in call.recording.steps:
@@ -52,7 +69,9 @@ def coded_seed(
             shape = Shape(step.op)
             shapes.setdefault(shape.key, shape)
             flags.setdefault(shape.key, set()).update(names)
-            arrays.setdefault(step.op.resolved(dev).array_key(), set()).add(shape.key)
+            op = step.op.resolved(dev)
+            dims.setdefault(shape.key, Profile.dims(type(op), vars(op)))
+            arrays.setdefault(op.array_key(), set()).add(shape.key)
 
     def coded(keys) -> Profile:
         covering, held = replacing(profile, [shapes[k] for k in keys])
@@ -67,10 +86,15 @@ def coded_seed(
                 for k in keys
             ],
         )
-        for fusion in profile.fusions():
-            out.add_fusion(*fusion)
+        given = [(shapes[k].cls, dims[k], flags[k]) for k in keys]
+        for kind, steps, edges, versions in profile.fusions():
+            out.add_fusion(
+                kind, [_coded_member(s, given) for s in steps], edges, versions
+            )
         for packing in profile.packings():
-            out.add_packing(packing.members, packing.versions)
+            out.add_packing(
+                [_coded_member(m, given) for m in packing.members], packing.versions
+            )
         return out
 
     legal = set()
