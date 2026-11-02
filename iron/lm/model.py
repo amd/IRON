@@ -20,7 +20,7 @@ import os
 import sys
 import time
 from collections.abc import Callable, Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 import numpy as np
@@ -85,7 +85,7 @@ def _cgroup_limit(root: Path = CGROUP, proc_cgroup: Path = PROC_CGROUP) -> int |
             limits.append(int(text))
         if path in ("", "/"):
             break
-        path = str(Path(path).parent)
+        path = str(PurePosixPath(path).parent)
     return min(limits) if limits else None
 
 
