@@ -87,13 +87,36 @@ def _cgroup_limit(root: Path = CGROUP, proc_cgroup: Path = PROC_CGROUP) -> int |
     return min(limits) if limits else None
 
 
+def _physical_memory() -> int:
+    """Return this host's physical memory in bytes."""
+    sysconf = getattr(os, "sysconf", None)
+    if sysconf is not None:
+        return int(sysconf("SC_PAGE_SIZE") * sysconf("SC_PHYS_PAGES"))
+    import ctypes
+
+    class MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("length", ctypes.c_uint32),
+            ("memory_load", ctypes.c_uint32),
+            ("total_phys", ctypes.c_uint64),
+            *(("unused_" + str(i), ctypes.c_uint64) for i in range(6)),
+        ]
+
+    status = MemoryStatusEx(length=ctypes.sizeof(MemoryStatusEx))
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(  # pyright: ignore[reportAttributeAccessIssue]
+        ctypes.byref(status)
+    ):
+        raise ctypes.WinError()  # pyright: ignore[reportAttributeAccessIssue]
+    return int(status.total_phys)
+
+
 def host_budget() -> int:
     """Return the bytes a model's arena may use on this host.
 
     Physical memory minus ``HOST_RESERVE``, or the cgroup's limit minus
     ``CGROUP_RESERVE`` when a cgroup caps this process, whichever is smaller.
     """
-    phys = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") - HOST_RESERVE
+    phys = _physical_memory() - HOST_RESERVE
     limit = _cgroup_limit()
     return phys if limit is None else min(phys, limit - CGROUP_RESERVE)
 

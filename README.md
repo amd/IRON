@@ -81,6 +81,7 @@ start with the [programming guide](./programming_guide/).
 | [Granite 4.0-H 1B](./iron/applications/granite_hybrid/) | ✓ | ✓ |
 | [Gemma 4 E2B](./iron/applications/gemma4/): text, vision and audio | text decoder | ✓ |
 | [EmbeddingGemma 2](./iron/applications/embedding_gemma2/) | ✓ | ✓ |
+| [Whisper-small](./iron/applications/whisper/) | ✓ | ✓ |
 | [Gemma 4 E2B in FastFlowLM](./iron/operators/flm/gemma4_engine/) | | ✓ |
 
 How to run, test and tune each one is on the
