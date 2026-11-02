@@ -5,6 +5,7 @@
 
 import dataclasses
 import re
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -50,6 +51,23 @@ def test_a_file_of_other_inputs_is_refused_and_rerecorded(tmp_path, npu2):
         golden.logits(TOKENS), np.array(model(3).logits(TOKENS), np.float32)
     )
     assert len(Golden(path, None, (TOY, 3)).rows) == 1
+
+
+def test_golden_keys_include_audio_contents_shape_and_dtype(tmp_path):
+    """Do not reuse a label's recorded output for a different Mel input."""
+    path = tmp_path / "golden.npz"
+    audio = np.arange(8, dtype=np.float32).reshape(4, 2)
+    golden = Golden(
+        path,
+        lambda: SimpleNamespace(logits=lambda _, mel: mel.sum(axis=-1)),
+        record=True,
+    )
+    expected = golden.logits(TOKENS, audio)
+    reread = Golden(path, record=False)
+    np.testing.assert_array_equal(reread.logits(TOKENS, audio.copy()), expected)
+    for changed in (audio + 1, audio.reshape(2, 4), audio.astype(np.float64)):
+        with pytest.raises(LookupError, match="holds no logits"):
+            reread.logits(TOKENS, changed)
 
 
 def test_a_weight_the_model_does_not_hold_is_refused():

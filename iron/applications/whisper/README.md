@@ -38,7 +38,8 @@ Audio up to 30 s is transcribed in one window without timestamps. Audio
 longer than 30 s (or with `--long-form`) runs OpenAI Whisper's sequential
 long-form algorithm with `ApplyTimestampRules`: each 30 s window is decoded
 with paired non-decreasing timestamps, advancing the next window to the last
-complete timestamp pair.
+complete timestamp pair. When it rewinds, unfinished trailing text is discarded
+so the next window does not duplicate it.
 
 - `model.py`: `WhisperConfig`, `WhisperEncoder`, `WhisperDecoder`,
   `Whisper`, `TokenPolicy` and the CLI
@@ -113,3 +114,6 @@ pending; only Phoenix hardware is available locally.
 
 Record missing goldens where `torch` and `transformers` are installed with
 `pytest <test> --record-goldens -p no:xdist`.
+Golden keys include the Mel input's contents, shape and dtype; label-only
+goldens from the initial port must be re-recorded. With `--random-weights`,
+pretrained-golden accuracy checks are skipped; determinism still runs.

@@ -85,8 +85,10 @@ def model(request):
 
 
 @pytest.fixture(scope="module")
-def reference():
+def reference(request):
     """Return ``reference(key, compute)`` backed by ``golden.npz`` beside the checkpoint."""
+    if request.config.getoption("--random-weights") is not None:
+        pytest.skip("pretrained goldens do not match random weights")
     if not os.environ.get(RECORD):
         require(DIRECTORY / "golden.npz")
 
@@ -101,13 +103,13 @@ def reference():
         checkpoint = Checkpoint(DIRECTORY / "model.safetensors")
         return (DIRECTORY / "config.json").read_text(), checkpoint.fingerprint()
 
-    def recorded(key: str, compute):
+    def recorded(key: str, mel: np.ndarray, compute):
         golden = Golden(
             DIRECTORY / "golden.npz",
-            lambda: SimpleNamespace(logits=lambda _: compute(hf_model())),
+            lambda: SimpleNamespace(logits=lambda _, audio: compute(hf_model(), audio)),
             inputs(),
         )
-        return golden.logits(np.frombuffer(key.encode(), np.uint8))
+        return golden.logits(np.frombuffer(key.encode(), np.uint8), mel)
 
     return recorded
 
@@ -125,8 +127,7 @@ def test_whisper_short(model, reference, record_property):
     tokens, got_enc = model.window(mel, list(PROMPT), policy)
     elapsed = time.perf_counter() - t0
     record_property("Latency", elapsed * 1e6)
-    record_property("TPS", len(tokens) / max(elapsed, 1e-6))
-    want_enc = reference("encoder short", lambda hf: hf.encode(want_mel))
+    want_enc = reference("encoder short", want_mel, lambda hf, audio: hf.encode(audio))
     check_embedding(
         got_enc,
         want_enc,
@@ -136,7 +137,10 @@ def test_whisper_short(model, reference, record_property):
     )
     want_tokens = reference(
         "window short",
-        lambda hf: np.asarray(hf.window(want_mel, list(PROMPT), policy)[0], np.int32),
+        want_mel,
+        lambda hf, audio: np.asarray(
+            hf.window(audio, list(PROMPT), policy)[0], np.int32
+        ),
     )
     assert tokens == list(want_tokens)
 
@@ -147,7 +151,7 @@ def test_whisper_encoder_accuracy(model, reference, name, record_property):
     """Check the NPU encoder's hidden states against float32 Hugging Face."""
     mel = log_mel_spectrogram(clip(name), model.filters(), frames=model.config.frames)
     got = model.encode(mel)
-    want = reference(f"encoder {name}", lambda hf: hf.encode(mel))
+    want = reference(f"encoder {name}", mel, lambda hf, audio: hf.encode(audio))
     check_embedding(
         got,
         want,
@@ -167,7 +171,8 @@ def test_whisper_decoder_accuracy(model, reference, name, record_property):
     for step in range(STEPS):
         want = reference(
             f"logits {name} {step} {tokens}",
-            lambda hf, t=list(tokens): hf.logits(t, mel),
+            mel,
+            lambda hf, audio, t=list(tokens): hf.logits(t, audio),
         )
         got = model.logits(tokens, mel if step == 0 else None)
         results.append(divergence(want, got))
@@ -214,9 +219,10 @@ def test_whisper_long_form(model, reference, record_property):
         seek = int(w["seek"])
         expected = reference(
             f"long_window {i} {seek}",
-            lambda hf, s=seek: np.asarray(
+            mel,
+            lambda hf, audio, s=seek: np.asarray(
                 decode_window(
-                    hf, mel, s, content_frames, policy, frames=model.config.frames
+                    hf, audio, s, content_frames, policy, frames=model.config.frames
                 )[1],
                 np.int32,
             ),

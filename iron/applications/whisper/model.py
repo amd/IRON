@@ -746,11 +746,22 @@ def decode_window(
     policy: TokenPolicy,
     frames: int = FRAMES,
 ) -> tuple[int, list[int]]:
-    """Slice and zero-pad one ``frames``-wide window from ``mel`` at ``seek`` and decode it."""
+    """Return the seek advance and completed tokens from one padded Mel window.
+
+    When the next window rewinds to the last completed timestamp pair,
+    discard unfinished speech that it will decode again.
+    """
     size = min(frames, content_frames - seek)
     segment = np.zeros((frames, mel.shape[1]), dtype=np.float32)
     segment[:size] = mel[seek : seek + size]
     tokens, _ = backend.window(segment, list(TIMESTAMP_PROMPT), policy)
+    text_end = [t for t in tokens if t != policy.eos]
+    is_stamp = [t >= TIMESTAMP_BEGIN for t in text_end]
+    pairs = [i + 1 for i in range(len(is_stamp) - 1) if is_stamp[i] and is_stamp[i + 1]]
+    if pairs and is_stamp[-2:] != [False, True]:
+        advance = (text_end[pairs[-1] - 1] - TIMESTAMP_BEGIN) * INPUT_STRIDE
+        if advance > 0:
+            return advance, text_end[: pairs[-1]]
     return size, tokens
 
 
@@ -769,17 +780,7 @@ def transcribe_long(
             backend, mel, seek, content_frames, policy, frames=frames
         )
         windows.append({"seek": seek, "tokens": tokens})
-        text_end = [t for t in tokens if t != policy.eos]
-        is_stamp = [t >= TIMESTAMP_BEGIN for t in text_end]
-        single_ending = is_stamp[-2:] == [False, True]
-        pairs = [
-            i + 1 for i in range(len(is_stamp) - 1) if is_stamp[i] and is_stamp[i + 1]
-        ]
-        advance = size
-        if pairs and not single_ending:
-            last_stamp = text_end[pairs[-1] - 1] - TIMESTAMP_BEGIN
-            advance = last_stamp * INPUT_STRIDE
-        seek += advance if advance > 0 else size
+        seek += size
     return windows
 
 

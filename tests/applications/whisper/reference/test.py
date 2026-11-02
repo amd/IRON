@@ -30,6 +30,8 @@ from iron.applications.whisper.model import (
     Whisper,
     WhisperConfig,
     WhisperDecoder,
+    decode_window,
+    transcribe_long,
     windows_match,
     word_error_rate,
 )
@@ -201,6 +203,63 @@ def test_every_step_of_every_version_resolves(npu1, npu2):
         for call in model.shapes():
             for step in model.record(**call).steps:
                 step.op.resolved(dev)
+
+
+def test_whisper_small_decoder_profile_resolves(npu1, npu2):
+    """Resolve real-width decode and prefill projections, not just toy profiles."""
+    config = WhisperConfig(num_hidden_layers=1, encoder_layers=1)
+    weights = checkpoint(config, shapes(config)).tree("unread")
+    for dev in (npu1, npu2):
+        model = Whisper(config, weights)
+        for call in model.decoder.shapes():
+            for step in model.record(**call).steps:
+                step.op.resolved(dev)
+
+
+@pytest.mark.parametrize(
+    "tokens, advance, retained",
+    [
+        ([0, 10, 4, 4, 20], 8, [0, 10, 4]),
+        ([0, 10, 4, 4, 20, 6], 16, [0, 10, 4, 4, 20, 6]),
+        ([0, 10, 20], 16, [0, 10, 20]),
+        ([0, 10, 0, 0, 20], 16, [0, 10, 0, 0, 20]),
+    ],
+)
+def test_decode_window_keeps_only_completed_speech_when_rewinding(
+    tokens, advance, retained
+):
+    """Trim the unfinished suffix only when a completed segment advances seek."""
+
+    def stamps(items):
+        return [TIMESTAMP_BEGIN + t if t < 10 else t for t in items]
+
+    backend = SimpleNamespace(window=lambda *_: (stamps(tokens), None))
+    mel = np.zeros((32, 80), np.float32)
+    got_advance, got_tokens = decode_window(
+        backend, mel, 0, 32, TokenPolicy(WhisperConfig(), timestamps=True), frames=16
+    )
+    assert got_advance == advance
+    assert got_tokens == stamps(retained)
+
+
+def test_long_form_does_not_duplicate_unfinished_speech():
+    """Decode unfinished text again without retaining its first partial copy."""
+    responses = iter(
+        [
+            [TIMESTAMP_BEGIN, 10, TIMESTAMP_BEGIN + 4, TIMESTAMP_BEGIN + 4, 20],
+            [TIMESTAMP_BEGIN, 20, TIMESTAMP_BEGIN + 4, EOS],
+        ]
+    )
+    backend = SimpleNamespace(window=lambda *_: (next(responses), None))
+    windows = transcribe_long(
+        backend,
+        np.zeros((16, 80), np.float32),
+        16,
+        TokenPolicy(WhisperConfig(), timestamps=True),
+        frames=16,
+    )
+    assert [w["seek"] for w in windows] == [0, 8]
+    assert [t for w in windows for t in w["tokens"] if t < EOS] == [10, 20]
 
 
 def test_decode_from_an_empty_cache_matches_the_prompt_and_hugging_face(cpu):
