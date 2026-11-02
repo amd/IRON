@@ -799,8 +799,14 @@ class NotBitIdentical(RuntimeError):
 
 
 def built(call: Timed, profile: Profile, dev) -> CompiledGraph:
-    """Return ``call``'s version under ``profile``, packaged as ``dev`` does."""
+    """Return ``call``'s version under ``profile``, packaged as ``dev`` does.
+
+    Its weights coded as ``Graph.compile`` codes them (``Recording.code_weights``), in
+    ``call``'s recording itself: how a weight is read is its recording's, the same
+    under every profile.
+    """
     begun = time.perf_counter()
+    call.recording.code_weights()
     recording, fused, packing = apply_profile(call.recording, profile, dev)
     chosen = plan(
         dev, recording, None, False, step_words=_step_words(recording), fusions=fused
