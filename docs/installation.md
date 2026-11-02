@@ -42,6 +42,15 @@ echo "options amdxdna tdr_timeout_ms=150000" | sudo tee /etc/modprobe.d/amdxdna-
 sudo modprobe -r amdxdna && sudo modprobe amdxdna
 ```
 
+The amdxdna 2.21 driver (XRT 2.21) names it `timeout_in_sec`, in seconds
+(2 by default); `ls /sys/module/amdxdna/parameters` shows which one yours
+has. There, write `options amdxdna timeout_in_sec=150` instead, or set it
+until the next reboot without reloading:
+
+```bash
+echo 150 | sudo tee /sys/module/amdxdna/parameters/timeout_in_sec
+```
+
 On NPU2 a model's prompt chunk is one command, and the deepest chunk, at the
 model's native context, is the longest. The timeout must cover it, with room
 to spare on a slower device. CI's nightly times a whole prompt at the native
