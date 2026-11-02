@@ -13,9 +13,9 @@ import iron
 from iron import Profile
 from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import apply_profile
-from iron.operators.gemm import GEMM
 from iron.lm.generation import Sampler
 from iron.lm.tune import calls
+from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU

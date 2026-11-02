@@ -30,8 +30,10 @@ from aie.utils.compile.jit.params import OperatorParam
 
 from iron.common.declare import Operator, Profile
 from iron.common.design import OperatorDesign
+from iron.common.graph.compiled import apply_profile
 from iron.common.graph.record import Recording
-from iron.common.image.compose import fits
+from iron.common.image.compose import Packing, fits
+from iron.common.image.step import Fusion
 from iron.operators.gemm import GEMM
 
 from .measure import (
@@ -151,6 +153,15 @@ class Timed:
             for b in self.recording.bindings
             if b.op is op
         }
+
+    def under(self, profile: Profile, dev) -> tuple[Timed, tuple[Fusion, ...], Packing]:
+        """Return this call as ``profile`` builds it on ``dev`` (``apply_profile``), with its fusions and packing.
+
+        The steps a fusion or packing rebuilds are new operators, bound in the built
+        recording alone: their values and inputs are read from the returned call.
+        """
+        recording, fused, packing = apply_profile(self.recording, profile, dev)
+        return dataclasses.replace(self, recording=recording), fused, packing
 
     def op_points(self, op: Operator) -> list[tuple[float, dict[str, int]]]:
         """Return where ``op`` is timed, as ``(weight, values)`` pairs.
