@@ -105,6 +105,32 @@ top-1 mismatches, mean KL at most `0.000213`, and maximum KL at most
 The 2 s short-clip encoder/decoder window measured 4.48 s Latency
 (excluding frontend extraction, compilation and weight loading).
 
+### Chained-xclbin diagnostic
+
+The original Windows prototype timed out on the first two designs of a
+ten-design encoder chain. That used an older runtime and is not evidence
+of an eight-kernel hardware limit. A checkpoint-free reconstruction using
+the current APIs is available from the repository root:
+
+```bash
+python -m utils.probe_xclbin_chain --kernels-per-image 10 --output chain-ten.json
+python -m utils.probe_xclbin_chain --kernels-per-image 8 --output chain-eight.json
+```
+
+Source XRT as described in the installation guide, and run only one NPU
+process at a time. The probe builds five GEMMs, LayerNorm, Softmax, GELU
+and two additions at the encoder's 1536/768/3072 dimensions. It records
+kernel names, image/instruction paths, dispatch failures and reference
+comparisons as JSON, returning a nonzero exit status for a failure.
+`--compile-only` builds without dispatching; the rows, width and hidden
+dimensions can be reduced to multiples of 256 for a quicker smoke check.
+
+On Phoenix with `mlir-aie` `1.4.5.dev119`, all ten full-size designs passed
+in a single image, both with an explicit ten-kernel batch and the wheel's
+default batch size of 32. The historical timeout was **not reproduced**
+on this stack. The script is a current-API reconstruction, not the original
+obsolete-API probe, and no Linux or NPU2 result is claimed.
+
 ## Testing
 
 ```bash
