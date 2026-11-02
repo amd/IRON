@@ -27,10 +27,13 @@ def hook():
 
 @pytest.mark.parametrize("directory_urls", [True, False])
 @pytest.mark.parametrize("quote", ['"', "'"])
-def test_root_page_html_image_uses_site_asset(hook, directory_urls, quote):
+def test_root_page_html_image_uses_site_asset(hook, directory_urls, quote, monkeypatch):
     docs = str(ROOT / "docs")
     image = File("assets/images/XDNA2.png", docs, "/tmp/site", directory_urls)
     source = File("agents.md", docs, "/tmp/site", directory_urls)
+    # Model resolved symlink targets even in a checkout without symlink privileges.
+    monkeypatch.setattr(image, "abs_src_path", str(ROOT / "images" / "XDNA2.png"))
+    monkeypatch.setattr(source, "abs_src_path", str(ROOT / "AGENTS.md"))
     page = SimpleNamespace(file=source, url=source.url)
     markdown = f'<img alt="IRON Logo" src={quote}./images/XDNA2.png?raw=1#logo{quote}>'
 

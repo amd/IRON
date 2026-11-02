@@ -9,11 +9,10 @@ test's last two runs, all the trends read of it.
 """
 
 import csv
-import subprocess
 from datetime import datetime, timedelta
-from pathlib import Path
 
-SCRIPTS = Path(__file__).resolve().parents[3] / "ci" / "scripts"
+from iron.tests.support.results import merge_results
+
 FMT = "%Y-%m-%d %H:%M:%S"
 COLUMNS = ["Commit", "Date", "Test Path", "Test", "Checks", "Bench", "Latency (mean)"]
 BENCHED = ("iron/tests/operators/test_catalog.py::test_operator", "npu2-GEMV-M_2048")
@@ -48,7 +47,7 @@ def _merge(tmp_path, history, latest):
             writer = csv.DictWriter(f, COLUMNS)
             writer.writeheader()
             writer.writerows(rows)
-    subprocess.run([SCRIPTS / "merge_results.sh", run, suite], check=True)
+    merge_results(run, suite)
     with open(suite / "all.csv", newline="") as f:
         kept = {}
         for row in csv.DictReader(f):
