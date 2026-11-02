@@ -56,8 +56,10 @@ Halo, Krackan).
   more, each one declared Python class, tested against a numpy reference.
 - **Graphs**: a model's operators are recorded once per input shape and
   compiled into one image, so intermediate values stay on the device.
-- **Autotuning**: each operator's tunables are searched and saved in a
-  per-device profile.
+- **Autotuning**: each operator's tunables, and which steps run fused,
+  packed into one device configuration or on coded weights, are searched and
+  saved in a per-device profile; a model's tune keeps only what leaves it
+  bit-identical and faster end to end.
 - **Models on the NPU**: Llama 3.2, Granite 4, Gemma 4 (text, vision and
   audio) and EmbeddingGemma 2, every step of the model's graph on the NPU.
   See [Models](models.md).
