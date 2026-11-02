@@ -4,6 +4,7 @@
 """``Golden``: what it records, when, and the file it refuses."""
 
 import dataclasses
+import re
 
 import numpy as np
 import pytest
@@ -25,7 +26,7 @@ def test_it_records_only_while_asked_and_reads_back_without_the_reference(
 ):
     path = tmp_path / "golden.npz"
     expected = np.array(model(2).logits(TOKENS), np.float32)
-    with pytest.raises(FileNotFoundError, match=f"{path} is missing"):
+    with pytest.raises(FileNotFoundError, match=re.escape(f"{path} is missing")):
         Golden(path, lambda: model(2), (TOY, 2), record=False).logits(TOKENS)
     np.testing.assert_array_equal(
         Golden(path, lambda: model(2), (TOY, 2), record=True).logits(TOKENS),
@@ -57,6 +58,17 @@ def test_a_weight_the_model_does_not_hold_is_refused():
     weights.model.extra = np.zeros(1, np.float32)
     with pytest.raises(ValueError, match=r"hold \['model.extra'\]"):
         HuggingFace.build("llama", SMALL, weights)
+
+
+def test_a_missing_tied_weight_requires_a_loaded_alias():
+    pytest.importorskip("transformers")
+    config = dataclasses.replace(TOY, tie_word_embeddings=True)
+    weights = checkpoint(config).tree("random")
+    model = HuggingFace.build("llama", config, weights).model
+    assert model.lm_head.weight is model.model.embed_tokens.weight
+    del weights.model.embed_tokens.weight
+    with pytest.raises(ValueError, match="the weights lack"):
+        HuggingFace.build("llama", config, weights)
 
 
 def test_a_field_added_at_its_default_keeps_the_fingerprint():

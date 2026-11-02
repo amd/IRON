@@ -20,6 +20,20 @@ arena:
   packed self-attention and cross-attention `MHA`, `GELU`, `lm_head` (padded
   to 51,968 rows across 8 lanes) and `Sample`.
 
+The shared `iron.lm.blocks.LogMel` runs the windowed DFT, power spectrum,
+Slaney Mel projection, log, global maximum, dynamic clamp and scale/shift
+on the NPU. Only sample padding/reflection and WAV decoding stay on the
+host. Long-form normalization uses the complete recording plus 30 seconds
+of silence, before slicing its decoder windows.
+
+Token selection also runs on the NPU. The host writes one small Sample
+draw row per step: history-dependent suppression ranges and the
+timestamp/text split. Static scattered suppression tokens are a resident
+negative-infinity bias. Sample applies the forced-timestamp probability
+rule and returns the selected token; transcription does not read back the
+vocabulary-sized logits. `Whisper.logits` retains full readback for
+teacher-forced accuracy checks.
+
 Audio up to 30 s is transcribed in one window without timestamps. Audio
 longer than 30 s (or with `--long-form`) runs OpenAI Whisper's sequential
 long-form algorithm with `ApplyTimestampRules`: each 30 s window is decoded
@@ -28,8 +42,7 @@ complete timestamp pair.
 
 - `model.py`: `WhisperConfig`, `WhisperEncoder`, `WhisperDecoder`,
   `Whisper`, `TokenPolicy` and the CLI
-- `audio.py`: pure-NumPy 16 kHz mono WAV loading and 30 s / long-form
-  log-Mel spectrogram extraction
+- `audio.py`: 16 kHz mono WAV loading and the NumPy log-Mel reference
 - `hugging_face.py`: Hugging Face's `WhisperForConditionalGeneration` in
   float32, used only when recording goldens or running `--check-reference`
 - `profiles/`: per-device operator tunables (`npu1.json`, `npu2.json`)
@@ -57,23 +70,29 @@ Hugging Face's float32 model.
 
 With `mlir-aie` `1.4.5.dev119`, `GELU(approximate="none")` (`gelu_erf`) is
 exact (0 of 48,853 normal-output finite `bfloat16` inputs misrounded on
-`npu1`), and `LayerNorm` (`layer_norm_eps`) keeps its statistics in 3-limb
-`float32` (within 1 `bfloat16` ULP on `npu1`). All projections and attention
-matmuls run at `Precision.HIGHEST`.
+`npu1`). `Softmax(input_dtype=np.float32)` measured a `0.00159` maximum
+absolute error and `0.00208` NRMSE against its NumPy reference. `LayerNorm`
+(`layer_norm_eps`) keeps its statistics in 3-limb `float32` (within 1
+`bfloat16` ULP on `npu1`). All projections and attention matmuls run at
+`Precision.HIGHEST`.
 
-Measured on Phoenix (`npu1`) across five LibriSpeech clips against the
-Hugging Face float32 CPU reference:
+The revised NPU log-Mel and Sample path was measured on Phoenix (`npu1`),
+with the complete `whisper-small` checkpoint and five local LibriSpeech
+clips. Mel error is maximum absolute error against the NumPy reference;
+short-window encoder and token comparisons use the Hugging Face float32
+reference. Long-form word/timestamp comparisons are per window; each
+timestamp tick is 0.02 s:
 
-| Clip | Audio | Windows | Encoder NRMSE | Encoder Cosine | Tokens / Words vs FP32 | WER | Total Time |
+| Clip | Audio | Windows | Mel max error | Encoder NRMSE / cosine | HF comparison | WER | Total time |
 | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |
-| 5.9 s test clip | 5.9 s | 1 | 4.06% | 0.99917 | exact (`23/23`) | 0.0% | 6.8 s |
-| `1919-142785-0007` | 26.6 s | 1 | 2.33% | 0.99972 | exact (`85/85`) | 0.0% | 22.1 s |
-| `3170-137482-0000` | 28.0 s | 1 | 2.23% | 0.99975 | exact (`84/84`) | 1.5% | 21.9 s |
-| `422-122949-0013` | 32.6 s | 2 | | | words exact, window end exact | 6.0% | 43.9 s |
-| `2902-9006-0005, -0007, -0015` | 97.0 s | 4 | | | words exact, window end within 0.02 s | 2.3% | 120.9 s |
+| 5.9 s test clip | 5.9 s | 1 | 0.01339 | 4.33% / 0.99906 | exact tokens (`23`) | — | 17.9 s |
+| `1919-142785-0007` | 26.6 s | 1 | 0.00946 | 3.05% / 0.99953 | exact tokens (`85`) | 0.0% | 34.4 s |
+| `3170-137482-0000` | 28.0 s | 1 | 0.00971 | 2.30% / 0.99973 | exact tokens (`84`) | 1.5% | 31.6 s |
+| `422-122949-0013` | 32.6 s | 2 | 0.00970 | — | words exact; timestamp deltas `4, 0` ticks | 6.0% | 89.4 s |
+| 96 s LibriSpeech clip | 97.0 s | 4 | 0.00940 | — | words exact; timestamp deltas `5, 0, 1, 0` ticks | 2.3% | 323.7 s |
 
-The float32 CPU reference produces the exact same word error rate on every
-clip.
+These are full-checkpoint Phoenix measurements of the revised NPU frontend
+and token-selection path, not the earlier host-preprocessing baseline.
 
 ## Testing
 
@@ -81,6 +100,16 @@ clip.
 pytest tests/applications/whisper/reference/   # device-free toy graph vs Hugging Face
 pytest tests/applications/whisper/             # hardware tests on NPU1 and NPU2
 ```
+
+Hardware tests use fixed LibriSpeech utterances and
+`weights_dir("whisper-small")` (by default `/srv/whisper-small`). Set
+`IRON_EXAMPLE_WEIGHTS_DIR` to the parent of your local `whisper-small`
+checkpoint directory; tests do not search the Hugging Face cache or allow
+environment overrides for the audio. The short benchmark records the
+whole encoder/decoder window as Latency, not time to first token.
+
+NPU2 profiles resolve device-free, but Krackan hardware validation is
+pending; only Phoenix hardware is available locally.
 
 Record missing goldens where `torch` and `transformers` are installed with
 `pytest <test> --record-goldens -p no:xdist`.

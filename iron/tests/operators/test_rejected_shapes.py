@@ -323,6 +323,14 @@ def test_mha_of_one_query_that_does_not_pack_is_refused(kwargs, why, npu2):
         MHA(seq_len=1, kv_len=512, **kwargs).resolved(npu2)
 
 
+@pytest.mark.parametrize("valid", [0, 1537])
+def test_mha_fixed_encoder_length_must_fit_the_padded_keys(valid, npu2):
+    with pytest.raises(ValueError, match="kv_seq_len"):
+        MHA(
+            num_heads=4, seq_len=64, kv_len=1536, kv_seq_len=valid, causal=False
+        ).resolved(npu2)
+
+
 def test_sample_with_more_cores_than_a_memtile_joins_is_refused(npu2):
     """Each select core's summary is one input stream of the memtile they join in.
 

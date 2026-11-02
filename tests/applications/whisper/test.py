@@ -14,7 +14,6 @@ long-form timestamp decoding.
 import functools
 import os
 import time
-from pathlib import Path
 from types import SimpleNamespace
 
 import aie.utils as aie_utils
@@ -22,7 +21,6 @@ import numpy as np
 import pytest
 
 from iron.applications.whisper.audio import (
-    load_wav,
     log_mel_spectrogram,
     log_mel_spectrogram_long,
 )
@@ -40,26 +38,7 @@ from iron.lm.golden import RECORD, Golden
 from iron.lm.testing import check_embedding, require, weights_dir
 from iron.tests.support.librispeech import utterance
 
-
-def _checkpoint_dir() -> Path:
-    """Return the Whisper-small checkpoint directory from env or weights_dir."""
-    env_safe = os.environ.get("WHISPER_SAFE")
-    if env_safe:
-        p = Path(env_safe).expanduser()
-        return p.parent if p.is_file() else p
-    default = weights_dir("whisper-small")
-    if (default / "model.safetensors").exists():
-        return default
-    hf_cache = (
-        Path.home()
-        / ".cache/huggingface/hub/models--openai--whisper-small/snapshots/973afd24965f72e36ca33b3055d56a652f456b4d"
-    )
-    if (hf_cache / "model.safetensors").exists():
-        return hf_cache
-    return default
-
-
-DIRECTORY = _checkpoint_dir()
+DIRECTORY = weights_dir("whisper-small")
 
 pytestmark = pytest.mark.supported_devices("npu1", "npu2")
 
@@ -87,14 +66,6 @@ CLIPS = {
 
 def clip(name: str) -> np.ndarray:
     """Return the LibriSpeech utterance ``CLIPS[name]`` at 16 kHz mono."""
-    if name == "short" and (wav := os.environ.get("WHISPER_TEST_WAV")):
-        path = Path(wav).expanduser()
-        if path.is_file():
-            return load_wav(path)
-    if name == "long" and (wav := os.environ.get("WHISPER_LONG_TEST_WAV")):
-        path = Path(wav).expanduser()
-        if path.is_file():
-            return load_wav(path)
     return utterance(CLIPS[name])
 
 
@@ -144,16 +115,18 @@ def reference():
 @pytest.mark.bench
 def test_whisper_short(model, reference, record_property):
     """Encode and decode a short clip on the NPU (runs on every PR)."""
-    mel = log_mel_spectrogram(
+    want_mel = log_mel_spectrogram(
         clip("short"), model.filters(), frames=model.config.frames
     )
+    mel, _ = model.log_mel(clip("short"))
+    assert np.max(np.abs(mel - want_mel)) <= 0.03
     policy = TokenPolicy(model.config, timestamps=False)
     t0 = time.perf_counter()
     tokens, got_enc = model.window(mel, list(PROMPT), policy)
     elapsed = time.perf_counter() - t0
-    record_property("TTFT", elapsed)
+    record_property("Latency", elapsed * 1e6)
     record_property("TPS", len(tokens) / max(elapsed, 1e-6))
-    want_enc = reference("encoder short", lambda hf: hf.encode(mel))
+    want_enc = reference("encoder short", lambda hf: hf.encode(want_mel))
     check_embedding(
         got_enc,
         want_enc,
@@ -163,7 +136,7 @@ def test_whisper_short(model, reference, record_property):
     )
     want_tokens = reference(
         "window short",
-        lambda hf: np.asarray(hf.window(mel, list(PROMPT), policy)[0], np.int32),
+        lambda hf: np.asarray(hf.window(want_mel, list(PROMPT), policy)[0], np.int32),
     )
     assert tokens == list(want_tokens)
 
@@ -189,7 +162,7 @@ def test_whisper_encoder_accuracy(model, reference, name, record_property):
 def test_whisper_decoder_accuracy(model, reference, name, record_property):
     """Check teacher-forced decoder logits against float32 Hugging Face."""
     mel = log_mel_spectrogram(clip(name), model.filters(), frames=model.config.frames)
-    tokens = list(PROMPT)
+    tokens: list[int] = list(PROMPT)
     results = []
     for step in range(STEPS):
         want = reference(

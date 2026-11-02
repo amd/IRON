@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from iron.lm import LogMel
+from iron.lm.blocks import filterbank
 from iron.tests.support.log_mel import EVERY, Extractor
 
 FRAMES = 3072
@@ -59,3 +60,38 @@ def test_log_mel(log_mel, frames, golden, record_property):
         log_mel(wave, frames=frames)
         times.append(time.perf_counter() - start)
     record_property("Latency", min(times) * 1e6)
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize("silent", [False, True])
+def test_whisper_log_mel(silent, record_property):
+    """Check centered Whisper frames, Slaney triangles and the global dynamic floor."""
+    frames = 64
+    graph = LogMel(
+        frame=400,
+        fft=400,
+        mels=80,
+        mel_scale="slaney",
+        mel_floor=1e-10,
+        whisper=True,
+    )
+    n = (frames - 1) * graph.hop + graph.span
+    wave = np.zeros(n, np.float32)
+    if not silent:
+        t = np.arange(n) / 16000
+        wave[:] = 0.2 * np.sin(2 * np.pi * 440 * t)
+        wave[: n // 3] *= 0.001
+    net = graph.compile(wave=((n,), np.float32))
+    try:
+        got = net(wave, frames=frames).numpy().reshape(frames, 80).astype(np.float32)
+    finally:
+        net.release()
+    windows = np.lib.stride_tricks.sliding_window_view(wave, 400)[::160][:frames]
+    dft = np.fft.rfft(windows * np.hanning(401)[:-1], axis=-1)
+    energy = np.abs(dft) ** 2 @ filterbank(400, 80, 16000, 8000, scale="slaney")
+    log = np.log10(np.maximum(energy, 1e-10))
+    want = (np.maximum(log, log.max() - 8) + 4) / 4
+    error = float(np.max(np.abs(got - want)))
+    record_property("MaxAbsError", error)
+    # log_f32 rounds to bf16 before the separately rounded scale and shift.
+    assert error <= 0.03, error

@@ -11,50 +11,20 @@ running ``--check-reference``.
 # torch, transformers and safetensors: only recording imports them.
 # pyright: reportMissingImports=false
 
-import tempfile
-from typing import Any
+import copy
+from typing import Any, cast
 
 import numpy as np
 import torch
-import transformers
-from safetensors.torch import save_file
+from transformers import WhisperTimeStampLogitsProcessor
 
-from iron.lm.golden import HuggingFace, _merged, flat
+from iron.lm.golden import HuggingFace
 
 
 class HuggingFaceWhisper(HuggingFace):
     """transformers' ``WhisperForConditionalGeneration`` in float32."""
 
     model_class = "WhisperForConditionalGeneration"
-
-    @classmethod
-    def load(cls, directory) -> "HuggingFaceWhisper":
-        """Load ``WhisperForConditionalGeneration`` in float32 from ``directory``."""
-        auto = getattr(transformers, cls.model_class)
-        return cls(auto.from_pretrained(directory, dtype=torch.float32))
-
-    @classmethod
-    def build(cls, model_type: str, config, weights, **json) -> "HuggingFaceWhisper":
-        """Build ``WhisperForConditionalGeneration`` in float32 from ``config`` and ``weights``."""
-        hf = transformers.AutoConfig.for_model(
-            model_type, **_merged(config.to_json(), json)
-        )
-        auto = getattr(transformers, cls.model_class)
-        with tempfile.TemporaryDirectory() as directory:
-            hf.save_pretrained(directory)
-            state = {k: torch.from_numpy(v) for k, v in flat(weights)}
-            save_file(state, f"{directory}/model.safetensors")
-            model, info = auto.from_pretrained(
-                directory, dtype=torch.float32, output_loading_info=True
-            )
-        missing = set(info["missing_keys"]) - {"proj_out.weight"}
-        unexpected = info["unexpected_keys"]
-        if missing or unexpected:
-            raise ValueError(
-                f"{model_type}: the weights lack {sorted(missing)} and hold "
-                f"{sorted(unexpected)}, which the model does not"
-            )
-        return cls(model)
 
     def encode(self, mel: np.ndarray) -> np.ndarray:
         """Return the float32 encoder hidden state ``(frames // 2, hidden_size)`` for ``mel``.
@@ -92,6 +62,14 @@ class HuggingFaceWhisper(HuggingFace):
     ) -> tuple[list[int], np.ndarray]:
         """Greedy-decode one 30 s window ``mel`` ``(frames, mels)`` under ``policy``."""
         features = np.ascontiguousarray(np.asarray(mel, dtype=np.float32).T)[None]
+        timestamp_rules = None
+        if policy.timestamps:
+            config = copy.deepcopy(self.model.generation_config)
+            config.no_timestamps_token_id = 50363
+            config.max_initial_timestamp_index = 50
+            timestamp_rules = WhisperTimeStampLogitsProcessor(
+                config, begin_index=len(prompt)
+            )
         with torch.no_grad():
             encoder_out = self.model.model.encoder(torch.from_numpy(features))
             hidden = encoder_out.last_hidden_state
@@ -106,8 +84,19 @@ class HuggingFaceWhisper(HuggingFace):
                     use_cache=True,
                 )
                 past = out.past_key_values
-                next_logits = out.logits[0, -1].numpy()
-                token = int(policy(next_logits, generated).argmax())
+                scores = out.logits[:, -1].clone()
+                scores[:, policy.suppress] = -torch.inf
+                for lo, hi in policy.ranges(generated):
+                    scores[:, lo:hi] = -torch.inf
+                if timestamp_rules is not None:
+                    scores = timestamp_rules(
+                        cast(
+                            torch.LongTensor,
+                            torch.tensor([prompt + generated], dtype=torch.long),
+                        ),
+                        scores,
+                    )
+                token = int(scores.argmax())
                 generated.append(token)
                 if token == policy.eos or len(generated) >= policy.max_new_tokens:
                     return generated, hidden[0].numpy()

@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Whisper audio loading and log-Mel spectrogram extraction in NumPy."""
+"""Whisper audio loading and the NumPy reference for its NPU log-Mel frontend."""
 
 import json
 import wave
 from pathlib import Path
 
 import numpy as np
+
+from iron.lm.blocks import filterbank
 
 SAMPLE_RATE = 16000
 N_FFT = 400
@@ -17,49 +19,13 @@ N_SAMPLES = 30 * SAMPLE_RATE
 FRAMES = N_SAMPLES // HOP_LENGTH
 
 
-def _hz_to_mel(freq: np.ndarray | float) -> np.ndarray | float:
-    """Convert frequencies in Hz to the Slaney mel scale."""
-    min_log_hz = 1000.0
-    min_log_mel = 15.0
-    logstep = 27.0 / np.log(6.4)
-    freq_arr = np.asarray(freq, dtype=np.float64)
-    mels = 3.0 * freq_arr / 200.0
-    above = freq_arr >= min_log_hz
-    if np.any(above):
-        mels = np.where(
-            above,
-            min_log_mel
-            + np.log(np.maximum(freq_arr, min_log_hz) / min_log_hz) * logstep,
-            mels,
-        )
-    return mels
-
-
-def _mel_to_hz(mels: np.ndarray) -> np.ndarray:
-    """Convert Slaney mel values to frequencies in Hz."""
-    min_log_hz = 1000.0
-    min_log_mel = 15.0
-    logstep = np.log(6.4) / 27.0
-    mels = np.asarray(mels, dtype=np.float64)
-    freqs = 200.0 * mels / 3.0
-    above = mels >= min_log_mel
-    return np.where(above, min_log_hz * np.exp((mels - min_log_mel) * logstep), freqs)
-
-
 def slaney_filterbank(
     fft: int = N_FFT, mels: int = N_MELS, sample_rate: int = SAMPLE_RATE
 ) -> np.ndarray:
     """Compute the ``(fft // 2 + 1, mels)`` Slaney-normalized mel filterbank in float32."""
-    mel_points = np.linspace(_hz_to_mel(0.0), _hz_to_mel(sample_rate / 2.0), mels + 2)
-    filter_freqs = _mel_to_hz(mel_points)
-    fft_freqs = np.linspace(0.0, sample_rate / 2.0, fft // 2 + 1, dtype=np.float64)
-    fdiff = np.diff(filter_freqs)
-    ramps = filter_freqs[None, :] - fft_freqs[:, None]
-    lower = -ramps[:, :-2] / fdiff[:-1]
-    upper = ramps[:, 2:] / fdiff[1:]
-    weights = np.maximum(0.0, np.minimum(lower, upper))
-    enorm = 2.0 / (filter_freqs[2 : mels + 2] - filter_freqs[:mels])
-    return (weights * enorm[None, :]).astype(np.float32)
+    return filterbank(fft, mels, sample_rate, sample_rate / 2, scale="slaney").astype(
+        np.float32
+    )
 
 
 def mel_filters(

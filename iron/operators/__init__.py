@@ -20,11 +20,13 @@ from .log import Log
 from .magnitude import Magnitude
 from .merge import Merge
 from .mha import MHA
+from .reduce_max import ReduceMax
 from .relu import ReLU
 from .resample.op import PatchPositions, Resample, ResampleTaps
 from .rms_norm import RMSNorm
 from .rope import RoPE
 from .sample import Sample
+from .scale_shift import ScaleShift
 from .selective_scan import SelectiveScan
 from .sigmoid import Sigmoid
 from .silu import SiLU
@@ -53,12 +55,14 @@ __all__ = [
     "PatchPositions",
     "RMSNorm",
     "ReLU",
+    "ReduceMax",
     "Resample",
     "ResampleTaps",
     "RoPE",
     "RowwiseAdd",
     "RowwiseMul",
     "Sample",
+    "ScaleShift",
     "SelectiveScan",
     "SiLU",
     "Sigmoid",

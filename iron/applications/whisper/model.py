@@ -17,7 +17,6 @@ import argparse
 import dataclasses
 import re
 import time
-from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,7 +24,7 @@ from typing import Any
 import aie.utils as aie_utils
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron.kernels.sample import ROW_WORDS
+from aie.iron.kernels import sample
 from ml_dtypes import bfloat16
 
 import iron
@@ -47,10 +46,10 @@ from iron.lm import (
     Linear,
     Model,
     NoCache,
-    Sampler,
     residual_add,
     subtree,
 )
+from iron.lm.blocks import LogMel
 from iron.lm.checkpoint import renamed
 from iron.lm.cli import parse_args
 from iron.operators.copy import Copy
@@ -61,10 +60,10 @@ from iron.operators.sample import Sample
 from .audio import (
     FRAMES,
     HOP_LENGTH,
+    N_FFT,
+    N_SAMPLES,
     SAMPLE_RATE,
     load_wav,
-    log_mel_spectrogram,
-    log_mel_spectrogram_long,
     mel_filters,
 )
 
@@ -83,6 +82,14 @@ INPUT_STRIDE = 2
 MAX_INITIAL_TIMESTAMP = 50
 TIMESTAMP_TOLERANCE = 5
 MAX_NEW_TOKENS = 224
+MAX_RANGES = 8
+RENAMES = {
+    "self_attn_layer_norm": "input_layernorm",
+    "out_proj": "o_proj",
+    "final_layer_norm": "post_attention_layernorm",
+    "fc1": "mlp.fc1",
+    "fc2": "mlp.fc2",
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -192,46 +199,47 @@ class TokenPolicy:
         self.timestamps = timestamps
         self.max_new_tokens = max_new_tokens
 
-    def __call__(self, logits: np.ndarray, generated: list[int]) -> np.ndarray:
-        """Return filtered float32 ``logits`` given the ``generated`` tokens so far."""
-        out = np.array(logits, dtype=np.float32, copy=True).reshape(-1)
-        if self.suppress:
-            out[self.suppress] = -np.inf
-        if not generated and self.begin_suppress:
-            out[self.begin_suppress] = -np.inf
-        if not self.timestamps:
-            out[FIRST_NON_TEXT_SPECIAL:] = -np.inf
-            return out
+        self.vocab = config.vocab_size
 
-        out[FIRST_NON_TEXT_SPECIAL:TIMESTAMP_BEGIN] = -np.inf
+    def ranges(self, generated: list[int]) -> list[tuple[int, int]]:
+        """Return history-only suppression intervals in global vocabulary coordinates."""
+        ranges = []
+        if not generated and self.begin_suppress:
+            ranges.extend((t, t + 1) for t in self.begin_suppress)
+        if not self.timestamps:
+            return [*ranges, (FIRST_NON_TEXT_SPECIAL, self.vocab)]
+
+        ranges.append((FIRST_NON_TEXT_SPECIAL, TIMESTAMP_BEGIN))
         last = len(generated) >= 1 and generated[-1] >= TIMESTAMP_BEGIN
         penultimate = len(generated) < 2 or generated[-2] >= TIMESTAMP_BEGIN
         if last:
             if penultimate:
-                out[TIMESTAMP_BEGIN:] = -np.inf
+                ranges.append((TIMESTAMP_BEGIN, self.vocab))
             else:
-                out[: self.eos] = -np.inf
+                ranges.append((0, self.eos))
 
         stamps = [t for t in generated if t >= TIMESTAMP_BEGIN]
         if stamps:
             floor = stamps[-1] if last and not penultimate else stamps[-1] + 1
-            out[TIMESTAMP_BEGIN:floor] = -np.inf
+            ranges.append((TIMESTAMP_BEGIN, floor))
         if not generated:
-            out[:TIMESTAMP_BEGIN] = -np.inf
-            out[TIMESTAMP_BEGIN + MAX_INITIAL_TIMESTAMP + 1 :] = -np.inf
+            ranges.extend(
+                [
+                    (0, TIMESTAMP_BEGIN),
+                    (TIMESTAMP_BEGIN + MAX_INITIAL_TIMESTAMP + 1, self.vocab),
+                ]
+            )
+        return ranges
 
-        finite = out[np.isfinite(out)]
-        if finite.size:
-            shifted = out - finite.max()
-            logprobs = shifted - np.log(np.sum(np.exp(shifted)))
-            stamp_slice = logprobs[TIMESTAMP_BEGIN:]
-            finite_stamps = stamp_slice[np.isfinite(stamp_slice)]
-            if finite_stamps.size:
-                m = finite_stamps.max()
-                stamp_logprob = float(m + np.log(np.sum(np.exp(stamp_slice - m))))
-                if stamp_logprob > float(logprobs[:TIMESTAMP_BEGIN].max()):
-                    out[:TIMESTAMP_BEGIN] = -np.inf
-        return out
+    def row(self, generated: list[int]) -> np.ndarray:
+        """Pack one greedy draw, its ranges and the forced-timestamp split."""
+        return np.concatenate(
+            [
+                sample.draw_row(0.0, 1, 0),
+                sample.range_words(self.ranges(generated), MAX_RANGES),
+                sample.split_word(TIMESTAMP_BEGIN if self.timestamps else self.vocab),
+            ]
+        ).reshape(1, -1)
 
 
 class WhisperNoCache(NoCache):
@@ -282,6 +290,7 @@ class WhisperCrossAttention(WhisperAttention):
         super().__init__(c, i)
         self.keys = iron.state((c.source_pad, self.groups, self.head_dim))
         self.values = iron.state((c.source_pad, self.groups, self.head_dim))
+        self.source_positions = c.max_source_positions
 
     def write_kv(self, hidden: Handle) -> None:
         """Project ``hidden`` into this layer's ``keys`` and ``values`` states."""
@@ -292,9 +301,9 @@ class WhisperCrossAttention(WhisperAttention):
         Copy.step(v.reshape(S, G, D), self.values)
 
     def body(  # pyright: ignore[reportIncompatibleMethodOverride]
-        self, x: Handle, audio_rows
+        self, x: Handle
     ) -> Handle:
-        """Attend ``x``'s queries over the first ``audio_rows`` of ``keys`` and ``values``."""
+        """Attend ``x``'s queries over the encoder's fixed source positions."""
         n, H, D = x.shape[0], self.heads, self.head_dim
         tiles = dict(tile_size_output=D // 2) if n == 1 else {}
         q = F.linear(
@@ -304,10 +313,12 @@ class WhisperCrossAttention(WhisperAttention):
             precision=self.q_proj.precision,
             **tiles,
         )
+        # Keep whole DMA blocks in storage; 1500 rows alone do not tile.
         o = MHA.step(
             q.reshape(n, H, D),
-            self.keys[:audio_rows],
-            self.values[:audio_rows],
+            self.keys,
+            self.values,
+            kv_seq_len=self.source_positions,
             heads_interleaved=True,
             kv_interleaved=True,
             causal=False,
@@ -329,13 +340,7 @@ class WhisperEncoder(Encoder):
 
     profile = PROFILES
     layer_class = WhisperEncoderLayer
-    renames = {
-        "self_attn_layer_norm": "input_layernorm",
-        "out_proj": "o_proj",
-        "final_layer_norm": "post_attention_layernorm",
-        "fc1": "mlp.fc1",
-        "fc2": "mlp.fc2",
-    }
+    renames = RENAMES
 
     def __init__(self, config: WhisperConfig, weights: SimpleNamespace):
         c = config.encoder_config
@@ -420,13 +425,13 @@ class WhisperDecoderLayer(DecoderLayer):
         self.encoder_attn = WhisperCrossAttention(c, i)
 
     def body(  # pyright: ignore[reportIncompatibleMethodOverride]
-        self, x: Handle, call, audio_rows
+        self, x: Handle, call
     ) -> Handle:
-        """Run self-attention, cross-attention over ``audio_rows`` and MLP."""
+        """Run self-attention, cross-attention over the encoder and MLP."""
         x = residual_add(
             x, self.mix(self.input_layernorm(x), call), self.residual_multiplier
         )
-        h = self.encoder_attn(self.encoder_attn_layer_norm(x), audio_rows)
+        h = self.encoder_attn(self.encoder_attn_layer_norm(x))
         x = residual_add(x, h, self.residual_multiplier)
         h = self.mlp(self.post_attention_layernorm(x))
         return residual_add(x, h, self.residual_multiplier)
@@ -452,14 +457,7 @@ class WhisperDecoder(CausalLM):
     decoder_class = WhisperDecoderModule  # pyright: ignore[reportAssignmentType]
     layer_class = WhisperDecoderLayer
     model: WhisperDecoderModule
-    renames = {
-        "self_attn_layer_norm": "input_layernorm",
-        "out_proj": "o_proj",
-        "final_layer_norm": "post_attention_layernorm",
-        "fc1": "mlp.fc1",
-        "fc2": "mlp.fc2",
-        "layer_norm": "norm",
-    }
+    renames = {**RENAMES, "layer_norm": "norm"}
 
     def __init__(self, config: WhisperConfig, weights: SimpleNamespace):
         super().__init__(config, subtree(weights, model=weights.model.decoder))
@@ -471,28 +469,27 @@ class WhisperDecoder(CausalLM):
         pos = np.zeros((c.max_seq_len + c.prefill_chunk, c.hidden_size), bfloat16)
         pos[: c.max_seq_len] = self.model.embed_positions.weight[: c.max_seq_len]
         self.pos_table = iron.weight(pos)
-        self._audio_rows: Any = None
+        self.rules = iron.state(
+            (1, sample.select_row_words(MAX_RANGES, True)), np.int32
+        )
+        self.selected = iron.state((1,), np.int32)
+        bias = np.zeros(c.vocab_pad, bfloat16)
+        bias[list(c.suppress_tokens)] = -np.inf
+        bias[c.vocab_size :] = -np.inf
+        self.suppress_bias = iron.param(bias)
 
     def draw(self, logits, call: Call):
         """Draw the next token from ``vocab_pad``-padded ``logits`` over ``vocab_size`` drawable tokens."""
         c = self.config
         _, drawn = Sample.step(
-            logits.reshape(c.vocab_pad),
-            self.draws,
-            self.drawn,
-            row=call.position * ROW_WORDS,
-            at=call.position,
+            logits.reshape(c.vocab_pad) + self.suppress_bias,
+            self.rules,
+            self.selected,
             drawable=c.vocab_size,
+            max_ranges=MAX_RANGES,
+            probability_rule=True,
         )
         return logits, iron.carry(token=drawn, position=call.position + 1)
-
-    def call_values(self) -> dict:
-        """Supply ``audio_rows`` to every prompt chunk and decode step."""
-        return dict(audio_rows=self.config.max_source_positions)
-
-    def reference(self, *tensors, dev=None, **values):
-        """Run ``Graph.reference`` with ``call_values`` filled in."""
-        return super().reference(*tensors, dev=dev, **{**self.call_values(), **values})
 
     def positions(self, x, call: Call):
         """Add ``embed_positions`` for the prompt chunk's slice or the decode step's position."""
@@ -502,31 +499,6 @@ class WhisperDecoder(CausalLM):
         else:
             pos = Copy.step(self.pos_table[call.position]).reshape(1, E)
         return x + pos
-
-    def layer(self, call: Call, i: int, w, x):
-        """Run decoder layer ``i`` with the active ``audio_rows`` bound."""
-        return w(x, call, self._audio_rows)
-
-    def body(  # pyright: ignore[reportIncompatibleMethodOverride]
-        self,
-        ids: Handle | None = None,
-        *,
-        token: Carried[np.int32],
-        position: Carried[np.int32],
-        start: Scratchpad[np.int32] = np.int32(0),
-        rows: Scratchpad[np.int32] = np.int32(1),
-        rope_start: Scratchpad[np.int32] = np.int32(0),
-        audio_rows: Scratchpad[np.int32] = np.int32(1500),
-    ):
-        self._audio_rows = audio_rows
-        return super().body(
-            ids,
-            token=token,
-            position=position,
-            start=start,
-            rows=rows,
-            rope_start=rope_start,
-        )
 
 
 class Whisper(Model):
@@ -541,14 +513,16 @@ class Whisper(Model):
 
     config = WhisperConfig
     profile = PROFILES
+    decoder_class = WhisperDecoder
 
     def __init__(self, config: WhisperConfig, weights: SimpleNamespace):
         self.config = config
         self.weights = weights
         self.encoder = WhisperEncoder(config, weights)
-        self.decoder = WhisperDecoder(config, weights)
+        self.decoder = self.decoder_class(config, weights)
         self.encode_version: CompiledGraph | None = None
         self._last_mel: np.ndarray | None = None
+        self._frontends: dict[int, CompiledGraph] = {}
 
     @property
     def hugging_face(self):
@@ -572,7 +546,6 @@ class Whisper(Model):
         start: Scratchpad[np.int32] = np.int32(0),
         rows: Scratchpad[np.int32] = np.int32(1),
         rope_start: Scratchpad[np.int32] = np.int32(0),
-        audio_rows: Scratchpad[np.int32] = np.int32(1500),
     ):
         """Record the encoder version when ``features`` is given, else the decoder."""
         if features is not None:
@@ -589,7 +562,6 @@ class Whisper(Model):
             start=start,
             rows=rows,
             rope_start=rope_start,
-            audio_rows=audio_rows,
         )
 
     def shapes(self) -> list[dict]:
@@ -606,6 +578,9 @@ class Whisper(Model):
     def release(self) -> None:
         """Free the decoder's loops and all versions' device memory."""
         self.decoder.release()
+        for frontend in self._frontends.values():
+            frontend.release()
+        self._frontends.clear()
         super().release()
 
     def encode(self, mel: np.ndarray) -> np.ndarray:
@@ -622,7 +597,6 @@ class Whisper(Model):
             start=0,
             rows=1,
             rope_start=0,
-            audio_rows=c.max_source_positions,
         )
         if self.encode_version is not None:
             out, _ = self.encode_version(buf, **defaults)
@@ -641,25 +615,6 @@ class Whisper(Model):
             self.encode(mel)
         return self.decoder.logits(tokens)
 
-    @property
-    def draws_at_once(self) -> bool:
-        return self.decoder.draws_at_once
-
-    def _draw(
-        self,
-        tokens,
-        max_tokens: int,
-        sampler: Sampler,
-        each: bool = True,
-        mel: np.ndarray | None = None,
-    ) -> Iterator[int]:
-        """Yield tokens drawn after ``tokens``, encoding ``mel`` when provided."""
-        if mel is not None and (
-            self._last_mel is None or not np.array_equal(mel, self._last_mel)
-        ):
-            self.encode(mel)
-        return self.decoder._draw(tokens, max_tokens, sampler, each)
-
     def window(
         self,
         mel: np.ndarray,
@@ -669,16 +624,35 @@ class Whisper(Model):
         """Encode one 30 s ``mel`` window and greedy-decode tokens under ``policy``."""
         if policy is None:
             policy = TokenPolicy(self.config, timestamps=False)
+        if not (0 < len(prompt) <= self.config.prefill_chunk) or not (
+            0 < policy.max_new_tokens <= self.config.max_seq_len - len(prompt) + 1
+        ):
+            raise ValueError(
+                "Whisper: prompt and requested tokens do not fit the decoder"
+            )
+        if self.decoder.decode_step is None:
+            raise RuntimeError("Whisper.window: load_versions() first")
         encoder_out = self.encode(mel)
-        history = list(prompt)
         generated: list[int] = []
         while True:
-            next_logits = self.decoder.logits(history)
-            token = int(policy(next_logits, generated).argmax())
+            self.decoder.decode_step.write(self.decoder.rules, policy.row(generated))
+            if not generated:
+                _, carry = self.decoder(
+                    self.decoder.session.prompt_ids(prompt),
+                    token=0,
+                    position=len(prompt) - 1,
+                    start=0,
+                    rows=len(prompt),
+                )
+            else:
+                _, carry = self.decoder(
+                    token=generated[-1],
+                    position=len(prompt) + len(generated) - 1,
+                )
+            token = int(carry["token"])
             generated.append(token)
             if token == policy.eos or len(generated) >= policy.max_new_tokens:
                 return generated, encoder_out
-            history.append(token)
 
     def filters(self) -> np.ndarray:
         """Return the checkpoint's Mel filterbank, or the Slaney filterbank."""
@@ -688,6 +662,38 @@ class Whisper(Model):
         return mel_filters(
             directory, mels=self.config.num_mel_bins, sample_rate=SAMPLE_RATE
         )
+
+    def log_mel(
+        self, waveform: np.ndarray, *, long_form: bool = False
+    ) -> tuple[np.ndarray, int]:
+        """Extract and globally normalize log-Mel on the NPU; pad/reflect samples on the host."""
+        samples = np.asarray(waveform, np.float32).reshape(-1)
+        content = samples.size // HOP_LENGTH
+        if long_form:
+            samples = np.pad(samples, (0, N_SAMPLES))
+        else:
+            samples = np.pad(samples[:N_SAMPLES], (0, max(0, N_SAMPLES - samples.size)))
+        frames = samples.size // HOP_LENGTH
+        capacity = -(-frames // 64) * 64
+        graph = LogMel(
+            frame=N_FFT,
+            fft=N_FFT,
+            mels=self.config.num_mel_bins,
+            mel_floor=1e-10,
+            mel_scale="slaney",
+            whisper=True,
+        )
+        length = (capacity - 1) * HOP_LENGTH + graph.span
+        padded = np.pad(samples, (N_FFT // 2, N_FFT // 2), mode="reflect")
+        wave = np.zeros(length, np.float32)
+        wave[: min(length, padded.size)] = padded[:length]
+        if capacity not in self._frontends:
+            self._frontends[capacity] = graph.compile(wave=((length,), np.float32))
+        # A reduction tile is eight padded Mel rows. Long-form's trailing
+        # silence makes rounding to that tile harmless; a 30 s window is exact.
+        out = self._frontends[capacity](wave, frames=-(-frames // 8) * 8)
+        mel = out.numpy().reshape(capacity, self.config.num_mel_bins)
+        return np.array(mel[:frames], np.float32), content
 
     def transcribe(
         self,
@@ -699,47 +705,36 @@ class Whisper(Model):
         samples = np.asarray(waveform, dtype=np.float32).reshape(-1)
         duration = samples.size / SAMPLE_RATE
         use_long = long_form or duration > 30.0
-        filters = self.filters()
+        mel, content_frames = self.log_mel(samples, long_form=use_long)
         if not use_long:
-            mel = log_mel_spectrogram(samples, filters, frames=self.config.frames)
             policy = TokenPolicy(self.config, timestamps=False)
             tokens, encoder_out = self.window(mel, list(PROMPT), policy)
-            text_ids = [t for t in tokens if t < EOS]
-            text = (
-                self.tokenizer.decode(text_ids).strip()
-                if self.tokenizer is not None
-                else ""
+            result = dict(encoder_out=encoder_out, segments=[])
+        else:
+            policy = TokenPolicy(self.config, timestamps=True)
+            windows = transcribe_long(self, mel, content_frames, policy)
+            tokens = [t for w in windows for t in w["tokens"]]
+            result = dict(
+                content_frames=content_frames,
+                windows=windows,
+                segments=(
+                    segments_of(windows, self.tokenizer)
+                    if self.tokenizer is not None
+                    else []
+                ),
             )
-            return {
-                "text": text,
-                "tokens": tokens,
-                "long_form": False,
-                "mel": mel,
-                "encoder_out": encoder_out,
-                "segments": [],
-            }
-
-        mel, content_frames = log_mel_spectrogram_long(samples, filters)
-        policy = TokenPolicy(self.config, timestamps=True)
-        windows = transcribe_long(self, mel, content_frames, policy)
-        tokens = [t for w in windows for t in w["tokens"]]
         text_ids = [t for t in tokens if t < EOS]
         text = (
             self.tokenizer.decode(text_ids).strip()
             if self.tokenizer is not None
             else ""
         )
-        segments = (
-            segments_of(windows, self.tokenizer) if self.tokenizer is not None else []
-        )
         return {
             "text": text,
             "tokens": tokens,
-            "long_form": True,
+            "long_form": use_long,
             "mel": mel,
-            "content_frames": content_frames,
-            "windows": windows,
-            "segments": segments,
+            **result,
         }
 
 

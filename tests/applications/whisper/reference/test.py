@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from aie.iron.kernels.sample import apply_ranges_ref
 
 from iron.applications.whisper.audio import (
     log_mel_spectrogram,
@@ -28,6 +29,7 @@ from iron.applications.whisper.model import (
     TokenPolicy,
     Whisper,
     WhisperConfig,
+    WhisperDecoder,
     windows_match,
     word_error_rate,
 )
@@ -64,7 +66,7 @@ TOY = WhisperConfig(
 )
 
 
-def whisper_names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
+def shapes(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
     """Return every tensor of a Hugging Face Whisper checkpoint of ``c``'s shape."""
     E, M, S, T, V = (
         c.hidden_size,
@@ -137,25 +139,30 @@ def whisper_names(c: WhisperConfig) -> dict[str, tuple[int, ...]]:
     return out
 
 
+class HostDecoder(OnHost, WhisperDecoder):
+    """Run the decoder's recorded steps on the host."""
+
+    profile = None
+
+
 class HostWhisper(OnHost, Whisper):
     """``Whisper`` with both its outer graph and its decoder run via ``OnHost``."""
 
     profile = None
+    decoder_class = HostDecoder
 
     def __init__(self, config: WhisperConfig, weights: SimpleNamespace):
         super().__init__(config, weights)
         self.encoder.profile = None
-        self.decoder.profile = None
-        host_decoder_cls = type(
-            "HostDecoder", (OnHost, type(self.decoder)), {"profile": None}
-        )
-        self.decoder.__class__ = host_decoder_cls
+
+    def logits(self, tokens, mel=None):
+        return Whisper.logits(self, tokens, mel)
 
 
 @pytest.fixture(scope="module")
 def cpu(golden):
     """Build the toy weights, Mel input, prompt and recorded Hugging Face goldens."""
-    weights = checkpoint(TOY, whisper_names(TOY)).tree("random", seed=3)
+    weights = checkpoint(TOY, shapes(TOY)).tree("random", seed=3)
     rng = np.random.default_rng(7)
     mel = rng.normal(0.0, 0.5, (TOY.frames, TOY.num_mel_bins)).astype(np.float32)
     prompt = rng.integers(0, TOY.vocab_size, 4, dtype=np.int64)
@@ -188,7 +195,7 @@ def test_every_step_of_every_version_resolves(npu1, npu2):
     import dataclasses
 
     one_layer = dataclasses.replace(TOY, num_hidden_layers=1, encoder_layers=1)
-    weights = checkpoint(one_layer, whisper_names(one_layer)).tree("unread")
+    weights = checkpoint(one_layer, shapes(one_layer)).tree("unread")
     for dev in (npu1, npu2):
         model = Whisper(one_layer, weights)
         for call in model.shapes():
@@ -228,17 +235,17 @@ def test_audio_spectrogram_and_token_policy():
     cfg = WhisperConfig()
     no_ts = TokenPolicy(cfg, timestamps=False)
     logits = np.zeros(cfg.vocab_size, dtype=np.float32)
-    filtered = no_ts(logits, [])
+    filtered = apply_ranges_ref(logits, no_ts.ranges([]))
     assert np.all(np.isneginf(filtered[FIRST_NON_TEXT_SPECIAL:]))
     assert np.isneginf(filtered[EOS])
 
     with_ts = TokenPolicy(cfg, timestamps=True)
-    first_step = with_ts(logits, [])
+    first_step = apply_ranges_ref(logits, with_ts.ranges([]))
     assert np.all(np.isneginf(first_step[:TIMESTAMP_BEGIN]))
     assert np.all(
         np.isneginf(first_step[TIMESTAMP_BEGIN + MAX_INITIAL_TIMESTAMP + 1 :])
     )
-    second_step = with_ts(logits, [TIMESTAMP_BEGIN])
+    second_step = apply_ranges_ref(logits, with_ts.ranges([TIMESTAMP_BEGIN]))
     assert np.all(np.isneginf(second_step[TIMESTAMP_BEGIN:]))
 
     assert word_error_rate("Mr. Quilter is here.", "mister quilter is here") == 0.0
