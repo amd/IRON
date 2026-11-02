@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CI's Benchmarks page data and the pull request comment, run as CI runs them.
+"""CI's Performance Checks page data and the pull request comment, run as CI runs them.
 
 The page's data names each benchmark as the comment does, holds one series
 per parametrization with each device's runs, says which ran in each suite's

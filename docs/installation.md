@@ -46,7 +46,7 @@ On NPU2 a model's prompt chunk is one command, and the deepest chunk, at the
 model's native context, is the longest. The timeout must cover it, with room
 to spare on a slower device. CI's nightly times a whole prompt at the native
 context, which bounds its deepest chunk from above: `long_context`'s TTFT on
-the [Benchmarks page](https://amd.github.io/IRON/benchmarks/#bench=long_context&suite=nightly&metric=TTFT).
+the [Performance Checks page](https://amd.github.io/IRON/benchmarks/#bench=long_context&suite=nightly&metric=TTFT).
 On NPU1 a command is one operator, the longest an attention layer of the
 deepest chunk.
 

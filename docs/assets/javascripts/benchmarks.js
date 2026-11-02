@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// The Benchmarks page: each benchmark's headline trend, the suites' latest
+// The Performance Checks page: each benchmark's headline trend, the suites' latest
 // runs, and one benchmark's history per device, from the data.json
 // ci/scripts/build_pages.py writes beside it.
 

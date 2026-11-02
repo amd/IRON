@@ -16,7 +16,7 @@ MAX_RUNS = 400
 
 
 def prune(rows, date_fmt="%Y-%m-%d %H:%M:%S"):
-    """Keep the runs the reports and the Benchmarks page read.
+    """Keep the runs the reports and the Performance Checks page read.
 
     A run is the rows of one date. Each benched parametrization keeps its own
     runs of the last `KEEP_DAYS` before the suite's newest, its newest run of

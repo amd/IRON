@@ -76,7 +76,7 @@
 .iron-card-title { font-weight: 600; font-size: 0.9rem; display: block; margin-bottom: 0.3rem; color: var(--md-typeset-a-color); }
 .iron-card-desc  { font-size: 0.78rem; opacity: 0.72; line-height: 1.4; }
 
-/* ── Benchmarks page ─────────────────────────────────────────────────────── */
+/* ── Performance Checks page ─────────────────────────────────────────────────────── */
 .iron-bench-filters {
   display: flex;
   flex-wrap: wrap;

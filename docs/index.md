@@ -44,7 +44,7 @@ Halo, Krackan).
 
 <a class="iron-card" href="benchmarks/" markdown>
 <span class="iron-card-icon">📊</span>
-<span class="iron-card-title">Benchmarks</span>
+<span class="iron-card-title">Performance Checks</span>
 <span class="iron-card-desc">Operator and model performance, as measured by CI.</span>
 </a>
 

@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Benchmarks
+# Performance Checks
 
 CI measures every figure here on a Krackan (NPU2) and a Phoenix (NPU1) runner,
 keeps each run on the [`ci` branch](https://github.com/amd/IRON/tree/ci), and

@@ -106,7 +106,7 @@ def main():
     parser.add_argument(
         "--benchmarks-page",
         default="",
-        help="The website's Benchmarks page, which each moved benchmark links to",
+        help="The website's Performance Checks page, which each moved benchmark links to",
     )
     parser.add_argument("-o", "--output", default="comment.md")
     args = parser.parse_args()
@@ -162,7 +162,7 @@ def main():
 
     if args.benchmarks_page:
         lines += [
-            f"Every benchmark's history: [Benchmarks]({args.benchmarks_page}).",
+            f"Every benchmark's history: [Performance Checks]({args.benchmarks_page}).",
             "",
         ]
 

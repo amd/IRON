@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Publishes the IRON website, the MkDocs site (docs/), as one GitHub Pages
-# deployment; its Benchmarks page draws the results the benchmark workflows
+# deployment; its Performance Checks page draws the results the benchmark workflows
 # push to the `ci` branch. This workflow also runs after they finish, so the
 # page stays current between doc changes.
 #
@@ -70,7 +70,7 @@ jobs:
       - name: Link programming_guide into docs tree
         run: test -d programming_guide && ln -s ../programming_guide docs/programming_guide || true
 
-      - name: Write the benchmark data beside the Benchmarks page
+      - name: Write the benchmark data beside the Performance Checks page
         run: python ci/scripts/build_pages.py --results-root results -o docs/benchmarks/data.json
 
       - name: Build the MkDocs site

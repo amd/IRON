@@ -214,7 +214,7 @@ def build_report(
 
     `all_rows` holds the last two runs of each test. Their values reach a pull
     request comment, so every cell passes through `cell`. Given `history`, the
-    website's Benchmarks page, each moved benchmark links to its history in
+    website's Performance Checks page, each moved benchmark links to its history in
     `suite` there.
     """
     dates = sorted(

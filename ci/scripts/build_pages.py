@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Write the data the website's Benchmarks page draws, from the results branch.
+"""Write the data the website's Performance Checks page draws, from the results branch.
 
 Reads every ``{arch}/{suite}/all.csv`` under a results root and writes one JSON
 file: each suite's latest run on each device, and each benchmark's history,
@@ -81,7 +81,7 @@ CHECKPOINTS = {
 FORMS = {"device_loop": "device loop", "each_step": "each step"}
 DEVICE_FORMS = {"krackan": ("device loop", None), "phoenix": ("each step", None)}
 
-# Where a benchmark still run is documented, relative to the Benchmarks page:
+# Where a benchmark still run is documented, relative to the Performance Checks page:
 # a model on the Models page, an operator in the API reference. A catalog
 # benchmark is named for its class; these are named for their test's
 # directory.
@@ -438,7 +438,7 @@ def main():
         "--output",
         default="docs/benchmarks/data.json",
         help="The JSON file to write (default: docs/benchmarks/data.json, "
-        "beside the Benchmarks page)",
+        "beside the Performance Checks page)",
     )
     args = parser.parse_args()
 
