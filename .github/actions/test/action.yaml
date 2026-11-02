@@ -26,10 +26,35 @@ inputs:
 runs:
   using: "composite"
   steps:
+    # Timing in amdxdna's default mode reads the clock the NPU ramped to, so
+    # the run asks for turbo, as mlir-aie's nightly checks do. Setting a mode
+    # needs root and amdxdna refuses turbo while any hardware context is
+    # open: a runner that cannot set it warns, and a run that publishes then
+    # records no figures (conftest's --pmode).
+    - name: NPU power mode
+      env:
+        PERF_PMODE: turbo
+      shell: "bash"
+      run: |
+        [ -f /opt/xilinx/xrt/setup.sh ] && source /opt/xilinx/xrt/setup.sh
+        XRT_SMI=$(command -v xrt-smi) || { echo "::warning::No xrt-smi; the run records the power mode it finds"; exit 0; }
+        BDF=$("$XRT_SMI" examine | grep -oE '\[[0-9a-f:.]+\]' | head -1 | tr -d '[]')
+        PLATFORM=$("$XRT_SMI" examine -d "$BDF" --report platform)
+        if ! grep -qiE "mode[[:space:]]*:[[:space:]]*$PERF_PMODE\b" <<<"$PLATFORM"; then
+          if sudo -n "$XRT_SMI" configure -d "$BDF" --pmode "$PERF_PMODE"; then
+            PLATFORM=$("$XRT_SMI" examine -d "$BDF" --report platform)
+          else
+            echo "::warning::The NPU is not in --pmode $PERF_PMODE and cannot be set non-interactively; a run that publishes records no figures in another mode"
+          fi
+        fi
+        grep -iE "mode[[:space:]]*:" <<<"$PLATFORM" || true
+
     - name: Test
       env:
         HOME: /workspace
         AIECC_JOBS: "1"
+        # The publish jobs' condition: only main and devel publish figures.
+        REQUIRED_PMODE: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') && 'turbo' || 'any' }}
       shell: "bash"
       run: |
         source ${{ inputs.env_name }}/bin/activate
@@ -38,7 +63,7 @@ runs:
         if [ "${{ inputs.extensive }}" != "true" ]; then
           MARKS=(-m "not extensive")
         fi
-        FLAGS=(--log-cli-level=${{ inputs.log_level || 'WARNING' }} ${{ inputs.test_flags }})
+        FLAGS=(--log-cli-level=${{ inputs.log_level || 'WARNING' }} --pmode="$REQUIRED_PMODE" ${{ inputs.test_flags }})
         rm -f tests_latest.csv
 
         case "${{ inputs.test_suite }}" in
