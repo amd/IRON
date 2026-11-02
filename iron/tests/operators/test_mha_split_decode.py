@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Split decode's walks on the host, with the operator's own patterns (device-free, npu1).
+"""Split decode's walks on the host, with the operator's own patterns (device-free, npu1 and npu2).
 
 Q and a pad fill a lane's first object, its keys are every n-th block of
 each pass's heads, and O's walk takes each packed row back to its head.
@@ -14,7 +14,12 @@ from aie.iron.device import from_name
 
 from iron.operators.mha import MHA
 
-NPU1 = from_name("npu1", n_cols=4)
+# Each device with its pipelines per npu1 pipeline: npu1 takes two lanes a
+# column, npu2 one, so both run the same lanes.
+DEVICES = {
+    "npu1": (from_name("npu1", n_cols=4), 1),
+    "npu2": (from_name("npu2", n_cols=8), 2),
+}
 
 CASES = [
     # Llama 3.2 1B's and 3B's, Granite's group of 5, Qwen3's of 2 at d=64,
@@ -29,8 +34,9 @@ CASES = [
 ]
 
 
-def _split(heads, kv_heads, d, pipelines, kv_len=4096):
-    with aie_utils.set_current_device(NPU1):
+def _split(device, heads, kv_heads, d, pipelines, kv_len=4096):
+    dev, per = DEVICES[device]
+    with aie_utils.set_current_device(dev):
         return MHA(
             num_heads=heads,
             num_KV_heads=kv_heads,
@@ -39,25 +45,29 @@ def _split(heads, kv_heads, d, pipelines, kv_len=4096):
             kv_len=kv_len,
             heads_interleaved=True,
             kv_paired=True,
-            num_pipelines=pipelines,
+            num_pipelines=pipelines * per,
             cores_per_block=1,
-        ).resolved(NPU1)
+        ).resolved(dev)
 
 
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("heads,kv_heads,d,pipelines", CASES)
-def test_q_and_its_pad_are_one_key_block(heads, kv_heads, d, pipelines):
+def test_q_and_its_pad_are_one_key_block(device, heads, kv_heads, d, pipelines):
     """A lane's first object is every query head flat, in order, then any keys up to one key block's object."""
-    op = _split(heads, kv_heads, d, pipelines)
+    op = _split(device, heads, kv_heads, d, pipelines)
     q = np.arange(heads * d).reshape(op.Q.shape)
     assert np.array_equal(op.split_q().gather(q), np.arange(heads * d))
     obj = op.B_kv * op.lane_heads * 2 * d
     assert heads * d + op.split_pad().sizes[0] == obj
 
 
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("heads,kv_heads,d,pipelines", CASES)
-def test_a_lane_streams_every_nth_block_of_each_pass(heads, kv_heads, d, pipelines):
+def test_a_lane_streams_every_nth_block_of_each_pass(
+    device, heads, kv_heads, d, pipelines
+):
     """Lane ``l``'s descriptor gives each pass's KV heads, key blocks ``l``, ``l + n``, ... at their positions, K row then V row a head."""
-    op = _split(heads, kv_heads, d, pipelines)
+    op = _split(device, heads, kv_heads, d, pipelines)
     shape = op.KV.shape
     kv = np.arange(np.prod(shape)).reshape(shape)
     G, B, lanes, lh = kv_heads, op.B_kv, op.kv_lanes, op.lane_heads
@@ -72,13 +82,14 @@ def test_a_lane_streams_every_nth_block_of_each_pass(heads, kv_heads, d, pipelin
                 assert np.array_equal(got[p, b], want), (lane, p, b)
 
 
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("heads,kv_heads,d,pipelines", CASES)
-def test_o_returns_each_packed_row_to_its_head(heads, kv_heads, d, pipelines):
+def test_o_returns_each_packed_row_to_its_head(device, heads, kv_heads, d, pipelines):
     """mha.cc's take_q packs rows ``i`` and ``i + 4`` from neighbouring heads of the group; O's walk takes each row back to its head.
 
     Every head of the group is packed at least once.
     """
-    op = _split(heads, kv_heads, d, pipelines)
+    op = _split(device, heads, kv_heads, d, pipelines)
     g = heads // kv_heads
     pairs = 1 if g == 1 else g - 1 if g % 2 else g // 2
     step = 0 if g == 1 else 1 if g % 2 else 2

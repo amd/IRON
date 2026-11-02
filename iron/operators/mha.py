@@ -269,8 +269,7 @@ _CASES = [
         lower=True,
     ),
     # Llama 3.2 1B's and 3B's decode step split over keys, and Gemma 3 1B's
-    # sliding one, its merging core's L1 holding two lanes' partials at d=256
-    # (AIE2).
+    # sliding one, its merging core's L1 holding two lanes' partials at d=256.
     *(
         Case(
             dict(
@@ -321,11 +320,11 @@ def _cases(cls, dev: Device):
             },
         )
         for c in _CASES
-        # AIE2P's one core a query block is attend_block over bf16 scores:
-        # not split decode's attend_head, nor audio's float32 scores.
+        # AIE2P's one core a query block takes bf16 scores, not audio's
+        # float32 ones.
         if dev.arch is AIEArch.AIE2
         or c.kwargs.get("cores_per_block") != 1
-        or (c.kwargs["seq_len"] > 1 and not c.kwargs.get("f32_scores"))
+        or not c.kwargs.get("f32_scores")
     ]
 
 
@@ -492,7 +491,10 @@ class MHA(Operator):
     q_blocks_valid = per_call(
         derive=lambda op: ceildiv(op.q_tokens, op.positions * op.streams)
     )
-    kv_blocks = per_call(derive=lambda op: ceildiv(op.kv_tokens, op.B_kv))
+    # Split streams lane_blocks instead: a word its design never reads.
+    kv_blocks = per_call(
+        derive=lambda op: 0 if op.split else ceildiv(op.kv_tokens, op.B_kv)
+    )
     # Fused, the key blocks each of ROUND_GROUPS groups of rounds streams: up
     # to its last valid query, so a round's stream ends near its own.
     kv_blocks_0 = per_call(derive=lambda op: op.group_blocks(0))
@@ -719,11 +721,13 @@ class MHA(Operator):
                     f"MHA: a lane's passes take {self.lane_heads} of the "
                     f"{self.num_KV_heads} KV heads each"
                 )
-            if lanes != 2 * self.num_pipelines or self.kv_len % (lanes * self.B_kv):
+            if lanes != self.column_cores * self.num_pipelines or self.kv_len % (
+                lanes * self.B_kv
+            ):
                 raise ValueError(
-                    f"MHA: one query split over keys takes two KV lanes a column "
-                    f"({lanes} for {self.num_pipelines}), kv_len ({self.kv_len}) whole "
-                    f"rounds of a {self.B_kv}-key block on each"
+                    f"MHA: one query split over keys takes {self.column_cores} KV "
+                    f"lanes a column ({lanes} for {self.num_pipelines}), kv_len "
+                    f"({self.kv_len}) whole rounds of a {self.B_kv}-key block on each"
                 )
             return
         if self.fused:
@@ -891,9 +895,9 @@ class MHA(Operator):
         pipeline's.
 
         Raises:
-            Unresolvable: No device, not AIE2 or AIE2P, K and V apart, one
-                query on AIE2P, float32 scores or a score feature AIE2P's
-                block lacks, or no block fits.
+            Unresolvable: No device, not AIE2 or AIE2P, K and V apart,
+                float32 scores or a score feature AIE2P's block lacks, or no
+                block fits.
         """
         if dev is None or dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
             raise Unresolvable(
@@ -908,10 +912,6 @@ class MHA(Operator):
         if self.pv_cores not in (None, 1):
             raise Unresolvable("MHA: one core a query block takes P*V on that core")
         if self.packed:
-            if aie2p:
-                raise Unresolvable(
-                    "MHA: one query split over keys is attend_head, AIE2's"
-                )
             if self.f32_scores or self.score_features:
                 raise Unresolvable(
                     "MHA: one query split over keys keeps bf16 scores and no "
@@ -1035,9 +1035,11 @@ class MHA(Operator):
         return dev.default_core_stack_bytes + data + frame
 
     def resolve_split(self, dev):
-        """``resolve`` for one query: a core a KV lane, two a column, each over every ``kv_lanes``-th key block from its own.
+        """``resolve`` for one query: a core a KV lane, each over every ``kv_lanes``-th key block from its own.
 
-        A core merges their partials.
+        Two lanes a column on 4 columns, every shim channel; one on 8, which
+        leaves a channel a column to the decode packing. A core merges their
+        partials.
 
         Raises:
             Unresolvable: No key block for ``d`` dividing ``kv_len`` in whole
@@ -1050,7 +1052,9 @@ class MHA(Operator):
         heads = 2 if self.d == 64 and g > 1 and not G % 2 else 1
         B_kv = self.FUSED_KEY_BLOCKS.get(self.d)
         B_kv = None if B_kv is None else B_kv // heads
-        lanes = 2 * self.num_pipelines
+        width = max(w for w in self.PACKED_PIPELINES if w <= dev.cols)
+        column_cores = 2 if width < max(self.PACKED_PIPELINES) else 1
+        lanes = column_cores * self.num_pipelines
         if B_kv is None or self.kv_len % (lanes * B_kv):
             raise Unresolvable(
                 f"MHA: one query split over keys takes d of "
@@ -1081,12 +1085,12 @@ class MHA(Operator):
             join_rows=8,
             kv_lanes=lanes,
             kv_streams=1,
-            width=max(w for w in self.PACKED_PIPELINES if w <= dev.cols),
+            width=width,
             pv_cores=1,
             pv_width=self.d,
             cores_per_block=1,
             fused=True,
-            column_cores=2,
+            column_cores=column_cores,
             group=g,
             split=True,
             lane_heads=heads,
@@ -1918,7 +1922,7 @@ class MHA(Operator):
         rescale = obj.bind("rescale_O", [part_ty, o_ty, state_ty, np.int32, idx_ty])
         mac = (
             kernels.linalg.mha.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
-                pv=False
+                pv=True
             )
         )
         pv = mm_stream_dims(B_q, B_kv, d, mac)
