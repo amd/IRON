@@ -40,7 +40,15 @@ from iron.common.declare.profile import PackingEntry, Version
 from iron.common.graph.compiled import apply_profile
 from iron.common.image.step import FusionKind
 
-from .autotune import CONFIDENCE, FIT_CACHE, Shape, Timed, _json_safe, time_shape
+from .autotune import (
+    CONFIDENCE,
+    FIT_CACHE,
+    Shape,
+    Timed,
+    _json_safe,
+    coding_tunables,
+    time_shape,
+)
 from .costmodel import FEATURES, CostModel
 from .failures import Kind, Ledger, first_error
 from .fold import fold_profile
@@ -408,24 +416,14 @@ class Packer:
         """``group`` with each member off its own setting at the fastest of its other tunables there that still fits.
 
         Searched as an operator's own tuning searches them (``time_shape``), its widths
-        held.
+        and coding held (``tiling``).
         """
         current = dict(group)
         for key, setting in group.items():
             if not setting:
                 continue
-            shape = Shape(self.recorded(key))
-            shape.pinned = frozenset(width_tunables(self.recorded(key)))
-            shape.members = [
-                (
-                    op._with_tunables(**setting),
-                    self.call.op_points(op),
-                    self.call.op_inputs(op),
-                )
-                for op, _ in self.shapes[key].values()
-            ]
             tried = time_shape(
-                shape,
+                self.tiling(key, setting),
                 self.dev,
                 full_elf=self.full_elf,
                 timing=self.timing,
@@ -441,6 +439,25 @@ class Packer:
                     current = trial
                     break
         return current
+
+    def tiling(self, key, setting: Setting) -> Shape:
+        """Return the shape ``retile`` searches for unit ``key`` at ``setting``.
+
+        Its widths held, and its coding: a weight's coded rows are bound when the
+        recording is coded, before any search (``plan.coded_seed``).
+        """
+        recorded = self.recorded(key)
+        shape = Shape(recorded)
+        shape.pinned = frozenset(width_tunables(recorded)) | coding_tunables(recorded)
+        shape.members = [
+            (
+                op._with_tunables(**setting),
+                self.call.op_points(op),
+                self.call.op_inputs(op),
+            )
+            for op, _ in self.shapes[key].values()
+        ]
+        return shape
 
     def group(self) -> list[Group]:
         """Return the arrays grouped to minimize ``objective``.

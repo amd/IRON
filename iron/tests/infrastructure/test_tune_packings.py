@@ -29,7 +29,7 @@ from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
 from iron.tests.support.llama_model import small
-from iron.tune.autotune import Point, Shape, Timed
+from iron.tune.autotune import Point, Shape, Timed, settings
 from iron.tune.costmodel import CostModel
 from iron.tune.fold import fold_profile
 from iron.tune.measure import Budget, Cache, Timing, platform
@@ -191,6 +191,23 @@ def test_one_shapes_two_arrays_are_one_unit_a_change_aligns(npu2, tmp_path):
         if len(packer.arrays(k, s)) == 1
     ]
     assert min(aligned) * 2 == packer.cores({unit: {}})
+
+
+def test_a_retile_holds_a_weight_s_coding(npu2, tmp_path):
+    """A GEMV's coded_a is bound when its recording is coded, before the search.
+
+    Re-tiled free, EmbeddingGemma 2's packing search built coded rows over a weight
+    recorded plain (a size mismatch at every build).
+    """
+    model = small()
+    packer = _packer(model.record(**model.shapes()[0]), npu2, tmp_path)
+    key = next(k for k in packer.shapes if isinstance(packer.recorded(k), GEMV))
+    shape = packer.tiling(key, {"num_aie_columns": 1})
+    assert "coded_a" in shape.pinned
+    op = shape.members[0][0]
+    assert {s.get("coded_a", op.coded_a) for s in settings(op, npu2, shape.pinned)} == {
+        op.coded_a
+    }
 
 
 def test_a_packing_names_no_dimension_a_hosts_context_sizes(npu2, tmp_path):
