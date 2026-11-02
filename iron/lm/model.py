@@ -8,6 +8,7 @@ Built from a checkpoint's files (``load``), which generates from a prompt;
 to its ids.
 """
 
+import ctypes
 import dataclasses
 import datetime
 import functools
@@ -16,6 +17,7 @@ import json
 import logging
 import math
 import os
+import sys
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -89,10 +91,8 @@ def _cgroup_limit(root: Path = CGROUP, proc_cgroup: Path = PROC_CGROUP) -> int |
 
 def _physical_memory() -> int:
     """Return this host's physical memory in bytes."""
-    sysconf = getattr(os, "sysconf", None)
-    if sysconf is not None:
-        return int(sysconf("SC_PAGE_SIZE") * sysconf("SC_PHYS_PAGES"))
-    import ctypes
+    if sys.platform != "win32":
+        return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
 
     class MemoryStatusEx(ctypes.Structure):
         _fields_ = [
