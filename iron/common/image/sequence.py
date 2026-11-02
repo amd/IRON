@@ -285,11 +285,42 @@ class Image:
         self.steps = [SequenceStep(resolved[id(s.op)], s.buffers) for s in self.steps]
         self.layout, self.buffer_sizes = self._layout()
 
+    def prepare(self) -> Image:
+        """Resolve the operators and lay the buffers out, building nothing; return this image."""
+        if self.layout is None:
+            self._prepare()
+        return self
+
     def compile(self):
         """Build the image ahead of time."""
-        self._prepare()
+        self.prepare()
         self._link()
         return self
+
+    def own_scratch(self) -> dict[str, tuple[int, int]]:
+        """Each scratch buffer a run of this image holds in its own pool, not an arena's: ``(byte offset, bytes)``."""
+        assert self.layout is not None, "laid out first"
+        return {
+            root: (offset, length)
+            for root, (kind, offset, length) in self.layout.items()
+            if kind == "scratch"
+            and not (self.arena is not None and root in self.residents)
+        }
+
+    def held_bytes(self) -> int:
+        """Bytes a run of this image holds on the device outside its arena plan, as its callable allocates them."""
+        assert self.layout is not None, "laid out first"
+        if isinstance(self.packaging, FullELF):
+            sizes = self.buffer_sizes
+            scratch = 0 if self.arena is not None else sizes.scratch
+            return sizes.input + sizes.output + (sizes.feedback or 0) + scratch
+        hosted = sum(
+            length
+            for root, (kind, _, length) in self.layout.items()
+            if kind != "scratch"
+            and not (self.arena is not None and root in self.residents)
+        )
+        return hosted + max((o + n for o, n in self.own_scratch().values()), default=0)
 
     def _link(self):
         """Build this sequence's image, once; sets ``self.image`` and ``artifacts``."""

@@ -76,7 +76,7 @@ The text decoder's generation, accuracy, determinism and chat-turn tests
 are shared with the other decoders, in `tests/applications/decoders/`
 (`pytest tests/applications/decoders/ -k gemma4`); their time to first token
 and tokens per second are recorded to CI
-([benchmarks](https://amd.github.io/IRON/benchmarks/#bench=gemma4&suite=nightly&metric=TTFT)).
+([performance checks](https://amd.github.io/IRON/performance-checks/#bench=gemma4&suite=nightly&metric=TTFT)).
 
 On NPU1, the text decoder runs a dispatch per step: `decoders/test.py`'s
 `TestEachStep` and `tests/applications/long_context/` hold it there.

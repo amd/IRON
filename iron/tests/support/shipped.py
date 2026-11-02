@@ -150,7 +150,7 @@ class Shipped(
     # eight words behind a lock, written once per shape.
     n_val = m_row_blocks = k_iters = mode = clamp_min = clamp_max = None
     n_units = units_valid = units_repeat = a_half = c_half = valid = None
-    b_passes_repeat = b_resident = None
+    b_passes_repeat = b_peek_repeat = b_drained = None
     parameters = Block(PARAMETER_WORDS, derive=_parameter_words)
 
     def build(self) -> Built:

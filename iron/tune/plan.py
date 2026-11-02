@@ -40,6 +40,75 @@ def _coded_member(
     return cls, dims, tunables
 
 
+class Coding:
+    """The shapes ``profile``'s calls could read coded, and ``profile`` with a set of them coded."""
+
+    def __init__(self, calls: Sequence[Timed], dev, profile: Profile):
+        self.base = profile
+        self.resolved = [s.op.resolved(dev) for c in calls for s in c.recording.steps]
+        self.shapes: dict[Hashable, Shape] = {}
+        self.flags: dict[Hashable, set[str]] = {}
+        # A fusion or packing entry names the dims a resolved operator holds.
+        self.dims: dict[Hashable, dict[str, Any]] = {}
+        self.arrays: dict[Hashable, set[Hashable]] = {}
+        for call in calls:
+            for step in call.recording.steps:
+                names = coding_tunables(step.op)
+                if not names:
+                    continue
+                shape = Shape(step.op)
+                self.shapes.setdefault(shape.key, shape)
+                self.flags.setdefault(shape.key, set()).update(names)
+                op = step.op.resolved(dev)
+                self.dims.setdefault(shape.key, Profile.dims(type(op), vars(op)))
+                self.arrays.setdefault(op.array_key(), set()).add(shape.key)
+
+    def profile(self, keys) -> Profile:
+        """Return the profile with the shapes ``keys`` name coded, in their entries, fusions and packings."""
+        covering, held = replacing(self.base, [self.shapes[k] for k in keys])
+        out = merged(
+            self.base,
+            [
+                (
+                    self.shapes[k].cls,
+                    self.shapes[k].entry(covering[k], frozenset(), self.resolved),
+                    {**held[k], **dict.fromkeys(self.flags[k], True)},
+                )
+                for k in keys
+            ],
+        )
+        given = [(self.shapes[k].cls, self.dims[k], self.flags[k]) for k in keys]
+        for kind, steps, edges, versions in self.base.fusions():
+            out.add_fusion(
+                kind, [_coded_member(s, given) for s in steps], edges, versions
+            )
+        for packing in self.base.packings():
+            out.add_packing(
+                [_coded_member(m, given) for m in packing.members], packing.versions
+            )
+        return out
+
+    def recordable(
+        self,
+        record: Callable[[Profile], Sequence[Timed]],
+        dev,
+        log: Callable[[str], None] = print,
+    ) -> set[Hashable]:
+        """Return the shapes whose calls record and resolve coded, each coded alone."""
+        legal = set()
+        for key, shape in self.shapes.items():
+            try:
+                for call in record(self.profile([key])):
+                    for step in call.recording.steps:
+                        if Shape(step.op).key == key:
+                            step.op.resolved(dev)
+            except (TypeError, ValueError) as e:
+                log(f"coded: {shape} records only plain: {e}")
+                continue
+            legal.add(key)
+        return legal
+
+
 def coded_seed(
     record: Callable[[Profile], Sequence[Timed]],
     dev,
@@ -54,62 +123,10 @@ def coded_seed(
     Coding part of an array would split it into a coded and a plain one, more cores than
     it fits.
     """
-    calls = record(profile)
-    resolved = [s.op.resolved(dev) for c in calls for s in c.recording.steps]
-    shapes: dict[Hashable, Shape] = {}
-    flags: dict[Hashable, set[str]] = {}
-    # A fusion or packing entry names the dims a resolved operator holds.
-    dims: dict[Hashable, dict[str, Any]] = {}
-    arrays: dict[Hashable, set[Hashable]] = {}
-    for call in calls:
-        for step in call.recording.steps:
-            names = coding_tunables(step.op)
-            if not names:
-                continue
-            shape = Shape(step.op)
-            shapes.setdefault(shape.key, shape)
-            flags.setdefault(shape.key, set()).update(names)
-            op = step.op.resolved(dev)
-            dims.setdefault(shape.key, Profile.dims(type(op), vars(op)))
-            arrays.setdefault(op.array_key(), set()).add(shape.key)
-
-    def coded(keys) -> Profile:
-        covering, held = replacing(profile, [shapes[k] for k in keys])
-        out = merged(
-            profile,
-            [
-                (
-                    shapes[k].cls,
-                    shapes[k].entry(covering[k], frozenset(), resolved),
-                    {**held[k], **dict.fromkeys(flags[k], True)},
-                )
-                for k in keys
-            ],
-        )
-        given = [(shapes[k].cls, dims[k], flags[k]) for k in keys]
-        for kind, steps, edges, versions in profile.fusions():
-            out.add_fusion(
-                kind, [_coded_member(s, given) for s in steps], edges, versions
-            )
-        for packing in profile.packings():
-            out.add_packing(
-                [_coded_member(m, given) for m in packing.members], packing.versions
-            )
-        return out
-
-    legal = set()
-    for key, shape in shapes.items():
-        try:
-            for call in record(coded([key])):
-                for step in call.recording.steps:
-                    if Shape(step.op).key == key:
-                        step.op.resolved(dev)
-        except (TypeError, ValueError) as e:
-            log(f"coded: {shape} records only plain: {e}")
-            continue
-        legal.add(key)
+    coding = Coding(record(profile), dev, profile)
+    legal = coding.recordable(record, dev, log)
     fits = set(legal)
-    for call in record(coded(legal)):
+    for call in record(coding.profile(legal)):
         recording = call.recording
         recording.code_weights()
         refused = set(recording.read_plain)
@@ -117,17 +134,17 @@ def coded_seed(
             if any(h.ref().root in refused for h in step.slots):
                 fits.discard(Shape(step.op).key)
     for key in legal - fits:
-        log(f"coded: {shapes[key]} has a weight past its rows' capacity")
+        log(f"coded: {coding.shapes[key]} has a weight past its rows' capacity")
     taken = set(fits)
-    mixed = [m for m in arrays.values() if m & taken and not m <= taken]
+    mixed = [m for m in coding.arrays.values() if m & taken and not m <= taken]
     while mixed:
         for key in mixed[0] & taken:
-            log(f"coded: {shapes[key]} shares an array with a shape kept plain")
+            log(f"coded: {coding.shapes[key]} shares an array with a shape kept plain")
         taken -= mixed[0]
-        mixed = [m for m in arrays.values() if m & taken and not m <= taken]
+        mixed = [m for m in coding.arrays.values() if m & taken and not m <= taken]
     for key in taken:
-        log(f"coded: {shapes[key]}")
-    return coded(taken) if taken else profile
+        log(f"coded: {coding.shapes[key]}")
+    return coding.profile(taken) if taken else profile
 
 
 @dataclasses.dataclass(frozen=True)

@@ -378,7 +378,7 @@ class CausalLM(Model):
         weights = weights_file(args.checkpoint)
         config = dataclasses.replace(cls.default_config(weights), **dict(args.config))
         # A tune's checks hold a call built under two profiles, and validate two models.
-        config = cls.fit(config, weights, host_budget() // 2)
+        config = cls.fit(config, weights, host_budget(), builds=2, coded=True)
         assert isinstance(config, DecoderConfig), "a decoder's"
         layers = config.num_hidden_layers
         model = cls(config, Checkpoint(weights).tree(layers=layers))

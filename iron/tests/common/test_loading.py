@@ -137,10 +137,17 @@ def test_from_checkpoint_lowers_the_context_and_refuses_to_raise_it(tmp_path):
 
 
 def _held(config, length: int) -> int:
-    """Return what the model holds at ``length`` positions: its arena, recorded."""
+    """Return what the model holds at ``length`` positions: its weights on the host and one build on the bound device."""
     config = dataclasses.replace(config, max_seq_len=length)
-    model = Llama(config, checkpoint(config).tree("unread"))
-    model.profile = None
+    model = Small(config, checkpoint(config).tree("unread"))
+    host = sum(h.nbytes for _, h in model.record(**model.shapes()[0]).weights.values())
+    return host + model.held_bytes(model.shapes())
+
+
+def _pinned(config, length: int) -> int:
+    """Return the decode version's pinned states at ``length`` positions, which ``fit`` once took for all it holds."""
+    config = dataclasses.replace(config, max_seq_len=length)
+    model = Small(config, checkpoint(config).tree("unread"))
     return sum(model.record(**model.shapes()[0]).pinned.values())
 
 
@@ -267,3 +274,40 @@ def test_a_shallow_config_loads_a_deeper_checkpoint_s_first_layers(tmp_path, npu
             dataclasses.replace(SMALL, num_hidden_layers=1),
             Checkpoint(tmp_path / "model.safetensors").tree(),
         )
+
+
+def test_fit_counts_a_per_step_images_own_scratch(npu1):
+    """On npu1 each version is an xclbin a step, and each holds a scratch pool beside the arena.
+
+    A budget that holds only the decode version's pinned states at the native
+    context does not hold what the model holds there; at this small shape, not
+    even one prompt chunk's.
+    """
+    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    path = checkpoint(config).path
+    assert _held(config, 1024) > _pinned(config, 1024)
+    with pytest.raises(ValueError, match="do not fit"):
+        Small.fit(config, path, budget=_pinned(config, 1024))
+
+
+def test_fit_holds_the_weights_once_beside_each_build(npu2):
+    """Two builds of one model need one more build's bytes, not another copy of its host weights."""
+    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    path = checkpoint(config).path
+    one = _held(config, 1024)
+    model = Small(config, checkpoint(config).tree("unread"))
+    build = model.held_bytes(model.shapes())
+    assert Small.fit(config, path, budget=one + build, builds=2) == config
+    assert Small.fit(config, path, budget=one + build - 1, builds=2) != config
+
+
+def test_a_tunes_fit_holds_its_seeds_coded_rows_beside_the_plain_weights(npu2):
+    """A tune's seed codes its decode GEMVs, so it holds their coded rows besides the plain weights."""
+    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    path = checkpoint(config).path
+    model = Small(config, checkpoint(config).tree("unread"))
+    plain = _held(config, 1024) + model.held_bytes(model.shapes())
+    assert Small.fit(config, path, budget=plain, builds=2) == config
+    # Here the coded rows are about the weights' own size: not one chunk fits.
+    with pytest.raises(ValueError, match="do not fit"):
+        Small.fit(config, path, budget=plain, builds=2, coded=True)

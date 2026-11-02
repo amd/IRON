@@ -597,12 +597,9 @@ class PerStepCallable(ImageCallable):
         self.dispatch_values: dict[str, np.generic] = {}
         self._buffers: dict[BufferRef, XRTTensor] = {}
         self._storage: dict[str, XRTTensor] = {}
-        own_scratch: dict[str, tuple[int, int]] = {}
+        own_scratch = seq.own_scratch()
         for root, (kind, offset, length) in seq.layout.items():
-            if self.arena is not None and root in seq.residents:
-                continue
-            if kind == "scratch":
-                own_scratch[root] = (offset, length)
+            if kind == "scratch" or (self.arena is not None and root in seq.residents):
                 continue
             ref = BufferRef(root)
             dtype = seq.buffer_dtype(ref)

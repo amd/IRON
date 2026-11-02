@@ -223,3 +223,30 @@ def test_a_run_of_several_sessions_reads_as_one_run(tmp_path):
     trends = (suite / "trends.md").read_text()
     assert "`test_first`" in trends and "`test_second`" in trends, trends
     assert "added" not in trends and "dropped" not in trends, trends
+
+
+def test_a_run_merged_twice_keeps_one_row_per_test(tmp_path):
+    fields = ["Commit", "Date", "Test Path", "Test", "Latency (mean)"]
+    latest = tmp_path / "latest.csv"
+    with open(latest, "w", newline="") as f:
+        writer = csv.DictWriter(f, fields)
+        writer.writeheader()
+        for test, latency in (("a", 1.0), ("b", 2.0)):
+            writer.writerow(
+                {
+                    "Commit": "c0ffee",
+                    "Date": "2026-10-28 01:25:46",
+                    "Test Path": "t.py::test_x",
+                    "Test": test,
+                    "Latency (mean)": latency,
+                }
+            )
+    every = tmp_path / "all.csv"
+    for _ in range(2):
+        subprocess.run(
+            [sys.executable, _SCRIPTS / "merge_all.py", "--all", every]
+            + ["--latest", latest, "--prune"],
+            check=True,
+        )
+    with open(every) as f:
+        assert sorted(row["Test"] for row in csv.DictReader(f)) == ["a", "b"]

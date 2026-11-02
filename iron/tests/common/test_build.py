@@ -438,7 +438,8 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
         "a_half": 2 * 128 * 1024,
         "c_half": 2 * 128 * 1024,
         "b_passes_repeat": 1,
-        "b_resident": 1,
+        "b_peek_repeat": 0,
+        "b_drained": 0,
     }
     with pytest.raises(ValueError, match="multiple of 256"):
         flm_gemm.ProjectionGEMM(

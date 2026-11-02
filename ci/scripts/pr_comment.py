@@ -75,7 +75,7 @@ def suite_report(
         threshold=args.threshold,
         sigma=args.sigma,
         ndigits=args.ndigits,
-        history=args.benchmarks_page,
+        history=args.performance_checks_page,
         suite=suite,
     )
 
@@ -104,9 +104,9 @@ def main():
     parser.add_argument("--sigma", type=float, default=SIGMA)
     parser.add_argument("--round", type=int, default=2, dest="ndigits")
     parser.add_argument(
-        "--benchmarks-page",
+        "--performance-checks-page",
         default="",
-        help="The website's Benchmarks page, which each moved benchmark links to",
+        help="The website's Performance Checks page, which each moved benchmark links to",
     )
     parser.add_argument("-o", "--output", default="comment.md")
     args = parser.parse_args()
@@ -160,9 +160,9 @@ def main():
             "",
         ]
 
-    if args.benchmarks_page:
+    if args.performance_checks_page:
         lines += [
-            f"Every benchmark's history: [Benchmarks]({args.benchmarks_page}).",
+            f"Every benchmark's history: [Performance Checks]({args.performance_checks_page}).",
             "",
         ]
 

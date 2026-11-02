@@ -29,9 +29,11 @@ from pretty_common import (
     METRICS,
     UNKNOWN_METRIC,
     UNKNOWN_OPERATOR,
+    comparable,
     operator_name,
     row_key,
     select_bench_rows,
+    spread,
     tracked_metrics,
     try_parse_float,
 )
@@ -124,15 +126,13 @@ def verdict(metric: str, pct: float) -> str:
 def within_spread(curr, prev, metric, sigma):
     """Report whether the move sits inside the spread the two runs measured.
 
-    Each run repeats its test and records the standard deviation of the repeats.
-    A move smaller than that spread says nothing about the code. A run that
-    records no spread cannot answer, so it suppresses nothing.
+    Each run records the median absolute deviation over its timed calls (see
+    ``spread``). A move smaller than that spread says nothing about the code. A
+    run that records no spread cannot answer, so it suppresses nothing.
     """
     if not sigma:
         return False
-    deviations = [
-        try_parse_float(row.get(f"{metric} (stddev)")) for row in (curr, prev)
-    ]
+    deviations = [spread(row, metric) for row in (curr, prev)]
     deviations = [d for d in deviations if d is not None]
     if not deviations:
         return False
@@ -193,6 +193,8 @@ def moves(
             pct = delta_pct(curr_v, prev_v)
             if pct is None or abs(pct) < threshold:
                 continue
+            if not comparable(curr, prev, metric):
+                continue
             if within_spread(curr, prev, metric, sigma):
                 continue
             changes.append((operator, params, metric, prev_v, curr_v, pct))
@@ -214,7 +216,7 @@ def build_report(
 
     `all_rows` holds the last two runs of each test. Their values reach a pull
     request comment, so every cell passes through `cell`. Given `history`, the
-    website's Benchmarks page, each moved benchmark links to its history in
+    website's Performance Checks page, each moved benchmark links to its history in
     `suite` there.
     """
     dates = sorted(

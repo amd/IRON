@@ -185,7 +185,7 @@ nav:
     - Testing and tracing: api/testing.md
     - Language models: api/lm.md
     - Tuning: api/tune.md
-  - Benchmarks: benchmarks.md
+  - Performance Checks: performance-checks.md
   - Contributing:
     - Contributing: contributing.md
     - Agent Instructions: agents.md
