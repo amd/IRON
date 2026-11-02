@@ -320,11 +320,8 @@ def _cases(cls, dev: Device):
             },
         )
         for c in _CASES
-        # AIE2P's one core a query block takes bf16 scores, not audio's
-        # float32 ones.
-        if dev.arch is AIEArch.AIE2
-        or c.kwargs.get("cores_per_block") != 1
-        or not c.kwargs.get("f32_scores")
+        # AIE2P's one core a query block takes no relative band, audio's.
+        if dev.arch is AIEArch.AIE2 or not c.kwargs.get("relative_band")
     ]
 
 
@@ -558,7 +555,7 @@ class MHA(Operator):
 
     @property
     def scores_f32(self) -> bool:
-        """Whether QK^T's scores are float32: ``f32_scores``, else the mapping's own (one core a query block over several queries on AIE2)."""
+        """Whether QK^T's scores are float32: ``f32_scores``, else the mapping's own (one core a query block over several queries)."""
         if self.f32_scores is not None:
             return self.f32_scores
         dev = self.dev
@@ -566,7 +563,7 @@ class MHA(Operator):
             self.fused
             and not self.split
             and dev is not None
-            and dev.arch is AIEArch.AIE2
+            and dev.arch in (AIEArch.AIE2, AIEArch.AIE2p)
         )
 
     @property
@@ -893,13 +890,11 @@ class MHA(Operator):
         positions dividing 64 whose core fits L1, unless given: with two key
         blocks in L1 where any block fits so, else one.
 
-        On AIE2P the block takes bf16 scores and the accurate exp2, its
-        pipeline's.
+        On AIE2P the block takes the accurate exp2, its pipeline's.
 
         Raises:
-            Unresolvable: No device, not AIE2 or AIE2P, K and V apart,
-                float32 scores or a score feature AIE2P's block lacks, or no
-                block fits.
+            Unresolvable: No device, not AIE2 or AIE2P, K and V apart, a
+                score feature AIE2P's block lacks, or no block fits.
         """
         if dev is None or dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
             raise Unresolvable(
@@ -921,14 +916,13 @@ class MHA(Operator):
                 )
             return self.resolve_split(dev)
         group = self.num_heads // self.num_KV_heads
-        f32 = self.f32_scores is not False and not aie2p
-        if aie2p:
-            if self.f32_scores or self.soft_cap is not None or self.relative_band:
-                raise Unresolvable(
-                    "MHA: one core a query block on AIE2P takes bf16 scores and no "
-                    "soft cap or relative band"
-                )
-        elif self.score_features and not f32:
+        f32 = self.f32_scores is not False
+        if aie2p and (self.soft_cap is not None or self.relative_band):
+            raise Unresolvable(
+                "MHA: one core a query block on AIE2P takes no soft cap or "
+                "relative band"
+            )
+        if self.score_features and not f32 and not aie2p:
             raise Unresolvable(
                 "MHA: a soft cap, the accurate exp2 and a relative band take "
                 "float32 scores"
