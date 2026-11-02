@@ -222,7 +222,7 @@ _CASES = [
         lower=True,
     ),
     # Llama 3.2 1B's and 3B's prompt chunk on one core a query block, and
-    # Gemma 4 E2B's sliding layer, its 8 heads over one KV head (AIE2).
+    # Gemma 4 E2B's sliding layer, its 8 heads over one KV head.
     *(
         Case(
             dict(
@@ -321,8 +321,11 @@ def _cases(cls, dev: Device):
             },
         )
         for c in _CASES
-        # One core a query block is attend_block, AIE2's.
-        if c.kwargs.get("cores_per_block") != 1 or dev.arch is AIEArch.AIE2
+        # AIE2P's one core a query block is attend_block over bf16 scores:
+        # not split decode's attend_head, nor audio's float32 scores.
+        if dev.arch is AIEArch.AIE2
+        or c.kwargs.get("cores_per_block") != 1
+        or (c.kwargs["seq_len"] > 1 and not c.kwargs.get("f32_scores"))
     ]
 
 
@@ -354,12 +357,13 @@ class MHA(Operator):
     scale: float = param(default=lambda op: float(1 / np.sqrt(op.d)), array=True)
     # QK^T's scores kept in float32 (D4) where True, bf16 where False; None
     # is the mapping's own: float32 for one core a query block over several
-    # queries, else bf16.
+    # queries on AIE2, else bf16.
     f32_scores: bool | None = param(default=None, array=True)
     # Fused, float32 scores: each score c * tanh(s / c) (Gemma's logit cap),
     # taken on the raw products, so the scale is 1.
     soft_cap: float | None = param(default=None, array=True)
-    # Fused, float32 scores: the accurate exp2 in place of AIE2's cubic.
+    # Fused, float32 scores: the accurate exp2 in place of AIE2's cubic
+    # (AIE2P's fused block always takes it, as its pipeline does).
     accurate_exp2: bool = param(default=False, array=True)
     # Fused, float32 scores, a query a row: each score gains Q_i . R_d at
     # distance d = pos_i - key_j, 0 <= d < 16, before the cap (Gemma 4
@@ -384,7 +388,7 @@ class MHA(Operator):
     pv_width: int = tunable(repr=False, init=False)
     # The cores a query block's key blocks take: 3, today's pipeline of a
     # QK^T, a softmax and a P*V core; 1, mha.cc's attend_block on every core
-    # of the columns placed (AIE2, over a paired KV).
+    # of the columns placed (over a paired KV).
     cores_per_block: int = tunable(default=3, domain=(1, 3))
     fused: bool = tunable(repr=False, init=False)
     # Fused, the cores a column holds, each a query block of a round.
@@ -552,10 +556,16 @@ class MHA(Operator):
 
     @property
     def scores_f32(self) -> bool:
-        """Whether QK^T's scores are float32: ``f32_scores``, else the mapping's own (one core a query block over several queries)."""
+        """Whether QK^T's scores are float32: ``f32_scores``, else the mapping's own (one core a query block over several queries on AIE2)."""
         if self.f32_scores is not None:
             return self.f32_scores
-        return self.fused and not self.split
+        dev = self.dev
+        return (
+            self.fused
+            and not self.split
+            and dev is not None
+            and dev.arch is AIEArch.AIE2
+        )
 
     @property
     def positions(self) -> int:
@@ -877,14 +887,20 @@ class MHA(Operator):
         positions dividing 64 whose core fits L1, unless given: with two key
         blocks in L1 where any block fits so, else one.
 
+        On AIE2P the block takes bf16 scores and the accurate exp2, its
+        pipeline's.
+
         Raises:
-            Unresolvable: No device, not AIE2, K and V apart, one query, or no
-                block fits.
+            Unresolvable: No device, not AIE2 or AIE2P, K and V apart, one
+                query on AIE2P, float32 scores or a score feature AIE2P's
+                block lacks, or no block fits.
         """
-        if dev is None or dev.arch is not AIEArch.AIE2:
+        if dev is None or dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
             raise Unresolvable(
-                "MHA: one core a query block is mha.cc's attend_block, AIE2's"
+                "MHA: one core a query block is mha.cc's attend_block, AIE2's and "
+                "AIE2P's"
             )
+        aie2p = dev.arch is AIEArch.AIE2p
         if not self.kv_paired or not self.heads_interleaved:
             raise Unresolvable(
                 "MHA: one core a query block reads a paired KV, its heads interleaved"
@@ -892,6 +908,10 @@ class MHA(Operator):
         if self.pv_cores not in (None, 1):
             raise Unresolvable("MHA: one core a query block takes P*V on that core")
         if self.packed:
+            if aie2p:
+                raise Unresolvable(
+                    "MHA: one query split over keys is attend_head, AIE2's"
+                )
             if self.f32_scores or self.score_features:
                 raise Unresolvable(
                     "MHA: one query split over keys keeps bf16 scores and no "
@@ -899,8 +919,14 @@ class MHA(Operator):
                 )
             return self.resolve_split(dev)
         group = self.num_heads // self.num_KV_heads
-        f32 = self.f32_scores is not False
-        if self.score_features and not f32:
+        f32 = self.f32_scores is not False and not aie2p
+        if aie2p:
+            if self.f32_scores or self.soft_cap is not None or self.relative_band:
+                raise Unresolvable(
+                    "MHA: one core a query block on AIE2P takes bf16 scores and no "
+                    "soft cap or relative band"
+                )
+        elif self.score_features and not f32:
             raise Unresolvable(
                 "MHA: a soft cap, the accurate exp2 and a relative band take "
                 "float32 scores"
@@ -966,6 +992,7 @@ class MHA(Operator):
 
         ``kv_heads`` KV heads a key block, float32 scores where ``f32``.
         """
+        dev = self.dev
         return kernels.linalg.mha(
             B_q,
             self.d,
@@ -979,7 +1006,8 @@ class MHA(Operator):
             group=group,
             kv_heads=kv_heads,
             f32_scores=f32,
-            accurate_exp2=self.accurate_exp2,
+            accurate_exp2=self.accurate_exp2
+            or (dev is not None and dev.arch is AIEArch.AIE2p),
             soft_cap=self.soft_cap,
             relative_band=self.relative_band,
         )
@@ -1727,13 +1755,9 @@ class MHA(Operator):
         relative = [obj.bind("relative_rows", [q_ty, kv_ty, *qr_ty])] * rel
         init = obj.bind("init_scale_buffer", [state_ty, np.int32])
         rescale = obj.bind("rescale_O", [acc_ty, o_ty, state_ty, np.int32, idx_ty])
-        mac = (
-            kernels.linalg.mha.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
-                pv=False
-            )
-        )
-        qk = mm_stream_dims(B_q, d, B_kv, mac, b_col_maj=True)
-        pv = mm_stream_dims(B_q, B_kv, d, mac)
+        mac = kernels.linalg.mha.mac_dims  # pyright: ignore[reportFunctionMemberAccess]
+        qk = mm_stream_dims(B_q, d, B_kv, mac(pv=False), b_col_maj=True)
+        pv = mm_stream_dims(B_q, B_kv, d, mac(pv=True))
 
         inQ = self.Q.fifos(2, tiles=[AnyShimTile] * self.num_pipelines)
         memO = self.O.fifos(2, tiles=[AnyShimTile] * self.num_pipelines, to_stream=pv.C)

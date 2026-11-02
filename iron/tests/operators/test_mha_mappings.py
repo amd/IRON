@@ -17,7 +17,7 @@ from iron.common.testing import vectors
 from iron.operators.mha import MHA
 
 
-@pytest.mark.supported_devices("npu1")
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
     "heads,kv_heads,d,seq_len,kv_len,window",
     [
