@@ -22,7 +22,6 @@
   // A trend's line style names its form where a card draws two.
   const DASHES = {
     "device loop": { dash: [], css: "solid" },
-    "host loop": { dash: [7, 4], css: "dashed" },
     "each step": { dash: [2, 3], css: "dotted" },
   };
   const SUITE_ORDER = ["small", "examples", "extensive", "nightly"];
@@ -450,13 +449,14 @@
     const current = series.filter((s) => Object.values(s.devices).some((d) => d.current));
     const own = focus ? current.filter((s) => s.test.includes(focus)) : [];
     if (!slots.size && own.length) {
-      // A checkpoint's every form and context, a colour per context.
+      // A checkpoint's every form and context, a colour per context; a series
+      // naming none (long_context's cache sizes) keeps a colour of its own.
       const forms = Object.keys(DASHES);
       own.sort((a, b) => forms.indexOf(a.form) - forms.indexOf(b.form)
         || (a.context || "").localeCompare(b.context || "", "en", { numeric: true }));
-      const contexts = [...new Set(own.map((s) => s.context))];
-      own.filter((s) => contexts.indexOf(s.context) < PALETTE.light.length)
-        .forEach((s) => slots.set(s.label, contexts.indexOf(s.context)));
+      const contexts = [...new Set(own.map((s) => s.context || s.label))];
+      own.filter((s) => contexts.indexOf(s.context || s.label) < PALETTE.light.length)
+        .forEach((s) => slots.set(s.label, contexts.indexOf(s.context || s.label)));
     }
     if (!slots.size) {
       const leads = DATA.trends.filter((t) => t.benchmark === name && t.suite === suite);
@@ -582,6 +582,10 @@
     const hi = Math.max(Math.ceil(Math.max(...times) / DAY) * DAY, lo + DAY);
     const step = DAY * Math.ceil((hi - lo) / DAY / 7);
 
+    const short = drawn.map((s) => [s.form, s.context].filter(Boolean).join(" · "));
+    const names = new Map(drawn.map((s, i) =>
+      [s.label, short[i] && short.indexOf(short[i]) === short.lastIndexOf(short[i]) ? short[i] : s.label]));
+
     for (const device of devices) {
       const runs = new Set();
       const datasets = drawn.filter((s) => device in s.devices).map((s) => {
@@ -590,7 +594,7 @@
         const colour = colours[slots.get(s.label)];
         const failed = points.map((p) => p[2] === false);
         return {
-          label: [s.form, s.context].filter(Boolean).join(" · ") || s.label,
+          label: names.get(s.label),
           data: points.map((p) => ({ x: +parseDate(p[0]), y: p[3][metric], spread: spreadOf(p, metric), point: p })),
           borderColor: colour,
           backgroundColor: colour,
@@ -644,6 +648,7 @@
             },
             y: {
               beginAtZero: true,
+              suggestedMax: Math.max(...datasets.flatMap((d) => d.data.map((p) => p.y + (p.spread || 0)))),
               grid: { color: grid },
               border: { color: grid },
               ticks: { color: ink, callback: (v) => number(v) },
@@ -751,8 +756,8 @@
     fillNames();
     select(hashState());
     pick.name.addEventListener("change", () => select({ bench: pick.name.value, metric: pick.metric.value }));
-    pick.suite.addEventListener("change", () => select({ bench: pick.name.value, suite: pick.suite.value, metric: pick.metric.value }));
-    pick.metric.addEventListener("change", () => select({ bench: pick.name.value, suite: pick.suite.value, metric: pick.metric.value }));
+    pick.suite.addEventListener("change", () => select({ bench: pick.name.value, suite: pick.suite.value, metric: pick.metric.value, checkpoint: focus }));
+    pick.metric.addEventListener("change", () => select({ bench: pick.name.value, suite: pick.suite.value, metric: pick.metric.value, checkpoint: focus }));
     window.addEventListener("hashchange", () => {
       select(hashState());
       bench.scrollIntoView({ behavior: "smooth" });

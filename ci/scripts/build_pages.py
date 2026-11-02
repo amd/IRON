@@ -79,19 +79,19 @@ CHECKPOINTS = {
 }
 
 # The forms a decoder runs in, as its test ids name them; beside them, a test
-# naming none is its host loop, and None a test of a benchmark with no forms.
-# Each device's trend draws a line for each form it runs, in this order.
+# naming none runs the model as it loads, NPU2's device loop, and None is a
+# test of a benchmark with no forms. Each device's trend draws a line for each
+# form it runs, in this order.
 FORMS = {"device_loop": "device loop", "each_step": "each step"}
 DEVICE_FORMS = {
-    "krackan": ("device loop", "host loop", "each step", None),
+    "krackan": ("device loop", "each step", None),
     "phoenix": ("each step", None),
 }
 # How the page's key explains each form, named once a card draws two.
 FORM_NOTES = {
-    "device loop": "the NPU starts every decode step itself, one full ELF (NPU2)",
-    "host loop": "one full ELF per step; the host starts each step (NPU2)",
-    "each step": "each operator its own xclbin dispatch, the host starting each "
-    "step: the form NPU1 runs, and NPU2's for comparison",
+    "device loop": "one full ELF; the NPU draws every token and starts every decode step itself (NPU2)",
+    "each step": "each step its own xclbin dispatch, started by the host on the token "
+    "the last drew: the form NPU1 runs, and NPU2's for comparison",
 }
 
 # Where a benchmark still run is documented, relative to the Performance Checks page:
@@ -401,7 +401,7 @@ def build_data(results_root, repository):
                             None,
                         ),
                         "context": (
-                            f"prompt {shape[1]} → {shape[2]} token{'' if shape[2] == '1' else 's'}"
+                            f"prompt {shape[1]} chars → {shape[2]} token{'' if shape[2] == '1' else 's'}"
                             if (
                                 shape := re.search(
                                     r"prompt_(\d+)_tokens_(\d+)", s["params"]
@@ -414,10 +414,11 @@ def build_data(results_root, repository):
                     for s in series
                 ],
             }
-            # Beside a decoder's named forms, a test naming none is its host loop.
+            # Beside a decoder's named forms, a test naming none runs the model
+            # as it loads: on NPU2, the device loop.
             if any(s["form"] for s in suites[suite]["series"]):
                 for s in suites[suite]["series"]:
-                    s["form"] = s["form"] or "host loop"
+                    s["form"] = s["form"] or "device loop"
         if not any(suite["metrics"] for suite in suites.values()):
             continue
         group = SUITE_NAMES[next(iter(suites))][0]

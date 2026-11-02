@@ -245,18 +245,12 @@ def test_a_model_s_trend_draws_each_checkpoint_s_decode_in_every_form_run(tmp_pa
     trends = {t["title"]: t for t in _page_data(tmp_path)["trends"]}
     one, three = trends["Llama 3.2 1B"], trends["Llama 3.2 3B"]
     assert (one["suite"], one["metric"], one["also"]) == ("nightly", "TPS", "TTFT")
-    context = "prompt 13 → 40 tokens"
+    context = "prompt 13 chars → 40 tokens"
     assert one["series"] == [
         {
             "device": "krackan",
-            "label": "test_llama_3_2_device_loop · llama_3.2_1b",
-            "form": "device loop",
-            "context": None,
-        },
-        {
-            "device": "krackan",
             "label": "test_llama_3_2 · llama_3.2_1b-prompt_13_tokens_40",
-            "form": "host loop",
+            "form": "device loop",
             "context": context,
         },
         {
@@ -281,11 +275,11 @@ def test_a_model_s_trend_draws_each_checkpoint_s_decode_in_every_form_run(tmp_pa
     }
     assert series["test_llama_3_2_device_loop · llama_3.2_1b"] == ("device loop", None)
     assert series["test_llama_3_2 · llama_3.2_1b-prompt_13_tokens_40"] == (
-        "host loop",
+        "device loop",
         context,
     )
     assert [(line["device"], line["form"]) for line in three["series"]] == [
-        ("krackan", "host loop"),
+        ("krackan", "device loop"),
         ("krackan", "each step"),
         ("phoenix", "each step"),
     ]
