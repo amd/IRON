@@ -31,9 +31,9 @@ from pretty_common import (
     UNKNOWN_OPERATOR,
     comparable,
     operator_name,
-    spread,
     row_key,
     select_bench_rows,
+    spread,
     tracked_metrics,
     try_parse_float,
 )
