@@ -29,7 +29,7 @@ from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
 from iron.tests.support.llama_model import small
-from iron.tune.autotune import Point, Shape, Timed, settings
+from iron.tune.autotune import Point, Shape, Timed, settings, time_shape
 from iron.tune.costmodel import CostModel
 from iron.tune.fold import fold_profile
 from iron.tune.measure import Budget, Cache, Timing, platform
@@ -208,6 +208,20 @@ def test_a_retile_holds_a_weight_s_coding(npu2, tmp_path):
     assert {s.get("coded_a", op.coded_a) for s in settings(op, npu2, shape.pinned)} == {
         op.coded_a
     }
+
+
+def test_a_shape_whose_operators_share_no_setting_is_left_as_recorded(npu2):
+    """Nothing to search where no setting suits every operator: none timed, none taken.
+
+    Gemma 4 E2B's packing search hit such a unit re-tiling with its coding held, and
+    time_shape indexed the empty intersection (IndexError).
+    """
+    gemv = GEMV(M=2048, K=2048)
+    shape = Shape(gemv)
+    shape.members = [(gemv, [(1.0, {})], {}), (Tanh(size=2048), [(1.0, {})], {})]
+    logged = []
+    assert time_shape(shape, npu2, full_elf=True, log=logged.append) == []
+    assert logged[-1].endswith("left as recorded")
 
 
 def test_a_packing_names_no_dimension_a_hosts_context_sizes(npu2, tmp_path):
