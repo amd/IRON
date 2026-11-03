@@ -18,7 +18,7 @@ from .allocator import Allocation, ArenaPlan, lay_out
 from .artifacts import Artifacts, Step
 from .callable import BF16, FullELFCallable, PerStepCallable, ScratchArena
 from .link import FullELF, PerStep
-from .step import BufferRef, Fusion, SequenceStep
+from .step import BufferRef, Fusion, FusionKind, SequenceStep
 
 if TYPE_CHECKING:
     from ..graph.record import Recording
@@ -170,21 +170,29 @@ class Image:
         return designs, design_of
 
     def _uses(self, roots) -> list[tuple[list[str], list[str]]]:
-        """Return each step's reads and writes among ``roots``.
+        """Return each dispatch's reads and writes among ``roots``, in order.
 
-        A part of a buffer is its use.
+        A part of a buffer is its use. A fusion whose members run at once (any kind but a
+        merge) is one use, so no member's buffer shares bytes with another's.
         """
+        together = {
+            f.steps[0]: f.steps for f in self.fusions if f.kind is not FusionKind.MERGE
+        }
         uses = []
-        for s in self.steps:
+        i = 0
+        while i < len(self.steps):
+            members = together.get(i, (i,))
             reads, writes = [], []
-            for ref, b in zip(s.buffers, s.op.buffers):
-                if ref.root not in roots:
-                    continue
-                if b.fills:
-                    reads.append(ref.root)
-                if b.drains:
-                    writes.append(ref.root)
+            for s in (self.steps[j] for j in members):
+                for ref, b in zip(s.buffers, s.op.buffers):
+                    if ref.root not in roots:
+                        continue
+                    if b.fills:
+                        reads.append(ref.root)
+                    if b.drains:
+                        writes.append(ref.root)
             uses.append((reads, writes))
+            i = members[-1] + 1
         return uses
 
     def _place_in_arena(self, uses, sizes: Mapping[str, int]) -> dict[str, Allocation]:

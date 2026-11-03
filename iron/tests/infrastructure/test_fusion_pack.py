@@ -44,6 +44,28 @@ LLAMA_NPU2_PROFILE = Profile.load(
 )
 
 
+@pytest.mark.parametrize(
+    "kind, shared", [(FusionKind.PACK, False), (FusionKind.MERGE, True)]
+)
+def test_a_concurrent_fusion_s_scratch_shares_no_bytes_a_merge_s_may(kind, shared):
+    """Step 1 last reads ``t`` as step 2 first writes ``u``: apart they may share bytes, at once not."""
+    add = ElementwiseAdd(size=2048, num_aie_columns=1, tile_size=2048)
+    steps = sequences.steps(
+        (add, "x", "x", "t"),
+        (add, "t", "x", "y1"),
+        (add, "x", "x", "u"),
+        (add, "u", "x", "y2"),
+    )
+    image = Image(
+        Recording.of_steps("lifetimes", steps, ["x"], ["y1", "y2"]),
+        FullELF(),
+        fusions=(Fusion(kind, (1, 2)),),
+    ).prepare()
+    assert image.layout is not None
+    (_, t, n), (_, u, _) = image.layout["t"], image.layout["u"]
+    assert (t < u + n and u < t + n) == shared
+
+
 def _qkv(num_aie_columns=(8, 4, 4)):
     """Llama decode's q/k/v GEMVs (M=2048/512/512, K=2048) over one normed row.
 
