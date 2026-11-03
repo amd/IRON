@@ -12,10 +12,11 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import os
+import tempfile
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import BinaryIO
+from typing import IO
 
 import numpy as np
 from aie.utils import coded
@@ -125,16 +126,17 @@ class CodedWeight:
         return rows
 
 
-def _publish(path: Path, write: Callable[[BinaryIO], object]) -> None:
+def _publish(path: Path, write: Callable[[IO[bytes]], object]) -> None:
     """Write ``path`` whole or not at all.
 
     A reader racing the writer finds either no file or every byte of it.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(f"{path.name}.{os.getpid()}.partial")
-    with open(partial, "wb") as f:
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent, prefix=f"{path.name}.", suffix=".partial", delete=False
+    ) as f:
         write(f)
-    os.replace(partial, path)
+    os.replace(f.name, path)
 
 
 def encode_all(weights: Iterable[CodedWeight]) -> dict[CodedWeight, ValueError]:

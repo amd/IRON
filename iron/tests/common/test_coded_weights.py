@@ -9,7 +9,9 @@ the graph's reference still reads the weight itself.
 
 import os
 import re
+import threading
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 
 import aie.utils as aie_utils
 import numpy as np
@@ -20,7 +22,7 @@ from safetensors.numpy import save_file
 
 import iron
 from iron.common.design.design import OperatorDesign
-from iron.common.graph.coded import CodedWeight
+from iron.common.graph.coded import CodedWeight, _publish
 from iron.lm import Checkpoint
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
@@ -163,6 +165,22 @@ def test_a_refusal_is_cached_and_a_weight_with_no_file_is_not(tmp_path):
     loose = np.array(held[:3])
     CodedWeight(loose, "w", 15, None, cache).encode()
     assert [p.suffix for p in cache.iterdir()] == [".refused"]
+
+
+def test_writers_publishing_one_path_at_once_each_land_whole(tmp_path):
+    target = tmp_path / "rows.npy"
+    both = threading.Barrier(2)
+
+    def write(f, payload):
+        f.write(payload)
+        both.wait()
+        f.write(payload)
+
+    payloads = [b"a" * 4096, b"b" * 4096]
+    with ThreadPoolExecutor(2) as pool:
+        list(pool.map(lambda p: _publish(target, lambda f: write(f, p)), payloads))
+    assert target.read_bytes() in [p * 2 for p in payloads]
+    assert list(tmp_path.iterdir()) == [target]
 
 
 def test_a_report_names_each_coded_weight_and_each_read_plain(caplog):
