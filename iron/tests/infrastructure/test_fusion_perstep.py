@@ -447,6 +447,21 @@ def test_silu_mul_fusion_builds_an_xclbin_per_fused_step_on_npu1(npu1):
     assert len({d.image for d in img.artifacts.designs}) == 1
 
 
+def test_an_operator_fused_once_and_called_alone_is_labelled_per_step(npu1):
+    silu, mul = _silu_mul(2048, 1, 1024)
+    steps = sequences.steps(
+        (silu, "x", "mid"), (mul, "mid", "up", "out"), (silu, "out", "again")
+    )
+    img = Image(
+        Recording.of_steps("npu1_relabel", steps, ["x", "up"], ["again"]),
+        PerStep(),
+        fusions=(_fuse(0, "y", "a"),),
+    )
+    img.compile()
+    first, second, alone = (s.design for s in img.artifacts.steps)
+    assert first == second and first.split("+")[0] == alone and "+" not in alone
+
+
 def test_gemv_fusions_build_an_xclbin_per_fused_step_on_npu1(npu1):
     def build(fused_steps, recording_fn, ops_fn):
         img = Image(

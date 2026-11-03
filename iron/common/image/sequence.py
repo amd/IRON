@@ -354,16 +354,14 @@ class Image:
         ]
         records, entry, insts = self.packaging.record(designs, sharing)
         labels = [d.name for d in records]
-        by_design = {id(op): labels[design_of[id(op)]] for op in operators}
-        # A fusion's steps are one design in the composed module: all of its
-        # members report one label, not their separate standalone ones.
+        step_labels = [labels[design_of[id(s.op)]] for s in self.steps]
         for fusion in self.fusions:
-            paired = "+".join(by_design[id(self.steps[j].op)] for j in fusion.steps)
+            paired = "+".join(step_labels[j] for j in fusion.steps)
             for j in fusion.steps:
-                by_design[id(self.steps[j].op)] = paired
+                step_labels[j] = paired
         steps = tuple(
-            Step(i, s.op.name, by_design[id(s.op)], s.buffers)
-            for i, s in enumerate(self.steps)
+            Step(i, s.op.name, label, s.buffers)
+            for i, (s, label) in enumerate(zip(self.steps, step_labels))
         )
         return Artifacts(
             full_elf=isinstance(self.packaging, FullELF),
