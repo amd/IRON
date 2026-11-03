@@ -215,23 +215,6 @@ class ProjectionGEMM(Operator):
     rows: int = tunable(repr=False, init=False)
     cols: int = tunable(repr=False, init=False)
     joins: int = tunable(repr=False, init=False)
-    # B is packed to bfp16ebs8 where the macs are bfp16 and B is not read as
-    # stored; B's host shape follows it, so a graph's step, which infers B's
-    # shape from the weight it is given, passes it.
-    bfp16_b: bool = param(
-        derive=lambda op: (
-            op.dev.arch == AIEArch.AIE2p
-            and op.precision == Precision.MEDIUM
-            and not op.b_col_maj
-        ),
-        array=True,
-        repr=False,
-    )
-    # B's element type, on the array and in DDR alike; the host holds a
-    # block-float B as bytes (Operand.host_dtype).
-    b_dtype: Any = param(
-        derive=lambda op: v8bfp16ebs8 if op.bfp16_b else bfloat16, repr=False
-    )
     l1_b_depth: int = tunable(repr=False, init=False)
     a_l2: int = tunable(repr=False, init=False)
     b_l2: int = tunable(repr=False, init=False)
@@ -364,6 +347,13 @@ class ProjectionGEMM(Operator):
         # AIE2 has no BFP types, so its mmul lowers onto four native bf16 macs.
         emulate = dev.arch == AIEArch.AIE2p and self.precision == Precision.MEDIUM
         bfp16_b = self.bfp16_b
+        if bfp16_b != (emulate and not self.b_col_maj):
+            raise ValueError(
+                f"flm.ProjectionGEMM: bfp16_b ({bfp16_b}) on {dev.name}, which "
+                f"takes a {'bfp16' if emulate else 'bf16'} packed B at "
+                f"precision={str(self.precision)!r}: pass "
+                f"bfp16_b={emulate and not self.b_col_maj}"
+            )
         b_elem_bytes = bfp.BLOCK_BYTES / bfp.BLOCK if bfp16_b else 2
         b_group = bfp.BLOCK if bfp16_b else 1
         tile_n = self.tile_n or next(

@@ -54,7 +54,6 @@ def linear(
             x,
             weight,
             b_col_maj=True,
-            bfp16_b=False,
             epilogue_modes=(Epilogue.NONE,),
             precision=precision,
         )

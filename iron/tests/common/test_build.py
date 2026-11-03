@@ -396,8 +396,10 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
     # Keyword construction leaves every tunable to resolution, which reads the
     # device alone; the operator's extent is checked against the resolved
     # tunables by compatible(), not folded into its defaults. B's host shape
-    # follows the device and precision, never a tunable: it is known untuned.
-    untuned = flm_gemm.ProjectionGEMM(M=512, K=1024, N=1024, precision=Precision.MEDIUM)
+    # follows bfp16_b, never a tunable: it is known untuned.
+    untuned = flm_gemm.ProjectionGEMM(
+        M=512, K=1024, N=1024, precision=Precision.MEDIUM, bfp16_b=True
+    )
     assert untuned.tile_n is None
     assert untuned.buffers[1].shape == (1024 * 1024 // 8,)
     op = flm_gemm.ProjectionGEMM(

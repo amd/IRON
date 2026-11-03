@@ -51,9 +51,7 @@ class ProjectAsStored(iron.Graph):
     """
 
     def body(self, x, w, *, n: Scratchpad[np.int32]):
-        return ProjectionGEMM.step(
-            x[:n], w, b_col_maj=True, bfp16_b=False, precision=Precision.MEDIUM
-        )
+        return ProjectionGEMM.step(x[:n], w, b_col_maj=True, precision=Precision.MEDIUM)
 
 
 class Walk(iron.Graph):

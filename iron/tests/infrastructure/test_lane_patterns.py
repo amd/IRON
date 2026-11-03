@@ -250,7 +250,9 @@ def test_projection_gemm_lanes_are_faithful(kwargs, described):
     split leg) ``lane_transfers`` refuses, same as the catalog cases above would if
     their own derived order did not hold.
     """
-    op = ProjectionGEMM(**kwargs, precision=Precision.MEDIUM).resolved(NPU2)
+    op = ProjectionGEMM(
+        **kwargs, precision=Precision.MEDIUM, bfp16_b=not kwargs.get("b_col_maj")
+    ).resolved(NPU2)
     for name in ("A", "C"):
         operand = getattr(op, name)
         result = op.lane_transfers(operand)
@@ -267,7 +269,7 @@ def test_projection_gemm_refuses_a_per_call_bound():
     ``length_parameter``/``length_unit``, so a bound call is refused rather than
     described wrong.
     """
-    op = ProjectionGEMM(M=2048, K=512, N=1024, precision=Precision.MEDIUM)
+    op = ProjectionGEMM(M=2048, K=512, N=1024, precision=Precision.MEDIUM, bfp16_b=True)
     op.use_value("valid", PerCall("n", Kind.SCRATCHPAD, np.int32).affine())
     op = op.resolved(NPU2)
     assert op.lane_transfers(op.A) is None
@@ -279,7 +281,9 @@ def test_projection_gemm_refuses_a_second_slab_under_a_bound():
 
     A shape refused unbounded (two slabs) is refused bounded too.
     """
-    op = ProjectionGEMM(M=16384, K=512, N=1024, precision=Precision.MEDIUM)
+    op = ProjectionGEMM(
+        M=16384, K=512, N=1024, precision=Precision.MEDIUM, bfp16_b=True
+    )
     op.use_value("valid", PerCall("n", Kind.SCRATCHPAD, np.int32).affine())
     op = op.resolved(NPU2)
     assert op.lane_transfers(op.A) is None
@@ -291,7 +295,9 @@ def test_projection_gemm_m_chunk_refuses_a_bound_before_building():
 
     ``lane_transfers`` never has to.
     """
-    op = ProjectionGEMM(M=512, K=512, N=20480, m_chunk=2, precision=Precision.MEDIUM)
+    op = ProjectionGEMM(
+        M=512, K=512, N=20480, m_chunk=2, precision=Precision.MEDIUM, bfp16_b=True
+    )
     op.use_value("valid", PerCall("n", Kind.SCRATCHPAD, np.int32).affine())
     with pytest.raises(ValueError, match=r"m_chunk \(2\)"):
         op.resolved(NPU2)
