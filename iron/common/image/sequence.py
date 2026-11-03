@@ -72,7 +72,7 @@ class Image:
         self._artifacts: Artifacts | None = None
 
     def _validate_fusions(self) -> None:
-        """Each ``Fusion``'s steps are real steps, no step in two fusions, and each of its edges names a real hand-off.
+        """Each ``Fusion``'s steps are real, consecutive steps, none in two fusions, and each of its edges names a real hand-off.
 
         The producer's drained output and the consumer's filled input, both the whole of
         one buffer.
@@ -82,6 +82,10 @@ class Image:
         """
         claimed: set[int] = set()
         for fusion in self.fusions:
+            if list(fusion.steps) != list(range(fusion.steps[0], fusion.steps[-1] + 1)):
+                raise ValueError(
+                    f"an image fusion's steps {fusion.steps} must be consecutive"
+                )
             for s in fusion.steps:
                 if not 0 <= s < len(self.steps):
                     raise ValueError(

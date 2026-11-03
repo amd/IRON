@@ -240,6 +240,8 @@ def apply_folds(recording: Recording, folds: Sequence[Fusion]) -> Recording:
         if fusion.kind is not FusionKind.FOLD:
             raise ValueError(f"apply_folds: {fusion.kind.value} is not a fold")
         for s in fusion.steps:
+        if list(fusion.steps) != list(range(fusion.steps[0], fusion.steps[-1] + 1)):
+            raise ValueError(f"a fold's steps must be consecutive, not {fusion.steps}")
             if s in taken:
                 raise ValueError(f"step {s} is folded twice")
             taken[s] = fusion

@@ -221,6 +221,17 @@ def test_bad_step_index_refused():
         Image(recording, FullELF(), fusions=(_fuse(1, "y", "a"),))
 
 
+@pytest.mark.parametrize(
+    "packaging", [FullELF(), PerStep()], ids=["full_elf", "per_step"]
+)
+def test_an_image_refuses_a_fusion_with_a_gap(packaging):
+    silu, mul = _silu_mul(2048, 1, 1024)
+    steps = sequences.steps((silu, "x", "a"), (mul, "a", "up", "b"), (silu, "up", "c"))
+    recording = Recording.of_steps("gap", steps, ["x", "up"], ["b", "c"])
+    with pytest.raises(ValueError, match="must be consecutive"):
+        Image(recording, packaging, fusions=(Fusion(FusionKind.PACK, (0, 2)),))
+
+
 def test_wrong_buffer_names_refused():
     silu, mul = _silu_mul(2048, 1, 1024)
     with pytest.raises(ValueError, match="no drained buffer"):
@@ -275,10 +286,21 @@ def test_fusion_needs_at_least_two_steps():
         Fusion(FusionKind.STREAM, (0,), ())
 
 
-@pytest.mark.parametrize("steps", [(1, 0), (0, 0, 1), (0, 2)])
-def test_fusion_steps_must_be_consecutive(steps):
-    with pytest.raises(ValueError, match="consecutive"):
-        Fusion(FusionKind.PACK, steps)
+def test_fusion_steps_must_be_increasing_and_distinct():
+    with pytest.raises(ValueError, match="increasing and distinct"):
+        Fusion(FusionKind.STREAM, (1, 0), ())
+    with pytest.raises(ValueError, match="increasing and distinct"):
+        Fusion(FusionKind.STREAM, (0, 0, 1), ())
+
+
+def test_edge_skipping_a_non_member_step_refused():
+    """An edge between two members may not skip a step between them that is not itself a member.
+
+    That step would have to run on another device configuration, interleaved between the
+    fusion's two halves.
+    """
+    with pytest.raises(ValueError, match="skips a step"):
+        Fusion(FusionKind.STREAM, (0, 2), (Edge(0, "y", 2, "a"),))
 
 
 def test_stream_fusion_edges_must_run_forward():
