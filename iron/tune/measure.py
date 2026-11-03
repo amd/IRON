@@ -18,6 +18,7 @@ import contextlib
 import contextvars
 import dataclasses
 import datetime
+import enum
 import fcntl
 import functools
 import hashlib
@@ -748,6 +749,7 @@ class Cache:
         if not path.exists():
             return None
         fields = json.loads(path.read_text())
+        fields.pop("op", None)
         if fields.keys() != {f.name for f in dataclasses.fields(Measurement)}:
             return None
         return Measurement(
@@ -758,8 +760,20 @@ class Cache:
             }
         )
 
-    def put(self, key: str, m: Measurement) -> None:
-        write(self.directory / f"{key}.json", json.dumps(dataclasses.asdict(m)) + "\n")
+    def put(self, key: str, m: Measurement, op: Operator | None = None) -> None:
+        """Write ``m`` at ``key``, with the resolved ``op`` it times: its class and every parameter, the tunables named."""
+        fields: dict[str, object] = dict(dataclasses.asdict(m))
+        if op is not None:
+            params = type(op).declaration.params
+            fields["op"] = {
+                "class": type(op).__name__,
+                "params": {n: vars(op)[n] for n in params if n in vars(op)},
+                "tunables": sorted(n for n, p in params.items() if p.tunable),
+            }
+        text = json.dumps(
+            fields, default=lambda v: v.value if isinstance(v, enum.Enum) else str(v)
+        )
+        write(self.directory / f"{key}.json", text + "\n")
 
     def get_fusion(self, key: str) -> FusionMeasurement | None:
         """Return the fusion measurement at ``key``; None if there is none, or it was written with other fields than ``FusionMeasurement`` has."""
@@ -999,7 +1013,7 @@ def measure(
                 )
                 if cache is not None:
                     assert keys is not None, "built above whenever cache is not None"
-                    cache.put(keys[i], out[i])
+                    cache.put(keys[i], out[i], ops[i].resolved())
             fastest = min(fastest, *(times[n + j].median_us for j in range(n)))
             # A probe holds its context while it lives; the next batch needs them.
             del short, long

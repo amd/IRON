@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``iron.tune.measure``'s device lock and the pairing of a setting with its default, device-free."""
+"""``iron.tune.measure``'s device lock, its cache and the pairing of a setting with its default, device-free."""
 
+import json
 import subprocess
 import sys
 
 import numpy as np
 
-from iron.tune.measure import Measurement, NpuLock, standard_error
+from iron.operators.silu import SiLU
+from iron.tune.measure import Cache, Measurement, NpuLock, standard_error
 
 
 def test_npu_lock_keeps_another_process_out_until_its_outermost_exit(tmp_path):
@@ -49,3 +51,17 @@ def test_a_figure_with_no_default_beside_it_pairs_with_the_given_one():
     own = Measurement(5.0, (4.0, 5.0, 6.0), "o", "a", "p", 50)
     default = Measurement(3.0, (3.0, 3.5, 2.5), "o", "b", "p", 50)
     assert own.against_default(default) == own.difference(default)
+
+
+def test_a_cached_measurement_names_the_operator_it_timed(tmp_path, npu2):
+    cache = Cache("Test NPU", "default", root=tmp_path)
+    m = Measurement(3.0, (2.9, 3.1), "abc", "run", "default", 50)
+    op = SiLU(size=2048, tile_size=256, num_aie_columns=2).resolved()
+    cache.put("k", m, op)
+    assert cache.get("k") == m
+    (path,) = tmp_path.rglob("k.json")
+    named = json.loads(path.read_text())["op"]
+    assert named["class"] == "SiLU" and "tile_size" in named["tunables"]
+    assert named["params"]["size"] == 2048 and named["params"]["tile_size"] == 256
+    cache.put("plain", m)
+    assert cache.get("plain") == m
