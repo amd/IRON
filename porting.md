@@ -5,6 +5,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # Porting the decode layer to ObjectFifos
 
+## State
+
+The kernels live on mlir-aie `flm-decode-lock-move`. The design lives on IRON `flm-decode-lock-move`.
+
+T1 covers decode_glu.cc and decode_rope.cc. Every other tier is open.
+
+Both branches need a rebase. IRON's branch holds 15 commits that `fastflowlm-explicit-compile` lacks. That branch holds 28 commits that the port lacks. Those 28 commits rewrite `design.py`. The rebase is therefore not mechanical. The mlir-aie branch is 20 commits behind its upstream. mlir-aie `main` holds none of the pool work.
+
 ## Paths already on an ObjectFifo
 
 - The PLI weight streams: down, gate and up
@@ -31,7 +39,7 @@ Each tier states one complication. A kernel or a path appears in every tier that
 
 **Change** Move the loop into the Worker. One ObjectFifo handle replaces the ping buffer and the pong buffer. `_bf16_proj` already takes this form.
 
-rope and GLU expose one entry point per iteration: `rope_q`, `rope_k`, `rope_v`, `glu_chunk` and `glu_emit`. The Worker runs the loops. The Worker acquires and releases every lock. A depth-2 `BufferPool` replaces each ping-pong pair. The core reaches that pool through a handle. `ROPE_LOCKS` and `GLU_LOCKS` are therefore empty.
+rope and GLU expose one entry point per iteration: `rope_q`, `rope_k`, `rope_v`, `glu_chunk` and `glu_emit`. The Worker runs the loops. The Worker acquires and releases every lock. A depth-2 `ObjectFifoPool` replaces each ping-pong pair. The core reaches that pool through a handle. `ROPE_LOCKS` and `GLU_LOCKS` are therefore empty.
 
 The median latency measures 947.9 us before this tier and 944.8 us after it, over 25 dispatches each, with a standard deviation near 17 us.
 
@@ -74,9 +82,9 @@ proj_main holds three flags. The x flag and the w flag belong to this tier. The 
 
 **Complication** One channel carries three streams through a three-BD cyclic chain. Arrival order alone routes each stream to its buffer. An ObjectFifo holds one object type and one rotation. Three ObjectFifos therefore cannot share the channel.
 
-**Change** Use out-of-order ObjectFifos. Each packet names its descriptor through `out_of_order_id`. `bd_id_base` keeps the BD ranges disjoint. The shim sequence tags each transfer. Out-of-order ObjectFifos remove the `manual_fill` BufferPool.
+**Change** Use out-of-order ObjectFifos. Each packet names its descriptor through `out_of_order_id`. `bd_id_base` keeps the BD ranges disjoint. The shim sequence tags each transfer. Out-of-order ObjectFifos remove the `manual_fill` ObjectFifoPool.
 
-**Compiler** The `objectfifo-out-of-order` branch implements this.
+**Compiler** The `objectfifo-out-of-order` branch implements this. mlir-aie `main` does not hold it.
 
 ### T5 — Several channels fill one object behind chained locks
 
@@ -106,7 +114,9 @@ The `y` lock identity follows the ping-pong parity across four locks. `send_x_ou
 
 A pool of two segments, one slice per core, fails. A BD block acquires at most one lock: `'aie.mem' op BD block must have at most one acquire UseLockOp`. One BD drains the object. That BD therefore cannot wait on one lock pair per slice. The design uses four locks for this reason. Both cores release one lock. The BD acquires that lock with value 2. One pair per buffer lets the two cores use different buffers. Per-slice locks need one BD per slice, which costs a channel. Two segments may instead share one lock pair and a count.
 
-That attempt settled two points. Place the endpoint on the tile of the acting core: `verifyAccessPlacement` requires the two tiles to match. `ObjectFifoCoreEndpointOp::getAccessType` builds the subview type `memref<48xbf16, strided<[1]>>` for one segment. `BufferPoolHandle._memref_type` builds a plain memref.
+That attempt settled two points. Place the endpoint on the tile of the acting core: `verifyAccessPlacement` requires the two tiles to match. `ObjectFifoCoreEndpointOp::getAccessType` builds the subview type `memref<48xbf16, strided<[1]>>` for one segment. `ObjectFifoPoolHandle._memref_type` builds a plain memref.
+
+A second route gives each core its own ObjectFifo over its own slice. Each ObjectFifo then needs its own BD, its own packet header, and a share of the MM2S channel. The `objectfifo-mm2s-sharing` branch supplies the last part. `release_strategy = push_queue` has the core push the descriptor of each buffer it releases, so two ObjectFifos share one core MM2S channel. A hardware test covers two ObjectFifos on channel 0 of one tile. Two items remain for this route. Each slice carries its own packet header. The gather memtile receives two arrivals per object instead of one.
 
 **Compiler** Likely.
 
