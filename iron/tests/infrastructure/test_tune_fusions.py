@@ -16,6 +16,7 @@ from pathlib import Path
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
 import iron
@@ -80,7 +81,7 @@ LLAMA_NPU1_PROFILE = Profile.load(
     Path(__file__).resolve().parents[2] / "applications/llama/profiles/npu1.json"
 )
 
-W = np.zeros(2048, bfloat16)
+W = np.random.default_rng(1).standard_normal(2048).astype(bfloat16)
 VERSION = (("x", (2048,), "bfloat16"),)
 
 
@@ -793,7 +794,7 @@ def test_a_tune_of_one_version_keeps_an_unscoped_entry_in_the_others(tmp_path):
 # ---------------------------------------------------------------------------
 
 FUSION_SIZE, FUSION_TILE, FUSION_COLS = 2**22, 4096, 8
-W_BIG = np.zeros(FUSION_SIZE, bfloat16)
+W_BIG = np.random.default_rng(2).standard_normal(FUSION_SIZE).astype(bfloat16)
 
 
 def _big_fused_graph():
@@ -871,6 +872,13 @@ def test_pricing_a_gaining_fusion_writes_an_entry_that_runs_bit_identically(tmp_
     want = np.array(plain(x).numpy()[:FUSION_SIZE])
     got = np.array(fused(x).numpy()[:FUSION_SIZE])
     assert want.view(np.uint16).tolist() == got.view(np.uint16).tolist()
+    tolerance = Tolerance.bf16_ulps(
+        3,
+        atol=up.tolerance().atol,
+        note="SiLU's 1 ulp through the multiply (2), plus both roundings",
+    )
+    verdict = compare(got, np.asarray(_big_fused_graph().reference(x)), tolerance)
+    assert verdict, verdict.detail
 
 
 # ---------------------------------------------------------------------------
