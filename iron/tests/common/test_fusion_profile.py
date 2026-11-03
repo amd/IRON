@@ -22,6 +22,7 @@ from iron.common.image.step import Edge, Fusion, FusionKind
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemm import GEMM, GEMMPlacement
 from iron.operators.gemv import GEMV
 from iron.operators.relu import ReLU
 from iron.operators.silu import SiLU
@@ -121,6 +122,20 @@ def test_a_fusion_steps_own_tunables_round_trip(tmp_path):
     roundtrip = tmp_path / "roundtrip.json"
     loaded.save(roundtrip)
     assert roundtrip.read_text() == path.read_text()
+
+
+def test_a_packing_members_enum_tunable_loads_as_its_member(tmp_path):
+    p = Profile()
+    p.add_packing(
+        [
+            (GEMM, dict(M=256, K=256, N=256), {"placement": GEMMPlacement.TILES}),
+            (GEMM, dict(M=256, K=256, N=512), None),
+        ]
+    )
+    path = tmp_path / "profile.json"
+    p.save(path)
+    (entry,) = Profile.load(path).packings()
+    assert entry.members[0][2]["placement"] is GEMMPlacement.TILES
 
 
 def test_fusion_tunables_is_none_without_a_matching_entry():

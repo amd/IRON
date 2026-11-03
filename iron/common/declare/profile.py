@@ -476,6 +476,8 @@ class Profile:
                 if name not in CATALOG:
                     raise ValueError(f"{path}: no operator {name!r} in iron.operators")
                 op_cls = CATALOG[name]
+                if tunables is not None:
+                    tunables = _with_enum_fields(op_cls, tunables)
                 out.append((op_cls, _with_enum_fields(op_cls, fields), tunables))
             return out
 
