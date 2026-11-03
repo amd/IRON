@@ -43,6 +43,7 @@ from aie import ir
 from aie.iron import Program
 
 from iron.common.declare import Operator, Profile
+from iron.common.declare.profile import Version
 from iron.common.design import BuiltArray, OperatorDesign, configuration
 from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
 from iron.common.graph.fusion import admits, candidates
@@ -106,6 +107,8 @@ class FusionGroup:
         # an entry and checks the rest still name only that member's shape by.
         self.varying: dict[Hashable, frozenset[str]] = {}
         self.ran: list[Operator] = []
+        # The versions (``Recording.version``) it occurs in: what its entry is scoped to.
+        self.versions: set[Version] = set()
 
     @property
     def key(self) -> Hashable:
@@ -188,6 +191,7 @@ def fusion_groups(
             group = FusionGroup(fusion.kind, resolved, edges)
             group = found.setdefault(group.key, group)
             group.occurrences.append((rid, fusion.steps[0]))
+            group.versions.add(call.recording.version)
             group.ran = ran
             for shape in group.shapes:
                 moved = call.varying.get(shape.key, frozenset())
@@ -421,8 +425,8 @@ def _device_timeout(e: Exception) -> bool:
     return "ERT_CMD_STATE_TIMEOUT" in str(e)
 
 
-def _refused_key(group: FusionGroup) -> str:
-    """Return ``group``'s content-hash identity among refused groups.
+def _group_key(group: FusionGroup) -> str:
+    """Return ``group``'s content-hash identity in a progress file.
 
     Stable across a restart, unlike ``id(group)``, and over ``group.key`` alone so a
     progress file holds it as a plain string.
@@ -430,21 +434,18 @@ def _refused_key(group: FusionGroup) -> str:
     return hashlib.sha256(repr(group.key).encode()).hexdigest()[:32]
 
 
-def _load_refused(path: Path) -> dict[str, str]:
-    """Return a hung group never retried, by ``_refused_key``, with why.
-
-    Empty where ``path`` holds none yet.
-    """
+def _load_by_group(path: Path) -> dict[str, Any]:
+    """Return what ``path`` holds by ``_group_key``, empty where it holds nothing yet."""
     return json.loads(path.read_text()) if path.exists() else {}
 
 
-def _save_refused(refused: Mapping[str, str], path: Path) -> None:
-    """``refused`` written atomically, as ``_checkpoint`` writes a profile.
+def _save_by_group(by_group: Mapping[str, Any], path: Path) -> None:
+    """``by_group`` written atomically, as ``_checkpoint`` writes a profile.
 
     Another process may be reading ``path``.
     """
     partial = path.with_suffix(f".{os.getpid()}")
-    partial.write_text(json.dumps(refused))
+    partial.write_text(json.dumps(by_group))
     partial.replace(path)
 
 
@@ -942,16 +943,16 @@ def confirm_fusions(
     refused: dict[str, str] | None = None,
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
-) -> list[FusionGroup]:
-    """``taken`` with a group dropped wherever the version it runs in does not gain from it beyond the noise.
+) -> dict[FusionGroup, frozenset[Version]]:
+    """Each of ``taken`` with the versions it runs in that gain from it beyond the noise.
 
     ``time_fusion_group`` prices a fusion against the steps it fuses alone, over one
-    call; this times each recording's version with every group ``taken`` still holds
+    call; this times each recording's version with every group of ``taken`` it runs
     fused (``combos``' narrowing, where it has one, applied via
     ``iron.common.graph.fusion_tunables`` the way a shipped profile would) against the
     same version unfused at its own, interleaved, and drops the smallest predicted gain
     (``priced``) among those active in a version that regresses, retrying it, until what
-    is left gains or none is left to drop.
+    is left gains or none is left to drop. A group no version keeps is left out.
 
     Args:
         calls: The calls whose versions are confirmed.
@@ -964,9 +965,9 @@ def confirm_fusions(
         timing: How each version is timed end to end.
         seed: The seed the inputs are drawn at.
         log: Where each version's verdict is logged.
-        refused: A hang's reason recorded here, by ``_refused_key``, for
-            every group dropped on it: a caller persists this so the group
-            is never retried past this run either.
+        refused: A hang's reason recorded here, by ``_group_key``, for
+            every group dropped on it, in every version: a caller persists
+            this so the group is never retried past this run either.
         lock: Held from each version's first dispatch through releasing its
             graphs' contexts; none taken where None.
 
@@ -975,12 +976,12 @@ def confirm_fusions(
             its unfused one, at the call's values or at one of its bounds
             halved (``_bound_points``).
     """
-    remaining = list(taken)
+    confirmed: dict[FusionGroup, set[Version]] = {}
+    hung: set[FusionGroup] = set()
     for call in calls:
         recording = call.recording
-        active = [g for g in remaining if g.occurs_in(recording)]
-        if not active:
-            continue
+        version = recording.version
+        active = [g for g in taken if g.occurs_in(recording) and g not in hung]
         while active:
             # Both sides as the profile builds the version, its packings
             # included: a fusion that pays alone can cost the packing it
@@ -990,9 +991,9 @@ def confirm_fusions(
                 trial_profile.add(cls, **dims, **tunables)
             for kind, steps, edges, versions in profile.fusions():
                 trial_profile.add_fusion(kind, steps, edges, versions)
-            for group in remaining:
+            for group in active:
                 trial_profile.add_fusion(
-                    group.kind, group.dims(combos.get(group)), group.edges
+                    group.kind, group.dims(combos.get(group)), group.edges, [version]
                 )
             for entry in profile.packings():
                 trial_profile.add_packing(entry.members, entry.versions)
@@ -1006,7 +1007,6 @@ def confirm_fusions(
                 # and retry, as for a version that regresses once run.
                 worst = max(active, key=lambda g: priced[g].delta_us)
                 log(f"  {worst}: dropped, {recording.name} does not build fused: {e}")
-                remaining.remove(worst)
                 active.remove(worst)
                 continue
             try:
@@ -1027,10 +1027,10 @@ def confirm_fusions(
                 # fix; none of them is retried in this run.
                 names = ", ".join(str(g) for g in active)
                 log(f"  {names}: dropped, {recording.name} hung on the device: {e}")
+                hung.update(active)
                 for g in active:
-                    remaining.remove(g)
                     if refused is not None:
-                        refused[_refused_key(g)] = f"hung on the device: {e}"
+                        refused[_group_key(g)] = f"hung on the device: {e}"
                 break
             noise_s = "?" if noise is None else f"{noise:.1f}"
             log(
@@ -1038,12 +1038,15 @@ def confirm_fusions(
                 f"{delta:+.1f} ± {noise_s} us end to end"
             )
             if noise is not None and delta < -CONFIDENCE * noise:
+                for g in active:
+                    confirmed.setdefault(g, set()).add(version)
                 break
             worst = max(active, key=lambda g: priced[g].delta_us)
             log(f"  {worst}: dropped, {recording.name} does not gain from it")
-            remaining.remove(worst)
             active.remove(worst)
-    return remaining
+    return {
+        g: frozenset(confirmed[g]) for g in taken if g in confirmed and g not in hung
+    }
 
 
 def _checkpoint(
@@ -1063,7 +1066,9 @@ def _checkpoint(
     for cls, dims, tunables in profile or ():
         out.add(cls, **dims, **tunables)
     for group in select_rewrites(priced, log=lambda _: None):
-        out.add_fusion(group.kind, group.dims(combos.get(group)), group.edges)
+        out.add_fusion(
+            group.kind, group.dims(combos.get(group)), group.edges, group.versions
+        )
     # Profile.save() writes in place; another process reading checkpoint
     # must never see a half-written file, so write beside it and rename.
     partial = checkpoint.with_suffix(f".{os.getpid()}")
@@ -1102,9 +1107,11 @@ def price_fusions(
     only to a step running inside this fusion
     (``iron.common.graph.fusion_tunables``): the same shape running unfused,
     or fused differently, elsewhere keeps what it already takes there.
-    Fusion entries covering the shapes found are replaced; every tunable
-    entry, and a fusion entry covering none of them, is kept as ``profile``
-    has it.
+    A taken fusion's entry names the versions it gains in. A fusion entry
+    covering a shape found is replaced in the versions it is found in, an
+    unscoped one kept in every other version of the graph (``Timed.versions``);
+    every tunable entry, and a fusion entry's other versions, are kept as
+    ``profile`` has them.
 
     Args:
         calls: The calls whose graphs' fusions are priced.
@@ -1122,44 +1129,58 @@ def price_fusions(
         kinds: The kinds priced, every kind the graphs admit by default.
         checkpoint: Where to write the decisions so far (``_checkpoint``)
             after every group is priced, so a run that dies partway still
-            leaves something behind beyond the cache alone. A group a device
-            timeout refused is written beside it (``_refused_key``,
-            ``checkpoint.with_suffix(".refused.json")``) and loaded back
-            here first, so a later call, batched or a restart after one,
-            never retries it.
-        max_price: Price at most this many of the found groups in this
-            call (already-cached ones cost little to recheck); where that
-            leaves any unpriced, return None without selecting, confirming
-            or saving. A caller holding the device lock for this call
-            alone, and calling again (fresh lock, so another agent's own
-            short run is never kept waiting behind a whole multi-hour
-            sweep) until it gets a profile back, never holds the lock past
-            one batch.
+            leaves something behind beyond the cache alone. Each group's
+            price is written beside it (``checkpoint.with_suffix(".priced.json")``)
+            and taken from there by a later call, batched or a restart after
+            one, until every group is priced; a group a device timeout
+            refused (``.refused.json``) is never retried.
+        max_price: Price at most this many groups not yet priced in this
+            call; where that leaves any unpriced, return None without
+            selecting, confirming or saving. A caller holding the device lock
+            for this call alone, and calling again (fresh lock, so another
+            agent's own short run is never kept waiting behind a whole
+            multi-hour sweep) until it gets a profile back, never holds the
+            lock past one batch.
         lock: Held for each measurement's own lifetime; none taken where None.
 
     Returns:
         The profile, or None where ``max_price`` left groups unpriced.
+
+    Raises:
+        ValueError: ``max_price`` is given without a ``checkpoint`` to carry
+            the prices between calls.
     """
+    if max_price is not None and checkpoint is None:
+        raise ValueError("max_price prices in batches through a checkpoint; give one")
     refused_path = (
         None if checkpoint is None else checkpoint.with_suffix(".refused.json")
     )
-    refused = {} if refused_path is None else _load_refused(refused_path)
+    priced_path = None if checkpoint is None else checkpoint.with_suffix(".priced.json")
+    refused = {} if refused_path is None else _load_by_group(refused_path)
+    earlier = {} if priced_path is None else _load_by_group(priced_path)
 
     all_found = fusion_groups(calls, dev, kinds)
-    found = []
-    for group in all_found:
-        why = refused.get(_refused_key(group))
-        if why is None:
-            found.append(group)
-        else:
-            log(f"{group}: skipped, refused earlier: {why}")
-    if max_price is not None and max_price < len(found):
-        found_now, rest = found[:max_price], found[max_price:]
-    else:
-        found_now, rest = found, []
-
     priced: list[tuple[FusionGroup, Trial]] = []
     combos: dict[FusionGroup, tuple[dict[str, Any], ...] | None] = {}
+    unpriced = []
+    for group in all_found:
+        why = refused.get(_group_key(group))
+        record = earlier.get(_group_key(group))
+        if why is not None:
+            log(f"{group}: skipped, refused earlier: {why}")
+        elif record is None:
+            unpriced.append(group)
+        else:
+            trial = Trial({}, record["delta_us"], record["noise_us"], record["refused"])
+            priced.append((group, trial))
+            combos[group] = None if record["combo"] is None else tuple(record["combo"])
+            log(f"{group}: {trial.delta_us:+.1f} us, priced earlier")
+    found_now, rest = (
+        (unpriced, [])
+        if max_price is None
+        else (unpriced[:max_price], unpriced[max_price:])
+    )
+
     for group in found_now:
         trial, combo = narrow_group(
             group,
@@ -1179,15 +1200,25 @@ def price_fusions(
         priced.append((group, trial))
         combos[group] = combo
         if trial.refused is not None and trial.refused.startswith("hung on the device"):
-            refused[_refused_key(group)] = trial.refused
+            refused[_group_key(group)] = trial.refused
             if refused_path is not None:
-                _save_refused(refused, refused_path)
+                _save_by_group(refused, refused_path)
+        if priced_path is not None:
+            earlier[_group_key(group)] = {
+                "delta_us": trial.delta_us,
+                "noise_us": trial.noise_us,
+                "refused": trial.refused,
+                "combo": None if combo is None else list(combo),
+            }
+            _save_by_group(earlier, priced_path)
         if checkpoint is not None:
             _checkpoint(profile, priced, combos, checkpoint)
 
     if rest:
         log(f"{len(rest)} group(s) left unpriced this batch; call again for them")
         return None
+    if priced_path is not None:
+        priced_path.unlink(missing_ok=True)
 
     taken = select_rewrites(priced, log)
     priced_dict = dict(priced)
@@ -1198,15 +1229,28 @@ def price_fusions(
     for entry in profile.packings() if profile is not None else ():
         out.add_packing(entry.members, entry.versions)
 
+    every = frozenset(c.recording.version for c in calls).union(
+        *(c.versions for c in calls)
+    )
     existing = profile.fusions() if profile is not None else []
     for kind, steps, edges, versions in existing:
         probe = Profile()
-        probe.add_fusion(kind, steps, edges)
-        if not any(probe.fused(g.kind, g.steps, g.edges) for g in all_found):
-            out.add_fusion(kind, steps, edges, versions)
+        probe.add_fusion(kind, steps, edges, versions)
+        replaced = {
+            v
+            for g in all_found
+            for v in g.versions
+            if probe.fused(g.kind, g.steps, g.edges, v)
+        }
+        scope = every if versions is None else versions
+        if versions is None and not replaced:
+            out.add_fusion(kind, steps, edges)
+        elif scope - replaced:
+            out.add_fusion(kind, steps, edges, scope - replaced)
 
+    kept = {g: frozenset(g.versions) for g in taken}
     if confirm:
-        taken = confirm_fusions(
+        kept = confirm_fusions(
             calls,
             dev,
             taken,
@@ -1220,7 +1264,7 @@ def price_fusions(
             lock=lock,
         )
         if refused_path is not None:
-            _save_refused(refused, refused_path)
-    for group in taken:
-        out.add_fusion(group.kind, group.dims(combos[group]), group.edges)
+            _save_by_group(refused, refused_path)
+    for group, versions in kept.items():
+        out.add_fusion(group.kind, group.dims(combos[group]), group.edges, versions)
     return out

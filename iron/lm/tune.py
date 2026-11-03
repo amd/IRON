@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from iron.common.declare import Profile
+from iron.common.graph.record import version_key
 from iron.operators.sample import Sample
 from iron.tune import cli as tune_cli
 from iron.tune.autotune import Point, Shape, Timed
@@ -112,7 +113,8 @@ def calls(
     The decode step and the prompt chunk, each over ``contexts`` up to ``context``,
     ``points`` of them with every doubling counting alike (the decode step's from
     ``position``, the prompt chunk's from one chunk), and Sample on the draw rows
-    ``sampler`` gives.
+    ``sampler`` gives. Each names every version of ``model`` (``Timed.versions``),
+    those ``versions`` leaves out too.
 
     Args:
         model: The decoder whose versions are timed.
@@ -164,6 +166,7 @@ def calls(
             ],
         ),
     ]
+    every = frozenset(version_key(s) for s in model.shapes())
     out = []
     for label, shapes, values, timed in planned:
         if label not in versions:
@@ -182,7 +185,7 @@ def calls(
                 here, there = Shape(step.op.resolved()), Shape(twin.op.resolved())
                 moved = {n for n, v in here.dims.items() if there.dims.get(n) != v}
                 varying[here.key] = varying.get(here.key, frozenset()) | moved
-        out.append(Timed(recording, values, {draws.name: rows}, timed, varying))
+        out.append(Timed(recording, values, {draws.name: rows}, timed, varying, every))
     return out
 
 

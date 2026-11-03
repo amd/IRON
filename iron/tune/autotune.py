@@ -30,6 +30,7 @@ from aie.utils.compile import NPU_CACHE_HOME
 from aie.utils.compile.jit.params import OperatorParam
 
 from iron.common.declare import Operator, Profile
+from iron.common.declare.profile import Version
 from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import apply_profile
 from iron.common.graph.record import Recording
@@ -127,7 +128,8 @@ class Timed:
     where they differ from call to call: an operator whose work they change is timed at
     each (``op_points``). ``varying`` is, by ``Shape.key`` of a resolved operator, the
     dimensions a host sizes (a model's fitted context), which a profile naming the shape
-    leaves out.
+    leaves out. ``versions`` is every version of the graph (``Recording.version``), a
+    tune's calls or not; empty where only the recording's own is known.
     """
 
     recording: Recording
@@ -135,6 +137,7 @@ class Timed:
     contents: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
     points: Sequence[Point] = ()
     varying: Mapping[Hashable, frozenset[str]] = dataclasses.field(default_factory=dict)
+    versions: frozenset[Version] = frozenset()
 
     def op_values(
         self, op: Operator, values: Mapping[str, int] | None = None

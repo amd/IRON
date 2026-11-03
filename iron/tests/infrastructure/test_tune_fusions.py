@@ -48,9 +48,9 @@ from iron.tune.fusions import (
     _dominates,
     _fed_widths,
     _gather_table_rows,
-    _load_refused,
-    _refused_key,
-    _save_refused,
+    _group_key,
+    _load_by_group,
+    _save_by_group,
     _widths,
     compare_graphs,
     confirm_fusions,
@@ -81,6 +81,7 @@ LLAMA_NPU1_PROFILE = Profile.load(
 )
 
 W = np.zeros(2048, bfloat16)
+VERSION = (("x", (2048,), "bfloat16"),)
 
 
 def _fused_graph():
@@ -103,6 +104,7 @@ def _group(dev, first: int, rid: int = 0) -> FusionGroup:
     mul = ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev)
     group = FusionGroup(FusionKind.STREAM, [silu, mul], [(0, "y", 1, "a")])
     group.occurrences = [(rid, first)]
+    group.versions = {VERSION}
     return group
 
 
@@ -592,7 +594,7 @@ def test_checkpoint_writes_the_fusions_taken_so_far(tmp_path):
     loaded = Profile.load(checkpoint)
     silu = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev)
     mul = ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved(dev)
-    assert loaded.fused(FusionKind.STREAM, [silu, mul], [(0, "y", 1, "a")])
+    assert loaded.fused(FusionKind.STREAM, [silu, mul], [(0, "y", 1, "a")], VERSION)
 
 
 def test_checkpoint_overwrites_the_previous_one_atomically(tmp_path):
@@ -613,11 +615,11 @@ def test_refused_round_trips_through_its_file_atomically(tmp_path):
     dev = aie_utils.ensure_current_device()
     group = _group(dev, 0)
     path = tmp_path / "profile.progress.refused.json"
-    assert _load_refused(path) == {}
+    assert _load_by_group(path) == {}
 
-    _save_refused({_refused_key(group): "hung on the device: ..."}, path)
-    loaded = _load_refused(path)
-    assert loaded == {_refused_key(group): "hung on the device: ..."}
+    _save_by_group({_group_key(group): "hung on the device: ..."}, path)
+    loaded = _load_by_group(path)
+    assert loaded == {_group_key(group): "hung on the device: ..."}
     # Only the final, whole file is ever on disk at that name.
     assert list(tmp_path.iterdir()) == [path]
 
@@ -640,10 +642,7 @@ def test_price_fusions_skips_a_group_already_refused_as_hung(tmp_path):
     refused_path = checkpoint.with_suffix(".refused.json")
     refused_path.write_text(
         json.dumps(
-            {
-                _refused_key(g): "hung on the device: ERT_CMD_STATE_TIMEOUT"
-                for g in groups
-            }
+            {_group_key(g): "hung on the device: ERT_CMD_STATE_TIMEOUT" for g in groups}
         )
     )
 
@@ -662,6 +661,131 @@ def test_price_fusions_skips_a_group_already_refused_as_hung(tmp_path):
         groups
     )
     assert not any(" us" in line for line in logs)  # narrow_group's own price line
+
+
+def test_a_later_batch_takes_the_groups_earlier_batches_priced(tmp_path):
+    """A ``max_price`` batch prices only groups no earlier call priced.
+
+    Every group here was priced by earlier batches (``.priced.json`` beside the
+    checkpoint), so this call prices none, selects among them and returns the
+    profile, its entry scoped to the version the group was found in.
+    """
+    dev = aie_utils.ensure_current_device()
+    recording = ChainGraph(size=2048, tile=2048, columns=1).record(a=(2048,), b=(2048,))
+    calls = [Timed(recording)]
+    groups = fusion_groups(calls, dev)
+    assert len(groups) > 1
+    [gaining] = [
+        g
+        for g in groups
+        if g.kind is FusionKind.STREAM
+        and [type(s) for s in g.steps] == [SiLU, ElementwiseMul]
+    ]
+    checkpoint = tmp_path / "profile.progress.json"
+    priced_path = checkpoint.with_suffix(".priced.json")
+    flat = {"delta_us": 2.0, "noise_us": 1.0, "refused": None, "combo": None}
+    priced = {_group_key(g): flat for g in groups}
+    priced[_group_key(gaining)] = {**flat, "delta_us": -10.0}
+    _save_by_group(priced, priced_path)
+
+    logs: list[str] = []
+    profile = price_fusions(
+        calls,
+        dev,
+        full_elf=True,
+        checkpoint=checkpoint,
+        max_price=1,
+        confirm=False,
+        log=logs.append,
+    )
+    assert profile is not None
+    assert len([line for line in logs if "priced earlier" in line]) == len(groups)
+    assert not any(" ± " in line for line in logs)  # narrow_group's own price line
+    [(kind, _, _, versions)] = profile.fusions()
+    assert kind is gaining.kind and versions == {recording.version}
+    assert profile.fused(gaining.kind, gaining.steps, gaining.edges, recording.version)
+    assert not priced_path.exists()
+
+
+def test_price_fusions_keeps_an_entry_in_the_versions_it_does_not_search(tmp_path):
+    """A tune of one version replaces an entry there only.
+
+    An existing entry scoped to a version these calls do not run is kept as it is;
+    one scoped to both loses only the version searched.
+    """
+    dev = aie_utils.ensure_current_device()
+    recording = ChainGraph(size=2048, tile=2048, columns=1).record(a=(2048,), b=(2048,))
+    calls = [Timed(recording)]
+    groups = fusion_groups(calls, dev)
+    [silu_mul] = [
+        g
+        for g in groups
+        if g.kind is FusionKind.STREAM
+        and [type(s) for s in g.steps] == [SiLU, ElementwiseMul]
+    ]
+    checkpoint = tmp_path / "profile.progress.json"
+    _save_by_group(
+        {_group_key(g): "hung on the device: ERT_CMD_STATE_TIMEOUT" for g in groups},
+        checkpoint.with_suffix(".refused.json"),
+    )
+    other = (("a", (4096,), "bfloat16"), ("b", (4096,), "bfloat16"))
+    profile = Profile()
+    profile.add_fusion(silu_mul.kind, silu_mul.dims(), silu_mul.edges, [other])
+    profile.add_fusion(
+        silu_mul.kind, silu_mul.dims(), silu_mul.edges, [other, recording.version]
+    )
+    out = price_fusions(
+        calls,
+        dev,
+        profile,
+        full_elf=True,
+        checkpoint=checkpoint,
+        confirm=False,
+        log=lambda _: None,
+    )
+    assert out is not None
+    assert [versions for *_, versions in out.fusions()] == [
+        frozenset({other}),
+        frozenset({other}),
+    ]
+
+
+def test_a_tune_of_one_version_keeps_an_unscoped_entry_in_the_others(tmp_path):
+    """An unscoped entry the decode step's search replaces still applies in the prompt chunk.
+
+    The decode step's call names the prompt chunk's version though ``--versions``
+    leaves it out (``Timed.versions``), so the entry comes back scoped to it.
+    """
+    dev = aie_utils.ensure_current_device()
+    model = small()
+    [decode] = calls(model, 0, 0, 256, 1, Sampler(0.7, 50), versions=["decode"])
+    prompt = model.record(**model.shapes()[1]).version
+    assert decode.versions == {decode.recording.version, prompt}
+    groups = fusion_groups([decode], dev)
+    silu_mul = next(
+        g
+        for g in groups
+        if g.kind is FusionKind.STREAM
+        and [type(s) for s in g.steps] == [SiLU, ElementwiseMul]
+    )
+    checkpoint = tmp_path / "profile.progress.json"
+    _save_by_group(
+        {_group_key(g): "hung on the device: ERT_CMD_STATE_TIMEOUT" for g in groups},
+        checkpoint.with_suffix(".refused.json"),
+    )
+    profile = Profile()
+    profile.add_fusion(silu_mul.kind, silu_mul.dims(), silu_mul.edges)
+    out = price_fusions(
+        [decode],
+        dev,
+        profile,
+        full_elf=True,
+        checkpoint=checkpoint,
+        confirm=False,
+        log=lambda _: None,
+    )
+    assert out is not None
+    assert [versions for *_, versions in out.fusions()] == [frozenset({prompt})]
 
 
 # ---------------------------------------------------------------------------
@@ -688,8 +812,8 @@ def _big_fused_graph():
 def test_max_price_prices_a_batch_then_stops_until_every_group_is_priced(tmp_path):
     """A caller holding the device lock for one call, not a whole sweep, calls again for the rest.
 
-    ``max_price`` below the groups found returns None without selecting, confirming or
-    saving; at or above it, the profile.
+    Each call with ``max_price`` prices a batch the calls before it did not, returning
+    None without selecting, confirming or saving until every group is priced.
     """
     dev = aie_utils.ensure_current_device()
     recording = ChainGraph(size=2048, tile=2048, columns=1).record(a=(2048,), b=(2048,))
@@ -699,10 +823,17 @@ def test_max_price_prices_a_batch_then_stops_until_every_group_is_priced(tmp_pat
     report = platform()
     cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     kwargs = dict(
-        full_elf=True, timing=Timing(rounds=2, calls=5), cache=cache, log=lambda _: None
+        full_elf=True,
+        timing=Timing(rounds=2, calls=5),
+        cache=cache,
+        checkpoint=tmp_path / "profile.progress.json",
+        log=lambda _: None,
     )
-    assert price_fusions(calls, dev, max_price=1, **kwargs) is None
-    assert price_fusions(calls, dev, max_price=n, **kwargs) is not None
+    batches = 1
+    while price_fusions(calls, dev, max_price=2, **kwargs) is None:
+        batches += 1
+        assert batches <= n, "a batch priced nothing new"
+    assert batches == math.ceil(n / 2)
 
 
 @pytest.mark.supported_devices("npu2")
@@ -726,7 +857,9 @@ def test_pricing_a_gaining_fusion_writes_an_entry_that_runs_bit_identically(tmp_
     up = ElementwiseMul(
         size=FUSION_SIZE, tile_size=FUSION_TILE, num_aie_columns=FUSION_COLS
     ).resolved()
-    assert profile.fused(FusionKind.STREAM, [gate, up], [(0, "y", 1, "a")])
+    assert profile.fused(
+        FusionKind.STREAM, [gate, up], [(0, "y", 1, "a")], recording.version
+    )
 
     fused_graph = _big_fused_graph()
     fused_graph.profile = profile
@@ -778,7 +911,7 @@ def test_confirm_fusions_drops_the_worst_group_on_a_build_failure():
         full_elf=True,
         log=logged.append,
     )
-    assert taken == []
+    assert taken == {}
     assert any("does not build fused" in line for line in logged)
 
 
@@ -1081,9 +1214,14 @@ def test_price_fusions_takes_the_cheaper_of_two_overlapping_fusions(tmp_path):
     )
     rms, gemv, add = _merge_members(dev)
     assert profile.fused(
-        FusionKind.STREAM, [rms, gemv, add], [(0, "y", 1, "B"), (1, "C", 2, "b")]
+        FusionKind.STREAM,
+        [rms, gemv, add],
+        [(0, "y", 1, "B"), (1, "C", 2, "b")],
+        recording.version,
     )
-    assert not profile.fused(FusionKind.STREAM, [gemv, add], [(0, "C", 1, "b")])
+    assert not profile.fused(
+        FusionKind.STREAM, [gemv, add], [(0, "C", 1, "b")], recording.version
+    )
 
 
 class LongChain(iron.Graph):
