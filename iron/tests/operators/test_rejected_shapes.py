@@ -649,9 +649,21 @@ def test_flm_decode_layer_rejects_unknown_configurations(kwargs, match):
 
 
 @pytest.mark.parametrize(
+    "make",
+    [
+        lambda: GEMV(M=256, K=256, coded_a=True, a_capacity=7),
+        lambda: Decode(M=64, K=64, capacity=7),
+    ],
+    ids=["gemv", "decode"],
+)
+def test_coded_rows_take_no_capacity_but_the_kernels(make):
+    with pytest.raises(TypeError, match="takes no argument"):
+        make()
+
+
+@pytest.mark.parametrize(
     "make, match",
     [
-        (lambda: Decode(M=64, K=64, capacity=7), r"capacity \(7\) must be 15"),
         (lambda: DepthwiseConv1d(rows=64, channels=48), "32-lane vectors"),
         (
             lambda: DepthwiseConv1d(rows=6, channels=64, num_aie_columns=2),

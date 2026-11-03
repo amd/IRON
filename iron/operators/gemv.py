@@ -13,7 +13,7 @@ from aie.helpers.util import np_ndarray_type_to_memref_type
 from aie.iron import Buffer, ExternalFunction, In, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
-from aie.iron.kernels import eltwise, linalg
+from aie.iron.kernels import datamovement, eltwise, linalg
 from aie.utils.compile.jit.params import (
     Select,
     divisors,
@@ -164,7 +164,6 @@ class GEMV(Operator):
     # A, a weight, streams as coded rows (aie.utils.coded): 0.76x the bytes,
     # decoded in each core into the bits plain A gives.
     coded_a: bool = tunable(default=False, domain=(False, True))
-    a_capacity: int = param(default=15, array=True)
     # One step folded into these cores, its output C's tile.
     finish: tuple[FinishStep, ...] = param(default=(), array=True)
     # A plain default, not derived: shim_columns() reads it from the class
@@ -182,7 +181,7 @@ class GEMV(Operator):
         per=(num_aie_columns, num_channels),
         depth=2,
         coded=coded_a,
-        capacity=a_capacity,
+        capacity=datamovement.CODED_CAPACITY,
     )
     B = In(num_batches, K, obj_shape=Select(feed_b, (K,), None))
     C = Out(

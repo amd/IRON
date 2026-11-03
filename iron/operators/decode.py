@@ -32,7 +32,6 @@ class Decode(Operator):
 
     M: int = param()
     K: int = param()
-    capacity: int = param(default=15, array=True)
     num_aie_columns: int = tunable(domain=widths)
     # Rows a call: more amortize a row's loop entry, two of each tile per
     # core must fit beside the stack.
@@ -44,17 +43,12 @@ class Decode(Operator):
         obj_shape=(rows, K),
         per=(num_aie_columns,),
         coded=True,
-        capacity=capacity,
+        capacity=datamovement.CODED_CAPACITY,
     )
     out = Out(M, K, obj_shape=(rows, K), per=(num_aie_columns,))
     tiles = per_call(derive=lambda op: op.M // (op.num_aie_columns * op.rows))
 
     def validate(self) -> None:
-        if self.capacity != datamovement.CODED_CAPACITY:
-            raise ValueError(
-                f"Decode: capacity ({self.capacity}) must be "
-                f"{datamovement.CODED_CAPACITY}, the decode kernel's"
-            )
         if self.K % 64:
             raise ValueError(
                 f"Decode: K ({self.K}) must be a multiple of 64, the coded unit"
