@@ -90,6 +90,7 @@ class TestEachStep:
         model, prompts = decoder
         check_generation(model, prompts[prompt_idx], num_tokens, record=record_property)
 
+    @pytest.mark.bench
     def test_gemma4_each_step_accuracy(self, decoder, record_property):
         check_accuracy(decoder[0], MAX_KL, record=record_property)
 

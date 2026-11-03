@@ -109,7 +109,7 @@ dispatch.
 | `STAGED` | As `STREAM`, where the two sides' lanes differ in count, tile or order and are rejoined through memory tiles. |
 | `FOLD` | The consumer's kernel runs in its producer's own cores, after the producer's (SiLU's cores finishing with the multiply). |
 | `PACK` | Independent steps placed side by side and issued at once (the q, k and v projections). |
-| `MERGE` | Consecutive steps that share one configuration, run back to back. |
+| `MERGE` | Consecutive steps that share one configuration, run back to back. A profile names it with `Profile.add_packing`, not `add_fusion`: it is how a packing runs on an xclbin. |
 
 ### Checking and timing it
 
@@ -125,13 +125,13 @@ held to `graph.reference(x)` (Section 6), and to each other bit for bit: a
 fusion changes where intermediates live, not what any kernel computes, so
 fused and unfused outputs must be identical. `compile(check=True)` checks
 each step on its own dispatch, so it compiles the steps unfused whatever
-the profile names; check the steps that way, then compare the fused version
-against them, as this example does.
+the profile names; this example compares the fused version with the steps
+compiled unfused under `tuned_profile()` instead.
 
 Each version's loaded image (`version.callable`) is then timed with
 mlir-aie's `run_interleaved`: `--rounds` rounds of `--calls` calls each,
 the two versions taking turns, each figure the NPU's own time for a call.
-On a Strix NPU2 (Ryzen AI 9 HX 370):
+One run on a Strix NPU2 (Ryzen AI 9 HX 370) printed:
 
 ```
 unfused: 1685.2 us min, 1720.6 us median

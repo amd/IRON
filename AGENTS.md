@@ -291,8 +291,8 @@ values, weights, state and profiles are named. The rules:
   For a model's decoder:
   1. Check its checkpoint fits: `aie.utils.coded.encode_rows` on each
      decode GEMV weight raises, naming the row, where one does not
-     (Llama 3.2 1B and 3B, Gemma 4 E2B, Gemma 3 1B, Qwen3 1.7B and
-     Phi-4-mini all fit).
+     (every shipped decoder fits: Llama 3.2 1B and 3B, Granite 4.2 3B,
+     Granite 4.0-H 1B and Gemma 4 E2B).
   2. Set `coded_a` on every GEMV shape whose steps share an array, or on
      none of them: `coded_a` is part of the array, so coding some steps of
      a shared array splits it, and a packing that fit runs out of cores.
