@@ -275,21 +275,10 @@ def test_fusion_needs_at_least_two_steps():
         Fusion(FusionKind.STREAM, (0,), ())
 
 
-def test_fusion_steps_must_be_increasing_and_distinct():
-    with pytest.raises(ValueError, match="increasing and distinct"):
-        Fusion(FusionKind.STREAM, (1, 0), ())
-    with pytest.raises(ValueError, match="increasing and distinct"):
-        Fusion(FusionKind.STREAM, (0, 0, 1), ())
-
-
-def test_edge_skipping_a_non_member_step_refused():
-    """An edge between two members may not skip a step between them that is not itself a member.
-
-    That step would have to run on another device configuration, interleaved between the
-    fusion's two halves.
-    """
-    with pytest.raises(ValueError, match="skips a step"):
-        Fusion(FusionKind.STREAM, (0, 2), (Edge(0, "y", 2, "a"),))
+@pytest.mark.parametrize("steps", [(1, 0), (0, 0, 1), (0, 2)])
+def test_fusion_steps_must_be_consecutive(steps):
+    with pytest.raises(ValueError, match="consecutive"):
+        Fusion(FusionKind.PACK, steps)
 
 
 def test_stream_fusion_edges_must_run_forward():

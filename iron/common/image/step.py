@@ -73,12 +73,9 @@ class Edge:
 class Fusion:
     """A set of steps that build and dispatch as one device configuration, with no host transfer between.
 
-    ``kind`` how, ``steps`` its members (increasing, distinct indices into a sequence)
-    and ``edges`` each on-chip hand-off among them.
-
-    An edge between two steps that are not adjacent in ``steps`` is only
-    valid where every step between them (by index) is also a member; a
-    stream or staged fusion's edges run forward, producer before consumer.
+    ``kind`` how, ``steps`` its members (a run of consecutive indices into a sequence)
+    and ``edges`` each on-chip hand-off among them; a stream or staged fusion's edges run
+    forward, producer before consumer.
     """
 
     kind: FusionKind
@@ -88,10 +85,10 @@ class Fusion:
     def __post_init__(self) -> None:
         if len(self.steps) < 2:
             raise ValueError("a fusion needs at least two steps")
-        if list(self.steps) != sorted(set(self.steps)):
-            raise ValueError(
-                f"fusion steps {self.steps} must be increasing and distinct"
-            )
+        if list(self.steps) != list(
+            range(self.steps[0], self.steps[0] + len(self.steps))
+        ):
+            raise ValueError(f"fusion steps {self.steps} must be consecutive")
         if self.kind in (FusionKind.PACK, FusionKind.MERGE) and self.edges:
             raise ValueError(f"a {self.kind.value} fusion takes no edges")
         members = set(self.steps)
@@ -108,9 +105,6 @@ class Fusion:
                 )
             if edge.producer not in members or edge.consumer not in members:
                 raise ValueError(f"{edge} names a step outside {self.steps}")
-            lo, hi = sorted((edge.producer, edge.consumer))
-            if not set(range(lo, hi + 1)) <= members:
-                raise ValueError(f"{edge} skips a step between {lo} and {hi} not in it")
             if (edge.consumer, edge.input) in fed:
                 raise ValueError(
                     f"step {edge.consumer}'s input {edge.input!r} is fed twice"
