@@ -592,7 +592,7 @@ def _time(
                 if i not in ran:
                     refused[i] = refused[i] or "does not build"
                     continue
-                delta, noise = ran[i].difference(default)
+                delta, noise = ran[i].against_default(default)
                 deltas[i] += weight * delta
                 variance = variances[i]
                 variances[i] = (

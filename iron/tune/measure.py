@@ -607,6 +607,18 @@ class Measurement:
             return delta, None
         return delta, math.hypot(own_noise, other_noise)
 
+    def against_default(self, default: Measurement) -> tuple[float, float | None]:
+        """``difference`` from the default timed beside it in its own run, else from ``default``.
+
+        A batch, or a cached figure, pairs with its own run's default, not another run's.
+        """
+        if not self.default_round_us:
+            return self.difference(default)
+        delta = self.t_step_us - statistics.median(self.default_round_us)
+        return delta, standard_error(
+            [a - b for a, b in zip(self.round_us, self.default_round_us)]
+        )
+
 
 @dataclasses.dataclass(frozen=True)
 class FusionMeasurement:
