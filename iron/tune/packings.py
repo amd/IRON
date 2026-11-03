@@ -615,14 +615,17 @@ def price_packings(
     Its members' settings in it, applying in that version; a version whose grouping does
     not gain end to end, beyond the noise, adds none. Each entry then applies in another
     version it matches only where that version gains from it too (``widen_packings``).
-    ``profile``'s own packings are replaced, but for another graph's (``_foreign``),
-    which a search of these calls leaves as they are, so one profile can hold several
-    models' packings. A version whose every switch, priced by ``model``, costs under
-    ``MIN_SWITCH_SHARE`` of its steps' own time is not searched.
+    A version searched keeps ``profile``'s own packings for it unless a grouping is
+    faster end to end than they are (an unscoped one beaten still applies in every
+    other version of the graph, ``Timed.versions``); every other entry (another graph's,
+    ``_foreign``, so one profile can hold several models' packings, or one scoped to
+    versions not searched) is kept as it is. A version whose every switch, priced by
+    ``model``, costs under ``MIN_SWITCH_SHARE`` of its steps' own time is not searched.
 
     A grouping whose version does not build, hangs or is not bit-identical
     is refused (``refuse_group``) and the version searched again without it,
-    until one is kept or none packs, recorded in ``ledger`` where one is given.
+    until one is kept or none packs; a version ``profile`` itself does not build
+    is not searched. Each is recorded in ``ledger`` where one is given.
 
     Args:
         calls: The calls whose versions are packed.
@@ -651,15 +654,37 @@ def price_packings(
             found should a later one fail.
     """
     model = CostModel() if model is None else model
-    base = _profile(profile, [e for e in profile.packings() if _foreign(e, calls, dev)])
-    found: list[PackingEntry] = []
+    packings = profile.packings()
+    every = frozenset(c.recording.version for c in calls).union(
+        *(c.versions for c in calls)
+    )
     budget = Budget() if budget is None else budget
     for i, call in enumerate(calls):
         if i and budget.ends(f"{call.recording.name}'s packing search"):
             continue
         version = call.recording.version
-        current = _profile(base, found)
-        recording, _, _ = apply_profile(call.recording, current, dev)
+        held = [
+            e
+            for e in packings
+            if (e.versions is None or version in e.versions)
+            and not _foreign(e, [call], dev)
+        ]
+        others = [e for e in packings if e not in held]
+        current = _profile(profile, packings)
+        unpacked = _profile(profile, others)
+        try:
+            recording, _, _ = apply_profile(call.recording, unpacked, dev)
+        except (ValueError, RuntimeError, ir.MLIRError) as e:
+            _refusal(
+                e,
+                dev,
+                unpacked,
+                f"{call.recording.name} as profiled",
+                f"{call.recording.name}-profiled",
+                ledger,
+                log,
+            )
+            continue
         packer = Packer(
             dataclasses.replace(call, recording=recording),
             dev,
@@ -697,29 +722,26 @@ def price_packings(
                 PackingEntry(tuple(packer.members(g)), frozenset({version}))
                 for g in packed
             ]
-            trial = _profile(base, [*found, *entries])
+            trial = _profile(profile, [*others, *entries])
             try:
                 delta, noise = _end_to_end(
-                    call, dev, current, trial, confirm_timing, log, lock
+                    call, dev, unpacked, trial, confirm_timing, log, lock
+                )
+                gain, gain_noise = (
+                    _end_to_end(call, dev, current, trial, confirm_timing, log, lock)
+                    if held
+                    else (delta, noise)
                 )
             except (ValueError, RuntimeError, ir.MLIRError) as e:
-                kind = (
-                    Kind.HANG
-                    if _device_timeout(e)
-                    else Kind.MISMATCH if isinstance(e, NotBitIdentical) else Kind.BUILD
+                kind = _refusal(
+                    e,
+                    dev,
+                    trial,
+                    f"{recording.name} packed",
+                    f"{recording.name}-{attempt}",
+                    ledger,
+                    log,
                 )
-                log(f"{recording.name}: refused, {kind.value}: {first_error(str(e))}")
-                if ledger is not None:
-                    trial_path = ledger.directory / "profiles"
-                    trial_path.mkdir(parents=True, exist_ok=True)
-                    trial.save(trial_path / f"{recording.name}-{attempt}.json")
-                    ledger.record(
-                        kind,
-                        dev.name,
-                        str(e),
-                        f"{recording.name} packed, profile "
-                        f"profiles/{recording.name}-{attempt}.json",
-                    )
                 for g in packed:
                     refuse_group(
                         list(packer._distinct(g).values()),
@@ -737,13 +759,29 @@ def price_packings(
                 f"{estimate:+.1f} us estimated; cost model now "
                 + ", ".join(f"{f} {v:.1f}" for f, v in model.terms.items())
             )
-            if noise is not None and delta < -CONFIDENCE * noise:
-                found.extend(entries)
+            if held:
+                gain_s = "?" if gain_noise is None else f"{gain_noise:.1f}"
+                log(f"  {gain:+.1f} ± {gain_s} us against its own packings")
+            if gain_noise is not None and gain < -CONFIDENCE * gain_noise:
+                kept: list[PackingEntry] = []
+                for e in packings:
+                    scope = every if e.versions is None else e.versions
+                    if e not in held:
+                        kept.append(e)
+                    elif scope - {version}:
+                        kept.append(PackingEntry(e.members, scope - {version}))
+                packings = [*kept, *entries]
             break
         if progress is not None:
-            progress(_profile(base, found), model)
+            progress(_profile(profile, packings), model)
     return widen_packings(
-        calls, dev, _profile(base, found), timing=confirm_timing, log=log, lock=lock
+        calls,
+        dev,
+        _profile(profile, packings),
+        timing=confirm_timing,
+        log=log,
+        lock=lock,
+        ledger=ledger,
     )
 
 
@@ -848,7 +886,8 @@ def price_folds_before_packing(
     version, the way ``widen_packings`` decides a packing entry's own widening:
     a version keeps its folds only where it, folded and packed, beats ``profile`` as it
     stands (its own packings, or none) end to end (``compare_graphs``); one that does
-    not gain keeps the profile as it stood instead, its own fold entries narrowed back
+    not gain, or does not build, hangs or is not bit-identical folded (recorded in
+    ``ledger``), keeps the profile as it stood instead, its own fold entries narrowed back
     out rather than the whole packed result discarded (``_narrow_for_rejected``), and
     its packings searched again without them (``_rejoin``): the ones found on its folded
     steps were never priced unfolded. The plain ``price_packings`` search on ``profile``
@@ -908,10 +947,25 @@ def price_folds_before_packing(
     rejected = []
     for call in calls:
         candidate = _with_fusions(packed_and_folded, fusions)
-        delta, noise = _end_to_end(
-            call, dev, profile, candidate, confirm_timing, log, lock
-        )
-        kept = _decide_fold(fusions, call, call.recording.version, delta, noise, log)
+        try:
+            delta, noise = _end_to_end(
+                call, dev, profile, candidate, confirm_timing, log, lock
+            )
+        except (ValueError, RuntimeError, ir.MLIRError) as e:
+            _refusal(
+                e,
+                dev,
+                candidate,
+                f"{call.recording.name} folded",
+                f"{call.recording.name}-folded",
+                ledger,
+                log,
+            )
+            kept = _narrow_for_rejected(fusions, call.recording.version)
+        else:
+            kept = _decide_fold(
+                fusions, call, call.recording.version, delta, noise, log
+            )
         if kept != fusions:
             rejected.append(call)
         fusions = kept
@@ -973,13 +1027,16 @@ def widen_packings(
     timing: Timing = Timing(rounds=3, calls=10),
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
+    ledger: Ledger | None = None,
 ) -> Profile:
     """``profile`` with each packing entry that names its versions applying also in each version of ``calls`` it matches but does not name.
 
     Where that version, built with them, is faster end to end beyond the noise;
-    elsewhere it keeps to the versions it names. A version's arrays are another's at
-    other extents, so a grouping that pays where switches dominate can slow a version
-    whose arrays' own time does. One end-to-end check per version the entries match.
+    elsewhere, or where it does not build, hangs or is not bit-identical with them
+    (recorded in ``ledger`` where one is given), it keeps to the versions it names. A
+    version's arrays are another's at other extents, so a grouping that pays where
+    switches dominate can slow a version whose arrays' own time does. One end-to-end
+    check per version the entries match.
     """
     entries = profile.packings()
     for call in calls:
@@ -1001,15 +1058,28 @@ def widen_packings(
             )
             for i, e in enumerate(entries)
         ]
-        delta, noise = _end_to_end(
-            call,
-            dev,
-            _profile(profile, entries),
-            _profile(profile, widened),
-            timing,
-            log,
-            lock,
-        )
+        try:
+            delta, noise = _end_to_end(
+                call,
+                dev,
+                _profile(profile, entries),
+                _profile(profile, widened),
+                timing,
+                log,
+                lock,
+            )
+        except (ValueError, RuntimeError, ir.MLIRError) as e:
+            _refusal(
+                e,
+                dev,
+                _profile(profile, widened),
+                f"{call.recording.name} with the other versions' packings",
+                f"{call.recording.name}-widened",
+                ledger,
+                log,
+            )
+            log(f"  keeping {len(foreign)} packing(s) to the versions they name")
+            continue
         noise_s = "?" if noise is None else f"{noise:.1f}"
         log(
             f"{call.recording.name}: the other versions' packings "
@@ -1046,6 +1116,33 @@ def _matches(members: Sequence, recording, dev) -> bool:
     probe.add_packing(members)
     version = recording.version
     return any(probe.packings_of(s.op.resolved(dev), version) for s in recording.steps)
+
+
+def _refusal(
+    e: Exception,
+    dev,
+    profile: Profile,
+    what: str,
+    stem: str,
+    ledger: Ledger | None,
+    log: Callable[[str], None],
+) -> Kind:
+    """Return the kind of ``e``, ``what`` under ``profile`` failing to build, run or match.
+
+    Logged, and recorded in ``ledger``, where given, with ``profile`` saved as ``stem``.
+    """
+    kind = (
+        Kind.HANG
+        if _device_timeout(e)
+        else Kind.MISMATCH if isinstance(e, NotBitIdentical) else Kind.BUILD
+    )
+    log(f"{what}: refused, {kind.value}: {first_error(str(e))}")
+    if ledger is not None:
+        saved = ledger.directory / "profiles"
+        saved.mkdir(parents=True, exist_ok=True)
+        profile.save(saved / f"{stem}.json")
+        ledger.record(kind, dev.name, str(e), f"{what}, profile profiles/{stem}.json")
+    return kind
 
 
 def _end_to_end(

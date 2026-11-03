@@ -10,10 +10,13 @@ No NPU above ``# On the device``.
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.iron import In, Out
+from aie.utils.compile.jit.params import param
 from ml_dtypes import bfloat16
 
 import iron
 from iron import Profile, Scratchpad
+from iron.common import Operator
 from iron.common.declare.profile import PackingEntry
 from iron.common.graph.compiled import apply_profile
 from iron.common.graph.packing import apply as apply_packings
@@ -29,8 +32,10 @@ from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
+from iron.operators.silu import SiLU
 from iron.operators.tanh import Tanh
 from iron.tests.support import sequences
+from iron.tests.support.graphs import Chain
 from iron.tests.support.llama_model import small
 from iron.tune.autotune import Point, Shape, Timed, settings, time_shape
 from iron.tune.costmodel import CostModel
@@ -525,6 +530,99 @@ def test_on_an_xclbin_a_packing_joins_its_steps_dispatches(npu2, tmp_path):
     assert full.features(together)["dispatches"] == 0
     assert xclbin.features(alone)["dispatches"] == len(xclbin.order) - 1
     assert xclbin.features(together)["dispatches"] == 0
+
+
+class Doubled(Operator):
+    """Doubles its input on the host: a step no packing search times."""
+
+    reference_only = True
+    rows: int = param()
+    x = In(rows, 8)
+    y = Out(rows, 8)
+
+    def reference(self, x):
+        return x * 2
+
+
+class Doubles(iron.Graph):
+    """Two independent ``Doubled`` steps."""
+
+    def body(self, x, y):
+        return Doubled.step(x), Doubled.step(y)
+
+
+def test_a_search_that_finds_nothing_keeps_the_packings_a_version_has(npu2, tmp_path):
+    """A version searched keeps its own packings where no grouping beats them.
+
+    Its entry also names a version these calls do not run, which it keeps too.
+    """
+    recording = Doubles().record(x=(4, 8), y=(8, 8))
+    profile = Profile()
+    profile.add_packing(
+        [(Doubled, {"rows": 4}), (Doubled, {"rows": 8})],
+        [recording.version, _version("prompt")],
+    )
+    logged = []
+    out = price_packings(
+        [Timed(recording)],
+        npu2,
+        profile,
+        full_elf=True,
+        fit_cache=tmp_path / "fit",
+        log=logged.append,
+    )
+    assert f"{recording.name}: no packing gains" in logged
+    assert out.packings() == profile.packings()
+
+
+def test_a_version_its_profile_does_not_build_is_refused(npu2, tmp_path):
+    """A fusion entry giving SiLU three columns, which 2048 elements do not split into.
+
+    The version is not searched, and the tune goes on.
+    """
+    recording = Chain(size=SIZE, tile=SIZE, columns=1).record(a=(SIZE,), b=(SIZE,))
+    profile = Profile()
+    profile.add_fusion(
+        FusionKind.STREAM,
+        [
+            (SiLU, {"size": SIZE}, {"num_aie_columns": 3}),
+            (ElementwiseMul, {"size": SIZE}),
+        ],
+        [(0, "y", 1, "a")],
+    )
+    logged = []
+    out = price_packings(
+        [Timed(recording)],
+        npu2,
+        profile,
+        full_elf=True,
+        fit_cache=tmp_path / "fit",
+        log=logged.append,
+    )
+    assert any(
+        line.startswith(f"{recording.name} as profiled: refused, build failure")
+        for line in logged
+    ), logged
+    assert out.fusions() == profile.fusions() and not out.packings()
+
+
+def test_widen_keeps_an_entry_to_its_versions_where_it_does_not_build(npu2):
+    """Another version's entry gives ReLU three columns, which 2048 elements do not split into.
+
+    Built with it, this version fails; the entry keeps to the version it names.
+    """
+    recording = Single().record(x=(SIZE,))
+    prompt = _version("prompt")
+    profile = Profile()
+    profile.add_packing(
+        [(ReLU, {"size": SIZE}, {"num_aie_columns": 3}), (Tanh, {"size": SIZE})],
+        [prompt],
+    )
+    logged = []
+    widened = widen_packings([Timed(recording)], npu2, profile, log=logged.append)
+    assert any("refused, build failure" in line for line in logged), logged
+    (entry,) = widened.packings()
+    assert entry.versions == {prompt}
 
 
 # ---------------------------------------------------------------------------
