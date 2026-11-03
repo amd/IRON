@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from aie import ir
+from aie.iron.device import Device
 from aie.utils.compile.jit.params import widths
 
 from iron.common.declare import Operator, Profile
@@ -592,7 +593,7 @@ def _profile(base: Profile, packings: Sequence[PackingEntry]) -> Profile:
 
 def price_packings(
     calls: Sequence[Timed],
-    dev,
+    dev: Device,
     profile: Profile,
     *,
     full_elf: bool,

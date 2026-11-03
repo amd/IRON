@@ -41,6 +41,7 @@ from typing import Any, Protocol, TypeVar
 import numpy as np
 from aie import ir
 from aie.iron import Program
+from aie.iron.device import Device
 
 from iron.common.declare import Operator, Profile
 from iron.common.declare.profile import Version
@@ -464,7 +465,7 @@ def _dominates(a: Sequence[Mapping[str, Any]], b: Sequence[Mapping[str, Any]]) -
 
 def narrowings(
     group: FusionGroup,
-    dev,
+    dev: Device,
     feasible: Callable[[tuple[dict[str, Any], ...]], bool],
 ) -> list[tuple[dict[str, Any], ...]]:
     """Return every widest combination of the group's members' widths that is ``feasible``.
@@ -931,7 +932,7 @@ def compare_graphs(
 
 def confirm_fusions(
     calls: Sequence[Timed],
-    dev,
+    dev: Device,
     taken: Sequence[FusionGroup],
     priced: Mapping[FusionGroup, Trial],
     profile: Profile,
@@ -1078,7 +1079,7 @@ def _checkpoint(
 
 def price_fusions(
     calls: Sequence[Timed],
-    dev,
+    dev: Device,
     profile: Profile | None = None,
     *,
     full_elf: bool,

@@ -17,6 +17,8 @@ from collections.abc import Callable, Hashable, Sequence
 from pathlib import Path
 from typing import Any
 
+from aie.iron.device import Device
+
 from iron.common.declare import Profile
 from iron.common.declare.profile import PackingEntry, Version
 from iron.common.graph.compiled import apply_profile
@@ -145,7 +147,7 @@ def narrowed(
 
 def checked(
     record: Callable[[Profile], Sequence[Timed]],
-    dev,
+    dev: Device,
     base: Profile,
     candidate: Profile,
     *,

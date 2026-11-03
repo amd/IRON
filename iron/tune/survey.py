@@ -15,6 +15,7 @@ import dataclasses
 from collections.abc import Callable, Hashable, Mapping, Set
 from typing import Any
 
+from aie.iron.device import Device
 from aie.utils import coded
 from aie.utils.compile.jit.params import OperatorParam
 
@@ -132,7 +133,7 @@ class Survey:
 def survey(
     call: Timed,
     profile: Profile,
-    dev,
+    dev: Device,
     times: Mapping[str, float],
     model: CostModel,
     codable: Set[Hashable] = frozenset(),
