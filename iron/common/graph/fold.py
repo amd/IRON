@@ -58,7 +58,7 @@ def _buffer_adjacent(recording: Recording) -> dict[int, tuple[str, str]]:
     """Index ``i``'s (producer's output operand name, consumer's input operand name) where step ``i``'s one output is read only by step ``i + 1``.
 
     Never again, is not a graph output, feedback, pinned or resident buffer, and names
-    its whole buffer; step ``i + 1`` has one output, and its matching input, and every
+    its whole buffer; no host step runs between the two; step ``i + 1`` has one output, and its matching input, and every
     other input it fills, do too, of the tile's element count and dtype; and the two
     operators are bound to the same per-call extent, or neither is (``_bounds_match``)
     -- a prompt chunk's own row count folds, its buffers walking it alike. Independent
@@ -80,10 +80,11 @@ def _buffer_adjacent(recording: Recording) -> dict[int, tuple[str, str]]:
         for h in host_step.writes:
             writers.setdefault(h.ref().root, []).append(-1)
 
+    host_at = {s.at for s in recording.host}
     found: dict[int, tuple[str, str]] = {}
     for i in range(len(recording.steps) - 1):
         step, nxt = recording.steps[i], recording.steps[i + 1]
-        if not _bounds_match(step.op, nxt.op):
+        if i + 1 in host_at or not _bounds_match(step.op, nxt.op):
             continue
         # Handle-level shapes, not the (possibly unresolved) Operand's: a
         # Select()-shaped operand (ProjectionGEMM's B) needs its dtype
@@ -232,19 +233,21 @@ def apply_folds(recording: Recording, folds: Sequence[Fusion]) -> Recording:
     each hop's other input appended, its output the run's last step's.
 
     Raises:
-        ValueError: Two of ``folds`` share a step, or a hop no longer
-            admits (its operator changed since ``fold_candidates`` ran).
+        ValueError: Two of ``folds`` share a step, one spans a host step, or a hop no
+            longer admits (its operator changed since ``fold_candidates`` ran).
     """
     taken: dict[int, Fusion] = {}
     for fusion in folds:
         if fusion.kind is not FusionKind.FOLD:
             raise ValueError(f"apply_folds: {fusion.kind.value} is not a fold")
-        for s in fusion.steps:
         if list(fusion.steps) != list(range(fusion.steps[0], fusion.steps[-1] + 1)):
             raise ValueError(f"a fold's steps must be consecutive, not {fusion.steps}")
+        for s in fusion.steps:
             if s in taken:
                 raise ValueError(f"step {s} is folded twice")
             taken[s] = fusion
+        if any(fusion.steps[0] < h.at <= fusion.steps[-1] for h in recording.host):
+            raise ValueError(f"{fusion} folds across a host step")
     steps: list[Step | None] = list(recording.steps)
     bindings = list(recording.bindings)
     for fusion in dict.fromkeys(taken.values()):
@@ -279,4 +282,8 @@ def apply_folds(recording: Recording, folds: Sequence[Fusion]) -> Recording:
         for s in fusion.steps:
             bindings = _rebind(recording.steps[s].op, current, bindings)
     kept = [s for s in steps if s is not None]
-    return dataclasses.replace(recording, steps=kept, bindings=bindings)
+    host = [
+        dataclasses.replace(h, at=h.at - sum(s is None for s in steps[: h.at]))
+        for h in recording.host
+    ]
+    return dataclasses.replace(recording, steps=kept, bindings=bindings, host=host)

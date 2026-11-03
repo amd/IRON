@@ -213,6 +213,41 @@ def test_a_second_binary_link_is_refused():
     assert sorted(f.steps for f in candidates) == [(0, 1)]
 
 
+class _HostBetween(iron.Graph):
+    """SiLU then ``*`` and ``+``, a host step writing ``staged`` before step ``at``."""
+
+    def __init__(self, at: int):
+        self.at = at
+        self.staged = iron.state((2048,))
+
+    def body(self, x):
+        y = SiLU.step(x, tile_size=256)
+        if self.at == 1:
+            iron.on_host(self.stage, x, writes=(self.staged,))
+        y = ElementwiseMul.step(y, self.staged, tile_size=256)
+        if self.at == 2:
+            iron.on_host(self.stage, x, writes=(self.staged,))
+        return ElementwiseAdd.step(y, self.staged, tile_size=256)
+
+    def stage(self, x, staged):
+        staged[:] = x
+
+
+def test_a_fold_never_spans_a_host_step():
+    rec = _HostBetween(at=1).record(x=(2048,))
+    assert all(f.steps != (0, 1) for f in fold_candidates(rec))
+    with pytest.raises(ValueError, match="folds across a host step"):
+        apply_folds(rec, (Fusion(FusionKind.FOLD, (0, 1), (Edge(0, "y", 1, "a"),)),))
+
+
+def test_a_host_step_after_a_fold_keeps_its_place():
+    rec = _HostBetween(at=2).record(x=(2048,))
+    fold = next(f for f in fold_candidates(rec) if f.steps == (0, 1))
+    folded = apply_folds(rec, (fold,))
+    (host,) = folded.host
+    assert len(folded.steps) == 2 and host.at == 1
+
+
 def test_a_graph_output_is_not_folded_away():
     """``mid``, both an intermediate and a graph output, keeps its own step.
 
