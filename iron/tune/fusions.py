@@ -24,6 +24,7 @@ unfused, or fused differently, elsewhere is untouched.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import heapq
 import json
@@ -62,11 +63,11 @@ from .autotune import (
 from .failures import Kind, Ledger, first_error, place
 from .measure import (
     Cache,
+    NpuLock,
     Spent,
     Timing,
     _sample,
     measure_fusion,
-    npu_lock,
     sized,
     standard_error,
     time_interleaved,
@@ -215,7 +216,7 @@ def time_fusion_group(
     remeasure: bool = False,
     fused: Sequence[Operator] | None = None,
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
 ) -> Trial:
     """``group`` priced as a whole.
 
@@ -522,7 +523,7 @@ def narrow_group(
     remeasure: bool = False,
     fit_cache: Path = FIT_CACHE,
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
 ) -> tuple[Trial, tuple[dict[str, Any], ...] | None]:
     """``group`` priced at the fastest setting of its members that co-resides, against ``group.steps`` run apart at their own.
 
@@ -824,7 +825,7 @@ def compare_graphs(
     timing: Timing,
     seed: int = 0,
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
 ) -> tuple[float, float | None]:
     """How much longer ``after`` takes than ``before``, two builds of ``call``'s recording.
 
@@ -887,11 +888,7 @@ def compare_graphs(
     staged = [(None, v) for v in _bound_points(recording, call.values)] + timed
     delta = 0.0
     variance: float | None = 0.0
-    # Held from the first dispatch (each graph's context created lazily on
-    # it) through the release below, not just around a dispatch: both
-    # graphs' contexts stay loaded past their own call otherwise, past the
-    # window another process holding this lock is kept out of.
-    with npu_lock(lock):
+    with lock or contextlib.nullcontext():
         try:
             for weight, values in staged:
                 for name, content in states.items():
@@ -944,7 +941,7 @@ def confirm_fusions(
     seed: int = 0,
     refused: dict[str, str] | None = None,
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
 ) -> list[FusionGroup]:
     """``taken`` with a group dropped wherever the version it runs in does not gain from it beyond the noise.
 
@@ -970,9 +967,8 @@ def confirm_fusions(
         refused: A hang's reason recorded here, by ``_refused_key``, for
             every group dropped on it: a caller persists this so the group
             is never retried past this run either.
-        lock: Take ``NPU_LOCK_PATH`` from each version's first dispatch
-            through releasing its graphs' contexts, not just under
-            ``coord/npu``.
+        lock: Held from each version's first dispatch through releasing its
+            graphs' contexts; none taken where None.
 
     Raises:
         NotBitIdentical: A version's fused output is not bit-identical to
@@ -1092,7 +1088,7 @@ def price_fusions(
     max_price: int | None = None,
     kinds: Sequence[FusionKind] = tuple(FusionKind),
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
 ) -> Profile | None:
     """``profile`` with a fusion entry for each fusion ``calls``' graphs admit that gains beyond the noise.
 
@@ -1139,10 +1135,7 @@ def price_fusions(
             short run is never kept waiting behind a whole multi-hour
             sweep) until it gets a profile back, never holds the lock past
             one batch.
-        lock: Take ``NPU_LOCK_PATH`` for each measurement's own lifetime (a
-            caller running this whole sweep without the ``coord/npu``
-            wrapper, which takes it for the wrapped command's whole life
-            instead).
+        lock: Held for each measurement's own lifetime; none taken where None.
 
     Returns:
         The profile, or None where ``max_price`` left groups unpriced.

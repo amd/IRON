@@ -46,7 +46,7 @@ from .autotune import (
 from .costmodel import CostModel
 from .failures import Ledger
 from .fusions import price_fusions
-from .measure import Budget, Cache, Timing, pmode, switch_cost
+from .measure import Budget, Cache, NpuLock, Timing, pmode, switch_cost
 from .packings import price_folds_before_packing, price_packings
 from .plan import coded_seed, searches
 from .survey import Survey, step_times, survey
@@ -128,13 +128,12 @@ def parser(description: str) -> argparse.ArgumentParser:
         "again for the rest)",
     )
     p.add_argument(
-        "--lock-in-process",
-        action="store_true",
-        help="take the device lock here, per measurement, instead of "
-        "relying on coord/npu to hold it for this whole process's life: "
-        "for a sweep run without that wrapper, so another agent's short "
-        "run is never kept waiting behind it. Never pass this while also "
-        "running under coord/npu (nesting the two deadlocks both)",
+        "--npu-lock",
+        type=NpuLock,
+        metavar="PATH",
+        help="flock PATH around each measurement, so another process taking "
+        "the same lock never dispatches while this one's images are loaded "
+        "(default: no lock); never one a wrapper of this process already holds",
     )
     return p
 
@@ -145,6 +144,7 @@ def _timing(args: argparse.Namespace) -> dict:
         repeats=args.repeats,
         cache=Cache.here(),
         remeasure=args.remeasure,
+        lock=args.npu_lock,
         # Hours long and usually redirected: each line lands as it is logged.
         log=functools.partial(print, flush=True),
     )
@@ -190,7 +190,7 @@ def tune(
     full_elf = dev.can_dispatch_full_elf
     log = functools.partial(print, flush=True)
     budget = Budget(args.budget, log)
-    lock = args.lock_in_process
+    lock = args.npu_lock
     cycles = kernel_cycles(dev)
     core_mhz = aie_utils.DefaultNPURuntime.core_mhz
     model = _cost_model(args, dev)
@@ -308,7 +308,6 @@ def tune(
                 full_elf=full_elf,
                 checkpoint=path.with_suffix(".progress.json"),
                 max_price=args.max_price,
-                lock=lock,
                 **_timing(args),
             )
             if priced is None:
@@ -370,7 +369,7 @@ def _surveys(
             repeats=args.repeats,
             cache=Cache.here(),
             log=log,
-            lock=args.lock_in_process,
+            lock=args.npu_lock,
         )
         found = survey(
             call,
@@ -396,7 +395,7 @@ def _cost_model(args, dev) -> CostModel:
                 dev,
                 cache=Cache.here(),
                 log=functools.partial(print, flush=True),
-                lock=args.lock_in_process,
+                lock=args.npu_lock,
             )
         )
     return model
@@ -440,7 +439,7 @@ def _save_packings(
         core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
         progress=progress,
         log=functools.partial(print, flush=True),
-        lock=args.lock_in_process,
+        lock=args.npu_lock,
         budget=budget,
     )
     print(f"wrote {model.save(dev.name)}")

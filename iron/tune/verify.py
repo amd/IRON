@@ -27,7 +27,7 @@ from iron.common.image.step import FusionKind
 
 from .autotune import CONFIDENCE, Timed, _identity
 from .fusions import built, compare_graphs
-from .measure import SPENT, Spent, Timing
+from .measure import SPENT, NpuLock, Spent, Timing
 
 
 @dataclasses.dataclass(frozen=True)
@@ -151,7 +151,7 @@ def checked(
     *,
     timing: Timing = Timing(rounds=3, calls=10),
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
     memo: dict[tuple[Hashable, Hashable], Check] | None = None,
 ) -> dict[Version, Check]:
     """Each version ``candidate`` builds differently from ``base``, timed end to end against it.
@@ -162,7 +162,7 @@ def checked(
         candidate: The profile checked.
         timing: How each version is timed end to end.
         log: Where each version's check is logged.
-        lock: Take the device lock per check, not under ``coord/npu``.
+        lock: Held around each check; none taken where None.
         record: The calls, recorded under a profile.
         memo: Checks by the two builds' fingerprints, read and added to, so a
             pair of builds is timed once per tune.
@@ -205,7 +205,7 @@ def verify(
     *,
     timing: Timing = Timing(rounds=3, calls=10),
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
     memo: dict[tuple[Hashable, Hashable], Check] | None = None,
 ) -> tuple[Profile, dict[Version, Check]]:
     """``candidate`` where each version it builds differently from ``base`` gains on it end to end beyond the noise.
@@ -268,7 +268,7 @@ class Phases:
         profile: Profile,
         *,
         log: Callable[[str], None] = print,
-        lock: bool = False,
+        lock: NpuLock | None = None,
         memo: dict[tuple[Hashable, Hashable], Check] | None = None,
     ):
         self.record, self.dev, self.profile = record, dev, profile

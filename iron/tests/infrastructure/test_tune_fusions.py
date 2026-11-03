@@ -7,12 +7,10 @@ Grouping the fusions a tuner's calls admit, and choosing among them cheapest fir
 device below the line.
 """
 
-import getpass
 import hashlib
 import json
 import math
 import re
-import subprocess
 from pathlib import Path
 
 import aie.utils as aie_utils
@@ -41,7 +39,6 @@ from iron.tests.support import sequences
 from iron.tests.support.graphs import Chain as ChainGraph
 from iron.tests.support.graphs import Rotate
 from iron.tests.support.llama_model import small
-from iron.tune import measure as tune_measure
 from iron.tune.autotune import Point, Timed, Trial
 from iron.tune.fusions import (
     FusionGroup,
@@ -69,7 +66,6 @@ from iron.tune.measure import (
     Standalone,
     Timing,
     _rewrite_mismatch,
-    npu_lock,
     platform,
     repeat_fusion,
     written_steps,
@@ -301,56 +297,6 @@ def test_rewrite_mismatch_names_the_differing_key_count_and_max_diff():
 def test_rewrite_mismatch_names_missing_and_extra_keys():
     reason = _rewrite_mismatch({"0.y": np.zeros(2)}, {"1.y": np.zeros(2)})
     assert reason == "keys differ: missing ['0.y'], extra ['1.y']"
-
-
-def test_npu_lock_is_a_noop_unless_told_to_lock():
-    """Every existing caller (every test run under ``coord/npu``) passes no ``lock``.
-
-    Taking none here at all; only a long sweep run without that wrapper passes
-    ``lock=True``, taking the same lock per measurement instead.
-    """
-    with npu_lock():
-        pass
-    with npu_lock(False):
-        pass
-
-
-def test_npu_lock_nested_reenters_without_a_second_flock(tmp_path):
-    """A caller already holding this lock enters it again without blocking on itself.
-
-    An outer ``npu_lock(lock=True)`` spans a whole measurement's loaded images and
-    ``time_interleaved``'s own enters again: only the outermost entry takes the real
-    flock, over a private file here, not the shared ``coord`` one.
-    """
-    path = tmp_path / "test.lock"
-    old_path = tune_measure.NPU_LOCK_PATH
-    tune_measure.NPU_LOCK_PATH = path
-    try:
-        with npu_lock(True):
-            assert tune_measure._LOCK_DEPTH == 1
-            with npu_lock(True):
-                assert tune_measure._LOCK_DEPTH == 2
-            assert tune_measure._LOCK_DEPTH == 1
-        assert tune_measure._LOCK_DEPTH == 0
-    finally:
-        tune_measure.NPU_LOCK_PATH = old_path
-
-
-def test_other_user_on_npu_ignores_a_run_on_npu_under_my_own_name():
-    """Parses real ``ps`` output.
-
-    A ``run_on_npu.py`` under a name that isn't mine is someone else on the device; the
-    same process under my own name (what ``ps`` reports me spawning it as) is not.
-    """
-    proc = subprocess.Popen(
-        ["python3", "-c", "import time; time.sleep(5)", "run_on_npu.py"]
-    )
-    try:
-        assert tune_measure._other_user_on_npu("a-name-nobody-has") is True
-        assert tune_measure._other_user_on_npu(getpass.getuser()) is False
-    finally:
-        proc.terminate()
-        proc.wait()
 
 
 def test_standalone_refuses_shared_buffers_for_a_fused_edge():

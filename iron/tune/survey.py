@@ -28,7 +28,7 @@ from .autotune import Shape, Timed, least_us
 from .costmodel import CostModel
 from .fold import array_scoped_fold_candidates
 from .fusions import design_cores
-from .measure import Cache, Timing, measure
+from .measure import Cache, NpuLock, Timing, measure
 
 # A design reading weights at this share of the version's fastest read rate
 # is bound by it; one whose kernel bound is this share of its time, by compute.
@@ -301,7 +301,7 @@ def step_times(
     repeats: int,
     cache: Cache | None,
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
 ) -> dict[str, float]:
     """Each design of ``call``'s version under ``profile``, by name.
 

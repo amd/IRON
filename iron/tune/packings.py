@@ -62,7 +62,7 @@ from .fusions import (
     group_fit_verdict,
     refuse_group,
 )
-from .measure import Budget, Cache, Timing, measure
+from .measure import Budget, Cache, NpuLock, Timing, measure
 
 # A version is searched only where its switches cost at least this share of
 # its steps' own time: packing removes switches, and narrowing slows steps.
@@ -115,7 +115,7 @@ class Packer:
         cache: Cache | None,
         fit_cache: Path,
         log: Callable[[str], None],
-        lock: bool,
+        lock: NpuLock | None,
         model: CostModel,
         ledger: Ledger | None = None,
         cycles: Mapping[str, int] | None = None,
@@ -451,6 +451,7 @@ class Packer:
                 cycles=self.cycles,
                 core_mhz=self.core_mhz,
                 log=self.log,
+                lock=self.lock,
             )
             for t in sorted((t for t in tried if t.gains), key=lambda t: t.delta_us):
                 trial = {**current, key: {**setting, **t.tunables}}
@@ -606,7 +607,7 @@ def price_packings(
     core_mhz: float | None = None,
     progress: Callable[[Profile, CostModel], None] | None = None,
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
     budget: Budget | None = None,
 ) -> Profile:
     """``profile`` with a packing entry for each group of arrays a version gains from sharing one device configuration (``Packer``).
@@ -635,7 +636,7 @@ def price_packings(
         fit_cache: Where each group's fit verdict is kept.
         ledger: Where each failure is recorded, or None.
         log: Where progress is logged.
-        lock: Take the device lock per measurement, not under ``coord/npu``.
+        lock: Held around each measurement; none taken where None.
         model: What a version pays beyond its steps' times; each end-to-end
             check adds it a sample. The prior where None.
         cycles: Kernel cycles per call by recipe key, which spare a narrowed
@@ -835,7 +836,7 @@ def price_folds_before_packing(
     core_mhz: float | None = None,
     progress: Callable[[Profile, CostModel], None] | None = None,
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
     budget: Budget | None = None,
 ) -> Profile:
     """Return ``profile`` with the folds its arrays admit, packed.
@@ -971,7 +972,7 @@ def widen_packings(
     *,
     timing: Timing = Timing(rounds=3, calls=10),
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
 ) -> Profile:
     """``profile`` with each packing entry that names its versions applying also in each version of ``calls`` it matches but does not name.
 
@@ -1054,7 +1055,7 @@ def _end_to_end(
     after: Profile,
     timing: Timing,
     log: Callable[[str], None],
-    lock: bool,
+    lock: NpuLock | None,
 ) -> tuple[float, float | None]:
     """Return ``call``'s version built under ``after`` against it under ``before`` (``compare_graphs``), each packaged as ``dev`` does.
 

@@ -11,6 +11,7 @@ at, and returns a ``Profile`` naming the fastest for each shape.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import itertools
@@ -39,6 +40,7 @@ from iron.operators.gemm import GEMM
 from .measure import (
     CONTEXTS,
     Cache,
+    NpuLock,
     Standalone,
     Timing,
     judge,
@@ -437,6 +439,7 @@ def time_shape(
     cycles: Mapping[str, int] | None = None,
     core_mhz: float | None = None,
     log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
 ) -> list[Trial]:
     """Each setting of ``shape`` timed, the recorded one first.
 
@@ -444,7 +447,8 @@ def time_shape(
     (MHA's pipelines with its query block), so one at a time would stop at a
     local best. A setting whose ``least_us`` at ``cycles`` and ``core_mhz``
     is no faster than the fastest taken so far is not timed. None where its operators
-    share no setting (each held to its own pinned ones): it stays as recorded.
+    share no setting (each held to its own pinned ones): it stays as recorded. Each
+    dispatch is under ``lock`` where given.
     """
     found = settings(shape.members[0][0], dev, shape.pinned)
     for op, _, _ in shape.members[1:]:
@@ -477,7 +481,10 @@ def time_shape(
         cycles = {
             **cycles,
             **time_kernels(
-                (fn for key, fn in kernels.items() if key not in cycles), cache, log
+                (fn for key, fn in kernels.items() if key not in cycles),
+                cache,
+                log,
+                lock,
             ),
         }
         least = {_frozen(s): _least(shape, s, cycles, core_mhz, dev) for s in found[1:]}
@@ -500,7 +507,7 @@ def time_shape(
         if skipped := sum(1 for s in batch if slower(s) and _frozen(s) not in tried):
             log(f"    {skipped} slower by their kernel alone, not timed")
         trials, recorded_us = _time(
-            shape, todo, full_elf, timing, repeats, cache, remeasure, log
+            shape, todo, full_elf, timing, repeats, cache, remeasure, log, lock
         )
         for s, t in zip(todo, trials):
             tried[_frozen(s)] = t
@@ -553,6 +560,7 @@ def _time(
     cache: Cache | None,
     remeasure: bool,
     log: Callable[[str], None],
+    lock: NpuLock | None,
 ) -> tuple[list[Trial], float]:
     """``found``'s settings timed and judged, and the recorded one's weighted step time.
 
@@ -576,6 +584,7 @@ def _time(
                 cache=cache,
                 remeasure=remeasure,
                 log=log,
+                lock=lock,
             )
             default = ran[0]
             recorded_us += weight * default.t_step_us
@@ -592,7 +601,7 @@ def _time(
                     else variance + (weight * noise) ** 2
                 )
                 if refused[i] is None and ran[i].output != default.output:
-                    refused[i] = _judged(ops[0], ops[i], values, inputs, full_elf)
+                    refused[i] = _judged(ops[0], ops[i], values, inputs, full_elf, lock)
     return [
         Trial(s, d, 0.0 if i == 0 else (None if v is None else math.sqrt(v)), r)
         for i, (s, d, v, r) in enumerate(zip(found, deltas, variances, refused))
@@ -605,8 +614,9 @@ def _judged(
     values: Mapping[str, int],
     inputs: Mapping[str, np.ndarray],
     full_elf: bool,
+    lock: NpuLock | None,
 ) -> str | None:
-    """``judge`` on one run of ``op`` at ``values`` on ``inputs``."""
+    """``judge`` on one run of ``op`` at ``values`` on ``inputs``, under ``lock`` where given."""
     run = Standalone(
         f"judge_{_identity(op, op.dev)}",
         [op],
@@ -616,8 +626,11 @@ def _judged(
         inputs={op: inputs},
         full_elf=full_elf,
     )
-    run.digest()
-    return judge(default, op, run.inputs(), run.written(), values)
+    with lock or contextlib.nullcontext():
+        run.digest()
+        verdict = judge(default, op, run.inputs(), run.written(), values)
+        del run
+    return verdict
 
 
 def _json_safe(dims: Mapping[str, Any]) -> dict[str, Any]:
@@ -695,6 +708,7 @@ def autotune(
     core_mhz: float | None = None,
     shares: Mapping[Hashable, float] | None = None,
     log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
 ) -> Profile:
     """``profile`` with an entry for each shape of ``calls`` (``shapes``) naming the fastest setting taken (``time_shape``).
 
@@ -720,6 +734,7 @@ def autotune(
             ``cycles`` are timed at; None times every setting.
         shares: Each shape's largest share of a version's time, by
             ``Shape.key`` (``Survey.shares``).
+        lock: Held around each measurement; none taken where None.
     """
     found = shapes(calls, dev)
     if shares is not None:
@@ -749,6 +764,7 @@ def autotune(
             cycles=cycles,
             core_mhz=core_mhz,
             log=log,
+            lock=lock,
         )
         if not tried:
             continue

@@ -32,6 +32,7 @@ import time
 import uuid
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import TextIO
 
 import numpy as np
 from aie.iron import Out
@@ -443,80 +444,34 @@ def judge(
     return None
 
 
-# The same lock file coord/npu flocks; held here only around one measurement
-# (a caller's own ``lock=True``), not a whole sweep, so a short run elsewhere
-# is never kept waiting behind it. Never pass ``lock=True`` while also
-# running under coord/npu: a child re-flocking the file its own parent
-# holds deadlocks both.
-NPU_LOCK_PATH = Path("/scratch/ehunhoff/iron-next/coord/.npu.lock")
+class NpuLock:
+    """An exclusive flock on ``path``, re-entrant in this process, held around one measurement.
 
-# Nesting depth of this process's own hold on NPU_LOCK_PATH: a caller wraps a
-# whole measurement (build through releasing its loaded images) in one
-# npu_lock(lock=True), and the dispatch helpers it calls (time_interleaved,
-# say) take it again inside that; re-entry must be a no-op, or the second
-# flock (on its own, separate file descriptor) would block on the first one
-# this same process already holds. One flock per process is inherently
-# process-global state, so this stays a module variable rather than a
-# parameter threaded everywhere ``npu_lock`` is.
-_LOCK_DEPTH = 0
-
-
-def _other_user_on_npu(me: str) -> bool:
-    """Whether some user other than ``me`` has a ``run_on_npu.py`` in their process args right now.
-
-    Coord/npu's own wait, replicated, since flock alone only keeps out this lock's own
-    other users, not a bare script.
+    A context lives from an image's first dispatch until it is released, and another
+    process creating one meanwhile fails (``DRM_IOCTL_AMDXDNA_CREATE_HWCTX``, err -22),
+    so a caller holds this until its images are released, not just around a dispatch.
     """
-    out = subprocess.run(
-        ["ps", "-eo", "user=,args="], capture_output=True, text=True, check=True
-    ).stdout
-    return any(
-        parts[0] != me and "run_on_npu.py" in parts[1]
-        for parts in (line.split(maxsplit=1) for line in out.splitlines())
-        if len(parts) == 2
-    )
 
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.depth = 0
+        self.file: TextIO | None = None
 
-@contextlib.contextmanager
-def npu_lock(lock: bool = False):
-    """Return the device lock ``coord/npu`` takes (an exclusive flock on ``NPU_LOCK_PATH``, then waiting out another user's own ``run_on_npu .py``).
+    def __enter__(self) -> NpuLock:
+        if self.depth == 0:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.file = open(self.path, "a+")
+            fcntl.flock(self.file.fileno(), fcntl.LOCK_EX)
+        self.depth += 1
+        return self
 
-    A no-op context unless ``lock`` is True; re-entrant, so a caller already holding it
-    (an outer ``npu_lock(lock=True)`` spanning a whole measurement) may call something
-    that takes it again.
-
-    A caller whose images stay loaded (a context created on first dispatch)
-    past its own dispatch call must hold this for as long as that is true,
-    not just around the dispatch: another process creating its own context
-    while this one's is still live fails (``DRM_IOCTL_AMDXDNA_CREATE_HWCTX``,
-    err -22), lock or no lock, since the lock only ever kept out a
-    *dispatch*, never a *loaded* one.
-    """
-    global _LOCK_DEPTH
-    if not lock:
-        yield
-        return
-    if _LOCK_DEPTH > 0:
-        _LOCK_DEPTH += 1
-        try:
-            yield
-        finally:
-            _LOCK_DEPTH -= 1
-        return
-    NPU_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(NPU_LOCK_PATH, "a+") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        try:
-            me = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
-            while _other_user_on_npu(me):
-                time.sleep(15)
-            _LOCK_DEPTH = 1
-            try:
-                yield
-            finally:
-                _LOCK_DEPTH = 0
-        finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    def __exit__(self, *exc: object) -> None:
+        self.depth -= 1
+        if self.depth == 0:
+            assert self.file is not None, "opened by the outermost __enter__"
+            fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
+            self.file.close()
+            self.file = None
 
 
 def _build_in_order(chain: Sequence[Callable[..., Standalone]]) -> None:
@@ -563,18 +518,15 @@ def time_interleaved(
     groups: Sequence[Hashable | None] = (),
     fastest: float = math.inf,
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
 ) -> list[Stats]:
     """Each loaded image's per-round medians, microseconds (``samples_us``).
 
     Each call's figure the time the image itself took, which its
     ``KernelResult`` carries: mlir-aie's ``run_interleaved``, whose arguments
-    and errors these are. Dispatches under ``npu_lock``; ``runs``' images
-    are already loaded by the time this is called, so a caller spanning
-    their whole lifetime in its own ``npu_lock(lock=True)`` already holds
-    it, making this one a no-op re-entry, not a second acquisition.
+    and errors these are. Dispatches under ``lock`` where given.
     """
-    with npu_lock(lock):
+    with lock or contextlib.nullcontext():
         return run_interleaved(
             list(runs),
             rounds=timing.rounds,
@@ -888,7 +840,7 @@ def measure(
     cache: Cache | None = None,
     remeasure: bool = False,
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
 ) -> dict[int, Measurement]:
     """Time each of ``ops``, settings of one design with the default first.
 
@@ -909,9 +861,8 @@ def measure(
             `remeasure`; those run are written to it.
         remeasure: Run every setting even where ``cache`` already holds it.
         log: Where progress and a setting that fails to build are reported.
-        lock: Take ``NPU_LOCK_PATH`` for each batch's dispatch through its
-            contexts' release, not just under ``coord/npu`` (a caller not
-            running under that wrapper's own sweep).
+        lock: Held for each batch from its first dispatch through its
+            contexts' release; none taken where None.
 
     Returns:
         Each one timed, by its index in ``ops``. One other than the default
@@ -950,12 +901,12 @@ def measure(
         load=False,
     )
     first.load()
-    with npu_lock(lock):
+    with lock or contextlib.nullcontext():
         first.callable()
         begun = time.perf_counter()
         first.callable()
         one_us = (time.perf_counter() - begun) * 1e6
-    del first
+        del first
     # The repeats cancel a dispatch's jitter, which a step this long dwarfs.
     if one_us > LONG_STEP_US:
         repeats = 2
@@ -1001,11 +952,8 @@ def measure(
             built.append(i)
             short.append(one)
             long.append(many)
-        # Held for this whole batch, build through release: a context lives
-        # from a probe's first dispatch until ``del`` below, not just the
-        # dispatch itself (``npu_lock``).
         building = time.perf_counter() - begun
-        with npu_lock(lock):
+        with lock or contextlib.nullcontext():
             outputs = [run.digest() for run in short]
             batch_timing = sized(timing, [r.callable for r in short + long])
             # The default is timed in full; the others stop once far behind.
@@ -1110,7 +1058,7 @@ def measure_rewrite(
     repeats: int = 9,
     mode: str | None = None,
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
 ) -> tuple[Measurement, Measurement, str | None]:
     """Time the steps ``rewritten`` builds against the same steps ``as_recorded`` builds.
 
@@ -1129,8 +1077,8 @@ def measure_rewrite(
         log: Where progress is logged.
         output: What a run wrote, by name, to compare the two designs by.
         mode: The NPU's power mode, read now if not given.
-        lock: Take ``NPU_LOCK_PATH`` from the first dispatch through
-            releasing every probe's context, not just under ``coord/npu``.
+        lock: Held from the first dispatch through releasing every probe's
+            context; none taken where None.
 
     Returns:
         The recorded steps' measurement, the rewrite's, and why the rewrite
@@ -1145,11 +1093,7 @@ def measure_rewrite(
     for run in (one_recorded, one_rewritten, many_recorded, many_rewritten):
         run.load()
 
-    # Held from the first dispatch (each probe's context created lazily on
-    # it) through ``del`` below, not just around each dispatch: the two
-    # probes' contexts stay loaded in between otherwise, past the window
-    # another process holding this lock is kept out of.
-    with npu_lock(lock):
+    with lock or contextlib.nullcontext():
         one_recorded.callable()
         one_rewritten.callable()
         recorded_out = output(one_recorded)
@@ -1253,7 +1197,7 @@ def measure_fusion(
     kind: FusionKind = FusionKind.STREAM,
     fused_steps: Sequence[Operator] | None = None,
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
 ) -> FusionMeasurement:
     """Time a ``kind`` fusion of ``steps`` against the same steps run apart.
 
@@ -1374,7 +1318,7 @@ def switch_cost(
     cache: Cache | None = None,
     remeasure: bool = False,
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
 ) -> tuple[float, float]:
     """Return the cost of a device-configuration switch at ``dev``.
 
@@ -1395,8 +1339,8 @@ def switch_cost(
         log: Where progress is logged.
         cache: The cost is taken from it rather than measured, unless
             `remeasure`; what is measured is written to it.
-        lock: Take ``NPU_LOCK_PATH`` from the first load through releasing
-            every probe's context, not just under ``coord/npu``.
+        lock: Held from the first load through releasing every probe's
+            context; none taken where None.
 
     Returns:
         ``(fixed_us, per_core_us)``.
@@ -1432,7 +1376,7 @@ def switch_cost(
                 )
     keys = list(runs)
     building = time.perf_counter() - begun
-    with npu_lock(lock):
+    with lock or contextlib.nullcontext():
         for run in runs.values():
             run.load()
         stats = time_interleaved(
@@ -1469,7 +1413,7 @@ def time_kernels(
     fns: Iterable[ExternalFunction],
     cache: Cache | None = None,
     log: Callable[[str], None] = print,
-    lock: bool = False,
+    lock: NpuLock | None = None,
 ) -> dict[str, int]:
     """Each of ``fns``' fewest cycles a call on one core, by recipe key.
 
@@ -1489,7 +1433,7 @@ def time_kernels(
         return out
     log(f"    tracing {len(todo)} kernels' cycles")
     begun = time.perf_counter()
-    with npu_lock(lock), tempfile.TemporaryDirectory() as scratch:
+    with lock or contextlib.nullcontext(), tempfile.TemporaryDirectory() as scratch:
         for fn in todo:
             harness = KernelDesign(fn, calls=KERNEL_CALLS)
             inputs = harness.sample_inputs()
