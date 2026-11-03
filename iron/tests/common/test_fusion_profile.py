@@ -213,6 +213,13 @@ def test_a_profile_without_fusions_saves_as_before(tmp_path):
     assert roundtrip.read_text() == path.read_text()
 
 
+def test_an_empty_profile_saves_without_trailing_whitespace(tmp_path):
+    path = tmp_path / "profile.json"
+    Profile().save(path)
+    assert path.read_text() == '{"entries": [\n]}\n'
+    assert len(Profile.load(path)) == 0
+
+
 def test_an_existing_profile_saves_byte_identically(tmp_path):
     original = LLAMA_NPU2_PROFILE.read_text()
     roundtrip = tmp_path / "npu2.json"

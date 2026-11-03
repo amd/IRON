@@ -570,11 +570,13 @@ class Profile:
             )
             for p in self._packings
         ]
-        body = '{"entries": [\n  ' + ",\n  ".join(lines) + "\n]"
+        body = '{"entries": [' + ",".join(f"\n  {s}" for s in lines) + "\n]"
         if fusion_lines:
-            body += ',\n"fusions": [\n  ' + ",\n  ".join(fusion_lines) + "\n]"
+            body += ',\n"fusions": [' + ",".join(f"\n  {s}" for s in fusion_lines)
+            body += "\n]"
         if packing_lines:
-            body += ',\n"packings": [\n  ' + ",\n  ".join(packing_lines) + "\n]"
+            body += ',\n"packings": [' + ",".join(f"\n  {s}" for s in packing_lines)
+            body += "\n]"
         with open(path, "w") as f:
             f.write(body + "}\n")
 
