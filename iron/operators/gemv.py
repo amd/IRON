@@ -391,6 +391,9 @@ class GEMV(Operator):
         if len(others) > 1:
             return None
         binary = bool(others)
+        # One finish step may take another input (``validate``).
+        if binary and any(f.binary for f in self.finish):
+            return None
         used = sum(b.streamed for b in self.inputs)
         rides = False
         dev = self.dev

@@ -25,6 +25,8 @@ from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy, Gather
 from iron.operators.decode import Decode
 from iron.operators.depthwise_conv1d import DepthwiseConv1d
+from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.emit import Emit
 from iron.operators.flm.dequant.op import DequantBFP
 from iron.operators.flm.gemm.op import ProjectionGEMM
@@ -659,6 +661,21 @@ def test_flm_decode_layer_rejects_unknown_configurations(kwargs, match):
 def test_coded_rows_take_no_capacity_but_the_kernels(make):
     with pytest.raises(TypeError, match="takes no argument"):
         make()
+
+
+def test_a_gemv_folds_one_binary_finish_step(npu2):
+    """A second two-input consumer is refused, not built past ``validate``."""
+    gemv = GEMV(
+        M=2048,
+        K=2048,
+        tile_size_input=4,
+        tile_size_output=512,
+        num_aie_columns=4,
+        num_channels=1,
+    )
+    added = gemv.fold(ElementwiseAdd(size=2048, tile_size=512), 1)
+    assert added is not None and not added.rides
+    assert added.fold(ElementwiseMul(size=2048, tile_size=512), 0) is None
 
 
 @pytest.mark.parametrize(
