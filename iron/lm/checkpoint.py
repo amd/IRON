@@ -303,7 +303,7 @@ class Checkpoint:
                 nothing past the header.
             seed: The seed ``"random"`` draws at.
             layers: Keep the text stack's first ``layers`` layers alone
-                (``[model.]layers.<i>``): a shallow model's view of a deeper
+                (``[model.][language_model.]layers.<i>``): a shallow model's view of a deeper
                 checkpoint, whose other layers it would refuse as extra.
 
         Raises:
@@ -315,8 +315,10 @@ class Checkpoint:
             n: t
             for n, t in self.tensors.items()
             if layers is None
-            or not (m := re.match(r"(model\.)?layers\.(\d+)\.", n))
-            or int(m.group(2)) < layers
+            or not (
+                m := re.match(r"(?:model\.)?(?:language_model\.)?layers\.(\d+)\.", n)
+            )
+            or int(m.group(1)) < layers
         }
         if fill != "read":
             named = {n: (t.shape, t.dtype) for n, t in kept.items()}
