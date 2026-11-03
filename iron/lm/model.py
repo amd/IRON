@@ -454,7 +454,7 @@ class Model(iron.Graph):
         native, C = config.max_seq_len, config.prefill_chunk
         if native < 2 * C:
             return config
-        tree = Checkpoint(weights_path).tree("unread")
+        tree = Checkpoint(weights_path).tree("unread", layers=config.num_hidden_layers)
         dev = require_device()
         budget = host_budget() if budget is None else budget
 

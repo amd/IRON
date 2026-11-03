@@ -276,6 +276,12 @@ def test_a_shallow_config_loads_a_deeper_checkpoint_s_first_layers(tmp_path, npu
         )
 
 
+def test_fit_reads_a_shallow_config_s_layers_alone(npu2):
+    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    shallow = dataclasses.replace(config, num_hidden_layers=1)
+    assert Small.fit(shallow, checkpoint(config).path, budget=2**40) == shallow
+
+
 def test_fit_counts_a_per_step_images_own_scratch(npu1):
     """On npu1 each version is an xclbin a step, and each holds a scratch pool beside the arena.
 
