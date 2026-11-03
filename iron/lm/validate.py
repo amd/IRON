@@ -23,7 +23,7 @@ import dataclasses
 import json
 import statistics
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -33,12 +33,12 @@ from aie.iron.device import from_name
 from iron import Profile
 from iron.common.declare.profile import Version
 from iron.common.graph.coded import CodedWeight
-from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
+from iron.common.graph.compiled import CompiledGraph
 from iron.common.graph.record import Recording
 from iron.common.image.link import FullELF, PerStep
-from iron.common.image.packaging import plan, require_device
+from iron.common.image.packaging import require_device
 from iron.tune.autotune import Timed
-from iron.tune.fusions import NotBitIdentical, compare_graphs
+from iron.tune.fusions import NotBitIdentical, built, compare_graphs
 from iron.tune.measure import Timing
 from iron.tune.verify import touches
 
@@ -392,12 +392,63 @@ def model_tune_points(
 def version_recordings(model) -> dict[Version, Recording]:
     """``model``'s own ``Recording`` of each of ``shapes()``, by ``Recording.version``.
 
-    The identity ``compare_versions`` matches ``model_tune_points``'s calls against.
+    The identity ``version_builds`` matches ``model_tune_points``'s calls against.
     """
     out = {}
     for shape in model.shapes():
         recording = model.record(**shape)
         out[recording.version] = recording
+    return out
+
+
+def version_builds(
+    model_class: type[Model],
+    checkpoint: Path,
+    max_seq_len: int | None,
+    profiles: Sequence[Profile],
+    label_to_version: Mapping[str, Version],
+    *,
+    config: Mapping[str, Any] | None = None,
+) -> dict[str, tuple[Timed, list[CompiledGraph]]]:
+    """Each label's tune call (``model_tune_points``) and its version under each of ``profiles`` (``built``).
+
+    Each side recorded on real weights under its own profile, since a tunable applies
+    as a step is recorded; the call carries the first side's recording.
+
+    Raises:
+        ValueError: ``label_to_version`` names a version ``model_tune_points`` gives
+            no call for: ``tune_calls`` and ``shapes()`` name other sets, a bug.
+    """
+    dev = require_device()
+    calls = {
+        c.recording.version: c
+        for c in model_tune_points(model_class, checkpoint, config)
+    }
+    sides = []
+    for profile in profiles:
+        probe = model_class.from_checkpoint(
+            checkpoint, max_seq_len=max_seq_len, config=config
+        )
+        probe.profile = profile
+        sides.append(version_recordings(probe))
+    missing = [
+        label
+        for label, version in label_to_version.items()
+        if version not in calls or any(version not in side for side in sides)
+    ]
+    if missing:
+        raise ValueError(
+            f"{missing}: no tune point for these versions; "
+            f"{model_class.__name__}.tune_calls names other shapes than "
+            f"{model_class.__name__}.shapes() does"
+        )
+    out = {}
+    for label, version in label_to_version.items():
+        own = [
+            dataclasses.replace(calls[version], recording=side[version])
+            for side in sides
+        ]
+        out[label] = own[0], [built(c, p, dev) for c, p in zip(own, profiles)]
     return out
 
 
@@ -414,66 +465,25 @@ def compare_versions(
     timing: Timing = Timing(rounds=3, calls=10),
     log=print,
 ) -> dict[str, dict[str, Any]]:
-    """``labels`` (``changed_versions``'s), each compared bit for bit and timed.
+    """``labels`` (``changed_versions``'s), each built under both profiles (``version_builds``), compared bit for bit and timed (``compare_graphs``).
 
-    ``stock_profile`` against ``candidate_profile`` (``compare_graphs``): a fresh
-    real-weight recording of the version (``model_class.from_checkpoint``, not the
-    already-loaded ``stock`` or ``candidate``, whose states and weights a recording
-    apart from their own cannot address), built under each profile (``apply_profile``),
-    at the per-call points ``model_tune_points`` gives that version
-    (``Recording.version`` matched to ``label_to_version``).
-
-    A build or dispatch failure, and a device timeout propagated from
-    ``compare_graphs``, are raised rather than recorded: only a real
-    bit-identity mismatch (``compare_graphs``'s own ``NotBitIdentical``) is
-    worth a report entry over a traceback, since that is validate's very
-    question; anything else is a bug worth seeing in full.
+    Only a bit-identity mismatch (``NotBitIdentical``) is reported; a build or dispatch
+    failure or a device timeout is raised.
 
     Raises:
-        ValueError: ``label_to_version`` names a version
-            ``model_tune_points`` gives no call for: ``model_class``'s
-            ``tune_calls`` names shapes other than its own ``shapes()``'s,
-            which is always a bug (the two are meant to name one set), never
-            an expected state a report should paper over.
-        RuntimeError: A version's build or dispatch failed outright (not a
-            bit-identity mismatch, ``NotBitIdentical``'s own), or a device
-            timeout propagated from ``compare_graphs``.
+        ValueError: A label's version has no tune point (``version_builds``).
+        RuntimeError: A build or dispatch failed, or the device timed out.
     """
-    dev = require_device()
-    probe = model_class.from_checkpoint(
-        checkpoint, max_seq_len=max_seq_len, config=config
+    builds = version_builds(
+        model_class,
+        checkpoint,
+        max_seq_len,
+        [stock_profile, candidate_profile],
+        {label: label_to_version[label] for label in labels},
+        config=config,
     )
-    recordings = version_recordings(probe)
-    calls = {
-        c.recording.version: c
-        for c in model_tune_points(model_class, checkpoint, config)
-    }
-
     out: dict[str, dict[str, Any]] = {}
-    for label in labels:
-        version = label_to_version[label]
-        call_t, recording = calls.get(version), recordings.get(version)
-        if call_t is None or recording is None:
-            raise ValueError(
-                f"{label}: no tune point for this version; "
-                f"{model_class.__name__}.tune_calls names other shapes than "
-                f"{model_class.__name__}.shapes() does"
-            )
-        call = dataclasses.replace(call_t, recording=recording)
-        graphs = []
-        for profile in (stock_profile, candidate_profile):
-            patched, fused, packing = apply_profile(call.recording, profile, dev)
-            chosen = plan(
-                dev,
-                patched,
-                True,
-                False,
-                step_words=_step_words(patched),
-                fusions=fused,
-            )
-            graphs.append(
-                CompiledGraph(patched, chosen, fusions=fused, packing=packing)
-            )
+    for label, (call, graphs) in builds.items():
         try:
             delta, noise = compare_graphs(call, *graphs, timing=timing, log=log)
         except NotBitIdentical as e:

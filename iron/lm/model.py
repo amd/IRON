@@ -656,9 +656,12 @@ class Model(iron.Graph):
 
     @classmethod
     def tune_calls(
-        cls, parser: argparse.ArgumentParser, args: argparse.Namespace
+        cls,
+        parser: argparse.ArgumentParser,
+        args: argparse.Namespace,
+        profile: Profile | None = None,
     ) -> list[Timed]:
-        """Return the calls its designs are timed in (``iron.lm.tune``)."""
+        """Return the calls its designs are timed in (``iron.lm.tune``), recorded under ``profile``, else its own."""
         raise NotImplementedError(f"{cls.__name__} is not tuned")
 
     def shapes(self) -> list[dict]:

@@ -210,8 +210,7 @@ def main(name: str, model: Any, argv: Sequence[str] | None = None) -> None:
     args = parse_args(parser, argv)
 
     def record(profile: Profile) -> list[Timed]:
-        model.profile = profile
-        return model.tune_calls(parser, args)
+        return model.tune_calls(parser, args, profile)
 
     def battery(start: Profile, kept: Profile) -> dict:
         report = validate(model, args.checkpoint, kept, start, config=dict(args.config))

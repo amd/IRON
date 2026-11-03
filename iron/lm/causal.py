@@ -20,7 +20,7 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
-from iron import Carried, Scratchpad
+from iron import Carried, Profile, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.compiled import walk
 from iron.common.graph.handle import State
@@ -368,10 +368,11 @@ class CausalLM(Model):
         arguments(parser)
 
     @classmethod
-    def tune_calls(cls, parser, args) -> list:
+    def tune_calls(cls, parser, args, profile: Profile | None = None) -> list:
         """``tune.calls`` on ``args``, built on the checkpoint's weights (read lazily).
 
-        What a coded weight's capacity and a build's timing follow.
+        What a coded weight's capacity and a build's timing follow; recorded under
+        ``profile``, else the model's own.
         """
         from .tune import calls  # which imports this module
 
@@ -396,6 +397,8 @@ class CausalLM(Model):
             dataclasses.replace(config, max_seq_len=other),
             Checkpoint(weights).tree(layers=layers),
         )
+        if profile is not None:
+            model.profile = sibling.profile = profile
         return calls(
             model,
             args.position,

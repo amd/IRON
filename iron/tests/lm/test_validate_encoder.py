@@ -10,6 +10,8 @@ versions carry no duplicate label, every version has a tune point to compare it 
 what is always a bug.
 """
 
+from pathlib import Path
+
 import pytest
 
 from iron import Profile
@@ -18,6 +20,8 @@ from iron.lm import validate
 from iron.lm.causal import CausalLM
 from iron.lm.cli import application_model
 from iron.lm.testing import require, weights_dir
+from iron.operators.mha import MHA
+from iron.tests.support.tools import requires
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -83,3 +87,46 @@ def test_compare_versions_raises_when_a_version_has_no_tune_point():
             ["nowhere"],
             {"nowhere": bogus},
         )
+
+
+@requires("xclbinutil", "peano")
+def test_version_builds_record_each_side_under_its_own_profile():
+    """A candidate of tunables alone builds differently from stock: a tunable applies as a step is recorded."""
+    _require_checkpoint()
+    model = Multimodal.from_checkpoint(CHECKPOINT, random_weights=0)
+    label, version = next(
+        (label, version)
+        for label, (version, recording) in zip(
+            validate.version_labels(model), validate.version_recordings(model).items()
+        )
+        if any(
+            isinstance(s.op, MHA) and vars(s.op)["num_pipelines"] == 8
+            for s in recording.steps
+        )
+    )
+    tuned = Profile.load(Path(Multimodal.profile) / "npu2.json")
+    [(_, graphs)] = validate.version_builds(
+        Multimodal, CHECKPOINT, None, [Profile(), tuned], {label: version}
+    ).values()
+    stock, candidate = (
+        [
+            vars(s.op)["num_pipelines"]
+            for s in g.recording.steps
+            if isinstance(s.op, MHA)
+        ]
+        for g in graphs
+    )
+    assert stock != candidate
+
+
+@requires("xclbinutil", "peano")
+def test_version_builds_package_as_npu1_does(npu1):
+    """Npu1 has no full-ELF dispatch: each side is built an xclbin per step."""
+    _require_checkpoint()
+    model = Multimodal.from_checkpoint(CHECKPOINT, random_weights=0)
+    label = validate.version_labels(model)[0]
+    version = next(iter(validate.version_recordings(model)))
+    [(_, graphs)] = validate.version_builds(
+        Multimodal, CHECKPOINT, None, [Profile(), Profile()], {label: version}
+    ).values()
+    assert [g.plan.full_elf for g in graphs] == [False, False]

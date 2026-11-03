@@ -24,7 +24,7 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
-from iron import Precision, lm
+from iron import Precision, Profile, lm
 from iron.applications.gemma4.audio import AudioConfig, AudioTower
 from iron.applications.gemma4.vision import VisionConfig, VisionTower
 from iron.lm import (
@@ -480,20 +480,25 @@ class Multimodal(lm.Multimodal):
 
     @classmethod
     def tune_calls(
-        cls, parser: argparse.ArgumentParser, args: argparse.Namespace
+        cls,
+        parser: argparse.ArgumentParser,
+        args: argparse.Namespace,
+        profile: Profile | None = None,
     ) -> list[Timed]:
         """Every version (the text encoder, each tower and the merge) on the checkpoint's weights (read lazily).
 
         The one profile in ``profiles/`` serving every version's designs: half its calls
         a query of ``QUERY_ROWS`` text rows, half its longest call. A call's
         configuration switches cost the same at any length, so a short query is where
-        they weigh.
+        they weigh. Recorded under ``profile``, else the model's own.
         """
         config = dataclasses.replace(Config(), **dict(args.config))
         weights = Checkpoint(weights_file(args.checkpoint)).tree(
             layers=config.num_hidden_layers
         )
         graph = cls(config, weights)
+        if profile is not None:
+            graph.profile = profile
         longest = graph.longest()
         points = [
             Point(0.5, {**longest, "rows": QUERY_ROWS}),
