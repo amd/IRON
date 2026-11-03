@@ -50,6 +50,11 @@ class Decode(Operator):
     tiles = per_call(derive=lambda op: op.M // (op.num_aie_columns * op.rows))
 
     def validate(self) -> None:
+        if self.capacity != datamovement.CODED_CAPACITY:
+            raise ValueError(
+                f"Decode: capacity ({self.capacity}) must be "
+                f"{datamovement.CODED_CAPACITY}, the decode kernel's"
+            )
         if self.K % 64:
             raise ValueError(
                 f"Decode: K ({self.K}) must be a multiple of 64, the coded unit"
