@@ -534,12 +534,13 @@ class MHA(Operator):
         return len(self.round_groups[g]) if self.fused and not self.split else 0
 
     def group_blocks(self, g: int) -> int:
-        """Return the key blocks group ``g``'s rounds stream: through its last valid query's position, at least one."""
+        """Return the key blocks group ``g``'s rounds stream: through the last key its last valid query attends, at least one."""
         if not self.fused or self.split:
             return 0
         rounds = self.round_groups[g]
         end = min(rounds.stop * self.positions * self.streams, self.q_tokens)
-        blocks = ceildiv(self.first_query + end, self.B_kv)
+        ahead = 0 if self.causal else (self.window or self.kv_tokens)
+        blocks = ceildiv(self.first_query + end + ahead, self.B_kv)
         return max(1, min(blocks, ceildiv(self.kv_tokens, self.B_kv)))
 
     @property

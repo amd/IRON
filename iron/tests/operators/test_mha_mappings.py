@@ -64,3 +64,24 @@ def test_one_core_a_block_is_three(heads, kv_heads, d, seq_len, kv_len, window):
     assert kv1 == kv3 and q1 != q3, (q1, kv1, q3, kv3)
     differ = np.argwhere(fused != pipeline)
     assert not len(differ), f"{len(differ)} of O differ, first {differ[:4]}"
+
+
+@pytest.mark.parametrize("window", [None, 100], ids=["unmasked", "two_sided"])
+def test_one_core_a_block_streams_every_key_a_non_causal_query_attends(window, npu1):
+    op = MHA(
+        num_heads=8,
+        num_KV_heads=8,
+        d=64,
+        seq_len=2048,
+        causal=False,
+        window=window,
+        kv_paired=True,
+        heads_interleaved=True,
+        num_pipelines=4,
+        cores_per_block=1,
+    ).resolved(npu1)
+    assert op.fused
+    for g, rounds in enumerate(op.round_groups):
+        end = min(rounds.stop * op.positions * op.streams, op.q_tokens)
+        attended = op.first_query + end + (op.kv_tokens if window is None else window)
+        assert op.group_blocks(g) * op.B_kv >= min(attended, op.kv_tokens)
