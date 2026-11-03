@@ -1339,6 +1339,44 @@ def test_inline_records_only_into_a_body():
         _Summed(2).inline(_Summed(2).body)
 
 
+def _tiles(tile_size):
+    profile = Profile()
+    profile.add(SiLU, size=2048, tile_size=tile_size)
+    return profile
+
+
+class _Inner(iron.Graph):
+    profile = _tiles(256)
+
+    def body(self, x):
+        return SiLU.step(x)
+
+
+class _Outer(iron.Graph):
+    def __init__(self):
+        self.inner = _Inner()
+
+    def body(self, x):
+        return self.inner.inline(self.inner.body, x)
+
+
+@pytest.mark.parametrize(
+    "outer, inner, tile",
+    [(None, None, 256), (512, None, 512), (512, 1024, 1024)],
+    ids=["class", "outer_beats_class", "instance_beats_outer"],
+)
+def test_an_inlined_graph_records_under_its_instance_then_outer_then_class_profile(
+    outer, inner, tile
+):
+    g = _Outer()
+    if outer is not None:
+        g.profile = _tiles(outer)
+    if inner is not None:
+        g.inner.profile = _tiles(inner)
+    (step,) = g.record(x=(2048,)).steps
+    assert step.op.tile_size == tile
+
+
 class _DeviceIds(iron.Graph):
     """A gather by ids a step made, whose table address the image writes."""
 

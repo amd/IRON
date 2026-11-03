@@ -724,7 +724,8 @@ class Graph:
     def inline(self, method: Callable, /, *args, **kwargs) -> Any:
         """Record ``method``, one of this graph's, into the graph being recorded.
 
-        Recorded under this graph's profile; that graph names its values.
+        Recorded under a profile set on this instance, else the recording graph's, else
+        this class's; the recording graph names its values.
 
         Raises:
             TypeError: No graph's body is being recorded.
@@ -732,6 +733,8 @@ class Graph:
         recorder = graph_recorder.get()
         if recorder is None:
             raise TypeError(f"{self.name}: inline() records into a graph's body")
+        if "profile" not in vars(self) and recorder.profile is not None:
+            return method(*args, **kwargs)
         own = self._profile()
         if own is None:
             return method(*args, **kwargs)
