@@ -315,9 +315,8 @@ class Profile:
         Wired by ``edges`` (local indices), in ``version`` (``Recording.version``): a
         fusion entry of the same kind, length and wiring whose steps' classes and dims
         (``Profile.dims``, ``Profile.matches``) match them, in order, and whose own
-        ``versions`` names ``version`` or names none. ``version`` left out matches any
-        entry regardless of its own scope: only a caller that tracks one
-        (``chosen_folds``) need give it.
+        ``versions`` names ``version`` or names none. ``version`` left out matches only
+        an entry that names none.
         """
         return self._matching(kind, steps, edges, version) is not None
 
