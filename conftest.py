@@ -276,14 +276,15 @@ UNBENCHED = "not benched on"
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
-    """Skip a device test the attached NPU is not among its ``supported_devices``.
+    """Skip a device test the attached NPU is not among its ``supported_devices``, and unbench a test its ``tracked_on`` leaves out.
 
     The skip happens before its fixtures build anything. The device is opened
-    here, at the first device test run, never at collection: it is
+    here, at the first test either marker names, never at collection: it is
     single-tenant, and a collect-only gate must not hold it.
     """
     marker = item.get_closest_marker("supported_devices")
-    if marker is None:
+    tracked = item.get_closest_marker("tracked_on")
+    if marker is None and tracked is None:
         return
     if ATTACHED not in item.config.stash:
         if aie_utils.DefaultNPURuntime is None:
@@ -296,12 +297,14 @@ def pytest_runtest_setup(item):
             device = aie_utils.DefaultNPURuntime.device().resolve().name
             item.config.stash[ATTACHED] = device
     device = item.config.stash[ATTACHED]
-    if not device:
-        pytest.skip(f"No NPU runtime: {npu_unavailable_reason()}")
-    if device not in marker.args:
-        pytest.skip(f"Not supported on {device} (supported: {', '.join(marker.args)})")
-    tracked = item.get_closest_marker("tracked_on")
-    if tracked is not None and device not in tracked.args:
+    if marker is not None:
+        if not device:
+            pytest.skip(f"No NPU runtime: {npu_unavailable_reason()}")
+        if device not in marker.args:
+            pytest.skip(
+                f"Not supported on {device} (supported: {', '.join(marker.args)})"
+            )
+    if tracked is not None and device and device not in tracked.args:
         item.user_properties.append((UNBENCHED, device))
 
 

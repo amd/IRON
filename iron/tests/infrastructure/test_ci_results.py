@@ -151,6 +151,11 @@ def test_npu1_only(record_property):
 @pytest.mark.bench
 def test_everywhere(record_property):
     record_property("Latency", 1.0)
+
+@pytest.mark.tracked_on("npu1")
+@pytest.mark.bench
+def test_tracked_alone(record_property):
+    record_property("Latency", 1.0)
 """
 
 
@@ -164,6 +169,7 @@ def test_a_bench_is_tracked_only_where_tracked_on_says(tmp_path):
     device = aie_utils.DefaultNPURuntime.device().resolve().name
     assert rows["test_everywhere"]["Bench"] == "yes"
     assert rows["test_npu1_only"]["Bench"] == ("yes" if device == "npu1" else "no")
+    assert rows["test_tracked_alone"]["Bench"] == ("yes" if device == "npu1" else "no")
     assert float(rows["test_npu1_only"]["Latency (mean)"]) == 1.0
 
 
