@@ -15,8 +15,9 @@ import numpy as np
 import pytest
 from aie.helpers.taplib import PerCall, TensorAccessPattern
 
-from iron.common import Precision
+from iron.common import Precision, Unresolvable
 from iron.common.image.packaging import Kind
+from iron.common.testing import Case
 from iron.operators.copy import Copy, Gather
 from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.gemm import GEMM
@@ -93,28 +94,30 @@ def test_gemm_lanes_are_faithful(case):
         _assert_described_and_faithful(op, name)
 
 
-@pytest.mark.parametrize("case", MHA.test.resolve(MHA, NPU2), ids=lambda c: c.label)
-def test_mha_lanes_are_faithful(case):
-    """Q and O stream every row unconditionally; K and V's (or KV's) order is checked at the unbounded catalog shapes, where ``length_parameter`` is None."""
-    op = MHA(**case.kwargs).resolved(NPU2)
-    for b in op.buffers:
-        _assert_described_and_faithful(op, b.name)
-
-
 @pytest.mark.parametrize(
-    "case",
-    [c for c in MHA.test.resolve(MHA, NPU1) if c.kwargs.get("cores_per_block") == 1],
-    ids=lambda c: c.label,
+    "dev,case",
+    [(NPU2, c) for c in MHA.test.resolve(MHA, NPU2)]
+    + [
+        (NPU1, c)
+        for c in MHA.test.resolve(MHA, NPU1)
+        if c.kwargs.get("cores_per_block") == 1
+    ],
+    ids=lambda x: x.label if isinstance(x, Case) else x.name,
 )
-def test_fused_mha_lanes_are_faithful(case):
-    """One core a block, on npu1, where mha.cc's attend_block builds: KV a pattern a fill.
+def test_mha_lanes_are_faithful(dev, case):
+    """Every catalog case on npu2, and one core a block's on npu1 too, at the unbounded shapes.
 
-    A prompt's groups of rounds stream up to their last query, a decode
+    Q and O stream every row unconditionally; K and V's (or KV's) order has
+    no ``length_parameter`` there. One core a block streams KV a pattern a
+    fill: a prompt's groups of rounds up to their last query, a decode
     step's lanes every n-th block.
     """
-    with aie_utils.set_current_device(NPU1):
-        op = MHA(**case.kwargs).resolved(NPU1)
-        # Split, Q rides KV's lanes: no stream of its own.
+    with aie_utils.set_current_device(dev):
+        try:
+            op = MHA(**case.kwargs).resolved(dev)
+        except Unresolvable as e:
+            pytest.skip(str(e))
+        # Split decode's Q rides KV's lanes: no stream of its own.
         for b in op.buffers:
             if b.streamed:
                 _assert_described_and_faithful(op, b.name)

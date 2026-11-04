@@ -353,6 +353,42 @@ def test_mha_of_one_query_that_does_not_pack_is_refused(kwargs, why, npu2):
         MHA(seq_len=1, kv_len=512, **kwargs).resolved(npu2)
 
 
+@pytest.mark.parametrize(
+    "kwargs,why",
+    [
+        (
+            dict(
+                num_heads=8,
+                d=128,
+                seq_len=256,
+                window=11,
+                scale=1.0,
+                num_pipelines=4,
+                soft_cap=50.0,
+            ),
+            "no soft cap or relative band",
+        ),
+        (dict(num_heads=24, num_KV_heads=8, d=128, seq_len=2048), "fits a core"),
+        (dict(num_heads=32, num_KV_heads=8, seq_len=1, kv_len=2048), "joins 8"),
+    ],
+    ids=["soft_cap", "float32_scores_at_d128", "sixteen_lanes"],
+)
+def test_mha_one_core_a_block_past_aie2p_is_refused(kwargs, why, npu2):
+    """AIE2P's fused block caps no score and adds no band.
+
+    At d=128 its float32 scores leave no 24-row block of whole 3-head
+    positions in L1. Sixteen split-decode lanes' partials join eight to a
+    memtile, which has six inputs.
+    """
+    with pytest.raises(Unresolvable, match=why):
+        MHA(
+            **{"num_pipelines": 8, **kwargs},
+            heads_interleaved=True,
+            kv_paired=True,
+            cores_per_block=1,
+        ).resolved(npu2)
+
+
 def test_sample_with_more_cores_than_a_memtile_joins_is_refused(npu2):
     """Each select core's summary is one input stream of the memtile they join in.
 

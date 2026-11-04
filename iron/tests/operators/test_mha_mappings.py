@@ -9,15 +9,24 @@ matmul_PV in one, and a row's keys go by in the same order whatever its
 query block.
 """
 
+from math import prod
+
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.iron import Buffer
+from aie.iron.dataflow.objectfifo import ObjectFifoHandle
+from aie.utils.compile.utils import resolve_target_arch
 
+from iron.common import Rtp
+from iron.common.design import OperatorDesign
+from iron.common.image.compose import BuiltArray
 from iron.common.testing import vectors
 from iron.operators.mha import MHA
+from iron.tests.support.tools import DEVICES
 
 
-@pytest.mark.supported_devices("npu1")
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
     "heads,kv_heads,d,seq_len,kv_len,window",
     [
@@ -85,3 +94,47 @@ def test_one_core_a_block_streams_every_key_a_non_causal_query_attends(window, n
         end = min(rounds.stop * op.positions * op.streams, op.q_tokens)
         attended = op.first_query + end + (op.kv_tokens if window is None else window)
         assert op.group_blocks(g) * op.B_kv >= min(attended, op.kv_tokens)
+
+
+@pytest.mark.parametrize("device", ["npu1", "npu2"])
+@pytest.mark.parametrize(
+    "seq_len,f32_scores",
+    [(2048, None), (2048, False), (1, None)],
+    ids=["prompt", "prompt_bf16", "split_decode"],
+)
+def test_a_fused_cores_estimate_holds_what_it_declares(device, seq_len, f32_scores):
+    """``fused_core_bytes`` and ``split_core_bytes`` cover every buffer, fifo end and word a built core holds, beside the stack and the kernel's frame."""
+    dev = DEVICES[device]()
+    with aie_utils.set_current_device(dev):
+        op = MHA(
+            num_heads=32,
+            num_KV_heads=8,
+            seq_len=seq_len,
+            kv_len=4096,
+            heads_interleaved=True,
+            kv_paired=True,
+            num_pipelines=4,
+            cores_per_block=1,
+            f32_scores=f32_scores,
+        ).resolved(dev)
+        if op.split:
+            estimate = op.split_core_bytes(dev, op.B_kv, op.kv_lanes, op.lane_heads)
+            kernel = op.fused_kernel(dev, op.B_q, op.B_kv, 1, op.lane_heads)
+        else:
+            estimate = op.fused_core_bytes(dev, op.B_q, op.B_kv, op.f32_scores)
+            kernel = op.fused_kernel(dev, op.B_q, op.B_kv, op.group, f32=op.f32_scores)
+        room = (
+            estimate
+            - dev.default_core_stack_bytes
+            - kernel.frame_bytes(resolve_target_arch(dev))
+        )
+        for worker in BuiltArray(OperatorDesign(op)).workers:
+            held = 0
+            for arg in worker.fn_args:
+                if isinstance(arg, Rtp):
+                    arg = arg.buffer
+                if isinstance(arg, Buffer):
+                    held += prod(arg.shape) * np.dtype(arg.dtype).itemsize
+                elif isinstance(arg, ObjectFifoHandle):
+                    held += arg.depth * prod(arg.shape) * np.dtype(arg.dtype).itemsize
+            assert held <= room, (worker.name, held, room)

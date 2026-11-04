@@ -10,10 +10,11 @@ KV group's heads into a block instead.
 """
 
 import dataclasses
+from operator import methodcaller
 from typing import ClassVar
 
 import numpy as np
-from aie.dialects.aie import AIEArch
+from aie.dialects.aie import AIEArch, WireBundle, get_target_model
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
@@ -41,7 +42,7 @@ from iron.common.testing import Case, Testing
 
 
 @dataclasses.dataclass(frozen=True)
-class SplitColumns:
+class PVSplitColumns:
     """Where MHA's streams meet the array with P*V split over two cores.
 
     Each column carries every stream its links hold, so these are what the
@@ -221,8 +222,9 @@ _CASES = [
         ),
         lower=True,
     ),
-    # Llama 3.2 1B's and 3B's prompt chunk on one core a query block, and
-    # Gemma 4 E2B's sliding layer, its 8 heads over one KV head (AIE2).
+    # Llama 3.2 1B's and 3B's prompt chunk on one core a query block, over
+    # the mapping's own float32 scores and over bf16, and Gemma 4 E2B's
+    # sliding layer, its 8 heads over one KV head.
     *(
         Case(
             dict(
@@ -236,18 +238,21 @@ _CASES = [
                 heads_interleaved=True,
                 kv_paired=True,
                 cores_per_block=1,
+                **({} if f32 is None else {"f32_scores": f32}),
             ),
             lower=True,
         )
-        for heads, kv_heads, d, seq_len, window in (
-            (32, 8, 64, 2048, None),
-            (24, 8, 128, 2048, None),
-            (8, 1, 256, 512, 511),
+        for heads, kv_heads, d, seq_len, window, f32 in (
+            (32, 8, 64, 2048, None, None),
+            (32, 8, 64, 2048, None, False),
+            (24, 8, 128, 2048, None, None),
+            (24, 8, 128, 2048, None, False),
+            (8, 1, 256, 512, 511, None),
         )
     ),
     # Gemma 4 audio's conformer attention on one core a query block: float32
     # scores with their relative band, capped at 50, a causal window of 12,
-    # the accurate exp2, q pre-scaled (AIE2).
+    # the accurate exp2, q pre-scaled (AIE2's block only).
     Case(
         dict(
             num_heads=8,
@@ -268,9 +273,9 @@ _CASES = [
         ),
         lower=True,
     ),
-    # Llama 3.2 1B's and 3B's decode step split over keys, and Gemma 3 1B's
-    # sliding one, its merging core's L1 holding two lanes' partials at d=256
-    # (AIE2).
+    # Llama 3.2 1B's and 3B's decode step split over keys, two lanes a
+    # pipeline, and Gemma 3 1B's sliding one, its merging core's L1 holding
+    # two lanes' partials at d=256.
     *(
         Case(
             dict(
@@ -289,7 +294,9 @@ _CASES = [
         )
         for heads, kv_heads, d, window, pipelines in (
             (32, 8, 64, None, 8),
+            (32, 8, 64, None, 4),
             (24, 8, 128, None, 8),
+            (24, 8, 128, None, 4),
             (4, 1, 256, 511, 2),
         )
     ),
@@ -321,8 +328,10 @@ def _cases(cls, dev: Device):
             },
         )
         for c in _CASES
-        # One core a query block is attend_block, AIE2's.
-        if c.kwargs.get("cores_per_block") != 1 or dev.arch is AIEArch.AIE2
+        # AIE2P's one core a query block takes no soft cap or relative band.
+        if c.kwargs.get("cores_per_block") != 1
+        or dev.arch is AIEArch.AIE2
+        or not (c.kwargs.get("soft_cap") or c.kwargs.get("relative_band"))
     ]
 
 
@@ -345,21 +354,24 @@ class MHA(Operator):
     # One operand KV, ``(kv_len, num_KV_heads, 2, d)``, a position's K and V
     # side by side as a KVCache holds them, in place of K and V.
     kv_paired: bool = param(default=False)
-    kv_apart: bool = param(default=lambda op: not op.kv_paired, repr=False)
+    kv_apart: bool = param(derive=lambda op: not op.kv_paired, repr=False)
+    # K and V apart may be either; a paired KV is position-major.
     kv_interleaved: bool = param(default=lambda op: op.kv_paired)
     d: int = param(default=64)
     causal: bool = param(default=True, array=True)
     # Keys more than this many positions from a query are masked.
     window: int | None = param(default=None, array=True)
     scale: float = param(default=lambda op: float(1 / np.sqrt(op.d)), array=True)
-    # QK^T's scores kept in float32 (D4) where True, bf16 where False; None
-    # is the mapping's own: float32 for one core a query block over several
-    # queries, else bf16.
-    f32_scores: bool | None = param(default=None, array=True)
+    # QK^T's scores kept in float32 (D4) where True, bf16 where False; unset,
+    # resolve() takes the mapping's own: float32 for one core a query block
+    # over several queries, else bf16. A profile may give it; no tune searches
+    # it.
+    f32_scores: bool = tunable()
     # Fused, float32 scores: each score c * tanh(s / c) (Gemma's logit cap),
     # taken on the raw products, so the scale is 1.
     soft_cap: float | None = param(default=None, array=True)
-    # Fused, float32 scores: the accurate exp2 in place of AIE2's cubic.
+    # Fused, float32 scores: the accurate exp2 in place of AIE2's cubic
+    # (AIE2P's fused block always takes it).
     accurate_exp2: bool = param(default=False, array=True)
     # Fused, float32 scores, a query a row: each score gains Q_i . R_d at
     # distance d = pos_i - key_j, 0 <= d < 16, before the cap (Gemma 4
@@ -407,9 +419,9 @@ class MHA(Operator):
     # The array widths MHA is placed on, each with the most pipelines one
     # query packed takes, a K and a V lane each.
     PACKED_PIPELINES: ClassVar[dict[int, int]] = {8: 4, 4: 2}
-    SPLIT_COLUMNS: ClassVar[dict[int, SplitColumns]] = {
-        8: SplitColumns(q=(1, 6), o=((0, 2), (5, 7)), k=3, k_shim=3, v=(3, 4)),
-        4: SplitColumns(q=(0,), o=((1, 2),), k=3, k_shim=0, v=(3, 3)),
+    PV_SPLIT_COLUMNS: ClassVar[dict[int, PVSplitColumns]] = {
+        8: PVSplitColumns(q=(1, 6), o=((0, 2), (5, 7)), k=3, k_shim=3, v=(3, 4)),
+        4: PVSplitColumns(q=(0,), o=((1, 2),), k=3, k_shim=0, v=(3, 3)),
     }
 
     Q = In(
@@ -486,17 +498,22 @@ class MHA(Operator):
         derive=lambda op: ceildiv(op.q_tokens, op.positions * op.streams)
     )
     kv_blocks = per_call(derive=lambda op: ceildiv(op.kv_tokens, op.B_kv))
-    # Fused, the key blocks each of ROUND_GROUPS groups of rounds streams: up
-    # to its last valid query, so a round's stream ends near its own.
-    kv_blocks_0 = per_call(derive=lambda op: op.group_blocks(0))
-    kv_blocks_1 = per_call(derive=lambda op: op.group_blocks(1))
-    kv_blocks_2 = per_call(derive=lambda op: op.group_blocks(2))
-    kv_blocks_3 = per_call(derive=lambda op: op.group_blocks(3))
-    # And each group's rounds.
-    rounds_0 = per_call(derive=lambda op: op.group_rounds(0))
-    rounds_1 = per_call(derive=lambda op: op.group_rounds(1))
-    rounds_2 = per_call(derive=lambda op: op.group_rounds(2))
-    rounds_3 = per_call(derive=lambda op: op.group_rounds(3))
+    ROUND_GROUPS: ClassVar[int] = 4
+    # Fused, the key blocks each group of rounds streams, kv_blocks_<g>: up to
+    # its last valid query, so a round's stream ends near its own.
+    locals().update(
+        {
+            f"kv_blocks_{g}": per_call(derive=methodcaller("group_blocks", g))
+            for g in range(ROUND_GROUPS)
+        }
+    )
+    # And each group's rounds, rounds_<g>.
+    locals().update(
+        {
+            f"rounds_{g}": per_call(derive=methodcaller("group_rounds", g))
+            for g in range(ROUND_GROUPS)
+        }
+    )
     # Split, the key blocks each KV lane streams, the last ones past the keys
     # on some.
     lane_blocks = per_call(
@@ -516,8 +533,6 @@ class MHA(Operator):
     q_offset = per_call(
         derive=lambda op: 0 if op.packed else op.first_query % op.positions
     )
-
-    ROUND_GROUPS: ClassVar[int] = 4
 
     @property
     def round_groups(self) -> list[range]:
@@ -542,18 +557,6 @@ class MHA(Operator):
         ahead = 0 if self.causal else (self.window or self.kv_tokens)
         blocks = ceildiv(self.first_query + end + ahead, self.B_kv)
         return max(1, min(blocks, ceildiv(self.kv_tokens, self.B_kv)))
-
-    @property
-    def score_features(self) -> bool:
-        """Whether a soft cap, the accurate exp2 or a relative band is set."""
-        return self.soft_cap is not None or self.accurate_exp2 or self.relative_band
-
-    @property
-    def scores_f32(self) -> bool:
-        """Whether QK^T's scores are float32: ``f32_scores``, else the mapping's own (one core a query block over several queries)."""
-        if self.f32_scores is not None:
-            return self.f32_scores
-        return self.fused and not self.split
 
     @property
     def positions(self) -> int:
@@ -605,11 +608,6 @@ class MHA(Operator):
     def validate(self) -> None:
         if self.d <= 0 or self.d % 64:
             raise ValueError(f"MHA: d ({self.d}) must be a positive multiple of 64")
-        if self.kv_apart == self.kv_paired:
-            raise ValueError(
-                f"MHA: K and V are apart or paired as KV, one of them; got "
-                f"kv_apart={self.kv_apart}, kv_paired={self.kv_paired}"
-            )
         if self.kv_paired and not self.kv_interleaved:
             raise ValueError("MHA: KV is position-major: kv_paired is kv_interleaved")
         if self.window is not None and self.window <= 0:
@@ -796,7 +794,12 @@ class MHA(Operator):
             )
         if self.cores_per_block == 1:
             return self.resolve_fused(dev)
-        if self.f32_scores or self.score_features:
+        if (
+            self.f32_scores
+            or self.soft_cap is not None
+            or self.accurate_exp2
+            or self.relative_band
+        ):
             raise Unresolvable(
                 "MHA: float32 scores, a soft cap, the accurate exp2 and a relative "
                 "band are one core a query block's (cores_per_block 1)"
@@ -839,10 +842,10 @@ class MHA(Operator):
             width = max(w for w in self.PACKED_PIPELINES if w <= dev.cols)
         else:
             width = max(self.PACKED_PIPELINES)
-        if pv_cores > 1 and width not in self.SPLIT_COLUMNS:
+        if pv_cores > 1 and width not in self.PV_SPLIT_COLUMNS:
             raise Unresolvable(
                 f"MHA at d={self.d} splits P*V over two cores, which is placed "
-                f"on {', '.join(map(str, self.SPLIT_COLUMNS))} columns, not {width}"
+                f"on {', '.join(map(str, self.PV_SPLIT_COLUMNS))} columns, not {width}"
             )
         return self.replace(
             B_q=B_q,
@@ -861,6 +864,7 @@ class MHA(Operator):
             split=False,
             lane_heads=1,
             query_heads=0,
+            f32_scores=False,
         )
 
     # Fused, the key block per head dimension, as today's pipeline takes it
@@ -871,15 +875,18 @@ class MHA(Operator):
         """``resolve`` for one core a query block: every core of ``num_pipelines`` columns.
 
         A KV group's heads packed a position; ``B_q`` the widest block of whole
-        positions dividing 64 whose core fits L1, unless given.
+        positions dividing 64 whose core fits L1, unless given. One query is
+        split over keys (``split_mapping``).
 
         Raises:
-            Unresolvable: No device, not AIE2, K and V apart, one query, or no
-                block fits.
+            Unresolvable: No device, neither AIE2 nor AIE2P, K and V apart, a
+                soft cap or relative band on AIE2P, features past the scores
+                they take, or no block fits.
         """
-        if dev is None or dev.arch is not AIEArch.AIE2:
+        if dev is None or dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
             raise Unresolvable(
-                "MHA: one core a query block is mha.cc's attend_block, AIE2's"
+                "MHA: one core a query block is mha.cc's attend_block, AIE2's and "
+                "AIE2P's"
             )
         if not self.kv_paired or not self.heads_interleaved:
             raise Unresolvable(
@@ -887,75 +894,99 @@ class MHA(Operator):
             )
         if self.pv_cores not in (None, 1):
             raise Unresolvable("MHA: one core a query block takes P*V on that core")
+        aie2p = dev.arch is AIEArch.AIE2p
+        if aie2p and (self.soft_cap is not None or self.relative_band):
+            raise Unresolvable(
+                "MHA: AIE2P's one core a query block takes no soft cap or relative "
+                "band"
+            )
+        # AIE2P's block always takes the accurate exp2, over either score type.
+        features = (
+            self.soft_cap is not None
+            or self.relative_band
+            or (self.accurate_exp2 and not aie2p)
+        )
+        group = self.num_heads // self.num_KV_heads
         if self.packed:
-            if self.f32_scores or self.score_features:
+            if self.f32_scores or features:
                 raise Unresolvable(
                     "MHA: one query split over keys keeps bf16 scores and no "
                     "score features"
                 )
-            return self.resolve_split(dev)
-        group = self.num_heads // self.num_KV_heads
-        f32 = self.f32_scores is not False
-        if self.score_features and not f32:
-            raise Unresolvable(
-                "MHA: a soft cap, the accurate exp2 and a relative band take "
-                "float32 scores"
+            mapping = self.split_mapping(dev)
+        else:
+            f32 = self.f32_scores is not False
+            if features and not f32:
+                raise Unresolvable(
+                    "MHA: a soft cap, AIE2's accurate exp2 and a relative band take "
+                    "float32 scores"
+                )
+            # A relative band's 16 keys ride as a key block: blocks of 16
+            # (audio's cores hold Q R^T beside them).
+            B_kv = 16 if self.relative_band else self.FUSED_KEY_BLOCKS.get(self.d)
+            if B_kv is None or self.kv_len % B_kv:
+                raise Unresolvable(
+                    f"MHA: one core a query block takes d of "
+                    f"{', '.join(map(str, self.FUSED_KEY_BLOCKS))}, its key block "
+                    f"dividing kv_len ({self.kv_len}); got d={self.d}"
+                )
+            column_cores = len(dev.core_rows)
+            cores = self.num_pipelines * column_cores
+            blocks = (
+                [self.B_q]
+                if self.B_q is not None
+                else [b for b in range(64, 7, -8) if not b % group]
             )
-        # A relative band's 16 keys ride as a key block: blocks of 16 (audio's
-        # cores hold Q R^T beside them).
-        B_kv = 16 if self.relative_band else self.FUSED_KEY_BLOCKS.get(self.d)
-        if B_kv is None or self.kv_len % B_kv:
-            raise Unresolvable(
-                f"MHA: one core a query block takes d of "
-                f"{', '.join(map(str, self.FUSED_KEY_BLOCKS))}, its key block dividing "
-                f"kv_len ({self.kv_len}); got d={self.d}"
+            fit = next(
+                (
+                    b
+                    for b in blocks
+                    if not 64 % (b // group or 1)
+                    and not self.seq_pad % (b // group * cores)
+                    and self.fused_core_bytes(dev, b, B_kv, f32)
+                    <= dev.core_memory_bytes
+                ),
+                None,
             )
-        column_cores = len(dev.core_rows)
-        cores = self.num_pipelines * column_cores
-        blocks = (
-            [self.B_q]
-            if self.B_q is not None
-            else [b for b in range(64, 7, -8) if not b % group]
-        )
-        fit = next(
-            (
-                b
-                for b in blocks
-                if not 64 % (b // group or 1)
-                and not self.seq_pad % (b // group * cores)
-                and self.fused_core_bytes(dev, b, B_kv, f32) <= dev.core_memory_bytes
-            ),
-            None,
-        )
-        if fit is None:
-            raise Unresolvable(
-                f"MHA: no query block of whole positions of {group} heads fits a core's "
-                f"{dev.core_memory_bytes} bytes and rounds of {cores} cores"
+            if fit is None:
+                raise Unresolvable(
+                    f"MHA: no query block of whole positions of {group} heads fits "
+                    f"a core's {dev.core_memory_bytes} bytes and rounds of {cores} "
+                    f"cores"
+                )
+            mapping = dict(
+                B_q=fit,
+                B_kv=B_kv,
+                q_shims=self.num_pipelines,
+                join_rows=fit * column_cores,
+                kv_lanes=1,
+                column_cores=column_cores,
+                split=False,
+                lane_heads=1,
+                query_heads=0,
+                f32_scores=f32,
             )
-        width = max(w for w in self.PACKED_PIPELINES if w <= dev.cols)
         return self.replace(
-            B_q=fit,
-            B_kv=B_kv,
-            q_shims=self.num_pipelines,
-            join_rows=fit * column_cores,
-            kv_lanes=1,
+            **mapping,
             kv_streams=1,
-            width=width,
+            width=max(w for w in self.PACKED_PIPELINES if w <= dev.cols),
             pv_cores=1,
             pv_width=self.d,
             cores_per_block=1,
             fused=True,
-            column_cores=column_cores,
             group=group,
-            split=False,
-            lane_heads=1,
-            query_heads=0,
         )
 
     def fused_kernel(
-        self, B_q: int, B_kv: int, group: int, kv_heads: int = 1, f32: bool = False
+        self,
+        dev: Device,
+        B_q: int,
+        B_kv: int,
+        group: int,
+        kv_heads: int = 1,
+        f32: bool = False,
     ):
-        """mha.cc's attend_block at a ``B_q`` x ``d`` x ``B_kv`` block, ``group`` heads a position.
+        """mha.cc's attend_block for ``dev`` at a ``B_q`` x ``d`` x ``B_kv`` block, ``group`` heads a position.
 
         ``kv_heads`` KV heads a key block, float32 scores where ``f32``.
         """
@@ -972,7 +1003,7 @@ class MHA(Operator):
             group=group,
             kv_heads=kv_heads,
             f32_scores=f32,
-            accurate_exp2=self.accurate_exp2,
+            accurate_exp2=self.accurate_exp2 or dev.arch is AIEArch.AIE2p,
             soft_cap=self.soft_cap,
             relative_band=self.relative_band,
         )
@@ -980,7 +1011,7 @@ class MHA(Operator):
     def fused_core_bytes(
         self, dev: Device, B_q: int, B_kv: int, f32: bool = False
     ) -> int:
-        """Return a fused core's L1 bytes: Q, two key blocks, O's two forms, S (float32 where ``f32``), P, state and stack."""
+        """Return a fused core's L1 bytes: Q, two key blocks, O's two forms, S (float32 where ``f32``), P, state, words and stack."""
         d = self.d
         data = (
             2 * B_q * d  # Q, one block deep
@@ -992,23 +1023,26 @@ class MHA(Operator):
             + (4 * 32 * B_q if self.relative_band else 0)  # Q R^T
             + 16 * B_q  # the online state
             + 12  # the block index
+            + 4 * (5 + 2 * self.ROUND_GROUPS)  # the core's words
+            + 4 * 2 * self.ROUND_GROUPS  # each group's rounds and key blocks
         )
         with set_current_device(dev), compile_context(_iron_kernel_registry=set()):
             frame = self.fused_kernel(
-                B_q, B_kv, self.num_heads // self.num_KV_heads, f32=f32
+                dev, B_q, B_kv, self.num_heads // self.num_KV_heads, f32=f32
             ).frame_bytes(resolve_target_arch(dev))
         return dev.default_core_stack_bytes + data + frame
 
-    def resolve_split(self, dev):
-        """``resolve`` for one query: a core a KV lane, two a column, each over every ``kv_lanes``-th key block from its own.
+    def split_mapping(self, dev: Device) -> dict:
+        """``resolve_fused``'s tunables for one query: a core a KV lane, two a column, each over every ``kv_lanes``-th key block from its own.
 
         A core merges their partials.
 
         Raises:
             Unresolvable: No key block for ``d`` dividing ``kv_len`` in whole
-                rounds of the lanes, a group O's rows cannot drain back from
-                in one walk, more query heads than a key block's object
-                holds, or a core past L1.
+                rounds of the lanes, half the lanes past a memtile's inputs,
+                a group O's rows cannot drain back from in one walk, more
+                query heads than a key block's object holds, or a core past
+                L1.
         """
         g, G = self.num_heads // self.num_KV_heads, self.num_KV_heads
         # A run of 256 bytes a position streams at about 2/3 of 512 (npu1).
@@ -1021,6 +1055,14 @@ class MHA(Operator):
                 f"MHA: one query split over keys takes d of "
                 f"{', '.join(map(str, self.FUSED_KEY_BLOCKS))}, kv_len ({self.kv_len}) "
                 f"whole rounds of a key block on each of {lanes} lanes"
+            )
+        tm = get_target_model(dev.resolve())
+        row = next(r for r in range(tm.rows()) if tm.is_mem_tile(0, r))
+        joined = tm.get_num_dest_switchbox_connections(0, row, WireBundle.DMA)
+        if lanes // 2 > joined:
+            raise Unresolvable(
+                f"MHA: one query split over {lanes} lanes joins {lanes // 2} "
+                f"partials in a memtile, which takes {joined}"
             )
         if self.B_q not in (None, 8) or self.split_drain() is None:
             raise Unresolvable(
@@ -1039,23 +1081,17 @@ class MHA(Operator):
                 f"MHA: one query split over {lanes} lanes takes {need} bytes of a "
                 f"core's {dev.core_memory_bytes}"
             )
-        return self.replace(
+        return dict(
             B_q=8,
             B_kv=B_kv,
             q_shims=1,
             join_rows=8,
             kv_lanes=lanes,
-            kv_streams=1,
-            width=max(w for w in self.PACKED_PIPELINES if w <= dev.cols),
-            pv_cores=1,
-            pv_width=self.d,
-            cores_per_block=1,
-            fused=True,
             column_cores=2,
-            group=g,
             split=True,
             lane_heads=heads,
             query_heads=self.num_heads,
+            f32_scores=False,
         )
 
     def split_drain(self) -> tuple[list[int], list[int]] | None:
@@ -1091,6 +1127,7 @@ class MHA(Operator):
             + 2 * self.num_heads * d  # every query head, flat
             + 2 * 2 * B_q * B_kv  # S and P
             + 12  # the block index
+            + 4 * 5  # the core's words
         )
         merge = (
             lanes * partial  # two joins of half the lanes' partials each
@@ -1098,9 +1135,10 @@ class MHA(Operator):
             + 16 * B_q
             + 2 * B_q * d  # O as it leaves
             + 12
+            + 4  # the core's word
         )
         with set_current_device(dev), compile_context(_iron_kernel_registry=set()):
-            frame = self.fused_kernel(B_q, B_kv, 1, heads).frame_bytes(
+            frame = self.fused_kernel(dev, B_q, B_kv, 1, heads).frame_bytes(
                 resolve_target_arch(dev)
             )
         return dev.default_core_stack_bytes + max(attend, merge) + frame
@@ -1178,26 +1216,26 @@ class MHA(Operator):
         )
 
     def build(self) -> Built:
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable("MHA: build() needs a bound device")
         if self.split:
-            return self.build_split()
+            return self.build_split(dev)
         if self.fused:
-            return self.build_fused()
+            return self.build_fused(dev)
         of_depth = 2
         dtype = bfloat16
         B_q, B_kv, d = self.B_q, self.B_kv, self.d
         num_pipelines = self.num_pipelines
         n_join = num_pipelines // self.q_shims  # the pipelines on one shim
-        # With P*V split, the two P*V cores share SPLIT_COLUMNS' own adjacent
+        # With P*V split, the two P*V cores share PV_SPLIT_COLUMNS' own adjacent
         # tiles, the line between them shared L1, which no placer can infer;
         # otherwise aiecc's placer takes every tile.
         pv_cores, pv_width = self.pv_cores, self.pv_width
-        split = pv_cores > 1
+        pv_split = pv_cores > 1
 
         # partial_softmax takes exp2, so the scale is in the log2 domain.
         inv_scale = float(bfloat16(self.scale * np.log2(np.e)))
-        dev = self.dev
-        if dev is None:
-            raise Unresolvable("MHA: build() needs a bound device")
         # AIE2P's exp2 instruction is up to 6% high; AIE2 has none to replace.
         accurate_exp2 = dev.arch is AIEArch.AIE2p
 
@@ -1236,7 +1274,7 @@ class MHA(Operator):
                 np.int32,
             ],
         )
-        # Split, a P*V core's product is mha.cc compiled at its share's width.
+        # P*V split, a P*V core's product is mha.cc compiled at its share's width.
         pv_object = (
             mha_object
             if pv_cores == 1
@@ -1279,10 +1317,10 @@ class MHA(Operator):
             ),
         )
 
-        # Split, Q is one block deep: the QK core's L1 holds one d=512 block.
-        q_depth = 1 if split else of_depth
-        layout = MHA.SPLIT_COLUMNS[self.width] if split else None
-        # Q and O are placed at the split layout's shim tiles; fifos()
+        # P*V split, Q is one block deep: the QK core's L1 holds one d=512 block.
+        q_depth = 1 if pv_split else of_depth
+        layout = MHA.PV_SPLIT_COLUMNS[self.width] if pv_split else None
+        # Q and O are placed at the P*V split layout's shim tiles; fifos()
         # returns the raw fifo, not an end, since each is split or joined
         # further below.
         inQ = self.Q.fifos(
@@ -1394,7 +1432,7 @@ class MHA(Operator):
                 .forward(
                     to_stream=qk.C,
                     depth=of_depth,
-                    tile=Tile(i, 1) if split else AnyMemTile,
+                    tile=Tile(i, 1) if pv_split else AnyMemTile,
                 )
             )
             memP.append(ObjectFifo(qk_ty, depth=of_depth))
@@ -1404,7 +1442,7 @@ class MHA(Operator):
                 .forward(
                     to_stream=pv.A,
                     depth=of_depth,
-                    tile=Tile(i, 1) if split else AnyMemTile,
+                    tile=Tile(i, 1) if pv_split else AnyMemTile,
                 )
             )
             # A copy of the row state for each P*V core, which rescales its own.
@@ -1624,7 +1662,7 @@ class MHA(Operator):
                         qk_rtps[i],
                         idx_buffer_qk,
                     ],
-                    tile=Tile(i, 2) if split else AnyComputeTile,
+                    tile=Tile(i, 2) if pv_split else AnyComputeTile,
                 )
             )
             idx_buffer_softmax = Buffer(
@@ -1648,10 +1686,10 @@ class MHA(Operator):
                         idx_buffer_softmax,
                         scale_buffer_softmax,
                     ],
-                    tile=Tile(i, 4) if split else AnyComputeTile,
+                    tile=Tile(i, 4) if pv_split else AnyComputeTile,
                 )
             )
-            # Split, the halves sit either side of the softmax, whose row
+            # P*V split, the halves sit either side of the softmax, whose row
             # state each reads from shared memory.
             for h in range(pv_cores):
                 idx_buffer_pv = Buffer(
@@ -1672,7 +1710,7 @@ class MHA(Operator):
                             idx_buffer_pv,
                             Buffer(acc_ty),
                         ],
-                        tile=Tile(i, 3 + 2 * h) if split else AnyComputeTile,
+                        tile=Tile(i, 3 + 2 * h) if pv_split else AnyComputeTile,
                     )
                 )
 
@@ -1681,7 +1719,7 @@ class MHA(Operator):
             [*qk_rtps, *softmax_rtps, *(r for rtps in pv_rtps for r in rtps)],
         )
 
-    def build_fused(self) -> Built:
+    def build_fused(self, dev: Device) -> Built:
         """One core a query block: ``column_cores`` cores a column, each attend_block over a KV head's every key block.
 
         Q split and O joined a column on its memtile; one K-and-V stream, tiled
@@ -1702,14 +1740,14 @@ class MHA(Operator):
         kv_ty = np.ndarray[(B_kv, 2 * d), np.dtype[dtype]]
         o_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
         acc_ty = np.ndarray[(B_q, d), np.dtype[np.float32]]
-        f32 = self.scores_f32
+        f32 = self.f32_scores
         s_ty = np.ndarray[(B_q * B_kv,), np.dtype[np.float32 if f32 else dtype]]
         p_ty = np.ndarray[(B_q * B_kv,), np.dtype[dtype]]
         state_ty = np.ndarray[(4 * B_q,), np.dtype[np.float32]]
         idx_ty = np.ndarray[(3,), np.dtype[np.int32]]
         qr_ty = [np.ndarray[(B_q * 32,), np.dtype[np.float32]]] * rel
 
-        fused = self.fused_kernel(B_q, B_kv, self.group, f32=f32)
+        fused = self.fused_kernel(dev, B_q, B_kv, self.group, f32=f32)
         obj = fused.object_file
         attend = obj.bind(
             "attend_block",
@@ -1719,16 +1757,14 @@ class MHA(Operator):
         relative = [obj.bind("relative_rows", [q_ty, kv_ty, *qr_ty])] * rel
         init = obj.bind("init_scale_buffer", [state_ty, np.int32])
         rescale = obj.bind("rescale_O", [acc_ty, o_ty, state_ty, np.int32, idx_ty])
-        mac = (
-            kernels.linalg.mha.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
-                pv=False
-            )
-        )
-        qk = mm_stream_dims(B_q, d, B_kv, mac, b_col_maj=True)
-        pv = mm_stream_dims(B_q, B_kv, d, mac)
+        # Q's, KV's and O's tilings, each as attend_block reads or writes it.
+        layouts = fused.contract.layouts
+        q_tiled, kv_tiled, o_tiled = (layouts[i].stream for i in (0, 1, 2 + rel))
 
         inQ = self.Q.fifos(2, tiles=[AnyShimTile] * self.num_pipelines)
-        memO = self.O.fifos(2, tiles=[AnyShimTile] * self.num_pipelines, to_stream=pv.C)
+        memO = self.O.fifos(
+            2, tiles=[AnyShimTile] * self.num_pipelines, to_stream=o_tiled
+        )
         memQ, outO = [], []
         for col in range(self.num_pipelines):
             memQ += (
@@ -1737,7 +1773,7 @@ class MHA(Operator):
                 .split(
                     offsets=[B_q * d * k for k in range(rows)],
                     obj_types=[q_ty] * rows,
-                    to_stream=[qk.A] * rows,
+                    to_stream=[q_tiled] * rows,
                     depths=[1] * rows,
                     tile=AnyMemTile,
                 )
@@ -1754,14 +1790,11 @@ class MHA(Operator):
             )
         inKV = ObjectFifo(kv_ty, depth=2)
         self.KV.bind([inKV.prod(tile=AnyShimTile)])
-        tiled = fused.contract.layouts[1].stream
-        memKV = inKV.cons().forward(to_stream=tiled, depth=2, tile=AnyMemTile)
+        memKV = inKV.cons().forward(to_stream=kv_tiled, depth=2, tile=AnyMemTile)
 
         groups = [
-            (self.rounds_0, self.kv_blocks_0),
-            (self.rounds_1, self.kv_blocks_1),
-            (self.rounds_2, self.kv_blocks_2),
-            (self.rounds_3, self.kv_blocks_3),
+            (self.value(f"rounds_{g}"), self.value(f"kv_blocks_{g}"))
+            for g in range(self.ROUND_GROUPS)
         ]
         values = [
             self.heads,
@@ -1844,7 +1877,7 @@ class MHA(Operator):
         ]
         return Built(workers, rtps)
 
-    def build_split(self) -> Built:
+    def build_split(self, dev: Device) -> Built:
         """One query: a core a KV lane, each attend_block over every ``kv_lanes``-th key block from its own into a partial; a core merging them.
 
         A lane takes ``lane_heads`` KV heads a pass, a key block's object
@@ -1869,7 +1902,7 @@ class MHA(Operator):
         state_ty = np.ndarray[(4 * B_q,), np.dtype[np.float32]]
         idx_ty = np.ndarray[(3,), np.dtype[np.int32]]
 
-        fused = self.fused_kernel(B_q, B_kv, 1, heads)
+        fused = self.fused_kernel(dev, B_q, B_kv, 1, heads)
         obj = fused.object_file
         attend = obj.bind(
             "attend_head",
@@ -1884,18 +1917,14 @@ class MHA(Operator):
             "merge_partials", [part_ty, state_ty, joined_ty, np.int32, dtype]
         )
         rescale = obj.bind("rescale_O", [part_ty, o_ty, state_ty, np.int32, idx_ty])
-        mac = (
-            kernels.linalg.mha.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
-                pv=False
-            )
-        )
-        pv = mm_stream_dims(B_q, B_kv, d, mac)
+        # KV's and O's tilings, as attend_head reads and rescale_O writes them.
+        layouts = fused.contract.layouts
+        kv_tiled, o_tiled = (layouts[i].stream for i in (1, 2))
 
         inKV = [ObjectFifo(kv_ty, depth=2) for _ in range(lanes)]
         self.KV.bind([fifo.prod(tile=AnyShimTile) for fifo in inKV])
-        tiled = fused.contract.layouts[1].stream
         memKV = [
-            fifo.cons().forward(to_stream=tiled, depth=2, tile=AnyMemTile)
+            fifo.cons().forward(to_stream=kv_tiled, depth=2, tile=AnyMemTile)
             for fifo in inKV
         ]
         joins = [ObjectFifo(joined_ty, depth=1) for _ in range(2)]
@@ -1909,7 +1938,7 @@ class MHA(Operator):
                 tile=AnyMemTile,
             )
         ]
-        (memO,) = self.O.fifos(2, tiles=[AnyShimTile], to_stream=pv.C)
+        (memO,) = self.O.fifos(2, tiles=[AnyShimTile], to_stream=o_tiled)
         (outO,) = memO.prod().join(
             offsets=[0], obj_types=[o_ty], depths=[1], tile=AnyMemTile
         )
@@ -2142,16 +2171,11 @@ class MHA(Operator):
         if dev is None:
             raise Unresolvable("MHA: the key fills need a bound device")
         iterations = 1 << dev.get_dma_bd_iter_bits(0, 0)
-        values = [
-            self.kv_blocks_0,
-            self.kv_blocks_1,
-            self.kv_blocks_2,
-            self.kv_blocks_3,
-        ]
         fills = []
         for kv_head in range(self.num_KV_heads):
             for g, rounds in enumerate(self.round_groups):
-                length = values[g] if values[g].per_call else None
+                word = self.value(f"kv_blocks_{g}")
+                length = word if word.per_call else None
                 blocks = (
                     ceildiv(self.kv_tokens, self.B_kv)
                     if length is not None
@@ -2266,99 +2290,59 @@ class MHA(Operator):
             return
         kv_heads = self.num_KV_heads
         group = self.num_heads // kv_heads
-        rows = self.join_rows  # Q rows each shim carries per block
-        blocks = ceildiv(self.seq_pad, rows * self.q_shims)  # per pipeline
-        B_kv = self.B_kv
-        kv_blocks = ceildiv(self.kv_tokens, B_kv)
         kv_valid = self.kv_blocks if self.kv_blocks.per_call else None
-
-        def by_head(buffer, interleaved):
-            tap = TensorAccessPattern.full(buffer.shape)
-            return tap.permute((1, 0, 2)) if interleaved else tap
-
-        def q_rows(buffer, head0, shim):
-            heads = by_head(buffer, self.heads_interleaved)[head0 : head0 + group]
-            by_shim = heads.split(1, self.q_shims * rows)
-            return by_shim[:, :, shim * rows : (shim + 1) * rows]
-
-        def kv_rows(x, kv_head, reads):
-            """K's (``x`` 0) or V's (1) blocks of ``kv_head``, read ``reads`` times."""
-            if self.kv_paired:
-                head = TensorAccessPattern.full(self.KV.shape)[:, kv_head, x]
-            else:
-                head = by_head((self.K, self.V)[x], self.kv_interleaved)[kv_head]
-            return head[: kv_blocks * B_kv].split(0, B_kv).repeat(reads)
+        keys = [self.composed_keys(x) for x in (0, 1)]
 
         def kv_fill(x, tap, p, h, group):
             """Fill pipeline lane ``p``'s K (``x`` 0) or its V share ``h`` (1)."""
-            if self.kv_paired:
-                operand = self.KV
-                lane = p * self.kv_streams + (1 + h if x else 0)
-            else:
-                operand = (self.K, self.V)[x]
-                lane = p * self.pv_cores + h if x else p
+            operand, lane = self.key_lane(x, p, h)
             operand.fill(
                 tap,
                 lane=lane,
                 group=group,
                 length_parameter=kv_valid,
-                length_unit=B_kv * (self.pv_width if x else self.d),
+                length_unit=self.B_kv * (self.pv_width if x else self.d),
             )
 
         if self.packed:
             steps = kv_heads // self.num_pipelines
-            # A group that does not divide a block is two overlapping runs.
-            width = 1 << (group.bit_length() - 1)
-
-            def packed_rows(buffer, kv_head):
-                heads = by_head(buffer, self.heads_interleaved)
-                if width == group:
-                    heads = heads[kv_head * group : (kv_head + 1) * group, 0]
-                    return heads.coalesce().repeat(self.B_q // group)
-                first = heads[kv_head * group : kv_head * group + width, 0]
-                (stride0,) = concrete(first.strides[:1], first)
-                both = TensorAccessPattern(
-                    first.tensor_dims,
-                    first.offset,
-                    (2, *first.sizes),
-                    ((group - width) * stride0, *first.strides),
-                )
-                return both.coalesce().repeat(self.B_q // (2 * width))
-
+            q_rows, o_rows = (self.packed_rows(b) for b in (self.Q, self.O))
             for step in range(steps):
                 owned = [p * steps + step for p in range(self.num_pipelines)]
                 tg = rt.task_group()
                 for kv_head in owned:
-                    self.Q.fill(packed_rows(self.Q, kv_head), lane=0, group=tg)
+                    self.Q.fill(q_rows[kv_head].coalesce(), lane=0, group=tg)
                 for p, kv_head in enumerate(owned):
                     for x in (0, 1):
-                        kv_fill(x, kv_rows(x, kv_head, 1), p, 0, tg)
+                        kv_fill(x, keys[x][kv_head].repeat(1), p, 0, tg)
                 for kv_head in owned:
                     self.O.drain(
-                        packed_rows(self.O, kv_head), lane=0, group=tg, wait=True
+                        o_rows[kv_head].coalesce(), lane=0, group=tg, wait=True
                     )
                 rt.finish(tg)
             return
 
         cores, pv_width = self.pv_cores, self.pv_width
+        # Q rows each shim carries per block, and the blocks per pipeline.
+        blocks = ceildiv(self.seq_pad, self.join_rows * self.q_shims)
         dev = self.dev
         if dev is None:
             raise Unresolvable("MHA: sequence() needs a bound device")
         # A shim descriptor's iteration count.
         iterations = 1 << dev.get_dma_bd_iter_bits(0, 0)
         for kv_head in range(kv_heads):
-            head0 = kv_head * group
+            heads = slice(kv_head * group, (kv_head + 1) * group)
             tg = rt.task_group()
             for shim in range(self.q_shims):
-                self.Q.fill(q_rows(self.Q, head0, shim), lane=shim, group=tg)
+                self.Q.fill(
+                    self.composed_rows(self.Q, shim)[heads], lane=shim, group=tg
+                )
             # O drains before K and V fill: past the queue's depth a fill
             # waits for a free slot, which the cores free only while O drains.
             for shim in range(self.q_shims):
                 for h in range(cores):
                     self.O.drain(
-                        q_rows(self.O, head0, shim)[
-                            ..., h * pv_width : (h + 1) * pv_width
-                        ],
+                        self.composed_rows(self.O, shim, h)[heads],
                         lane=shim * cores + h,
                         group=tg,
                         wait=True,
@@ -2367,11 +2351,67 @@ class MHA(Operator):
             reads = group * blocks
             for first in range(0, reads, iterations):
                 count = min(iterations, reads - first)
-                kv_fill(0, kv_rows(0, kv_head, count), 0, 0, tg)
+                kv_fill(0, keys[0][kv_head].repeat(count), 0, 0, tg)
                 for h in range(cores):
-                    share = kv_rows(1, kv_head, count)
+                    share = keys[1][kv_head].repeat(count)
                     kv_fill(1, share[..., h * pv_width : (h + 1) * pv_width], 0, h, tg)
             rt.finish(tg)
+
+    def composed_rows(
+        self, operand: Operand, shim: int, share: int = 0
+    ) -> TensorAccessPattern:
+        """Three cores a block: Q's or O's rows shim ``shim`` carries, ``(head, block, row, column)``; O's P*V share ``share`` of the columns."""
+        tap = TensorAccessPattern.full(operand.shape)
+        if self.heads_interleaved:
+            tap = tap.permute((1, 0, 2))
+        rows = self.join_rows
+        tap = tap.split(1, self.q_shims * rows)[:, :, shim * rows : (shim + 1) * rows]
+        if operand is self.O:
+            return tap[..., share * self.pv_width : (share + 1) * self.pv_width]
+        return tap
+
+    def packed_rows(self, operand: Operand) -> TensorAccessPattern:
+        """One query packed: Q's or O's rows of each KV group's block, ``(kv_head, repeat, ..., column)``.
+
+        A group that does not divide a block is two overlapping runs of its
+        heads.
+        """
+        group = self.num_heads // self.num_KV_heads
+        width = 1 << (group.bit_length() - 1)
+        tap = TensorAccessPattern.full(operand.shape)
+        if self.heads_interleaved:
+            tap = tap.permute((1, 0, 2))
+        heads = tap[:, 0].split(0, group)
+        by_group, by_head, column = concrete(heads.strides, heads)
+        if width == group:
+            sizes = [self.B_q // group, group]
+            strides = [0, by_head]
+        else:
+            sizes = [self.B_q // (2 * width), 2, width]
+            strides = [0, (group - width) * by_head, by_head]
+        return TensorAccessPattern(
+            heads.tensor_dims,
+            heads.offset,
+            [self.num_KV_heads, *sizes, self.d],
+            [by_group, *strides, column],
+        )
+
+    def composed_keys(self, x: int) -> TensorAccessPattern:
+        """Three cores a block: K's (``x`` 0) or V's (1) blocks of every KV head up to the bound, ``(kv_head, block, key, column)``."""
+        if self.kv_paired:
+            tap = TensorAccessPattern.full(self.KV.shape)[:, :, x].permute((1, 0, 2))
+        else:
+            tap = TensorAccessPattern.full((self.K, self.V)[x].shape)
+            if self.kv_interleaved:
+                tap = tap.permute((1, 0, 2))
+        blocks = ceildiv(self.kv_tokens, self.B_kv)
+        return tap[:, : blocks * self.B_kv].split(1, self.B_kv)
+
+    def key_lane(self, x: int, p: int, h: int) -> tuple[Operand, int]:
+        """Three cores a block: the operand and lane carrying pipeline ``p``'s K (``x`` 0) or its V share ``h`` (1)."""
+        if self.kv_paired:
+            return self.KV, p * self.kv_streams + (1 + h if x else 0)
+        return (self.K, self.V)[x], (p * self.pv_cores + h if x else p)
 
     def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
         """Q and O stream every row whatever ``kv_valid`` bounds (the rationale in AGENTS.md: a bound limits compute, not their DMA).
@@ -2412,88 +2452,47 @@ class MHA(Operator):
                 for col in range(self.num_pipelines)
             ]
 
-        def by_head(shape, interleaved):
-            tap = TensorAccessPattern.full(shape)
-            return tap.permute((1, 0, 2)) if interleaved else tap
-
-        def insert_repeat(tap, axis, count):
-            sizes = [*tap.sizes[:axis], count, *tap.sizes[axis:]]
-            strides = [*tap.strides[:axis], 0, *tap.strides[axis:]]
-            return TensorAccessPattern(tap.tensor_dims, tap.offset, sizes, strides)
-
-        rows = self.join_rows
         if operand is self.Q or operand is self.O:
             if self.packed:
-                group = self.num_heads // self.num_KV_heads
+                # Each KV group's block in the order the sequence visits them:
+                # by step, then pipeline.
                 steps = self.num_KV_heads // self.num_pipelines
-                width = 1 << (group.bit_length() - 1)
-                # The num_heads axis, one KV group (its packed block) at a
-                # time, reindexed (step, pipeline) in the order the sequence
-                # visits them.
-                base = by_head(operand.shape, self.heads_interleaved)[:, 0]
-                by_step_p = base.split(0, group).split(0, steps).permute((1, 0, 2, 3))
-                if width == group:
-                    tap = insert_repeat(by_step_p, 2, self.B_q // group)
-                else:
-                    (s,) = concrete((by_step_p.strides[2],), by_step_p)
-                    both = TensorAccessPattern(
-                        by_step_p.tensor_dims,
-                        by_step_p.offset,
-                        [*by_step_p.sizes[:2], 2, width, by_step_p.sizes[3]],
-                        [
-                            *by_step_p.strides[:2],
-                            (group - width) * s,
-                            s,
-                            by_step_p.strides[3],
-                        ],
-                    )
-                    tap = insert_repeat(both, 2, self.B_q // (2 * width))
-                return [(0, tap, None, None)]
-            full = by_head(operand.shape, self.heads_interleaved).split(
-                1, self.q_shims * rows
-            )
-            if operand is self.O:
-                pv_width = self.pv_width
-                return [
-                    (
-                        shim * self.pv_cores + h,
-                        full[:, :, shim * rows : (shim + 1) * rows][
-                            ..., h * pv_width : (h + 1) * pv_width
-                        ],
-                        None,
-                        None,
-                    )
-                    for shim in range(self.q_shims)
-                    for h in range(self.pv_cores)
-                ]
+                tap = self.packed_rows(operand).split(0, steps)
+                order = (1, 0, *range(2, len(tap.sizes)))
+                return [(0, tap.permute(order), None, None)]
+            # Q fills one lane a shim; O, sequence()'s ground truth, drains
+            # shim * pv_cores + h: a share of each shim's P*V cores.
             return [
-                (shim, full[:, :, shim * rows : (shim + 1) * rows], None, None)
+                (
+                    shim * self.pv_cores + h if operand is self.O else shim,
+                    self.composed_rows(operand, shim, h),
+                    None,
+                    None,
+                )
                 for shim in range(self.q_shims)
+                for h in range(self.pv_cores if operand is self.O else 1)
             ]
 
         # K, V or KV: K's (x 0) and V's (1) blocks for each pipeline lane,
         # laned as sequence() fills them.
-        kv_blocks = ceildiv(self.kv_tokens, self.B_kv)
         length_parameter = self.kv_blocks if self.kv_blocks.per_call else None
         group = self.num_heads // self.num_KV_heads
         steps = self.num_KV_heads // self.num_pipelines
-        blocks = ceildiv(self.seq_pad, rows * self.q_shims)
+        reads = group * ceildiv(self.seq_pad, self.join_rows * self.q_shims)
         pv_width = self.pv_width
-        heads = {}
-        for x in (0, 1) if self.kv_paired else (int(operand.name == "V"),):
-            if self.kv_paired:
-                full = TensorAccessPattern.full(operand.shape)[:, :, x]
-                full = full.permute((1, 0, 2))
-            else:
-                full = by_head(operand.shape, self.kv_interleaved)
-            heads[x] = full[:, : kv_blocks * self.B_kv].split(1, self.B_kv)
         out = []
         for p in range(self.kv_lanes):
-            for x, full in heads.items():
+            for x in (0, 1) if self.kv_paired else (int(operand.name == "V"),):
+                full = self.composed_keys(x)
                 if self.packed:
                     shares = [full[p * steps : (p + 1) * steps]]
                 else:
-                    tap = insert_repeat(full, 1, group * blocks)
+                    tap = TensorAccessPattern(
+                        full.tensor_dims,
+                        full.offset,
+                        [full.sizes[0], reads, *full.sizes[1:]],
+                        [full.strides[0], 0, *full.strides[1:]],
+                    )
                     shares = [tap]
                     if x:
                         shares = [
@@ -2501,10 +2500,7 @@ class MHA(Operator):
                             for h in range(self.pv_cores)
                         ]
                 for h, tap in enumerate(shares):
-                    if self.kv_paired:
-                        lane = p * self.kv_streams + (1 + h if x else 0)
-                    else:
-                        lane = p * self.pv_cores + h if x else p
+                    _, lane = self.key_lane(x, p, h)
                     unit = self.B_kv * (pv_width if x else self.d)
                     out.append((lane, tap, length_parameter, unit))
         return out

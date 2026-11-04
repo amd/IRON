@@ -50,7 +50,7 @@ def test_several_readers_many_cores_each_get_a_fresh_end():
 def test_mha_split_places_q_k_v_o_at_their_shim_tiles():
     """P*V split over two cores (``d=512``) places Q, K.
 
-    V and O at ``SplitColumns``' shim tiles from ``fifos(tiles=...)``, instead of a
+    V and O at ``PVSplitColumns``' shim tiles from ``fifos(tiles=...)``, instead of a
     manual ``bind()`` after the fact.
     """
     op = MHA(
