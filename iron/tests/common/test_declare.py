@@ -596,7 +596,6 @@ def test_an_equal_operator_resolves_from_the_first_unless_a_binding_differs(npu2
     An equal operator takes the first's resolution as a copy of its own; one with
     bindings resolves afresh.
     """
-
     shape = dict(
         num_heads=24,
         num_KV_heads=8,

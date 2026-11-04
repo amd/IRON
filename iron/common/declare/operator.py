@@ -497,10 +497,12 @@ class Operator(jit.Operator, library=True):
         key = (dev, self.design_key(), self.pinned, self.given)
         found = Operator._resolutions.get(key)
         if found is None:
-            found = Operator._resolutions[key] = super().resolved(dev)
-            return found
-        # A copy owns its values, so nothing this operator later binds reaches another.
-        new = found.copy()
+            resolved = super().resolved(dev)
+            Operator._resolutions[key] = resolved
+            return resolved
+        # The design key names the class. A copy owns its values, so nothing this
+        # operator later binds reaches another.
+        new = cast(Self, found).copy()
         new.bound_values, new.pinned, new.given = (
             self.bound_values,
             self.pinned,
