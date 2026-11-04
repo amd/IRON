@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -88,7 +89,7 @@ def test_model(tmp_path, installation, tag, name):
                 "bash",
                 str(installation / "install/flm_env.sh"),
                 str(port),
-                tag,
+                "Ollama/" + tag,
                 str(installation / "plugin/extension.json"),
             ],
             env=env,
@@ -119,7 +120,17 @@ def test_model(tmp_path, installation, tag, name):
                     np.linalg.norm(vectors, axis=1), 1, atol=0.02
                 )
                 assert np.dot(*vectors) < 0.99
-                again = post(url, "/v1/embeddings", {"model": tag, "input": texts[0]})
+                for invalid in ("does-not-exist:1", "llama3.2-iron:1b"):
+                    with pytest.raises(urllib.error.HTTPError) as error:
+                        post(
+                            url, "/v1/embeddings", {"model": invalid, "input": texts[0]}
+                        )
+                    with error.value as response:
+                        assert response.code == 400
+                        assert json.load(response)["error"]["message"]
+                again = post(
+                    url, "/v1/embeddings", {"model": "Ollama/" + tag, "input": texts[0]}
+                )
                 np.testing.assert_allclose(
                     again["data"][0]["embedding"], vectors[0], atol=1e-5
                 )
