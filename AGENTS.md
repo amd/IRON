@@ -388,8 +388,9 @@ Each hardware workflow runs one job per runner, Phoenix (NPU1) and Krackan
   `main` and `devel`.
 - `examples.yml`: `tests/applications/`, non-extensive, on every PR: each
   model loaded once for its shortest call (a 13-token prompt, one token
-  drawn; an embedding model's or a toy's own checks) and the device-free
-  reference tests.
+  drawn; an embedding model's or a toy's own checks), a decoder's 20 benched
+  decode steps checked against its golden, and the device-free reference
+  tests.
 - `nightly.yml`: every `tests/applications/`
   test, extensive ones too, each night: the depth a model's checks have
   (accuracy, determinism, sampling, chat turns, long generations, the

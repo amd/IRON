@@ -20,6 +20,7 @@ from iron.lm.testing import (
     check_accuracy,
     check_chat_turn,
     check_determinism,
+    check_device_sampling,
     check_generation,
     load_from_flags,
     weights_dir,
@@ -109,6 +110,15 @@ class TestEachStep:
 def test_generation(decoder, prompt, num_tokens, record_property):
     model, prompts = decoder
     check_generation(model, prompts[prompt], num_tokens, record=record_property)
+
+
+# Decode's speed per PR: the device loop's draws are the host's from the same
+# logits, and those within MAX_KL of the golden's (the accuracy test's first
+# rows).
+@pytest.mark.bench
+def test_decode(decoder, record_property):
+    check_device_sampling(decoder[0], 1024, 20, record=record_property)
+    check_accuracy(decoder[0], MAX_KL, 20, 1024, record=record_property)
 
 
 @pytest.mark.extensive

@@ -149,6 +149,14 @@ def test_llama_3_2(model, prompt_len, num_tokens, record_property):
     check_generation(model, prompt_len, num_tokens, record=record_property)
 
 
+# Decode's speed per PR: the device loop's draws are the host's from the same
+# logits, and those within MAX_KL of the golden's (TestEachStep's rows).
+@pytest.mark.bench
+def test_llama_3_2_decode(model, record_property):
+    check_device_sampling(model, 256, 20, record=record_property)
+    check_accuracy(model, MAX_KL, 20, 256, record=record_property)
+
+
 # The device draws every token and starts every decode step itself; from the
 # same seed its text is the host loop's. The figures are the device loop's.
 @pytest.mark.extensive
