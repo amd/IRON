@@ -3,11 +3,7 @@
 
 """``iron.lm.validate``'s model-general path, device-free, at EmbeddingGemma 2's shape.
 
-Weights drawn (``iron.common.graph.fill.filled``'s own ``Clipped`` bound, which a q, k
-and v projection sharing an input agrees on): an encoder is not a ``CausalLM``, its
-versions carry no duplicate label, every version has a tune point to compare it at, and
-``compare_versions`` raises plainly for one that does not, rather than papering over
-what is always a bug.
+An encoder is not a ``CausalLM``: its versions carry no duplicate label, every version has a tune point, and one with none is a wiring bug, not papered over.
 """
 
 from pathlib import Path
@@ -38,11 +34,9 @@ def test_application_model_resolves_embedding_gemma2_to_multimodal():
 
 
 def test_random_weights_satisfy_clipped_same_input():
-    """The audio and vision towers' q.
+    """The audio and vision towers' q, k, v (and the vision MLP's gate, up) clamp their shared input alike (``Clipped.same_input``), weights drawn included.
 
-    K and v (and the vision MLP's gate and up) each clamp their shared input alike
-    (``Clipped.same_input``), drawn weights included: construction alone raises if they
-    do not.
+    Construction alone raises if they do not.
     """
     _require_checkpoint()
     Multimodal.from_checkpoint(CHECKPOINT, random_weights=0)
@@ -70,11 +64,7 @@ def test_version_recordings_match_every_shapes_tune_point():
 
 
 def test_compare_versions_raises_when_a_version_has_no_tune_point():
-    """A changed version ``model_tune_points`` gives no call for is a wiring bug.
-
-    ``tune_calls`` and ``shapes()`` are meant to name one set of versions, so a
-    version ``label_to_version`` names without a call is never an expected state a report should paper over: it is raised, not recorded.
-    """
+    """A changed version ``model_tune_points`` gives no call for is a wiring bug, raised rather than recorded."""
     _require_checkpoint()
     bogus = (("nowhere", (1,), "int32"),)
     with pytest.raises(ValueError, match="nowhere"):

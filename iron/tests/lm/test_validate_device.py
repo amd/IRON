@@ -3,10 +3,7 @@
 
 """``iron.lm.validate`` end to end against real dispatch.
 
-At SMALL's shape (``iron.tests.support.llama_model.small``, drawn weights, no checkpoint
-directory needed): a candidate profile adding one on-chip fusion is live, compiles its
-own image, and is bit-identical to stock and within its own accuracy of the graph's
-reference.
+At SMALL's shape (drawn weights, no checkpoint needed), a candidate adding one fusion is live, bit-identical to stock and within its own accuracy.
 """
 
 import pytest

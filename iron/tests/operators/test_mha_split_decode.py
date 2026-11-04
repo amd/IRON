@@ -3,8 +3,7 @@
 
 """Split decode's walks on the host, with the operator's own patterns (device-free, npu1 and npu2).
 
-Q and a pad fill a lane's first object, its keys are every n-th block of
-each pass's heads, and O's walk takes each packed row back to its head.
+Q and a pad fill a lane's first object, its keys are every n-th block of each pass's heads, and O's walk takes each packed row back to its head.
 """
 
 import aie.utils as aie_utils

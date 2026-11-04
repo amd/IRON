@@ -144,8 +144,7 @@ def test_a_per_step_call_is_timed_with_a_cpu_wait_cap_its_dispatches_earn():
 def test_measure_stops_a_setting_far_behind_after_one_round(floor_us, stopped):
     """One column against eight over a long vector: several times slower a step.
 
-    With no floor it is timed one round and the default every round; with an infinite
-    floor both are timed until the existing cutoff.
+    With no floor it is timed one round; with an infinite floor both are timed until the existing cutoff.
     """
     default = ReLU(size=2**22, num_aie_columns=8).resolved()
     narrow = ReLU(size=2**22, num_aie_columns=1).resolved()

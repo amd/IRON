@@ -3,8 +3,7 @@
 
 """A weight a coded operand reads, recorded device-free.
 
-The recorder binds the coded rows derived from it, one buffer for every such read, and
-the graph's reference still reads the weight itself.
+One derived buffer serves every coded read; the reference still reads the weight itself.
 """
 
 import os
@@ -271,11 +270,7 @@ def test_a_weight_of_one_matrix_reads_coded_as_a_batch_of_one():
 
 
 def _channels(op) -> list:
-    """Return the DMA channels ``op``'s module asks for.
-
-    Per logical tile, its kind and the fifos it produces and consumes, and per fifo, the
-    kinds of its ends.
-    """
+    """Return the DMA channels ``op``'s module asks for: per tile its kind and fifos, per fifo the kinds of its ends."""
     text = str(OperatorDesign(op.resolved()).module())
     kinds = dict(re.findall(r"(%\w+) = aie\.logical_tile<(\w+)>", text))
     tiles, fifos = Counter(), Counter()
@@ -294,11 +289,7 @@ def _channels(op) -> list:
 
 
 def test_coding_a_gemv_s_weight_takes_no_channel_more():
-    """A packing priced for plain GEMVs must fit coded ones.
-
-    For each catalog shape coding can take, the same fifos between the same kinds of
-    tile, and the same count at every tile.
-    """
+    """A packing priced for plain GEMVs must fit coded ones: the same fifos and counts at every tile, for each catalog shape coding can take."""
     compared = 0
     for case in GEMV.test.resolve(GEMV, aie_utils.get_current_device()):
         shape = {k: v for k, v in case.kwargs.items() if k != "coded_a"}
@@ -312,12 +303,9 @@ def test_coding_a_gemv_s_weight_takes_no_channel_more():
 
 
 def test_gemvs_sharing_an_array_share_it_coded_and_split_it_mixed():
-    """Llama 1B's packed decode runs its q/o, k/v and gate/up GEMVs (K=2048, four rows a call, 32 a C tile) on one 8-core array.
+    """Llama 1B's packed q/o, k/v and gate/up GEMVs (K=2048) share one array coded alike, filling the device's 32 cores.
 
-    32 cores in all, the device's every core. Coded alike they still share one array;
-    coded on some and not others they need two, 40 cores, and the pack no longer places
-    ("no available compute tiles"). coded_a is the array's, so a profile codes such
-    GEMVs all or none.
+    Mixed coding splits them into two arrays (40 cores), which no longer places.
     """
 
     def array(M, coded_a):

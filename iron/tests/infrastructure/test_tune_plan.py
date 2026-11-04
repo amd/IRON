@@ -102,11 +102,7 @@ def test_the_search_holds_a_coding_tunable_where_the_seed_set_it():
 
 
 def test_a_seeded_shape_records_coded():
-    """The seed's entries match the calls that made them.
-
-    A GEMV call leaves ``num_matrices`` to its operator, so an entry naming it would
-    never apply.
-    """
+    """The seed's entries match the calls that made them: a GEMV call leaves ``num_matrices`` to its operator, so an entry naming it would never apply."""
     record = recorder("none")
     seed = coded_seed(record, aie_utils.ensure_current_device(), Profile())
     [call] = record(seed)
@@ -204,11 +200,7 @@ def test_packing_is_no_reason_to_skip_fusions():
 
 
 def test_a_decoder_is_timed_small_medium_and_large_up_to_its_context():
-    """Every doubling of context counts alike.
-
-    Three bands of equal log-width, each at its geometric centre, whole chunks for the
-    prompt chunk.
-    """
+    """Every doubling of context counts alike: three bands of equal log-width, each at its geometric centre, whole chunks for the prompt chunk."""
     assert contexts(256, 32768, 3, 1) == [(1 / 3, 575), (1 / 3, 2896), (1 / 3, 14596)]
     assert contexts(2048, 32768, 3, 2048) == [
         (1 / 3, 4096),

@@ -3,9 +3,7 @@
 
 """Gemma 4 E2B's random weights load under a peak-memory ceiling (CPU only).
 
-Its per-layer embeddings (262144 x 8960, 4.38 GiB in bf16) are the largest
-tensor of any shipped model: a whole-array float32 copy anywhere in the load
-path adds 8.76 GiB, past the ceiling.
+Its per-layer embeddings (4.38 GiB bf16) are the largest of any shipped model: a whole-array float32 copy in the load path adds 8.76 GiB, past the ceiling.
 """
 
 import os

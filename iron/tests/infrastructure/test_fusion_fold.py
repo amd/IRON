@@ -3,9 +3,7 @@
 
 """A fold (``iron.common.graph.fold``).
 
-A consumer's kernel runs inside its producer's own cores, on the output tile before it
-leaves L1, so the consumer takes no cores and no DMA hop of its own. No toolchain and no
-NPU above the "On the device" line.
+A consumer's kernel runs in its producer's own cores, before the tile leaves L1, taking no cores or DMA of its own. No device below "On the device".
 """
 
 import re
@@ -109,11 +107,9 @@ def test_a_row_wise_consumer_is_not_folded(producer):
 
 
 def test_a_chain_of_three_steps_admits_overlapping_candidates():
-    """SiLU -> ElementwiseMul -> GELU.
+    """SiLU -> ElementwiseMul -> GELU: each pair and the whole chain are separate (overlapping) candidates.
 
-    Each pair, and the whole chain, is a separate candidate (overlapping ones included,
-    as a stream run's are); applying the deepest collapses all three into one step, its
-    finish the two consumers in order, only the first (binary) riding finish0.
+    Applying the deepest collapses all three into one step, its finish the two consumers in order.
     """
     silu = SiLU(size=2048, tile_size=256)
     mul = ElementwiseMul(size=2048, tile_size=256)
@@ -140,12 +136,9 @@ def test_a_chain_of_three_steps_admits_overlapping_candidates():
 
 
 def test_a_second_binary_link_is_refused():
-    """Only one step of a chain may take another input.
+    """Only one step of a chain may take another input: SiLU folding Mul takes the one free channel, leaving none for a further Add.
 
-    Its one free channel is the first's. SiLU folding Mul takes it; chaining Add in too
-    would need a second (refused, chained or not: ``ElementwiseAdd`` into bare
-    ``ElementwiseMul`` has no free channel of its own either, both of its own already a
-    core's two).
+    ``ElementwiseAdd`` into bare ``ElementwiseMul`` has no free channel either, both of its own already a core's two.
     """
     silu = SiLU(size=2048, tile_size=256)
     mul = ElementwiseMul(size=2048, tile_size=256)
@@ -249,11 +242,7 @@ def test_a_binary_producer_has_no_free_channel():
 
 
 def test_binary_elementwise_rides_a_when_channel_full():
-    """A core's two channels are both ``add``'s own, but one tile is this whole call.
-
-    So ``a``'s channel can carry ``mul``'s other input too, one more acquire of the same
-    fifo (not its own stream).
-    """
+    """A core's two channels are both ``add``'s own, but one tile is this whole call, so ``a``'s channel can carry ``mul``'s other input too."""
     add = ElementwiseAdd(size=256, num_aie_columns=1, num_channels=1, tile_size=256)
     mul = ElementwiseMul(size=256, num_aie_columns=1, num_channels=1, tile_size=256)
     steps = sequences.steps((add, "a", "b", "mid"), (mul, "mid", "up", "out"))
@@ -290,11 +279,7 @@ def test_feed_b_leaves_no_channel_for_a_finish():
 
 
 def test_gemv_rides_a_when_feed_b_leaves_no_channel():
-    """feed_b's two channels leave none free, but A's own tile.
-
-    One column's whole share and so one call's only tile, can carry the residual's row
-    re-read instead (the old branch's re-read trick, not a stream of its own).
-    """
+    """feed_b's two channels leave none free, but A's own tile (one column's whole share, one call's only tile) can carry the residual's row re-read instead."""
     gemv = GEMV(
         M=2048,
         K=2048,
@@ -361,9 +346,7 @@ def test_a_folded_operator_s_name_is_a_symbol():
 def test_fold_candidates_on_small_llama():
     """Decode's residual adds after o_proj and down_proj, and SwiGLU's gate activation, fold.
 
-    The prompt chunk's own projections are ``ProjectionGEMM``, which declares no
-    ``fold()``, so its residual adds stay; its SwiGLU gate, ``Elementwise`` like
-    decode's, folds too, bound to the prompt chunk's own row count on both sides alike.
+    The prompt chunk's ``ProjectionGEMM`` declares no ``fold()``, so its residual adds stay; its SwiGLU gate folds too.
     """
     model = small()
     decode_shapes, prompt_shapes = model.shapes()
@@ -426,10 +409,9 @@ def _time(fused_run, unfused_run, stream_run):
     "size,tile", [(8192, 1024), (2097152, 4096)], ids=["decode", "prompt"]
 )
 def test_silu_folds_elementwise_mul_on_device(size, tile, record_property):
-    """``silu(gate) * up`` folded into SiLU's cores holds to the composed references.
+    """``silu(gate) * up`` folded into SiLU's cores holds to the composed references and is bit-equal to the pair run unfused.
 
-    It is bit-equal to the pair run unfused, and timed against both the unfused pair
-    and the same pair stream-fused.
+    Timed against both the unfused pair and the same pair stream-fused.
     """
     silu, mul = fusable.silu_mul(size, tile)
     folded_op = silu.fold(mul, 0)
@@ -493,8 +475,7 @@ def test_silu_folds_elementwise_mul_on_device(size, tile, record_property):
 def test_gemv_folds_elementwise_add_on_device(M, K, record_property):
     """Llama decode's GEMV -> ElementwiseAdd residual add, folded into GEMV's own cores.
 
-    Holds to the two operators' references composed and is bit-equal to the pair run
-    unfused; timed against both the unfused pair and the same pair stream-fused.
+    Holds to the references composed and is bit-equal to the pair unfused; timed against both the unfused and stream-fused pair.
     """
     tile_size_input, tile_size_output = (4, 256) if K == 2048 else (1, 256)
     gemv, add = fusable.gemv_add(M, K, tile_size_input, tile_size_output)
@@ -553,11 +534,9 @@ def test_gemv_folds_elementwise_add_on_device(M, K, record_property):
 
 @pytest.mark.supported_devices("npu2")
 def test_a_three_step_chain_matches_reference_and_unfused_on_device():
-    """GEMV -> ElementwiseAdd -> SiLU.
+    """GEMV -> ElementwiseAdd -> SiLU, all three folded into GEMV's own cores.
 
-    All three folded into GEMV's own cores (a residual add then an activation), holds to
-    the three operators' references composed and is bit-equal to the same three steps
-    run unfused.
+    Holds to the references composed and is bit-equal to the same steps unfused.
     """
     M, K = 2048, 2048
     gemv, add = fusable.gemv_add(M, K, 4, 256)
@@ -610,9 +589,7 @@ def test_a_three_step_chain_matches_reference_and_unfused_on_device():
 def test_a_bounded_fold_matches_across_different_per_call_counts():
     """SiLU -> ElementwiseMul, folded, bound to a graph's own per-call row count (as the prompt chunk's SwiGLU gate is).
 
-    Compiled once, called with several row counts, each bit-equal to the same call
-    unfused and matching the graph's own reference over just the valid rows -- the
-    prompt chunk's own regime, without needing the real model.
+    Compiled once, each row count is bit-equal to the same call unfused and matches the graph's own reference over the valid rows.
     """
     size, tile = 2048, 256
 
@@ -708,11 +685,9 @@ def _ride_binary() -> None:
 
 @pytest.mark.supported_devices("npu2")
 def test_binary_elementwise_rides_matches_reference_and_unfused_on_device():
-    """ElementwiseAdd(a, b) -> ElementwiseMul.
+    """ElementwiseAdd(a, b) -> ElementwiseMul, folded by riding a's channel (one tile, the whole call, no stream of its own for Mul's other input).
 
-    Folded by riding a's channel (one tile, the whole call, so no stream of its own for
-    Mul's other input), holds to the two operators' references composed and is bit-equal
-    to the pair run unfused.
+    Holds to the references composed and is bit-equal to the pair run unfused.
     """
     hang.bounded(_RIDE_TIMEOUT_S, _ride_binary)
 
@@ -804,18 +779,9 @@ def _ride_gemv() -> dict:
 
 @pytest.mark.supported_devices("npu2")
 def test_gemv_rides_a_matches_reference_unfused_and_stream_on_device(record_property):
-    """GEMV(2048, 2048) -> ElementwiseAdd residual.
+    """GEMV(2048, 2048) -> ElementwiseAdd residual, folded by riding A's channel (``feed_b=True`` leaves no channel of its own for it).
 
-    Folded by riding A's channel (``feed_b=True`` leaves no channel of its own for it),
-    holds to the two operators' references composed and is bit-equal to the pair run
-    unfused; timed against the unfused pair and the same pair stream-fused.
-
-    4 columns, not the decode tunable's 8: at 8, GEMV(feed_b=True)'s stream
-    fusion into Add needs the shim's whole 16-channel output budget plus
-    one more (A/B already claim it as two input streams a lane, so C can't
-    land on-chip and still needs its own output channel, same as Add's);
-    that is an existing stream-placement limit, not a riding one, so this
-    column count is the one where all three variants are buildable.
+    Holds to the references composed and is bit-equal to the pair unfused, timed against both; 4 columns, where all three variants build.
     """
     times = hang.bounded(_RIDE_TIMEOUT_S, _ride_gemv)
     for name, (lo, med) in times.items():

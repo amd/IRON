@@ -30,12 +30,7 @@ pytestmark = pytest.mark.usefixtures("npu2")
 
 
 def test_several_readers_one_core_still_gets_its_own_list():
-    """``readers=`` is asked at one column.
-
-    Every core still took its own ``fifos()`` list, not the plain, flat shape
-    ``readers=None`` returns (the bug this guards against was a ``TypeError`` indexing a
-    bare end).
-    """
+    """``readers=`` is asked at one column: the core still takes its own ``fifos()`` list, not the flat shape ``readers=None`` returns."""
     op = DepthwiseConv1d(rows=32, channels=96, num_aie_columns=1).resolved()
     BuiltArray(OperatorDesign(op))
 
@@ -48,11 +43,7 @@ def test_several_readers_many_cores_each_get_a_fresh_end():
 
 
 def test_mha_split_places_q_k_v_o_at_their_shim_tiles():
-    """P*V split over two cores (``d=512``) places Q, K.
-
-    V and O at ``PVSplitColumns``' shim tiles from ``fifos(tiles=...)``, instead of a
-    manual ``bind()`` after the fact.
-    """
+    """P*V split over two cores (``d=512``) places Q, K, V and O at their shim tiles from ``fifos(tiles=...)``, not a manual ``bind()`` after the fact."""
     op = MHA(
         num_heads=4,
         num_KV_heads=1,
@@ -127,10 +118,9 @@ _UNCLAMPED = (np.iinfo(np.int32).min, np.iinfo(np.int32).max)
 
 
 def _identity_row_program(op: Emit) -> np.ndarray:
-    """Return a program whose image rows copy ``planes[0]`` unchanged into ``image``.
+    """Return a program whose image rows copy ``planes[0]`` unchanged into ``image``, Emit's general int32 ALU at its identity.
 
-    Emit's general int32 ALU at its identity. The carried rows past them are left zero
-    (unused), a valid no-op row.
+    Rows past ``op.slots`` are left zero, a valid no-op.
     """
     program = np.zeros((op.rows, _ROW_FIELDS), np.int32)
     for r in range(op.slots):
@@ -140,11 +130,9 @@ def _identity_row_program(op: Emit) -> np.ndarray:
 
 @pytest.mark.supported_devices("npu2")
 def test_emit_feeds_sample_draws_matches_reference_and_unfused():
-    """Emit computes "the next call's scratchpad and carried state" (its own docstring); here, the sampling draw row.
+    """Emit computes the sampling draw row, fed straight into Sample.draws, whose select and combine cores each take their own reader of it.
 
-    Fed straight into Sample.draws, whose select cores and combine core each take their
-    own reader of it (the several readers ``fifos()`` now gives a fed lane), the row
-    costs no host round trip between the two operators.
+    The row costs no host round trip between the two operators.
     """
     emit = Emit(
         slots=sample_kernel.ROW_WORDS, carried=sample_kernel.ROW_WORDS

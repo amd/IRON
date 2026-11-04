@@ -3,9 +3,7 @@
 
 """``Image(fusions=...)``.
 
-``PACK`` (independent steps co-resident, issued concurrently) and ``MERGE`` (consecutive
-steps sharing a configuration, run back to back with no edge). No toolchain and no NPU
-below ``# On the device``'s line, as ``test_fusion.py``'s own.
+``PACK`` (independent steps co-resident, issued concurrently) and ``MERGE`` (consecutive steps run back to back, no edge). No device below "On the device".
 """
 
 import re
@@ -71,9 +69,7 @@ def test_a_concurrent_fusion_s_scratch_shares_no_bytes_a_merge_s_may(kind, share
 def _qkv(num_aie_columns=(8, 4, 4)):
     """Llama decode's q/k/v GEMVs (M=2048/512/512, K=2048) over one normed row.
 
-    Independent, each only reading the row and writing its own output. Packed, each runs
-    its own array, so k and v are narrowed to four columns: the three at the chip's
-    width take 24 shim channels of npu2's 16.
+    Packed, each runs its own array, so k and v are narrowed to four columns: the three at the chip's width take 24 shim channels of npu2's 16.
     """
     qc, kc, vc = num_aie_columns
     q = LLAMA_NPU2_PROFILE.make(GEMV, M=2048, K=2048, num_aie_columns=qc)
@@ -100,11 +96,9 @@ def _qkv_pack() -> Fusion:
 
 
 def _short_decode(num_aie_columns=(1, 8, 2)):
-    """Return a short decode run.
+    """Return a short decode run: RMSNorm -> GEMV -> ElementwiseAdd (Llama's own residual add), dependent through host memory.
 
-    RMSNorm -> GEMV -> ElementwiseAdd (Llama's own residual add), dependent through host
-    memory. GEMV keeps the profile's own width (8); GEMV and ElementwiseAdd both the
-    whole chip wide do not co-fit together, so ElementwiseAdd is narrowed.
+    GEMV keeps the profile's own width (8); both the whole chip wide do not co-fit, so ElementwiseAdd is narrowed.
     """
     rms_cols, gemv_cols, add_cols = num_aie_columns
     rms = RMSNorm(rows=1, tile_size=2048, weighted=True, num_aie_columns=rms_cols)
@@ -146,11 +140,7 @@ def test_merge_fusion_takes_no_edges():
 
 @pytest.mark.parametrize("packaging", [FullELF, PerStep])
 def test_an_image_refuses_a_dependent_pack(packaging):
-    """GEMV.C -> ElementwiseAdd.b through host memory is a stream candidate.
-
-    Not an independent one; packing the same two steps anyway is a hazard every
-    packaging refuses rather than silently racing.
-    """
+    """GEMV.C -> ElementwiseAdd.b through host memory is a stream candidate, not an independent one; packing them anyway is a hazard every packaging refuses."""
     gemv = GEMV(M=2048, K=2048, tile_size_input=4, tile_size_output=256)
     add = ElementwiseAdd(size=2048, tile_size=256)
     steps = sequences.steps((gemv, "A", "B", "mid"), (add, "r", "mid", "out"))
@@ -160,11 +150,9 @@ def test_an_image_refuses_a_dependent_pack(packaging):
 
 
 def test_pack_refuses_when_columns_cannot_co_reside():
-    """q/k/v plus a fourth, independent full-width GEMV (gate_proj) cannot share one device.
+    """q/k/v plus a fourth, full-width GEMV (gate_proj) cannot share one device: too many shim DMA channels between four designs the whole chip wide.
 
-    Too many shim DMA channels between four designs each the whole chip wide. Fit is
-    decided by placing, not refused up front; q/k/v alone co-fit at ``_qkv``'s default
-    widths.
+    Fit is decided by placing, not refused up front; q/k/v alone co-fit at ``_qkv``'s default widths.
     """
     q, k, v = _qkv()
     gate = LLAMA_NPU2_PROFILE.make(GEMV, M=8192, K=2048, num_aie_columns=8)
@@ -245,11 +233,9 @@ def _adds_recording(name, adds):
 
 
 def test_packed_steps_of_one_design_each_run_their_own_array():
-    """Packed steps issue in one task group.
+    """Packed steps issue in one task group; each keeps an array of its own, its barrier set once.
 
-    On one array, the second's and third's preambles would rewrite the words and re-set
-    the barrier its core had not yet read for the first, so one pass never ran. Each
-    step keeps an array of its own, its barrier set once.
+    On one shared array, the second's and third's preambles would re-set the barrier before the first's core read it, so one pass never ran.
     """
     image = Image(
         _adds_recording("pack_same_design", _adds()),
@@ -295,13 +281,9 @@ def test_merge_of_a_short_decode_run_is_one_device_configuration():
 
 
 def test_pack_candidates_on_small_llama(llama_recordings):
-    """Decode's q/k/v GEMVs and the prompt chunk's same projections pack.
+    """Decode's q/k/v GEMVs and the prompt chunk's same projections (under ``ProjectionGEMM``) pack, as 2- and 3-way runs, overlapping ones included.
 
-    One three-way pack a layer (the MLP's gate/up is only a pair, down_proj depending
-    on both), the prompt chunk's under ``ProjectionGEMM``. They pack as 2- and 3-way
-    runs, overlapping ones included; plain data movers (``Copy``,
-    ``RoPE``) that merely run side by side pack too, but a layer's K and V
-    cache writes, into one paired buffer.
+    Plain data movers (``Copy``, ``RoPE``) that merely run side by side pack too, but not a layer's K and V cache writes, into one paired buffer.
     """
     decode, prompt = llama_recordings
     for recording, projection in ((decode, "GEMV"), (prompt, "ProjectionGEMM")):
@@ -314,10 +296,9 @@ def test_pack_candidates_on_small_llama(llama_recordings):
 
 
 def test_a_packing_runs_as_merges_on_an_xclbin(llama_recordings):
-    """On an xclbin a packing's steps in a row are one merged dispatch (``merges``).
+    """On an xclbin a packing's steps in a row are one merged dispatch (``merges``), joining every consecutive pair whose designs it groups.
 
-    Every pair of consecutive steps whose designs it groups is joined, but across a host
-    step or into a fusion's step.
+    Not across a host step or into a fusion's step.
     """
     decode, _ = llama_recordings
     dev = aie_utils.ensure_current_device()
@@ -342,11 +323,9 @@ def test_a_packing_runs_as_merges_on_an_xclbin(llama_recordings):
 
 
 def test_each_merge_of_llama_s_npu2_packing_places():
-    """Llama's decode packing groups more shim ends than one sequence has channels for.
+    """Llama's decode packing groups more shim ends than one sequence has channels for; a full ELF's separate sequences share them.
 
-    A full ELF's separate sequences share them; an xclbin's merge is one sequence, so
-    its runs split where a design would not place (all 16 MM2S channels were taken),
-    and where its steps' host buffers would pass what one kernel takes (22 and 26).
+    An xclbin's merge is one sequence, so its runs split where a design would not place, or its steps' host buffers would pass what one kernel takes.
     """
     dev = aie_utils.ensure_current_device()
     model = llama_1b(num_hidden_layers=1)
@@ -370,11 +349,7 @@ def test_each_merge_of_llama_s_npu2_packing_places():
 
 
 def test_pack_candidates_on_llama_1b_header():
-    """The real 1B header (unread weights, the shapes ``candidates`` builds designs at).
-
-    Decode's q/k/v and gate/up GEMVs pack, as do the prompt chunk's same projections
-    under ``ProjectionGEMM``.
-    """
+    """The real 1B header: decode's q/k/v and gate/up GEMVs pack, as do the prompt chunk's same projections under ``ProjectionGEMM``."""
     model = llama_1b(num_hidden_layers=1)
     decode_shapes, prompt_shapes = model.shapes()
     decode, prompt = model.record(**decode_shapes), model.record(**prompt_shapes)
@@ -396,10 +371,7 @@ def test_pack_candidates_on_llama_1b_header():
 def test_pack_of_qkv_gemvs_matches_reference_and_unfused(record_property):
     """Llama decode's q/k/v GEMVs (M=2048/512/512, K=2048), packed to run concurrently on disjoint columns.
 
-    Hold to GEMV's own reference and are bit-equal to the same three steps run unfused;
-    also times both the tuner's way (``time_interleaved``: each image's calls run in
-    turn within a round, so a round pays one hardware-context load per image rather than
-    one per call), min and median over interleaved rounds.
+    Hold to GEMV's own reference and are bit-equal to the same steps unfused; also times both the tuner's way, min and median over interleaved rounds.
     """
 
     def build(fusions):
@@ -459,11 +431,9 @@ def test_pack_of_qkv_gemvs_matches_reference_and_unfused(record_property):
 
 @pytest.mark.supported_devices("npu2")
 def test_merge_of_a_short_decode_run_matches_reference_and_unfused(record_property):
-    """RMSNorm -> GEMV -> ElementwiseAdd (Llama's own residual add).
+    """RMSNorm -> GEMV -> ElementwiseAdd (Llama's own residual add), merged into one device configuration run back to back with no reconfigure.
 
-    Merged into one device configuration run back to back with no reconfigure between
-    them, holds to the operators' own references in turn and is bit-equal to the same
-    three steps run unfused; also times both.
+    Holds to the references in turn and is bit-equal to the same steps run unfused; also times both.
     """
 
     def build(fusions):

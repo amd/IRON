@@ -166,11 +166,7 @@ def test_a_command_reads_at_most_a_scratchpads_words(npu2):
 
 
 def test_a_command_never_starts_within_a_fusion(npu2):
-    """A fusion of the steps either side of a split moves the split to its first member.
-
-    The composition starts each command at that step's place among the fused steps,
-    one fewer past the fusion.
-    """
+    """A fusion of the steps either side of a split moves the split to its first member, one fewer past the fusion."""
     recording = ManyWords().record(x=(4096,))
     words = _step_words(recording)
     first = plan(npu2, recording, step_words=words).commands[0]

@@ -69,9 +69,7 @@ def recorded(profile: Profile) -> list[Timed]:
 def test_a_reverted_version_takes_the_base_entries_that_touch_it():
     """Only the small version loses.
 
-    Its own entry and the one both versions match come from the base, a packing scoped
-    to both keeps the large one, and an unscoped packing touching the small one is
-    dropped.
+    Its own entry and the one both versions match come from the base; a packing scoped to both keeps the large one, an unscoped one touching small is dropped.
     """
     large, small_ = (c.recording for c in recorded(Profile()))
     base = Profile()
@@ -188,10 +186,9 @@ def test_a_report_adds_each_phase_and_each_version_s_gain_so_far(tmp_path):
 
 @pytest.mark.supported_devices("npu2")
 def test_verify_keeps_the_version_that_gains_and_reverts_the_one_that_loses():
-    """The large version's candidate widens the one column the base gives its ReLU; the small version's candidate narrows its ReLU to one.
+    """The large version's candidate widens the base's one column; the small version's candidate narrows its ReLU to one, slower at this length.
 
-    Slower at this length. What is kept is the first alone, and the small version, back
-    at the base, is not reported.
+    What is kept is the first alone; the small version, back at the base, is not reported.
     """
     dev = aie_utils.ensure_current_device()
     base = Profile()
@@ -241,8 +238,7 @@ def test_a_phase_charges_its_own_timing_and_checks_its_profile_against_the_last(
 def test_the_final_verify_times_only_the_points_the_search_did_not():
     """A pair checked at its shortest point is timed at the other alone when verified at both.
 
-    The shortest point's figure is the one the first check found, and the verdict is
-    each point's weighed.
+    The shortest point's figure is the one the first check found; the verdict weighs each point.
     """
     dev = aie_utils.ensure_current_device()
     base = Profile()
