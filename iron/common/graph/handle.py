@@ -21,6 +21,7 @@ from ..declare.operator import graph_recorder
 from ..declare.precision import Precision
 from ..image.packaging import Kind
 from ..image.step import BufferRef
+from .coded import Source
 
 T = TypeVar("T")
 
@@ -122,6 +123,16 @@ class Handle:
         """Make a new buffer ``name`` of ``shape``, whole."""
         shape = tuple(int(s) for s in shape)
         return cls(Buffer(name, role, shape, dtype), shape, dtype)
+
+    def valid_index(self, values: Mapping[str, int]) -> tuple[slice, ...]:
+        """Return the index of the entries valid in a call with per-call ``values``.
+
+        Each bounded axis cut to its count, the others whole.
+        """
+        key = [slice(None)] * len(self.shape)
+        for axis, count in self.valid.items():
+            key[axis] = slice(count.evaluate(values))
+        return tuple(key)
 
     @property
     def name(self) -> str:
@@ -741,6 +752,16 @@ class State(_Viewed):
 def state(shape, dtype=bfloat16, name=None) -> State:
     """Declare device-resident state a graph holds."""
     return State(shape, dtype, name)
+
+
+class _Param(np.ndarray):
+    """A ``param``.
+
+    An array a graph holds as a weight, and where in a file it was read from, if it was
+    (``source``).
+    """
+
+    source: Source | None = None
 
 
 class Weight(_Viewed):

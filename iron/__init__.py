@@ -24,11 +24,13 @@ if TYPE_CHECKING:  # the same names, for a checker; the runtime loads them lazil
         state,
         weight,
     )
+    from .common.image.step import FusionKind
 
 __all__ = [
     "Carried",
     "CarriedLoop",
     "CompiledGraph",
+    "FusionKind",
     "Graph",
     "Precision",
     "Profile",
@@ -41,8 +43,10 @@ __all__ = [
     "weight",
 ]
 # Each name's module, loaded on first use.
-_LAZY = dict.fromkeys(__all__, "iron.common.graph") | dict.fromkeys(
-    ["Precision", "Profile"], "iron.common.declare"
+_LAZY = (
+    dict.fromkeys(__all__, "iron.common.graph")
+    | dict.fromkeys(["Precision", "Profile"], "iron.common.declare")
+    | {"FusionKind": "iron.common.image.step"}
 )
 
 

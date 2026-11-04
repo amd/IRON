@@ -78,6 +78,11 @@ are shared with the other decoders, in `tests/applications/decoders/`
 and tokens per second are recorded to CI
 ([performance checks](https://amd.github.io/IRON/performance-checks/#bench=gemma4&suite=nightly&metric=TTFT)).
 
-On NPU1, the text decoder runs a dispatch per step and
-`tests/applications/long_context/` holds it there. The towers and
-`Gemma4Multimodal` are tested on NPU2 only.
+On NPU1, the text decoder runs a dispatch per step: `decoders/test.py`'s
+`TestEachStep` and `tests/applications/long_context/` hold it there.
+Measured on Phoenix, repeated runs are bit-identical, and
+`long_context`'s deepest decode step at 4096 measured KL 0.0046 and its
+deepest prompt chunk 1.7e-10. `TestEachStep`'s own
+accuracy case needs its golden recorded in a torch-enabled, no-device
+process before it can run there. The towers and `Gemma4Multimodal` are
+tested on both NPUs.

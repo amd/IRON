@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 import aie.utils as aie_utils
@@ -18,7 +19,7 @@ from .allocator import Allocation, ArenaPlan, lay_out
 from .artifacts import Artifacts, Step
 from .callable import BF16, FullELFCallable, PerStepCallable, ScratchArena
 from .link import FullELF, PerStep
-from .step import BufferRef, SequenceStep
+from .step import BufferRef, Fusion, FusionKind, SequenceStep
 
 if TYPE_CHECKING:
     from ..graph.record import Recording
@@ -46,11 +47,12 @@ class Image:
         packaging: FullELF | PerStep,
         arena: ArenaPlan | None = None,
         residents: Mapping[str, Hashable] | None = None,
+        fusions: Sequence[Fusion] = (),
     ):
         if residents and arena is None:
             raise ValueError("residents are placed in an arena; pass arena= too")
         self.steps = [SequenceStep(s.op, s.refs()) for s in recording.steps]
-        # The chain's kernel instances are named from this label.
+        # A fusion's kernel instances are named from this label.
         self.name = recording.name
         self.inputs = [h.name for h in recording.inputs]
         self.outputs = [h.name for h in recording.outputs]
@@ -59,9 +61,86 @@ class Image:
         self.packaging = packaging
         self.arena = arena
         self.residents = dict(residents or {})
+        self.fusions = tuple(fusions)
+        if self.fusions and isinstance(packaging, PerStep) and packaging.check:
+            raise ValueError(
+                "fusions need their own single dispatch; check=True checks "
+                "each step on its own, against its reference"
+            )
+        self._validate_fusions()
         self._arena_layout: dict[str, Allocation] | None = None
         self.layout: dict[str, tuple[str, int, int]] | None = None
         self._artifacts: Artifacts | None = None
+
+    def _validate_fusions(self) -> None:
+        """Raise ``ValueError`` unless each fusion's steps are valid.
+
+        Real, consecutive and claimed once, a pack's steps independent, and each edge
+        names a real whole-buffer hand-off.
+        """
+        claimed: set[int] = set()
+        for fusion in self.fusions:
+            if list(fusion.steps) != list(range(fusion.steps[0], fusion.steps[-1] + 1)):
+                raise ValueError(
+                    f"an image fusion's steps {fusion.steps} must be consecutive"
+                )
+            for s in fusion.steps:
+                if not 0 <= s < len(self.steps):
+                    raise ValueError(
+                        f"fusion step {s} names no step ({len(self.steps)} steps)"
+                    )
+                if s in claimed:
+                    raise ValueError(f"step {s} is in two fusions")
+            claimed |= set(fusion.steps)
+            if fusion.kind is FusionKind.PACK:
+                uses = [(i, *self.steps[i].roots()) for i in fusion.steps]
+                for (i, ri, wi), (k, rk, wk) in itertools.combinations(uses, 2):
+                    if set(wi) & {*rk, *wk} or set(wk) & set(ri):
+                        raise ValueError(
+                            f"pack {fusion.steps}: step {i} and step {k} are not "
+                            f"independent, so issuing them concurrently is a hazard"
+                        )
+            for edge in fusion.edges:
+                producer, consumer = (
+                    self.steps[edge.producer],
+                    self.steps[edge.consumer],
+                )
+                out = next(
+                    (
+                        ref
+                        for ref, b in zip(producer.buffers, producer.op.buffers)
+                        if b.name == edge.output and b.drains
+                    ),
+                    None,
+                )
+                if out is None:
+                    raise ValueError(
+                        f"step {edge.producer} ({type(producer.op).__name__}) has "
+                        f"no drained buffer {edge.output!r}"
+                    )
+                in_ = next(
+                    (
+                        ref
+                        for ref, b in zip(consumer.buffers, consumer.op.buffers)
+                        if b.name == edge.input and b.fills
+                    ),
+                    None,
+                )
+                if in_ is None:
+                    raise ValueError(
+                        f"step {edge.consumer} ({type(consumer.op).__name__}) has "
+                        f"no filled buffer {edge.input!r}"
+                    )
+                if (
+                    out.nbytes is not None
+                    or in_.nbytes is not None
+                    or out.root != in_.root
+                ):
+                    raise ValueError(
+                        f"edge {edge.producer}->{edge.consumer}: {edge.output!r} "
+                        f"({out}) and {edge.input!r} ({in_}) do not name one "
+                        f"whole buffer"
+                    )
 
     @property
     def traced(self) -> bool:
@@ -101,20 +180,19 @@ class Image:
         return designs, design_of
 
     def _uses(self, roots) -> list[tuple[list[str], list[str]]]:
-        """Return each step's reads and writes among ``roots``.
+        """Return each dispatch's reads and writes among ``roots``, in order.
 
-        A part of a buffer is its use.
+        A part of a buffer is its use. A fusion whose members run at once (any kind but a
+        merge) is one use, so no member's buffer shares bytes with another's.
         """
+        together = [f for f in self.fusions if f.kind is not FusionKind.MERGE]
         uses = []
-        for s in self.steps:
+        for i, fusion in Fusion.dispatches(together, len(self.steps)):
             reads, writes = [], []
-            for ref, b in zip(s.buffers, s.op.buffers):
-                if ref.root not in roots:
-                    continue
-                if b.fills:
-                    reads.append(ref.root)
-                if b.drains:
-                    writes.append(ref.root)
+            for j in (i,) if fusion is None else fusion.steps:
+                step_reads, step_writes = self.steps[j].roots()
+                reads += [r for r in step_reads if r in roots]
+                writes += [w for w in step_writes if w in roots]
             uses.append((reads, writes))
         return uses
 
@@ -216,11 +294,42 @@ class Image:
         self.steps = [SequenceStep(resolved[id(s.op)], s.buffers) for s in self.steps]
         self.layout, self.buffer_sizes = self._layout()
 
+    def prepare(self) -> Image:
+        """Resolve the operators and lay the buffers out, building nothing; return this image."""
+        if self.layout is None:
+            self._prepare()
+        return self
+
     def compile(self):
         """Build the image ahead of time."""
-        self._prepare()
+        self.prepare()
         self._link()
         return self
+
+    def own_scratch(self) -> dict[str, tuple[int, int]]:
+        """Each scratch buffer a run of this image holds in its own pool, not an arena's: ``(byte offset, bytes)``."""
+        assert self.layout is not None, "laid out first"
+        return {
+            root: (offset, length)
+            for root, (kind, offset, length) in self.layout.items()
+            if kind == "scratch"
+            and not (self.arena is not None and root in self.residents)
+        }
+
+    def held_bytes(self) -> int:
+        """Bytes a run of this image holds on the device outside its arena plan, as its callable allocates them."""
+        assert self.layout is not None, "laid out first"
+        if isinstance(self.packaging, FullELF):
+            sizes = self.buffer_sizes
+            scratch = 0 if self.arena is not None else sizes.scratch
+            return sizes.input + sizes.output + (sizes.feedback or 0) + scratch
+        hosted = sum(
+            length
+            for root, (kind, _, length) in self.layout.items()
+            if kind != "scratch"
+            and not (self.arena is not None and root in self.residents)
+        )
+        return hosted + max((o + n for o, n in self.own_scratch().values()), default=0)
 
     def _link(self):
         """Build this sequence's image, once; sets ``self.image`` and ``artifacts``."""
@@ -246,10 +355,14 @@ class Image:
         ]
         records, entry, insts = self.packaging.record(designs, sharing)
         labels = [d.name for d in records]
-        by_design = {id(op): labels[design_of[id(op)]] for op in operators}
+        step_labels = [labels[design_of[id(s.op)]] for s in self.steps]
+        for fusion in self.fusions:
+            paired = "+".join(step_labels[j] for j in fusion.steps)
+            for j in fusion.steps:
+                step_labels[j] = paired
         steps = tuple(
-            Step(i, s.op.name, by_design[id(s.op)], s.buffers)
-            for i, s in enumerate(self.steps)
+            Step(i, s.op.name, label, s.buffers)
+            for i, (s, label) in enumerate(zip(self.steps, step_labels))
         )
         return Artifacts(
             full_elf=isinstance(self.packaging, FullELF),

@@ -23,6 +23,8 @@ import sys
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from ml_dtypes import bfloat16
+from safetensors.numpy import save_file
 
 from iron.applications.llama.model import Llama
 from iron.lm import Checkpoint
@@ -30,7 +32,7 @@ from iron.lm.cli import parse_args
 from iron.lm.golden import RECORD
 from iron.lm.model import TokenizerJson
 from iron.lm.testing import require, weights_dir
-from iron.tests.support.llama_model import SMALL, checkpoint
+from iron.tests.support.llama_model import SMALL, checkpoint, shapes
 
 TOKENIZER = weights_dir("llama3.2-1b") / "tokenizer.json"
 
@@ -135,10 +137,17 @@ def test_from_checkpoint_lowers_the_context_and_refuses_to_raise_it(tmp_path):
 
 
 def _held(config, length: int) -> int:
-    """Return what the model holds at ``length`` positions: its arena, recorded."""
+    """Return what the model holds at ``length`` positions: its weights on the host and one build on the bound device."""
     config = dataclasses.replace(config, max_seq_len=length)
-    model = Llama(config, checkpoint(config).tree("unread"))
-    model.profile = None
+    model = Small(config, checkpoint(config).tree("unread"))
+    host = sum(h.nbytes for _, h in model.record(**model.shapes()[0]).weights.values())
+    return host + model.held_bytes(model.shapes())
+
+
+def _pinned(config, length: int) -> int:
+    """Return the decode version's pinned states at ``length`` positions, which ``fit`` once took for all it holds."""
+    config = dataclasses.replace(config, max_seq_len=length)
+    model = Small(config, checkpoint(config).tree("unread"))
     return sum(model.record(**model.shapes()[0]).pinned.values())
 
 
@@ -163,6 +172,18 @@ def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks(npu2, capl
     assert short_log.levelno == logging.WARNING
     assert "max_seq_len 768, not the native 1024" in short_log.message
     assert "--max-seq-len asks for up to 1024" in short_log.message
+
+
+def test_from_checkpoint_fits_the_budget_it_is_given(npu2, tmp_path):
+    """Half the budget where validate or a tune holds two models: 512 of 1024 positions."""
+
+    class Native(Small):
+        config = dataclasses.replace(SMALL, max_seq_len=1024)
+
+    directory = _directory(tmp_path, Native.config)
+    budget = _held(Native.config, 512)
+    model = Native.from_checkpoint(directory, random_weights=1, budget=budget)
+    assert model.config.max_seq_len == 512
 
 
 def test_a_model_fits_its_context_with_no_device_bound(tmp_path):
@@ -212,3 +233,86 @@ def test_a_checkpoint_s_golden_is_refused_once_it_changes(tmp_path, change):
             f.write(b"\x01")
     with pytest.raises(ValueError, match="other inputs"):
         _golden(path)
+
+
+def test_a_tune_records_the_checkpoint_s_own_weights(tmp_path, npu2):
+    """A tune's calls hold the weights a coded seed audits and a build times.
+
+    The checkpoint's, not zeros in their shape.
+    """
+    rng = np.random.default_rng(0)
+    tensors = {
+        name: (rng.standard_normal(shape) * 0.05).astype(bfloat16)
+        for name, shape in shapes(SMALL).items()
+    }
+    save_file(tensors, tmp_path / "model.safetensors")
+    parser = argparse.ArgumentParser()
+    Small.tune_arguments(parser)
+    args = parser.parse_args(
+        ["--checkpoint", str(tmp_path), "--context", str(SMALL.prefill_chunk)]
+    )
+    decode, _ = Small.tune_calls(parser, args)
+    gate = tensors["model.layers.0.mlp.gate_proj.weight"].view(np.uint16)
+    held = [np.asarray(w) for w, _ in decode.recording.weights.values()]
+    assert any(
+        w.shape == gate.shape and np.array_equal(w.view(np.uint16), gate) for w in held
+    )
+
+
+def test_a_shallow_config_loads_a_deeper_checkpoint_s_first_layers(tmp_path, npu2):
+    """``--config num_hidden_layers=1`` over a two-layer checkpoint.
+
+    The model reads layer 0 and leaves layer 1, which a whole-checkpoint load refuses.
+    """
+    _directory(tmp_path)
+    shallow = Small.from_checkpoint(
+        tmp_path, random_weights=7, config={"num_hidden_layers": 1}
+    )
+    assert shallow.config.num_hidden_layers == 1 and len(shallow.layers) == 1
+    with pytest.raises(ValueError, match="extra model.layers.1"):
+        Small(
+            dataclasses.replace(SMALL, num_hidden_layers=1),
+            Checkpoint(tmp_path / "model.safetensors").tree(),
+        )
+
+
+def test_fit_reads_a_shallow_config_s_layers_alone(npu2):
+    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    shallow = dataclasses.replace(config, num_hidden_layers=1)
+    assert Small.fit(shallow, checkpoint(config).path, budget=2**40) == shallow
+
+
+def test_fit_counts_a_per_step_images_own_scratch(npu1):
+    """On npu1 each version is an xclbin a step, each holding a scratch pool beside the arena.
+
+    A budget that holds only the decode version's pinned states does not hold
+    what the model holds there.
+    """
+    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    path = checkpoint(config).path
+    assert _held(config, 1024) > _pinned(config, 1024)
+    with pytest.raises(ValueError, match="do not fit"):
+        Small.fit(config, path, budget=_pinned(config, 1024))
+
+
+def test_fit_holds_the_weights_once_beside_each_build(npu2):
+    """Two builds of one model need one more build's bytes, not another copy of its host weights."""
+    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    path = checkpoint(config).path
+    one = _held(config, 1024)
+    model = Small(config, checkpoint(config).tree("unread"))
+    build = model.held_bytes(model.shapes())
+    assert Small.fit(config, path, budget=one + build, builds=2) == config
+    assert Small.fit(config, path, budget=one + build - 1, builds=2) != config
+
+
+def test_a_tunes_fit_holds_its_seeds_coded_rows_beside_the_plain_weights(npu2):
+    """A tune's seed codes its decode GEMVs, so it holds their coded rows besides the plain weights."""
+    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    path = checkpoint(config).path
+    model = Small(config, checkpoint(config).tree("unread"))
+    plain = _held(config, 1024) + model.held_bytes(model.shapes())
+    assert Small.fit(config, path, budget=plain, builds=2) == config
+    # Here the coded rows are about the weights' own size: not one chunk fits.
+    with pytest.raises(ValueError, match="do not fit"):
+        Small.fit(config, path, budget=plain, builds=2, coded=True)

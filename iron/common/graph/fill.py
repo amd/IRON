@@ -9,24 +9,47 @@ from typing import Any
 
 import numpy as np
 
+#: A ``Clipped`` bound's leaf name: drawn fixed rather than per-tensor, so every
+#: one agrees (``Clipped.same_input``'s linears, which share an input, among
+#: them) and a min never exceeds its max.
+_CLIP_BOUNDS = {
+    "input_min": -1.0,
+    "output_min": -1.0,
+    "input_max": 1.0,
+    "output_max": 1.0,
+}
+
+#: Elements a matrix is drawn in at a time: a large one (Gemma 4's per-layer
+#: embeddings) never holds a float32 or float64 copy of itself.
+_DRAW = 1 << 22
+
 
 def filled(
     fill: str, named: Mapping[str, tuple[tuple[int, ...], Any]], seed: int = 0
 ) -> dict[str, np.ndarray]:
     """Return an array for each of ``named``'s ``(shape, dtype)``, by name.
 
-    ``"random"`` draws matrices normal at deviation ``1/sqrt(in)`` and the
-    rest about one (a bias zero) at 0.1, so swapping two changes the
-    output; ``"unread"`` is lazy zeros.
+    ``"random"`` draws matrices normal at deviation ``1/sqrt(in)``, a ``Clipped`` bound
+    (``_CLIP_BOUNDS``) fixed, and the rest about one (a bias zero) at 0.1, so swapping
+    two changes the output; ``"unread"`` is lazy zeros.
     """
     if fill == "unread":
         return {n: np.zeros(shape, dtype) for n, (shape, dtype) in named.items()}
     rng = np.random.default_rng(seed)
     out = {}
     for n, (shape, dtype) in named.items():
+        bound = _CLIP_BOUNDS.get(n.rsplit(".", 1)[-1])
+        if bound is None and len(shape) >= 2:
+            scale = np.sqrt(math.prod(shape[1:]))
+            out[n] = np.empty(shape, dtype)
+            flat = out[n].reshape(-1)
+            for start in range(0, flat.size, _DRAW):
+                x = rng.standard_normal(min(_DRAW, flat.size - start), np.float32)
+                flat[start : start + x.size] = (x / scale).astype(dtype)
+            continue
         x = rng.standard_normal(shape, dtype=np.float32)
-        if len(shape) >= 2:
-            out[n] = (x / np.sqrt(math.prod(shape[1:]))).astype(dtype)
+        if bound is not None:
+            out[n] = np.asarray(bound, dtype)
         else:
             # An array even of no axes, where numpy's arithmetic gives a scalar.
             out[n] = np.asarray(x / 10 + (not n.endswith("bias")), dtype)

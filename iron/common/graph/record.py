@@ -7,21 +7,24 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import logging
 import math
-from collections.abc import Callable, Hashable, Iterable, Mapping
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
 from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
 from aie.iron import In, InOut, Out
 from aie.utils import bfp
+from aie.utils.compile.jit.params import OperatorParam
 
 from ..declare import Operator, Value
 from ..declare.operand import concrete
 from ..declare.operator import graph_recorder
-from ..declare.profile import Profile
-from ..image.packaging import Kind
+from ..declare.profile import Profile, Version
+from ..image.packaging import Kind, Plan
 from ..image.step import BufferRef, SequenceStep
+from .coded import CodedWeight, encode_all
 from .handle import (
     Dense,
     Gather,
@@ -30,9 +33,12 @@ from .handle import (
     Strided,
     Weight,
     _count,
+    _Param,
     _rescale_bounds,
     is_operand,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -49,6 +55,10 @@ class Step:
     def refs(self) -> tuple[BufferRef, ...]:
         """Where each declared buffer of the step is."""
         return tuple(h.ref() for h in self.slots)
+
+    def roots(self) -> tuple[list[str], list[str]]:
+        """Return the buffer roots this step fills and those it drains, a root once per buffer naming it."""
+        return SequenceStep(self.op, self.refs()).roots()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -158,6 +168,16 @@ def _take_views(cls, operands, kwargs, values):
             continue
         param, offset_member = cls.accept_views[i]
         tap = TensorAccessPattern.full(h.shape or (1,)) if view is None else view.tap
+        offset = None if view is None else view.offset
+        if (
+            offset is not None
+            and isinstance(tap, TensorAccessPattern)
+            and isinstance(tap.offset, (int, np.integer))
+            and tap.offset
+        ):
+            # Moved per call, so views a fixed offset apart share one design.
+            offset = offset + int(tap.offset)
+            tap = TensorAccessPattern(tap.tensor_dims, 0, tap.sizes, tap.strides)
         kwargs.setdefault(param, tap)
         if view is not None and (view.repeat is not None or view.length is not None):
             if i:
@@ -178,12 +198,20 @@ def _take_views(cls, operands, kwargs, values):
         if view is None:
             out.append(dataclasses.replace(h, valid={}))
             continue
-        if view.offset is not None:
-            values[offset_member] = view.offset
+        if offset is not None:
+            values[offset_member] = offset
         # What the pattern walks: the whole buffer, in the pattern's shape.
         walked = view.tap[0] if isinstance(view.tap, tuple) else view.tap
         out.append(Handle(h.buffer, concrete(walked.tensor_dims, walked), h.dtype))
     return out
+
+
+def version_key(inputs: Mapping[str, tuple[tuple[int, ...], Any]]) -> Version:
+    """Return the key of a graph's version for ``inputs`` (each input's shape and dtype, by name, in the order its body takes them)."""
+    return tuple(
+        (name, tuple(int(n) for n in shape), bfp.dtype_name(dtype))
+        for name, (shape, dtype) in inputs.items()
+    )
 
 
 @dataclasses.dataclass
@@ -202,7 +230,7 @@ class Recording:
     # buffer name -> nbytes, for weights, states and slice parents
     pinned: dict[str, int] = dataclasses.field(default_factory=dict)
     values: list[PerCall] = dataclasses.field(default_factory=list)
-    weights: dict[int, tuple[object, Handle]] = dataclasses.field(
+    weights: dict[Hashable, tuple[object, Handle]] = dataclasses.field(
         default_factory=dict, repr=False
     )
     states: dict[int, tuple[State, Handle]] = dataclasses.field(default_factory=dict)
@@ -224,6 +252,13 @@ class Recording:
     limits: list[Limit] = dataclasses.field(default_factory=list)
     # Run between the steps, each ending a full ELF's command (``on_host``).
     host: list[HostStep] = dataclasses.field(default_factory=list)
+    # Each weight a coded read was given but which is read plain, and why.
+    read_plain: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    @property
+    def version(self) -> Version:
+        """The key of the graph version this recording compiles to."""
+        return version_key({h.name: (h.shape, h.dtype) for h in self.inputs})
 
     @property
     def reads(self) -> set[str]:
@@ -327,6 +362,44 @@ class Recording:
         found.update((h.name, key) for key, (_, h) in self.states.items())
         return found
 
+    @property
+    def held(self) -> set[str]:
+        """The buffer roots the host or a later call holds: outputs, feedback, pinned and resident buffers."""
+        return (
+            {h.name for h in self.outputs}
+            | set(self.feedback)
+            | set(self.pinned)
+            | set(self.residents)
+        )
+
+    def users(self) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
+        """Return the steps reading and writing each buffer root, a host step's index -1.
+
+        In step order, a step once per buffer it names the root with.
+        """
+        readers: dict[str, list[int]] = {}
+        writers: dict[str, list[int]] = {}
+        for i, step in enumerate(self.steps):
+            reads, writes = step.roots()
+            for root in reads:
+                readers.setdefault(root, []).append(i)
+            for root in writes:
+                writers.setdefault(root, []).append(i)
+        for host_step in self.host:
+            for h in host_step.reads:
+                readers.setdefault(h.ref().root, []).append(-1)
+            for h in host_step.writes:
+                writers.setdefault(h.ref().root, []).append(-1)
+        return readers, writers
+
+    def crosses_host(self, lo: int, hi: int) -> bool:
+        """Whether a host step runs between steps ``lo`` and ``hi`` (inclusive).
+
+        Host code the model's own graph runs between two device dispatches, which neither
+        packing concurrently nor merging back to back nor folding may skip past.
+        """
+        return any(lo < s.at <= hi for s in self.host)
+
     def check_limits(self, values: Mapping[str, int]) -> None:
         """Raise ``IndexError`` if ``values`` index or bound a view outside it."""
         for limit in self.limits:
@@ -336,6 +409,24 @@ class Recording:
                     f"{self.name}: {limit} is {at}, outside "
                     f"[{limit.lo}, {limit.hi}) for {limit.view}"
                 )
+
+    def rebind(self, replaced: Mapping[int, Sequence[Operator]]) -> None:
+        """Bind each per-call value of an operator ``replaced`` names (by ``id``) to each of its replacements too.
+
+        Run once ``steps`` hold the replacements: a replaced operator keeps its own
+        bindings only while a step still runs it (one instance called at several
+        steps, only some of them replaced).
+        """
+        running = {id(s.op) for s in self.steps}
+        bindings = []
+        for b in self.bindings:
+            if id(b.op) in running or id(b.op) not in replaced:
+                bindings.append(b)
+            bindings += [
+                dataclasses.replace(b, op=new, member=new.value(b.member.name))
+                for new in replaced.get(id(b.op), ())
+            ]
+        self.bindings = bindings
 
     def reference(
         self, tensors: Mapping[str, np.ndarray], values: Mapping[str, int]
@@ -357,8 +448,13 @@ class Recording:
 
         for h in self.inputs:
             store(h.name, tensors[h.name])
+        # A coded weight's readers read the weight it codes, as their reference does.
+        logical: dict[str, np.ndarray] = {}
         for array, h in self.weights.values():
-            store(h.name, array)
+            if isinstance(array, CodedWeight):
+                logical[h.name] = np.asarray(array.array)
+            else:
+                store(h.name, array)
         for state, h in self.states.values():
             if state.host is None:
                 state.host = np.zeros(state.shape, state.dtype)
@@ -370,12 +466,6 @@ class Recording:
                 buffers[ref.root] = np.zeros(h.buffer.nbytes, np.uint8)
             raw = buffers[ref.root][ref.start : ref.start + h.nbytes]
             return raw if bfp.is_bfp(h.dtype) else raw.view(h.dtype).reshape(h.shape)
-
-        def valid(h: Handle) -> tuple:
-            key = [slice(None)] * len(h.shape)
-            for axis, count in h.valid.items():
-                key[axis] = slice(count.evaluate(values))
-            return tuple(key)
 
         bound: dict[int, list[Binding]] = {}
         for b in self.bindings:
@@ -406,14 +496,16 @@ class Recording:
                 buffers.pop(root, None)
             for s in host.get(i, ()):
                 s.fn(
-                    *(view(h)[valid(h)] for h in s.reads),
+                    *(view(h)[h.valid_index(values)] for h in s.reads),
                     *(view(h) for h in s.writes),
                 )
             if step is None:
                 break
             if step.gather is not None:
                 if step.inputs[0] is not step.gather:
-                    _gather_reference(step, view(step.gather)[valid(step.gather)], view)
+                    _gather_reference(
+                        step, view(step.gather)[step.gather.valid_index(values)], view
+                    )
                 continue
             op = step.op
             given = {
@@ -425,7 +517,11 @@ class Recording:
                 # Each extent reads as this call's in the reference.
                 op = op._at_extents(**extents)
             declared = list(zip(op.buffers, step.slots))
-            inputs = {b.name: view(h) for b, h in declared if b.fills}
+            inputs = {
+                b.name: logical[h.name] if h.name in logical else view(h)
+                for b, h in declared
+                if b.fills
+            }
             outputs = {b.name: view(h) for b, h in declared if not b.fills}
             results = op._call_reference(inputs, outputs, given)
             for b, h in declared:
@@ -433,10 +529,10 @@ class Recording:
                     continue
                 target = outputs[b.name] if b.name in outputs else inputs[b.name]
                 if results[b.name] is not target:
-                    rows = valid(h)
+                    rows = h.valid_index(values)
                     result = np.asarray(results[b.name]).reshape(target.shape)
                     target[rows] = result[rows]
-        returned = [view(h)[valid(h)] for h in self.returned]
+        returned = [view(h)[h.valid_index(values)] for h in self.returned]
         carry = {
             name: (
                 nxt.evaluate(values)
@@ -446,6 +542,90 @@ class Recording:
             for name, nxt in self.carry.items()
         }
         return returned, carry
+
+    def code_weights(self) -> None:
+        """Encode every coded weight, a thread each, falling a refused one back to reading it plain.
+
+        What a compile runs; a reference, which reads the weights themselves, does
+        not. A weight with a row past its capacity is read plain instead, with a
+        warning: a profile keyed by shape may meet a checkpoint whose weights its
+        capacity does not hold.
+
+        Raises:
+            ValueError: A refused weight's reader has no coded flag to clear.
+        """
+        refused = encode_all(
+            w for w, _ in self.weights.values() if isinstance(w, CodedWeight)
+        )
+        for key, (weight, h) in list(self.weights.items()):
+            if isinstance(weight, CodedWeight) and weight in refused:
+                logger.warning(
+                    "%s: %s is read plain: %s", self.name, weight.name, refused[weight]
+                )
+                self.read_plain[weight.name] = str(refused[weight])
+                self._read_plain(key)
+        read = {
+            h.ref().root
+            for step in self.steps
+            for h in (*step.slots, *step.inputs, *step.outputs)
+        }
+        read |= {h.ref().root for s in self.host for h in (*s.reads, *s.writes)}
+        coded_from = {k[0] for k in self.weights if isinstance(k, tuple)}
+        unread = {
+            key: h.name
+            for key, (_, h) in self.weights.items()
+            if key in coded_from and h.name not in read
+        }
+        for key, name in unread.items():
+            del self.weights[key]
+            del self.pinned[name]
+
+    def coded_report(self) -> list[str]:
+        """Return a line per weight read as coded rows, and per weight a coded read was given but which is read plain, with why."""
+        lines = []
+        for weight, h in self.weights.values():
+            if isinstance(weight, CodedWeight):
+                origin = "from the cache" if weight.from_cache else "encoded"
+                lines.append(
+                    f"{weight.name}: coded rows {h.shape} uint8 ({origin}), "
+                    f"{weight.array.nbytes - h.nbytes} bytes fewer"
+                )
+        lines += [f"{name}: read plain: {why}" for name, why in self.read_plain.items()]
+        return lines
+
+    def report(self, plan: Plan, name: str) -> str:
+        """Return ``plan``'s report for this recording as ``name``, then its ``coded_report``."""
+        return "\n".join(
+            [plan.report(name)] + [f"  {line}" for line in self.coded_report()]
+        )
+
+    def _read_plain(self, key) -> None:
+        """Point every reader of the coded weight ``key`` back at the weight it codes, each reader rebuilt with its operand's coded flag cleared."""
+        derived = self.weights.pop(key)[1]
+        self.pinned.pop(derived.name, None)
+        plain = self.weights[key[0]][1]
+        rebuilt: dict[int, Operator] = {}
+        for step in self.steps:
+            if not any(h is derived for h in step.slots):
+                continue
+            op = step.op
+            if id(op) not in rebuilt:
+                flags = {
+                    b.declared_coded
+                    for b, h in zip(op.buffers, step.slots)
+                    if h is derived
+                }
+                names = {f.name for f in flags if isinstance(f, OperatorParam)}
+                if len(names) != len(flags):
+                    raise ValueError(
+                        f"{self.name}: {type(op).__name__} reads {plain.name} "
+                        f"coded by declaration, with no flag to read it plain"
+                    )
+                rebuilt[id(op)] = op.replace(**dict.fromkeys(names, False))
+            step.op = rebuilt[id(op)]
+            step.slots = [plain if h is derived else h for h in step.slots]
+            step.inputs = [plain if h is derived else h for h in step.inputs]
+        self.rebind({k: [op] for k, op in rebuilt.items()})
 
     @property
     def operators(self) -> list:
@@ -486,9 +666,13 @@ class Recorder:
         profile: Profile | None = None,
         held: Mapping[int, tuple[str, object]] | None = None,
         inputs: Iterable[str] = (),
+        coded: dict[Hashable, CodedWeight] | None = None,
     ) -> None:
         self.name = name
         self.profile = profile
+        # The graph's coded weights, shared by its versions, so each is
+        # encoded once.
+        self.coded = {} if coded is None else coded
         held = held or {}
         self._held_arrays = [
             x.array if isinstance(x, Weight) else x
@@ -496,7 +680,7 @@ class Recorder:
             if isinstance(x, (Weight, np.ndarray))
         ]
         self.steps: list[Step] = []
-        self.weights: dict[int, tuple[object, Handle]] = {}
+        self.weights: dict[Hashable, tuple[object, Handle]] = {}
         self.states: dict[int, tuple[State, Handle]] = {}
         self.bindings: list[Binding] = []
         self.limits: list[Limit] = []
@@ -875,6 +1059,10 @@ class Recorder:
         buffers = op.buffers
         ins = [b for b in buffers if b.fills]
         outs = [b for b in buffers if b.role is Out]
+        operands = [
+            self._coded_weight(op, b, h) if b.coded else h
+            for h, b in zip(operands, ins)
+        ] + list(operands[len(ins) :])
         given_outs = operands[len(ins) :]
         for h, b in zip(operands, ins + outs):
             shape = tuple(b.shape)
@@ -883,10 +1071,8 @@ class Recorder:
                     f"{type(op).__name__}.{b.name} is {bfp.dtype_name(b.dtype)}; "
                     f"operand {h!r} is {bfp.dtype_name(h.dtype)}"
                 )
-            bounds = (
-                h.valid if len(h.shape) == len(shape) else _rescale_bounds(h, shape)
-            )
-            for axis, count in bounds.items():
+            given = h.valid if len(h.shape) == len(shape) else _rescale_bounds(h, shape)
+            for axis, count in given.items():
                 extent = next(
                     (
                         m
@@ -936,6 +1122,43 @@ class Recorder:
         if not outputs:
             return None
         return outputs[0] if len(outputs) == 1 else tuple(outputs)
+
+    def _coded_weight(self, op, b, h: Handle) -> Handle:
+        """Return the derived weight a coded input ``b`` of ``op`` reads in place of ``h``.
+
+        The weight's coded rows, one buffer for every coded read of it at one capacity.
+
+        Raises:
+            TypeError: ``h`` is not a whole weight of ``b``'s logical shape.
+        """
+        source = next(
+            ((key, array) for key, (array, w) in self.weights.items() if w is h),
+            None,
+        )
+        # A leading unit dimension (one matrix, one batch) is the weight's alone.
+        if (
+            source is None
+            or h.layout != Dense()
+            or h.elements != math.prod(b.logical_shape)
+            or h.shape[-1] != b.logical_shape[-1]
+        ):
+            raise TypeError(
+                f"{type(op).__name__}.{b.name} streams a weight as coded rows; "
+                f"{h!r} is not a whole weight of shape {b.logical_shape}"
+            )
+        key, array = source
+        assert isinstance(array, np.ndarray), "a weight holds its array"
+        derived = (key, "coded", b.capacity)
+        if derived not in self.weights:
+            read_from = array.source if isinstance(array, _Param) else None
+            weight = self.coded.setdefault(
+                derived, CodedWeight(array, h.name, b.capacity, read_from)
+            )
+            self.weights[derived] = (
+                weight,
+                Handle.whole(weight.shape, np.uint8, f"{h.name}.coded", "weight"),
+            )
+        return self.weights[derived][1]
 
     def finish(
         self,

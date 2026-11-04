@@ -13,8 +13,14 @@ timed once per NPU and power mode.
 
 from __future__ import annotations
 
+import concurrent.futures
+import contextlib
+import contextvars
 import dataclasses
 import datetime
+import enum
+import fcntl
+import functools
 import hashlib
 import json
 import math
@@ -22,14 +28,20 @@ import os
 import re
 import statistics
 import subprocess
+import tempfile
+import time
 import uuid
-from collections.abc import Callable, Hashable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import TextIO
 
 import numpy as np
 from aie.iron import Out
+from aie.iron.algorithms.kernel_design import KernelDesign
+from aie.iron.device import Device
+from aie.iron.kernel import ExternalFunction
 from aie.utils import bfp
-from aie.utils.benchmark import Stats, run_interleaved
+from aie.utils.benchmark import Stats, cpu_wait_us, run_interleaved
 from aie.utils.compile import NPU_CACHE_HOME
 
 from iron.common.declare import Operand, Operator
@@ -37,9 +49,12 @@ from iron.common.declare.value import Value
 from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
 from iron.common.image.callable import ImageCallable
+from iron.common.image.compose import Packing
 from iron.common.image.link import FullELF, PerStep
+from iron.common.image.packaging import require_device
 from iron.common.image.sequence import Image
-from iron.common.image.step import BufferRef, SequenceStep
+from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind, SequenceStep
+from iron.operators.elementwise_add import ElementwiseAdd
 
 
 @dataclasses.dataclass(frozen=True)
@@ -48,13 +63,100 @@ class Timing:
 
     Where the runs are settings of one design, a setting whose runs take
     more than ``cutoff`` times the fastest setting's once ``settle`` rounds
-    are in is timed no further, its figure those rounds'.
+    are in is timed no further, its figure those rounds'. Before that, one
+    whose step takes more than ``first_cutoff`` times the fastest step in the
+    first round stops there, where that fastest step takes at least
+    ``first_floor_us``: a few-microsecond step's first round is too noisy.
     """
 
     rounds: int = 8
     calls: int = 50
     settle: int = 2
     cutoff: float = 1.5
+    first_cutoff: float = 2.0
+    first_floor_us: float = 100.0
+
+    def first_round_stops(self, steps_us: Sequence[float]) -> set[int]:
+        """Return the indices of ``steps_us`` (each setting's step in the first round, the default first) timed no further."""
+        fastest = min(steps_us)
+        if self.rounds < 2 or fastest < self.first_floor_us:
+            return set()
+        return {
+            i
+            for i, step in enumerate(steps_us)
+            if i and step > self.first_cutoff * fastest
+        }
+
+
+@dataclasses.dataclass
+class Spent:
+    """Seconds a tune waited on builds and spent timing on the device, while it is ``SPENT``.
+
+    Attributes:
+        build_s: Waiting on compiles: a probe's or a version's.
+        timing_s: Loading, checking and timing what was built.
+    """
+
+    build_s: float = 0.0
+    timing_s: float = 0.0
+
+    @staticmethod
+    def charge(build_s: float = 0.0, timing_s: float = 0.0) -> None:
+        """Add to the current ``SPENT``, if any."""
+        if (spent := SPENT.get()) is not None:
+            spent.build_s += build_s
+            spent.timing_s += timing_s
+
+
+SPENT: contextvars.ContextVar[Spent | None] = contextvars.ContextVar(
+    "SPENT", default=None
+)
+
+#: The share of a tune's budget kept back to finish it: each search's end-to-end
+#: check, the final verify at every point and validate. Measured on npu2 packing
+#: tunes: Granite 4.0-H 1B 6 of its 66 minutes, Granite 4.2 3B about 70 of 170
+#: (its verify times a 2048-token prompt chunk at every context point).
+RESERVE_SHARE = 0.4
+
+#: The share of a tune's budget one end-to-end check's timing may take: the reserve
+#: holds the final verify's check of each of a decoder's two versions.
+CHECK_SHARE = 0.2
+
+
+class Budget:
+    """A tune's wall-clock seconds, ``RESERVE_SHARE`` of them kept back to finish it.
+
+    A search runs its first round regardless and asks ``ends`` before each further one;
+    once less than the reserve is left it stops there, keeping what it found, which the
+    tune then checks, verifies and validates. ``stopped`` names each search it stopped.
+    """
+
+    def __init__(
+        self, seconds: float | None = None, log: Callable[[str], None] = print
+    ):
+        self.seconds, self.log = seconds, log
+        self.began = time.perf_counter()
+        self.stopped: list[str] = []
+
+    @property
+    def check_s(self) -> float:
+        """The seconds one end-to-end check's timing may take: ``CHECK_SHARE`` of the budget, unbounded without one."""
+        return math.inf if self.seconds is None else CHECK_SHARE * self.seconds
+
+    def ends(self, search: str) -> bool:
+        """Whether ``search`` stops here, the time left under the reserve; logged once a search."""
+        if self.seconds is None:
+            return False
+        left = self.seconds - (time.perf_counter() - self.began)
+        if left > RESERVE_SHARE * self.seconds:
+            return False
+        if search not in self.stopped:
+            self.stopped.append(search)
+            self.log(
+                f"budget: {max(left, 0.0):.0f} s of {self.seconds:.0f} s left; "
+                f"{search} stops here"
+            )
+        return True
 
 
 def standard_error(samples: Sequence[float]) -> float | None:
@@ -107,7 +209,8 @@ class Standalone:
         full_elf: How the runlist is packaged: one full ELF, else an xclbin
             per design dispatched step by step.
         distinct: Every step runs on buffers of its own, as a graph's do, so
-            no step finds its inputs in a SoC cache.
+            no step finds its inputs in a SoC cache. A fused edge needs this
+            (see `fusions`); a pack or a merge, with no edge, does not.
         values: Per operator, each per-call value by name: the tuner cannot
             know what a value means. One derived from bound extents follows
             from theirs.
@@ -115,6 +218,16 @@ class Standalone:
             would not be representative (a draw row's temperature and top-k).
         load: Write the per-call values now; with `False` the image is built
             and seeded, and `load()` writes them.
+        build_only: Compile the image and stop: no buffers on the device, so
+            a thread may build ahead of the dispatches (``prebuild``).
+        fusions: Edges to feed a consumer step's input from a producer
+            step's output on-chip, each a `Fusion` whose `steps` are indices
+            into `runlist`: a fed consumer's named buffer shares its
+            producer's, rather than a name of its own.
+        fuse: `fusions` are passed to `Image`, so each streams on-chip. With
+            `False` the shared buffer stays a normal host round trip, the
+            baseline a fusion is priced against.
+        packing: The designs a full ELF configures as one device.
     """
 
     def __init__(
@@ -127,7 +240,19 @@ class Standalone:
         inputs: Mapping[Operator, Mapping[str, np.ndarray]] | None = None,
         full_elf: bool = True,
         load: bool = True,
+        fusions: Sequence[Fusion] = (),
+        fuse: bool = True,
+        packing: Packing = Packing(),
+        build_only: bool = False,
     ):
+        if any(f.edges for f in fusions) and not distinct:
+            # An edge's buffer is named from its repeat-local producer and
+            # consumer indices (_shared below); not distinct, every repeat
+            # but the first resolves to another repeat's canonical slot, so
+            # the name never matches and the feed silently goes unwired. A
+            # pack or a merge takes no edges, so its repeats may still share
+            # buffers.
+            raise ValueError("a fused edge needs distinct=True: each its own buffers")
         self.steps = list(runlist)
         values, inputs = values or {}, inputs or {}
         self._values = {op: dict(values.get(op, {})) for op in self.steps}
@@ -138,10 +263,20 @@ class Standalone:
             k if distinct else firsts[id(op)] for k, op in enumerate(self.steps)
         ]
         self._filled = sorted(set(self._slot))
+        # A fed consumer's input is named for its producer's output: no
+        # buffer of its own, host-visible or not.
+        self._shared = {
+            (e.consumer, e.input): f"s{e.producer}_{e.output}"
+            for fusion in fusions
+            for e in fusion.edges
+        }
+        self._internal = set(self._shared.values())
         in_names, out_names = [], []
         for k in self._filled:
             op = self.steps[k]
             for buf, name_ in zip(op.buffers, self._names(k, op)):
+                if name_ in self._internal:
+                    continue
                 (out_names if buf.role is Out else in_names).append(name_)
         steps = [
             SequenceStep(op, tuple(map(BufferRef, self._names(self._slot[k], op))))
@@ -149,10 +284,16 @@ class Standalone:
         ]
         # Configure the array every call, as a design beside others in a
         # model's image is, so one timed alone pays that too.
-        packaging = FullELF(reconfigure=True) if full_elf else PerStep()
+        packaging = (
+            FullELF(reconfigure=True, packing=packing) if full_elf else PerStep()
+        )
         self.sequence = Image(
-            Recording.of_steps(name, steps, in_names, out_names), packaging
+            Recording.of_steps(name, steps, in_names, out_names),
+            packaging,
+            fusions=fusions if fuse else (),
         ).compile()
+        if build_only:
+            return
         self.callable = self.sequence.get_callable()
         rng = np.random.default_rng(seed)
         self._before: dict[str, np.ndarray] = {}
@@ -160,9 +301,13 @@ class Standalone:
             op = self.steps[k]
             names = self._names(k, op)
             addressed = op.addressed_inputs(
-                {buf.name: self.address(n) for buf, n in zip(op.buffers, names)}, rng
+                {buf.name: self.address(n) for buf, n in zip(op.buffers, names)},
+                rng,
+                self._values[op],
             )
             for buf, name_ in zip(op.buffers, names):
+                if name_ in self._internal:
+                    continue
                 if buf.name in addressed:
                     content = np.ascontiguousarray(addressed[buf.name], buf.dtype)
                     self._bytes(name_)[: buf.nbytes] = content.view(np.uint8)
@@ -174,7 +319,7 @@ class Standalone:
         ops = {id(op): op for op in self.steps}.values()
         artifacts = self.sequence.artifacts
         # An extent read only through its derivations has no word in a full
-        # ELF; an xclbin chain has no parameter table, its values dispatch-time.
+        # ELF; an xclbin fusion has no parameter table, its values dispatch-time.
         self._symbols = {
             v.symbol: np.int32(self._value(op, self._values[op], v))
             for op in ops
@@ -209,18 +354,24 @@ class Standalone:
         inputs: Mapping[str, np.ndarray],
         rng: np.random.Generator,
     ) -> np.ndarray:
+        if buf.name not in inputs and buf.coded:
+            # Random bytes are no coded row: an exception index past the row
+            # would write past the core's scratch.
+            drawn = rng.standard_normal(buf.logical_shape, dtype=np.float32)
+            return buf.device_form(drawn).reshape(-1).view(np.uint8)
         if buf.name not in inputs:
             return _sample(buf.dtype, buf.nbytes, rng)
-        content = np.ascontiguousarray(inputs[buf.name], dtype=buf.dtype)
+        content = np.ascontiguousarray(
+            buf.device_form(inputs[buf.name]), dtype=buf.dtype
+        )
         if content.nbytes != buf.nbytes:
             raise ValueError(
                 f"input {buf.name!r} is {content.nbytes} bytes, its buffer {buf.nbytes}"
             )
         return content.reshape(-1).view(np.uint8)
 
-    @staticmethod
-    def _names(k: int, op: Operator) -> list[str]:
-        return [f"s{k}_{b.name}" for b in op.buffers]
+    def _names(self, k: int, op: Operator) -> list[str]:
+        return [self._shared.get((k, b.name), f"s{k}_{b.name}") for b in op.buffers]
 
     def _bytes(self, name: str) -> np.ndarray:
         return self.callable.get_storage(name).numpy_view().view(np.uint8)
@@ -250,20 +401,25 @@ class Standalone:
         op = self.steps[k]
         out = {}
         for buf, name in zip(op.buffers, self._names(self._slot[k], op)):
+            if name in self._internal:
+                continue
             if buf.fills:
                 data = self._before.get(name, self._bytes(name)[: buf.nbytes])
-                out[buf.name] = data.view(buf.host_dtype).reshape(buf.host_shape)
+                out[buf.name] = buf.logical_form(
+                    data.view(buf.host_dtype).reshape(buf.host_shape)
+                )
         return out
 
     def written(self, k: int = 0) -> dict[str, np.ndarray]:
         """Return what step ``k`` wrote in the last run, by buffer name.
 
-        Along a bounded axis only the rows under the call's bound.
+        Along a bounded axis only the rows under the call's bound; a fused step's elided
+        buffer (no host copy once fused) is left out.
         """
         op = self.steps[k]
         out = {}
         for buf, name in zip(op.buffers, self._names(self._slot[k], op)):
-            if not buf.drains:
+            if not buf.drains or name in self._internal:
                 continue
             under = [slice(None)] * len(buf.shape)
             for extent in op.bound_extents:
@@ -314,31 +470,157 @@ def judge(
     return None
 
 
+class NpuLock:
+    """An exclusive flock on ``path``, re-entrant in this process, held around one measurement.
+
+    A context lives from an image's first dispatch until it is released, and another
+    process creating one meanwhile fails (``DRM_IOCTL_AMDXDNA_CREATE_HWCTX``, err -22),
+    so a caller holds this until its images are released, not just around a dispatch.
+    """
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.depth = 0
+        self.file: TextIO | None = None
+
+    def __enter__(self) -> NpuLock:
+        if self.depth == 0:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.file = open(self.path, "a+")
+            fcntl.flock(self.file.fileno(), fcntl.LOCK_EX)
+        self.depth += 1
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.depth -= 1
+        if self.depth == 0:
+            assert self.file is not None, "opened by the outermost __enter__"
+            fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
+            self.file.close()
+            self.file = None
+
+
+def _build_in_order(chain: Sequence[Callable[..., Standalone]]) -> None:
+    for build in chain:
+        build(build_only=True)
+
+
+def prebuild(
+    chains: Iterable[Sequence[Callable[..., Standalone]]],
+) -> dict[Callable[..., Standalone], concurrent.futures.Future]:
+    """Each of ``chains``' images compiled on a pool of ``BUILD_JOBS`` threads, a chain in order on one.
+
+    So the device times one batch while the next builds; building one again then reads
+    the compile cache. A chain's images share a design: built one after another, the
+    later ones read the cores the first compiled instead of compiling them beside it.
+    A build's error is its chain's future's, raised where the caller builds it for real.
+    """
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=BUILD_JOBS)
+    out: dict[Callable[..., Standalone], concurrent.futures.Future] = {}
+    for chain in chains:
+        future = pool.submit(contextvars.copy_context().run, _build_in_order, chain)
+        out |= dict.fromkeys(chain, future)
+    pool.shutdown(wait=False)
+    return out
+
+
+class CheckTooLong(RuntimeError):
+    """``sized``: one call a round would still take a timing past its cap.
+
+    The check's length, not either build's: a caller tells it apart by type.
+    """
+
+
+def sized(
+    timing: Timing, runs: Sequence[Callable[[], object]], cap_us: float = math.inf
+) -> Timing:
+    """Return ``timing`` with a round of ``runs`` about ``ROUND_US`` long, each at least ``MIN_CALLS`` calls.
+
+    A round of long steps (a prompt chunk's, hundreds of ms) runs fewer calls, its
+    median no noisier for it; fewer still, down to one, where the timing would take
+    past ``cap_us``. Each of ``runs`` is called once, to time it.
+
+    Raises:
+        CheckTooLong: One call a round would take past ``cap_us``.
+    """
+    begun = time.perf_counter()
+    for run in runs:
+        run()
+    round_us = (time.perf_counter() - begun) * 1e6
+    calls = max(MIN_CALLS, min(timing.calls, int(ROUND_US / round_us)))
+    # run_interleaved calls each run twice before it times them.
+    fits = int((cap_us / round_us - 2) / timing.rounds) if cap_us < math.inf else calls
+    if fits < 1:
+        raise CheckTooLong(
+            f"{timing.rounds} rounds of one call take about "
+            f"{(timing.rounds + 2) * round_us / 1e6:.0f} s, past {cap_us / 1e6:.0f} s"
+        )
+    return dataclasses.replace(timing, calls=min(calls, fits))
+
+
+# Tries a timing gets past run_interleaved's CPU-wait guard: a busy moment on
+# the host passes, a design never causes it.
+CPU_WAIT_TRIES = 3
+
+
+class CpuWaitRefused(RuntimeError):
+    """``time_interleaved``: the CPU-wait guard refused every try.
+
+    The host's state, not the design's: a caller tells it apart by type.
+    """
+
+
 def time_interleaved(
     runs: Sequence[ImageCallable],
     timing: Timing,
     groups: Sequence[Hashable | None] = (),
     fastest: float = math.inf,
     log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
 ) -> list[Stats]:
     """Each loaded image's per-round medians, microseconds (``samples_us``).
 
     Each call's figure the time the image itself took, which its
     ``KernelResult`` carries: mlir-aie's ``run_interleaved``, whose arguments
-    and errors these are.
+    and errors these are, its CPU-wait guard scaled to the most dispatches a call
+    of ``runs`` issues. The timing thread's CPU wait over it is logged. Dispatches
+    under ``lock`` where given.
+
+    Raises:
+        CpuWaitRefused: The guard refused it ``CPU_WAIT_TRIES`` times.
     """
-    return run_interleaved(
-        list(runs),
-        rounds=timing.rounds,
-        calls=timing.calls,
-        settle=timing.settle,
-        cutoff=timing.cutoff,
-        groups=list(groups) or None,
-        fastest_us=fastest,
-        completion_cores=True,
-        idle=True,
-        log=log,
-    )
+    cap = max(run.cpu_wait_cap_us() for run in runs)
+    refusals: list[str] = []
+    while len(refusals) < CPU_WAIT_TRIES:
+        began = cpu_wait_us()
+        try:
+            with lock or contextlib.nullcontext():
+                stats = run_interleaved(
+                    list(runs),
+                    rounds=timing.rounds,
+                    calls=timing.calls,
+                    settle=timing.settle,
+                    cutoff=timing.cutoff,
+                    groups=list(groups) or None,
+                    fastest_us=fastest,
+                    completion_cores=True,
+                    max_cpu_wait_us=cap,
+                    idle=True,
+                    log=log,
+                )
+        except RuntimeError as e:
+            if "for a CPU" not in str(e):
+                raise
+            refusals.append(str(e))
+            log(f"    {e} (cap {cap:.0f} us); try {len(refusals)} of {CPU_WAIT_TRIES}")
+            continue
+        ended = cpu_wait_us()
+        if began is not None and ended is not None:
+            log(
+                f"    CPU wait {ended - began:.0f} us in all; guard {cap:.0f} us a call"
+            )
+        return stats
+    raise CpuWaitRefused("; ".join(refusals))
 
 
 # The device contexts the driver holds at once; each run timed keeps one.
@@ -346,6 +628,19 @@ CONTEXTS = 16
 
 # Past this nothing stays in a cache, and the repeats' copies would not fit.
 DISTINCT_BYTES = 256 * 2**20
+
+# Images compiled at once ahead of the dispatches: each compile runs its
+# cores' kernels in parallel itself.
+BUILD_JOBS = 4
+
+# A batch's round of runs takes about this long, each run at least
+# MIN_CALLS times: a prompt chunk's step is hundreds of ms.
+ROUND_US = 2e6
+MIN_CALLS = 3
+
+# A step longer than this is timed as the excess of two runs over one, not
+# ``repeats``: a dispatch's ~160 us and its jitter are a small share of it.
+LONG_STEP_US = 20e3
 
 
 @dataclasses.dataclass(frozen=True)
@@ -378,15 +673,6 @@ class Measurement:
         default_factory=lambda: datetime.date.today().isoformat()
     )
 
-    def against_default(self) -> tuple[float, float | None]:
-        """``difference`` from the default timed beside it."""
-        default = self.default_round_us
-        return self.difference(
-            dataclasses.replace(
-                self, t_step_us=statistics.median(default), round_us=default
-            )
-        )
-
     def difference(self, other: Measurement) -> tuple[float, float | None]:
         """How much longer a step of this one takes than one of ``other``, and that difference's standard error.
 
@@ -402,6 +688,49 @@ class Measurement:
         if own_noise is None or other_noise is None:
             return delta, None
         return delta, math.hypot(own_noise, other_noise)
+
+    def against_default(self, default: Measurement) -> tuple[float, float | None]:
+        """``difference`` from the default timed beside it in its own run, else from ``default``.
+
+        A batch, or a cached figure, pairs with its own run's default, not another run's.
+        """
+        if not self.default_round_us:
+            return self.difference(default)
+        delta = self.t_step_us - statistics.median(self.default_round_us)
+        return delta, standard_error(
+            [a - b for a, b in zip(self.round_us, self.default_round_us)]
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class FusionMeasurement:
+    """A candidate fusion's step, as ``measure_fusion`` timed it.
+
+    Its steps fused on-chip against the same steps run apart, each edge's buffer shared
+    through the host instead, timed in one run so their rounds pair.
+
+    Attributes:
+        fused: The fused steps' step.
+        apart: The same steps', each edge's buffer a normal host round trip.
+        refused: Why the fusion may not replace the steps run apart: its
+            output was not bit-identical. None where it may.
+    """
+
+    fused: Measurement
+    apart: Measurement
+    refused: str | None = None
+
+    def difference(self) -> tuple[float, float | None]:
+        """How much longer the fused steps' step takes than run apart, and that difference's standard error (``Measurement.difference``)."""
+        return self.fused.difference(self.apart)
+
+
+def _hashed(arrays: Mapping[str, np.ndarray] | None) -> list[tuple[str, str]]:
+    """``arrays`` by name, each a sha256 of its contents, so a cache key follows what an input holds rather than its identity."""
+    return sorted(
+        (name, hashlib.sha256(np.ascontiguousarray(a).tobytes()).hexdigest())
+        for name, a in (arrays or {}).items()
+    )
 
 
 class Cache:
@@ -445,15 +774,49 @@ class Cache:
         as one full ELF or not.
         """
         design = OperatorDesign(op.resolved()).compilable()
-        given = sorted(
-            (name, hashlib.sha256(np.ascontiguousarray(a).tobytes()).hexdigest())
-            for name, a in (inputs or {}).items()
-        )
         key = (
             design.recipe_hash,
             design.artifact_hash,
             sorted((values or {}).items()),
-            given,
+            _hashed(inputs),
+            full_elf,
+        )
+        return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
+
+    @staticmethod
+    def fusion_key(
+        steps: Sequence[Operator],
+        edges: Sequence[tuple[int, str, int, str]],
+        values: Sequence[Mapping[str, int]] | None = None,
+        inputs: Sequence[Mapping[str, np.ndarray]] | None = None,
+        full_elf: bool = True,
+        kind: FusionKind = FusionKind.STREAM,
+        fused: Sequence[Operator] | None = None,
+    ) -> str:
+        """Return the entry a fusion of ``steps`` wired by ``edges`` (local indices) is kept in as each operator.
+
+        Resolved for the current device, is run at its own values on its own inputs,
+        packaged as one full ELF or not: every step's build and the wiring, so an
+        existing operator figure's key (``Cache.key``) is untouched. ``fused``, where it
+        differs from ``steps`` (a joint narrowing search's on-chip combination), is part
+        of the key too, so a narrower setting prices apart from the fusion at its
+        members' own.
+        """
+        designs = [OperatorDesign(op.resolved()).compilable() for op in steps]
+        values = values or [{}] * len(steps)
+        inputs = inputs or [{}] * len(steps)
+        fused_designs = (
+            ()
+            if fused is None
+            else [OperatorDesign(op.resolved()).compilable() for op in fused]
+        )
+        key = (
+            tuple((d.recipe_hash, d.artifact_hash) for d in designs),
+            tuple((d.recipe_hash, d.artifact_hash) for d in fused_designs),
+            tuple(edges),
+            kind.value,
+            tuple(sorted(v.items()) for v in values),
+            tuple(_hashed(i) for i in inputs),
             full_elf,
         )
         return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
@@ -467,6 +830,7 @@ class Cache:
         if not path.exists():
             return None
         fields = json.loads(path.read_text())
+        fields.pop("op", None)
         if fields.keys() != {f.name for f in dataclasses.fields(Measurement)}:
             return None
         return Measurement(
@@ -477,8 +841,91 @@ class Cache:
             }
         )
 
-    def put(self, key: str, m: Measurement) -> None:
-        write(self.directory / f"{key}.json", json.dumps(dataclasses.asdict(m)) + "\n")
+    def put(self, key: str, m: Measurement, op: Operator | None = None) -> None:
+        """Write ``m`` at ``key``, with the resolved ``op`` it times: its class and every parameter, the tunables named."""
+        fields: dict[str, object] = dict(dataclasses.asdict(m))
+        if op is not None:
+            params = type(op).declaration.params
+            fields["op"] = {
+                "class": type(op).__name__,
+                "params": {n: vars(op)[n] for n in params if n in vars(op)},
+                "tunables": sorted(n for n, p in params.items() if p.tunable),
+            }
+        text = json.dumps(
+            fields, default=lambda v: v.value if isinstance(v, enum.Enum) else str(v)
+        )
+        write(self.directory / f"{key}.json", text + "\n")
+
+    def get_fusion(self, key: str) -> FusionMeasurement | None:
+        """Return the fusion measurement at ``key``; None if there is none, or it was written with other fields than ``FusionMeasurement`` has."""
+        path = self.directory / "fusions" / f"{key}.json"
+        if not path.exists():
+            return None
+        fields = json.loads(path.read_text())
+        if fields.keys() != {f.name for f in dataclasses.fields(FusionMeasurement)}:
+            return None
+        sides = {}
+        for side in ("fused", "apart"):
+            m = fields[side]
+            if m.keys() != {f.name for f in dataclasses.fields(Measurement)}:
+                return None
+            sides[side] = Measurement(
+                **{
+                    **m,
+                    "round_us": tuple(m["round_us"]),
+                    "default_round_us": tuple(m["default_round_us"]),
+                }
+            )
+        return FusionMeasurement(sides["fused"], sides["apart"], fields["refused"])
+
+    def put_fusion(self, key: str, m: FusionMeasurement) -> None:
+        write(
+            self.directory / "fusions" / f"{key}.json",
+            json.dumps(dataclasses.asdict(m)) + "\n",
+        )
+
+    @staticmethod
+    def switch_cost_key(dev) -> str:
+        """Return the entry a device-configuration switch's cost at ``dev`` is kept in.
+
+        The probe designs ``switch_cost`` alternates, so editing how they are generated
+        misses rather than reusing a stale cost.
+        """
+        designs = [
+            OperatorDesign(op.resolved(dev)).compilable()
+            for op in _switch_cost_probes(dev)
+        ]
+        key = tuple((d.recipe_hash, d.artifact_hash) for d in designs)
+        return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
+
+    def get_cycles(self, recipe_key: str) -> int | None:
+        """Return the cycles per call kept for the kernel ``recipe_key``; None if none are."""
+        path = self.directory / "kernels" / f"{recipe_key}.json"
+        if not path.exists():
+            return None
+        return json.loads(path.read_text())["cycles"]
+
+    def put_cycles(self, recipe_key: str, cycles: int) -> None:
+        write(
+            self.directory / "kernels" / f"{recipe_key}.json",
+            json.dumps({"cycles": cycles}) + "\n",
+        )
+
+    def get_switch_cost(self, key: str) -> tuple[float, float] | None:
+        """Return the ``(fixed_us, per_core_us)`` at ``key``; None if there is none, or it was written with other fields than that pair has."""
+        path = self.directory / "switch_cost" / f"{key}.json"
+        if not path.exists():
+            return None
+        fields = json.loads(path.read_text())
+        if fields.keys() != {"fixed_us", "per_core_us"}:
+            return None
+        return fields["fixed_us"], fields["per_core_us"]
+
+    def put_switch_cost(self, key: str, cost: tuple[float, float]) -> None:
+        write(
+            self.directory / "switch_cost" / f"{key}.json",
+            json.dumps({"fixed_us": cost[0], "per_core_us": cost[1]}) + "\n",
+        )
 
 
 def write(path: Path, text: str) -> None:
@@ -500,6 +947,7 @@ def measure(
     cache: Cache | None = None,
     remeasure: bool = False,
     log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
 ) -> dict[int, Measurement]:
     """Time each of ``ops``, settings of one design with the default first.
 
@@ -511,7 +959,8 @@ def measure(
         full_elf: How each is packaged: one full ELF, else an xclbin per
             design dispatched step by step.
         timing: How long to measure each.
-        repeats: How many back-to-back runs a step's time is the excess over.
+        repeats: How many back-to-back runs a step's time is the excess over;
+            two where the default's step is longer than ``LONG_STEP_US``.
         values: The per-call values each is run at.
         inputs: What its input buffers hold, by name, where random bytes
             would not be representative.
@@ -519,6 +968,8 @@ def measure(
             `remeasure`; those run are written to it.
         remeasure: Run every setting even where ``cache`` already holds it.
         log: Where progress and a setting that fails to build are reported.
+        lock: Held for each batch from its first dispatch through its
+            contexts' release; none taken where None.
 
     Returns:
         Each one timed, by its index in ``ops``. One other than the default
@@ -547,36 +998,55 @@ def measure(
     if 0 not in todo:
         todo.insert(0, 0)  # the default, timed beside the others
     distinct = sum(b.nbytes for b in ops[0].resolved().buffers) <= DISTINCT_BYTES
+    first = Standalone(
+        "probe1_0",
+        [ops[0]],
+        values={ops[0]: values or {}},
+        distinct=distinct,
+        inputs={ops[0]: inputs or {}},
+        full_elf=full_elf,
+        load=False,
+    )
+    first.load()
+    with lock or contextlib.nullcontext():
+        first.callable()
+        begun = time.perf_counter()
+        first.callable()
+        one_us = (time.perf_counter() - begun) * 1e6
+        del first
+    # The repeats cancel a dispatch's jitter, which a step this long dwarfs.
+    if one_us > LONG_STEP_US:
+        repeats = 2
+        log(f"    a step takes {one_us / 1e3:.0f} ms: probes of {repeats} runs")
     # Each setting is two runs, each holding a context; one pair is the default's.
     size = CONTEXTS // 2 - 1
     fastest = math.inf
     others = todo[1:]
+    probes = {
+        (i, n): functools.partial(
+            Standalone,
+            f"probe{n}_{i}",
+            [ops[i]] * n,
+            values={ops[i]: values or {}},
+            distinct=distinct,
+            inputs={ops[i]: inputs or {}},
+            full_elf=full_elf,
+            load=False,
+        )
+        for i in todo
+        for n in (1, repeats)
+    }
+    prebuilt = prebuild([probes[i, n] for n in (1, repeats)] for i in todo)
     for begin in range(0, max(len(others), 1), size):
         batch = [todo[0]] + others[begin : begin + size]
         log(f"    timing {len(batch)} settings, {len(others) - begin} to go")
         built, short, long = [], [], []
+        begun = time.perf_counter()
         for i in batch:
             try:
-                # Operator is hashable by identity at runtime (object.__hash__);
-                # pyright infers __hash__ = None from jit.Operator's
-                # dataclass_transform defaults.
-                one = Standalone(
-                    f"probe1_{i}",
-                    [ops[i]],
-                    values={ops[i]: values or {}},
-                    inputs={ops[i]: inputs or {}},
-                    full_elf=full_elf,
-                    load=False,
-                )
-                many = Standalone(
-                    f"probe{repeats}_{i}",
-                    [ops[i]] * repeats,
-                    values={ops[i]: values or {}},
-                    distinct=distinct,
-                    inputs={ops[i]: inputs or {}},
-                    full_elf=full_elf,
-                    load=False,
-                )
+                for n in (1, repeats):
+                    prebuilt[probes[i, n]].result()
+                one, many = probes[i, 1](), probes[i, repeats]()
             except RuntimeError as e:
                 # The placer passed it, but the build did not.
                 if i == 0:
@@ -589,35 +1059,538 @@ def measure(
             built.append(i)
             short.append(one)
             long.append(many)
-        outputs = [run.digest() for run in short]
-        # The default is timed in full; the others stop once far behind.
-        groups = [None if i == 0 else i for i in built] * 2
+        building = time.perf_counter() - begun
+        with lock or contextlib.nullcontext():
+            outputs = [run.digest() for run in short]
+            batch_timing = sized(timing, [r.callable for r in short + long])
+            # The default is timed in full; the others stop once far behind.
+            groups = [None if i == 0 else i for i in built]
+            n = len(built)
+            first = time_interleaved(
+                [r.callable for r in short + long],
+                dataclasses.replace(batch_timing, rounds=1),
+                groups * 2,
+                fastest,
+                log,
+                lock,
+            )
+            stops = batch_timing.first_round_stops(
+                [
+                    (first[n + j].samples_us[0] - first[j].samples_us[0])
+                    / (repeats - 1)
+                    for j in range(n)
+                ]
+            )
+            if stops:
+                log(f"    {len(stops)} setting(s) stopped after one round")
+            live = [j for j in range(n) if j not in stops]
+            times = [list(f.samples_us) for f in first]
+            if batch_timing.rounds > 1:
+                rest = time_interleaved(
+                    [short[j].callable for j in live]
+                    + [long[j].callable for j in live],
+                    dataclasses.replace(
+                        batch_timing,
+                        rounds=batch_timing.rounds - 1,
+                        settle=max(1, batch_timing.settle - 1),
+                    ),
+                    [groups[j] for j in live] * 2,
+                    fastest,
+                    log,
+                    lock,
+                )
+                for k, j in enumerate(live):
+                    times[j] += rest[k].samples_us
+                    times[n + j] += rest[len(live) + k].samples_us
+            run = uuid.uuid4().hex
+            steps = [
+                tuple(
+                    (many - one) / (repeats - 1)
+                    for one, many in zip(times[j], times[n + j])
+                )
+                for j in range(n)
+            ]
+            for j, i in enumerate(built):
+                out[i] = Measurement(
+                    statistics.median(steps[j]),
+                    steps[j],
+                    outputs[j],
+                    run,
+                    mode,
+                    batch_timing.calls,
+                    () if i == 0 else steps[0],
+                )
+                if cache is not None:
+                    assert keys is not None, "built above whenever cache is not None"
+                    cache.put(keys[i], out[i], ops[i].resolved())
+            fastest = min(fastest, *(statistics.median(times[n + j]) for j in range(n)))
+            # A probe holds its context while it lives; the next batch needs them.
+            del short, long
+        timed = time.perf_counter() - begun - building
+        Spent.charge(build_s=building, timing_s=timed)
+        log(f"    waited {building:.0f} s on builds, timed in {timed:.0f} s")
+    return out
+
+
+def _digest(written: Mapping[str, np.ndarray]) -> str:
+    h = hashlib.sha256()
+    for k in sorted(written):
+        h.update(k.encode())
+        h.update(np.ascontiguousarray(written[k]).tobytes())
+    return h.hexdigest()
+
+
+def written_steps(run: Standalone) -> dict[str, np.ndarray]:
+    """Every host-visible output ``run``'s steps wrote (``Standalone .written``, which already leaves out an on-chip one).
+
+    Keyed by step index and buffer name so two steps' same-named output does not
+    collide: what a rewrite's output is judged by, however many final steps it has (a
+    fan-out's several, a fold's one in place of many).
+    """
+    return {
+        f"{k}.{name}": v
+        for k in range(len(run.steps))
+        for name, v in run.written(k).items()
+    }
+
+
+def _rewrite_mismatch(
+    recorded_out: Mapping[str, np.ndarray], rewritten_out: Mapping[str, np.ndarray]
+) -> str | None:
+    """Why ``rewritten_out`` may not replace ``recorded_out``.
+
+    Missing or extra keys, or any key's values differing, named with how many of its
+    elements differ and by how much at most, so a refusal distinguishes a narrower
+    (expected, no gain) outcome from a correctness bug (any mismatch at all, which never
+    should happen for a built fusion).
+    """
+    if recorded_out.keys() != rewritten_out.keys():
+        missing = recorded_out.keys() - rewritten_out.keys()
+        extra = rewritten_out.keys() - recorded_out.keys()
+        return f"keys differ: missing {sorted(missing)}, extra {sorted(extra)}"
+    bad = []
+    for k in sorted(recorded_out):
+        a, b = recorded_out[k], rewritten_out[k]
+        if np.array_equal(a, b):
+            continue
+        diff = np.abs(a.astype(np.float64) - b.astype(np.float64))
+        n = int(np.count_nonzero(diff))
+        bad.append(f"{k}: {n}/{diff.size} elements differ, max abs diff {diff.max():g}")
+    return (
+        None
+        if not bad
+        else "the rewrite's output is not bit-identical to the recorded steps': "
+        + "; ".join(bad)
+    )
+
+
+def measure_rewrite(
+    as_recorded: Callable[[str, int], Standalone],
+    rewritten: Callable[[str, int], Standalone],
+    output: Callable[[Standalone], Mapping[str, np.ndarray]],
+    *,
+    timing: Timing = Timing(),
+    repeats: int = 9,
+    mode: str | None = None,
+    log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
+) -> tuple[Measurement, Measurement, str | None]:
+    """Time the steps ``rewritten`` builds against the same steps ``as_recorded`` builds.
+
+    Each ``repeats`` times over one, interleaved in one run so rounds pair, the per-pair
+    step excess as ``measure`` finds an operator's. Each built once (at one repeat)
+    first and compared via ``output``: a rewrite whose output is not bit-identical to
+    the recorded steps' is refused. Kind-agnostic: a stream fusion, a fold or a pack
+    calls this the same way, each building its own designs over one dataflow.
+
+    Args:
+        as_recorded: Takes a run's name and its repeat count, and returns the
+            steps as recorded, a loaded (``load=False``) ``Standalone``.
+        rewritten: The same for the steps rewritten.
+        timing: How the two are timed.
+        repeats: Steps in each long run a step's time is taken from.
+        log: Where progress is logged.
+        output: What a run wrote, by name, to compare the two designs by.
+        mode: The NPU's power mode, read now if not given.
+        lock: Held from the first dispatch through releasing every probe's
+            context; none taken where None.
+
+    Returns:
+        The recorded steps' measurement, the rewrite's, and why the rewrite
+        may not replace the recorded steps (None where it may).
+    """
+    begun = time.perf_counter()
+    one_recorded = as_recorded("recorded1", 1)
+    one_rewritten = rewritten("rewritten1", 1)
+    many_recorded = as_recorded(f"recorded{repeats}", repeats)
+    many_rewritten = rewritten(f"rewritten{repeats}", repeats)
+    building = time.perf_counter() - begun
+    for run in (one_recorded, one_rewritten, many_recorded, many_rewritten):
+        run.load()
+
+    with lock or contextlib.nullcontext():
+        one_recorded.callable()
+        one_rewritten.callable()
+        recorded_out = output(one_recorded)
+        rewritten_out = output(one_rewritten)
+        refused = _rewrite_mismatch(recorded_out, rewritten_out)
+
         times = time_interleaved(
-            [r.callable for r in short + long], timing, groups, fastest, log
+            [
+                one_recorded.callable,
+                one_rewritten.callable,
+                many_recorded.callable,
+                many_rewritten.callable,
+            ],
+            timing,
+            log=log,
+            lock=lock,
         )
-        run = uuid.uuid4().hex
-        n = len(built)
-        steps = [
-            tuple(
-                (many - one) / (repeats - 1)
-                for one, many in zip(times[j].samples_us, times[n + j].samples_us)
+        del one_recorded, one_rewritten, many_recorded, many_rewritten
+    Spent.charge(build_s=building, timing_s=time.perf_counter() - begun - building)
+    run_id = uuid.uuid4().hex
+    mode = pmode() if mode is None else mode
+
+    def excess(one: Stats, many: Stats) -> tuple[float, ...]:
+        return tuple(
+            (m - o) / (repeats - 1) for o, m in zip(one.samples_us, many.samples_us)
+        )
+
+    recorded_steps = excess(times[0], times[2])
+    rewritten_steps = excess(times[1], times[3])
+    recorded_m = Measurement(
+        statistics.median(recorded_steps),
+        recorded_steps,
+        _digest(recorded_out),
+        run_id,
+        mode,
+        timing.calls,
+    )
+    rewritten_m = Measurement(
+        statistics.median(rewritten_steps),
+        rewritten_steps,
+        _digest(rewritten_out),
+        run_id,
+        mode,
+        timing.calls,
+    )
+    return recorded_m, rewritten_m, refused
+
+
+# Cheap, surely-built sizes for a spacer distinct from any fusion this prices;
+# the first whose design does not collide with the fusion's own steps.
+_SPACER_SIZES = (1024, 2048, 4096, 8192, 16384)
+
+
+def _spacer(
+    steps: Sequence[Operator], fused: Sequence[Operator] = ()
+) -> ElementwiseAdd:
+    """Return an operator of a design distinct from ``steps`` or ``fused``, to split a many-repeat probe's repeats apart (``measure_fusion``).
+
+    Spliced between them, it makes each configure on entry as it would beside another
+    design in a model's image, rather than merging with the repeat before it. Its own
+    cost is the same whichever side of a fusion's price it is spliced into, so it
+    cancels in the difference.
+    """
+    taken = {OperatorDesign(op.resolved()).identity for op in (*steps, *fused)}
+    for size in _SPACER_SIZES:
+        spacer = ElementwiseAdd(size=size, tile_size=128, num_aie_columns=1).resolved(
+            require_device()
+        )
+        if OperatorDesign(spacer).identity not in taken:
+            return spacer
+    raise RuntimeError("no cheap spacer design distinct from the fusion's own steps")
+
+
+def repeat_fusion(
+    kind: FusionKind, base: int, n: int, edges: Sequence[tuple[int, str, int, str]]
+) -> Fusion:
+    """Return the ``Fusion`` one repeat of a fused probe wires, at step index ``base`` through ``base + n - 1``.
+
+    ``edges`` kept for any kind that takes them (``Fusion`` itself refuses any for
+    ``PACK`` or ``MERGE``), so a fan-out's several edges, or a staged one, stay wired
+    the way ``candidates`` found them.
+    """
+    return Fusion(
+        kind,
+        tuple(base + i for i in range(n)),
+        tuple(Edge(base + p, out, base + c, inp) for p, out, c, inp in edges),
+    )
+
+
+def measure_fusion(
+    steps: Sequence[Operator],
+    edges: Sequence[tuple[int, str, int, str]],
+    *,
+    full_elf: bool,
+    timing: Timing = Timing(),
+    repeats: int = 9,
+    values: Sequence[Mapping[str, int]] | None = None,
+    inputs: Sequence[Mapping[str, np.ndarray]] | None = None,
+    cache: Cache | None = None,
+    remeasure: bool = False,
+    kind: FusionKind = FusionKind.STREAM,
+    fused_steps: Sequence[Operator] | None = None,
+    log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
+) -> FusionMeasurement:
+    """Time a ``kind`` fusion of ``steps`` against the same steps run apart.
+
+    ``STREAM`` and ``STAGED`` are wired by ``edges`` (local indices, ``producer``'s
+    drained output into ``consumer``'s filled input, one or more; ``PACK`` or
+    ``MERGE`` take none); apart, an edge is a normal host round trip instead (``measure_rewrite``). A fusion whose
+    host-visible outputs (``written_steps``, every step's, a fan-out's several) are not
+    bit-identical to the steps run apart is refused.
+
+    Args:
+        steps: The steps fused, in order.
+        edges: Each on-chip hand-off, local indices into ``steps``.
+        full_elf: How the steps are packaged.
+        timing: How the two are timed.
+        repeats: Steps in each long run a step's time is taken from.
+        remeasure: Time again what ``cache`` holds.
+        kind: How the steps run as one configuration.
+        log: Where progress is logged.
+        values: Each of ``steps``' per-call values, in its order.
+        inputs: What each of ``steps``' input buffers hold, by name, where
+            random bytes would not be representative.
+        cache: The fusion's figure is taken from it rather than run, unless
+            `remeasure`; what is run is written to it.
+        fused_steps: The same steps at another setting (a joint narrowing
+            search's candidate, narrower columns so they co-reside) to run
+            fused on-chip, priced against ``steps`` run apart at their own;
+            defaults to ``steps`` themselves.
+        lock: Passed through to ``measure_rewrite``.
+
+    A many-repeat probe splices a cheap spacer of another design
+    (``_spacer``) between its repeats on both sides, so a repeat configures
+    on entry as its design does beside another in a model's image, rather
+    than an unfused repeat's two designs costing a configure each while a
+    bare run of the fused one shares a single configure across every repeat.
+    """
+    mode = pmode()
+    if cache is not None and cache.mode != mode:
+        raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
+    n = len(steps)
+    fused_steps = list(fused_steps) if fused_steps is not None else list(steps)
+    if len(fused_steps) != n:
+        raise ValueError(f"fused_steps has {len(fused_steps)} steps, steps has {n}")
+    values = list(values) if values is not None else [{}] * n
+    inputs = list(inputs) if inputs is not None else [{}] * n
+    key = None
+    if cache is not None:
+        key = Cache.fusion_key(
+            steps, edges, values, inputs, full_elf, kind=kind, fused=fused_steps
+        )
+        if not remeasure:
+            cached = cache.get_fusion(key)
+            if cached is not None:
+                return cached
+    spacer = _spacer(steps, fused_steps)
+
+    def build(name: str, reps: int, fuse: bool) -> Standalone:
+        bsteps = fused_steps if fuse else steps
+        bvalues = {**dict(zip(bsteps, values)), spacer: {"valid": spacer.size}}
+        binputs = dict(zip(bsteps, inputs))
+        # Past DISTINCT_BYTES, distinct copies of the group's buffers per
+        # repeat would not fit a full ELF; shared ones time a cache instead.
+        distinct = (
+            sum(b.nbytes for op in bsteps for b in op.resolved().buffers)
+            <= DISTINCT_BYTES
+        )
+        runlist: list[Operator] = []
+        fusions = []
+        for r in range(reps):
+            base = len(runlist)
+            runlist.extend(bsteps)
+            fusions.append(repeat_fusion(kind, base, n, edges))
+            if r < reps - 1:
+                runlist.append(spacer)
+        return Standalone(
+            name,
+            runlist,
+            values=bvalues,
+            inputs=binputs,
+            distinct=distinct,
+            fusions=fusions,
+            fuse=fuse,
+            full_elf=full_elf,
+            load=False,
+        )
+
+    apart_m, fused_m, refused = measure_rewrite(
+        lambda name, reps: build(f"un{name}", reps, False),
+        lambda name, reps: build(f"fuse_{name}", reps, True),
+        written_steps,
+        timing=timing,
+        repeats=repeats,
+        mode=mode,
+        log=log,
+        lock=lock,
+    )
+    result = FusionMeasurement(fused_m, apart_m, refused)
+    if cache is not None and key is not None:
+        cache.put_fusion(key, result)
+    return result
+
+
+def _switch_cost_probes(dev) -> tuple[ElementwiseAdd, ElementwiseAdd, ElementwiseAdd]:
+    """``x``, a 1-core ``ElementwiseAdd``; ``narrow``, one of 1 column at ``dev``'s other size; ``wide``, one of every column ``dev`` has.
+
+    The three designs ``switch_cost`` alternates ``x`` against.
+    """
+    x = ElementwiseAdd(size=256, tile_size=128, num_aie_columns=1)
+    narrow = ElementwiseAdd(size=2048, tile_size=256, num_aie_columns=1)
+    wide = ElementwiseAdd(size=2048, tile_size=256, num_aie_columns=dev.cols)
+    return x, narrow, wide
+
+
+def switch_cost(
+    dev: Device,
+    timing: Timing = Timing(),
+    short: int = 4,
+    long: int = 20,
+    cache: Cache | None = None,
+    remeasure: bool = False,
+    log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
+) -> tuple[float, float]:
+    """Return the cost of a device-configuration switch at ``dev``.
+
+    ``fixed_us``, and ``per_core_us`` of the array switched into: a 1-core
+    ``ElementwiseAdd`` (``x``) alternated with one of 1 column and one of ``dev.cols``
+    columns (each its own ``y``), each pair against itself repeated ``short`` and
+    ``long`` times, so a repeat's own configure cancels (``per_step``) and only the
+    alternation's excess switch remains (``excess``); the two columns' excess then fit
+    to a line in the column count. Packaged as ``dev`` dispatches: on an xclbin per
+    step every probe step is a dispatch, so the dispatch cancels too.
+
+    Args:
+        dev: The device whose switch is timed.
+        timing: How the probes are timed.
+        short: Probe steps in the short run.
+        long: Probe steps in the long run.
+        remeasure: Time again what ``cache`` holds.
+        log: Where progress is logged.
+        cache: The cost is taken from it rather than measured, unless
+            `remeasure`; what is measured is written to it.
+        lock: Held from the first load through releasing every probe's
+            context; none taken where None.
+
+    Returns:
+        ``(fixed_us, per_core_us)``.
+    """
+    if dev.cols <= 1:
+        raise ValueError(f"{dev} has {dev.cols} column(s): no per-core cost to fit")
+    mode = pmode()
+    if cache is not None and cache.mode != mode:
+        raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
+    key = None
+    if cache is not None:
+        key = Cache.switch_cost_key(dev)
+        if not remeasure:
+            cached = cache.get_switch_cost(key)
+            if cached is not None:
+                return cached
+    x, narrow, wide = (op.resolved(dev) for op in _switch_cost_probes(dev))
+    begun = time.perf_counter()
+    runs = {}
+    for y, cols in ((narrow, 1), (wide, dev.cols)):
+        for n in (short, long):
+            kinds = {
+                "x": [x] * n,
+                "y": [y] * n,
+                "alt": [x if k % 2 == 0 else y for k in range(n)],
+            }
+            for kind, steps in kinds.items():
+                runs[(cols, kind, n)] = Standalone(
+                    f"sw_{cols}_{kind}{n}",
+                    steps,
+                    full_elf=dev.can_dispatch_full_elf,
+                    load=False,
+                )
+    keys = list(runs)
+    building = time.perf_counter() - begun
+    with lock or contextlib.nullcontext():
+        for run in runs.values():
+            run.load()
+        stats = time_interleaved(
+            [runs[k].callable for k in keys], timing, log=log, lock=lock
+        )
+        del runs
+    Spent.charge(build_s=building, timing_s=time.perf_counter() - begun - building)
+    med = {k: statistics.median(s.samples_us) for k, s in zip(keys, stats)}
+    excess = {}
+    for cols in (1, dev.cols):
+        per_step = {
+            kind: (med[(cols, kind, long)] - med[(cols, kind, short)]) / (long - short)
+            for kind in ("x", "y", "alt")
+        }
+        excess[cols] = per_step["alt"] - (per_step["x"] + per_step["y"]) / 2
+    per_core_us = (excess[dev.cols] - excess[1]) / (dev.cols - 1)
+    fixed_us = excess[1] - per_core_us
+    result = (fixed_us, per_core_us)
+    if cache is not None and key is not None:
+        cache.put_switch_cost(key, result)
+    return result
+
+
+# Calls a kernel is traced at: the fewest cycles of them is its figure.
+KERNEL_CALLS = 4
+
+# A traced run's buffer: mlir-aie's kernel checks size it so.
+TRACE_SIZE = 16384
+TRACE_BYTES_PER_INTERVAL = 512
+TRACE_MAX_BYTES = 4 << 20
+
+
+def time_kernels(
+    fns: Iterable[ExternalFunction],
+    cache: Cache | None = None,
+    log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
+) -> dict[str, int]:
+    """Each of ``fns``' fewest cycles a call on one core, by recipe key.
+
+    ``KERNEL_CALLS`` calls traced in one run (mlir-aie's ``KernelDesign.cycles_per_call``),
+    kept in ``cache``. One whose trace fills its largest buffer, or that does not
+    run, is left out and reported to ``log``.
+    """
+    out: dict[str, int] = {}
+    todo = []
+    for fn in fns:
+        held = None if cache is None else cache.get_cycles(fn.recipe_key)
+        if held is None:
+            todo.append(fn)
+        else:
+            out[fn.recipe_key] = held
+    if not todo:
+        return out
+    log(f"    tracing {len(todo)} kernels' cycles")
+    begun = time.perf_counter()
+    with lock or contextlib.nullcontext(), tempfile.TemporaryDirectory() as scratch:
+        for fn in todo:
+            harness = KernelDesign(fn, calls=KERNEL_CALLS)
+            inputs = harness.sample_inputs()
+            size = max(
+                TRACE_SIZE, TRACE_BYTES_PER_INTERVAL * harness.traced_intervals()
             )
-            for j in range(n)
-        ]
-        for j, i in enumerate(built):
-            out[i] = Measurement(
-                statistics.median(steps[j]),
-                steps[j],
-                outputs[j],
-                run,
-                mode,
-                timing.calls,
-                () if i == 0 else steps[0],
-            )
+            try:
+                while True:
+                    traced = harness.cycles_per_call(
+                        inputs, trace_size=size, workdir=Path(scratch) / fn.recipe_key
+                    )
+                    if not traced.truncated or size >= TRACE_MAX_BYTES:
+                        break
+                    size = min(2 * size, TRACE_MAX_BYTES)
+            except (RuntimeError, ValueError) as e:
+                log(f"    {fn.name} ({fn.recipe_key}) not traced: {e}")
+                continue
+            if traced.untimed or traced.truncated or not traced.kernel:
+                log(f"    {fn.name} ({fn.recipe_key}) not traced: {traced}")
+                continue
+            out[fn.recipe_key] = min(traced.kernel)
             if cache is not None:
-                assert keys is not None, "built above whenever cache is not None"
-                cache.put(keys[i], out[i])
-        fastest = min(fastest, *(times[n + j].median_us for j in range(n)))
-        # A probe holds its context while it lives; the next batch needs them.
-        del short, long
+                cache.put_cycles(fn.recipe_key, out[fn.recipe_key])
+    Spent.charge(timing_s=time.perf_counter() - begun)
     return out

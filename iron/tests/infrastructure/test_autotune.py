@@ -16,9 +16,14 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
+import iron
+from iron import Profile
+from iron.operators import ElementwiseAdd, SiLU
+from iron.operators.copy import Copy
+from iron.operators.gemm import GEMM
 from iron.tests.support.graphs import Chain
-from iron.tune.autotune import Timed, autotune
-from iron.tune.measure import Cache, Timing, platform
+from iron.tune.autotune import Shape, Timed, autotune, settings, time_shape
+from iron.tune.measure import Cache, Timing, platform, time_kernels
 
 SIZE = 8192
 TILE = 256
@@ -38,9 +43,9 @@ def test_a_tuned_profile_runs_bit_identically(tmp_path):
         log=lambda _: None,
     )
     assert len(profile)
-    graph = Chain(SIZE, TILE)
-    graph.profile = profile
-    tuned = graph.compile(full_elf=True, a=(SIZE,), b=(SIZE,))
+    tuned_graph = Chain(SIZE, TILE)
+    tuned_graph.profile = profile
+    tuned = tuned_graph.compile(full_elf=True, a=(SIZE,), b=(SIZE,))
     plain = Chain(SIZE, TILE).compile(full_elf=True, a=(SIZE,), b=(SIZE,))
     rng = np.random.default_rng(0)
     a = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
@@ -48,6 +53,80 @@ def test_a_tuned_profile_runs_bit_identically(tmp_path):
     want = np.array(plain(a, b).numpy()[:SIZE])
     got = np.array(tuned(a, b).numpy()[:SIZE])
     assert want.view(np.uint16).tolist() == got.view(np.uint16).tolist()
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_tuned_copy_of_a_slice_is_saved(tmp_path):
+    """A Copy reading part of a buffer names an access pattern among its dimensions, which a profile cannot write.
+
+    Its entry names the rest.
+    """
+
+    class Rows(iron.Graph):
+        def body(self, x):
+            return Copy.step(Copy.step(x)[:2])
+
+    dev = aie_utils.ensure_current_device()
+    report = platform()
+    profile = autotune(
+        [Timed(Rows().record(x=(64, 2048)))],
+        dev,
+        full_elf=dev.can_dispatch_full_elf,
+        timing=Timing(rounds=2, calls=5),
+        cache=Cache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
+        log=lambda _: None,
+    )
+    path = tmp_path / f"{dev.name}.json"
+    profile.save(path)
+    assert len(Profile.load(path)) == len(profile) > 0
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_tuned_entry_names_no_dimension_a_host_sizes(tmp_path):
+    """A model fitted to another host's context sizes its caches and attention otherwise (``Timed.varying``).
+
+    An entry naming that dimension would match there no longer, so it is left out.
+    """
+    recording = Chain(SIZE, TILE).record(a=(SIZE,), b=(SIZE,))
+    dev = aie_utils.ensure_current_device()
+    [silu] = {
+        Shape(s.op.resolved()).key for s in recording.steps if isinstance(s.op, SiLU)
+    }
+    report = platform()
+    profile = autotune(
+        [Timed(recording, varying={silu: frozenset({"size"})})],
+        dev,
+        full_elf=dev.can_dispatch_full_elf,
+        timing=Timing(rounds=2, calls=5),
+        cache=Cache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
+        log=lambda _: None,
+    )
+    named = {cls: dims for cls, dims, _ in profile}
+    assert "size" not in named[SiLU]
+    assert named[ElementwiseAdd]["size"] == SIZE
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_an_entry_a_tune_only_outranks_still_serves_what_it_did_not_time(tmp_path):
+    """A tune of one version (``--versions decode``) writes its shapes' own entries; a broader one they outrank still matches another version's shapes.
+
+    Which keep what it gave them rather than their defaults.
+    """
+    recording = Chain(SIZE, TILE).record(a=(SIZE,), b=(SIZE,))
+    dev = aie_utils.ensure_current_device()
+    stock = Profile()
+    stock.add(SiLU, tile_size=TILE)
+    report = platform()
+    profile = autotune(
+        [Timed(recording)],
+        dev,
+        stock,
+        full_elf=dev.can_dispatch_full_elf,
+        timing=Timing(rounds=2, calls=5),
+        cache=Cache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
+        log=lambda _: None,
+    )
+    assert profile.tunables_for(SiLU, {"size": 4 * SIZE}) == {"tile_size": TILE}
 
 
 def test_one_operator_is_timed_from_the_command_line(tmp_path):
@@ -70,3 +149,85 @@ def test_one_operator_is_timed_from_the_command_line(tmp_path):
     printed = [line for line in run.stdout.splitlines() if " us" in line]
     assert len(printed) > 1
     assert sum("(recorded)" in line for line in printed) == 1
+
+
+def test_a_setting_cached_as_the_default_is_judged_against_the_next_one(tmp_path):
+    # Given four columns, the first search records (4 columns, its channels)
+    # as its default; given those channels, the second searches the columns
+    # from its own recorded width and meets four columns in the cache.
+    dev = aie_utils.ensure_current_device()
+    report = platform()
+    cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    first = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=4)
+    channels = first.resolved(dev).num_channels
+    trials = []
+    for op in (first, ElementwiseAdd(size=SIZE, tile_size=TILE, num_channels=channels)):
+        shape = Shape(op)
+        shape.members.append((op, [(1.0, {})], {}))
+        trials = time_shape(
+            shape,
+            dev,
+            full_elf=True,
+            timing=Timing(rounds=2, calls=5),
+            cache=cache,
+            log=lambda _: None,
+        )
+    four = [t for t in trials if t.tunables.get("num_aie_columns") == 4]
+    assert four and all(np.isfinite(t.delta_us) for t in four)
+
+
+def test_only_a_shape_that_weighs_in_a_version_is_searched(tmp_path):
+    """Given each shape's share of its version, a tune searches the shapes at ``SHAPE_SHARE`` or more and writes no entry for the rest."""
+    recording = Chain(SIZE, TILE).record(a=(SIZE,), b=(SIZE,))
+    dev = aie_utils.ensure_current_device()
+    keys = {type(s.op): Shape(s.op).key for s in recording.steps}
+    report = platform()
+    profile = autotune(
+        [Timed(recording)],
+        dev,
+        full_elf=True,
+        timing=Timing(rounds=2, calls=10),
+        cache=Cache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
+        shares={keys[SiLU]: 0.5, keys[ElementwiseAdd]: 0.001},
+        log=lambda _: None,
+    )
+    assert {cls for cls, _, _ in profile} == {SiLU}
+
+
+def test_a_kernel_is_traced_once_per_device(tmp_path):
+    dev = aie_utils.ensure_current_device()
+    report = platform()
+    cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    fn = GEMM(M=256, K=256, N=256, precision="highest").resolved(dev).layout().matmul()
+    logged: list[str] = []
+    first = time_kernels([fn], cache, logged.append)
+    again = time_kernels([fn], cache, logged.append)
+    assert first == again and first[fn.recipe_key] > 0
+    assert sum("tracing" in line for line in logged) == 1
+
+
+def test_a_gemm_setting_its_kernels_cannot_make_faster_is_not_timed(tmp_path):
+    """With no kernel timings at hand, the shape's kernels are traced; a setting whose busiest core alone takes longer than the best found is skipped."""
+    dev = aie_utils.ensure_current_device()
+    report = platform()
+    op = GEMM(M=512, K=512, N=512, precision="highest", num_aie_columns=4)
+    shape = Shape(op)
+    shape.members.append((op, [(1.0, {})], {}))
+    logged: list[str] = []
+    trials = time_shape(
+        shape,
+        dev,
+        full_elf=True,
+        timing=Timing(rounds=2, calls=5),
+        cache=Cache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
+        cycles={},
+        core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
+        log=logged.append,
+    )
+    skipped = sum(
+        int(line.split()[0])
+        for line in logged
+        if "slower by their kernel alone" in line
+    )
+    assert any("tracing" in line for line in logged)
+    assert skipped > 0 and len(trials) + skipped <= len(settings(op, dev, shape.pinned))

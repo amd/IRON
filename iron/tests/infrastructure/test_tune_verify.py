@@ -1,0 +1,271 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""What a tune saves, checked against the profile it started from (``iron.tune.verify``).
+
+No NPU above ``# On the device``.
+"""
+
+import aie.utils as aie_utils
+import numpy as np
+import pytest
+
+import iron
+from iron import Profile, Scratchpad
+from iron.common.declare.profile import PackingEntry
+from iron.common.graph.fold import fold_candidates
+from iron.common.image.step import FusionKind
+from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.relu import ReLU
+from iron.operators.silu import SiLU
+from iron.operators.tanh import Tanh
+from iron.tests.support.llama_model import small
+from iron.tune.autotune import Point, Timed
+from iron.tune.fusions import Applied
+from iron.tune.measure import SPENT, Timing, measure
+from iron.tune.verify import (
+    Check,
+    Phase,
+    Phases,
+    entries,
+    narrowed,
+    touches,
+    verify,
+    write_report,
+)
+
+pytestmark = pytest.mark.usefixtures("npu2")
+
+LARGE, SMALL = 2**22, 2**21
+
+
+class Chain(iron.Graph):
+    """ReLU then Tanh: one version per input length."""
+
+    def body(self, x):
+        return Tanh.step(ReLU.step(x))
+
+
+class Bounded(iron.Graph):
+    """ReLU over a call's first ``n`` elements."""
+
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        return ReLU.step(x[:n])
+
+
+def bounded(profile: Profile) -> list[Timed]:
+    graph = Bounded()
+    graph.profile = profile
+    points = [Point(0.5, dict(n=SMALL)), Point(0.5, dict(n=LARGE))]
+    return [Timed(graph.record(x=(LARGE,)), values=dict(n=LARGE), points=points)]
+
+
+def recorded(profile: Profile) -> list[Timed]:
+    graph = Chain()
+    graph.profile = profile
+    return [Timed(graph.record(x=(n,))) for n in (LARGE, SMALL)]
+
+
+def test_a_reverted_version_takes_the_base_entries_that_touch_it():
+    """Only the small version loses.
+
+    Its own entry and the one both versions match come from the base; a packing scoped to both keeps the large one, an unscoped one touching small is dropped.
+    """
+    large, small_ = (c.recording for c in recorded(Profile()))
+    base = Profile()
+    base.add(ReLU, size=LARGE, tile_size=1024)
+    base.add(Tanh, tile_size=1024)
+    candidate = Profile()
+    candidate.add(ReLU, size=LARGE, tile_size=2048)
+    candidate.add(ReLU, size=SMALL, tile_size=512)
+    candidate.add(Tanh, tile_size=2048)
+    members = [(ReLU, {}), (Tanh, {})]
+    candidate.add_packing(members, [large.version, small_.version])
+    candidate.add_packing(members)
+
+    out = narrowed(base, candidate, {small_.version}, [large, small_])
+
+    assert sorted((c.__name__, d, t) for c, d, t in out) == [
+        ("ReLU", {"size": LARGE}, {"tile_size": 2048}),
+        ("Tanh", {}, {"tile_size": 1024}),
+    ]
+    assert out.packings() == [
+        PackingEntry(candidate.packings()[0].members, frozenset({large.version}))
+    ]
+
+
+def test_a_fold_touches_only_the_version_whose_steps_it_names():
+    """``touches`` finds a fold by the fold candidates, not the fusion kinds a profile's other entries take."""
+    model = small()
+    decode, prompt = (model.record(**s) for s in model.shapes())
+    fold = next(
+        f
+        for f in fold_candidates(decode)
+        if type(decode.steps[f.steps[0]].op).__name__ == "SiLU"
+    )
+    gate, mul = (decode.steps[i].op.resolved() for i in fold.steps)
+    assert isinstance(gate, SiLU) and isinstance(mul, ElementwiseMul)
+    edge = fold.edges[0]
+    entry = (
+        FusionKind.FOLD,
+        [(SiLU, {"size": gate.size}), (ElementwiseMul, {"size": mul.size})],
+        [(0, edge.output, 1, edge.input)],
+        None,
+    )
+    assert touches("fusion", entry, decode)
+    assert not touches("fusion", entry, prompt)
+    scoped = (*entry[:3], frozenset({prompt.version}))
+    assert not touches("fusion", scoped, decode)
+
+
+def test_a_fingerprint_moves_with_a_tunable_and_not_with_an_entry_elsewhere():
+    dev = aie_utils.ensure_current_device()
+    [large, _] = recorded(Profile())
+    other = Profile()
+    other.add(ReLU, size=SMALL, tile_size=512)
+    moved = Profile()
+    moved.add(ReLU, size=LARGE, tile_size=512)
+    [other_large, _], [moved_large, _] = recorded(other), recorded(moved)
+    prints = [
+        Applied.of(call, profile, dev).fingerprint(dev)
+        for call, profile in (
+            (large, Profile()),
+            (other_large, other),
+            (moved_large, moved),
+        )
+    ]
+    assert prints[0] == prints[1] != prints[2]
+
+
+def test_a_version_builds_from_the_profile_applied_for_its_fingerprint():
+    """``compared`` applies each profile once: the build takes the recording fingerprinted."""
+    dev = aie_utils.ensure_current_device()
+    [large, _] = recorded(Profile())
+    applied = Applied.of(large, Profile(), dev)
+    version = applied.built(dev)
+    assert version.recording is applied.recording
+    assert applied.fingerprint(dev) == Applied.of(large, Profile(), dev).fingerprint(
+        dev
+    )
+
+
+def test_a_report_names_what_the_saved_profile_adds_and_drops(tmp_path):
+    start = Profile()
+    start.add(Tanh, tile_size=1024)
+    saved = Profile()
+    saved.add(ReLU, size=LARGE, tile_size=2048)
+    write_report(tmp_path / "npu2.json", start, saved, {}, note="seen")
+    text = (tmp_path / "npu2.report.txt").read_text()
+    assert f"tunables ReLU size={LARGE} " in text and "tunables Tanh" in text
+    assert entries(saved) == {f'tunables ReLU size={LARGE} {{"tile_size": 2048}}'}
+    assert (tmp_path / "npu2.report.json").exists() and "seen" in text
+
+
+def test_a_report_adds_each_phase_and_each_version_s_gain_so_far(tmp_path):
+    decode = Check("Llama (no inputs)", -300.0, 10.0)
+    phases = [
+        Phase("seed", 1800.0, 600.0, 900.0, 200.0, (decode,)),
+        Phase("survey", 600.0, 100.0, 400.0, 0.0, ()),
+        Phase(
+            "packing", 1200.0, 300.0, 800.0, 200.0, (Check(decode.name, -50.0, None),)
+        ),
+    ]
+    write_report(tmp_path / "npu2.json", Profile(), Profile(), {}, phases=phases)
+    text = (tmp_path / "npu2.report.txt").read_text()
+    assert (
+        "survey: 600 s (build 100, timing 400), check 0 s; no version changed" in text
+    )
+    assert "Llama (no inputs) -50.0 ± ? us" in text
+    assert "1.11 h after packing: Llama (no inputs) -350.0" in text
+
+
+# ---------------------------------------------------------------------------
+# On the device
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.supported_devices("npu2")
+def test_verify_keeps_the_version_that_gains_and_reverts_the_one_that_loses():
+    """The large version's candidate widens the base's one column; the small version's candidate narrows its ReLU to one, slower at this length.
+
+    What is kept is the first alone; the small version, back at the base, is not reported.
+    """
+    dev = aie_utils.ensure_current_device()
+    base = Profile()
+    base.add(ReLU, size=LARGE, num_aie_columns=1)
+    candidate = Profile()
+    candidate.add(ReLU, size=LARGE, num_aie_columns=8)
+    candidate.add(ReLU, size=SMALL, num_aie_columns=1)
+
+    kept, checks = verify(
+        recorded, dev, base, candidate, timing=Timing(rounds=3, calls=10)
+    )
+
+    assert [(c.__name__, d, t) for c, d, t in kept] == [
+        ("ReLU", {"size": LARGE}, {"num_aie_columns": 8})
+    ]
+    [(version, check)] = checks.items()
+    assert version == recorded(Profile())[0].recording.version
+    assert check.gains, check
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_phase_charges_its_own_timing_and_checks_its_profile_against_the_last():
+    """A phase's timing is its own, its check's apart; one that leaves the profile as it was checks nothing."""
+    dev = aie_utils.ensure_current_device()
+    base = Profile()
+    base.add(ReLU, size=LARGE, num_aie_columns=1)
+    wider = Profile()
+    wider.add(ReLU, size=LARGE, num_aie_columns=8)
+
+    with Phases(recorded, dev, base) as phases:
+        measure(
+            [ReLU(size=SMALL, num_aie_columns=1).resolved()],
+            full_elf=dev.can_dispatch_full_elf,
+            timing=Timing(rounds=2, calls=5),
+        )
+        searched = phases.end("search", wider)
+        unchanged = phases.end("nothing", wider)
+
+    assert SPENT.get() is None
+    assert searched.timing_s > 0 and searched.check_s > 0
+    [check] = searched.checks
+    assert check.gains, check
+    assert unchanged.checks == () and (unchanged.build_s, unchanged.timing_s) == (0, 0)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_the_final_verify_times_only_the_points_the_search_did_not():
+    """A pair checked at its shortest point is timed at the other alone when verified at both.
+
+    The shortest point's figure is the one the first check found; the verdict weighs each point.
+    """
+    dev = aie_utils.ensure_current_device()
+    base = Profile()
+    base.add(ReLU, size=LARGE, num_aie_columns=1)
+    wider = Profile()
+    wider.add(ReLU, size=LARGE, num_aie_columns=8)
+    memo: dict = {}
+    timing = Timing(rounds=3, calls=10)
+
+    def shortest(profile: Profile) -> list[Timed]:
+        return [c.shortest() for c in bounded(profile)]
+
+    verify(shortest, dev, base, wider, timing=timing, memo=memo)
+    [known] = memo.values()
+    [(point, first)] = known.points.items()
+    assert point == (("n", SMALL),)
+    logged: list[str] = []
+    kept, checks = verify(
+        bounded, dev, base, wider, timing=timing, memo=memo, log=logged.append
+    )
+    assert known.points[point] is first and len(known.points) == 2
+    assert sum("CPU wait" in line for line in logged) == 1, logged
+    [check] = checks.values()
+    assert check.delta_us == pytest.approx(
+        0.5 * first[0] + 0.5 * known.points[(("n", LARGE),)][0]
+    )
+    assert check.gains, check
+    assert [(c.__name__, d, t) for c, d, t in kept] == [
+        ("ReLU", {"size": LARGE}, {"num_aie_columns": 8})
+    ]

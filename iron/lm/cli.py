@@ -6,6 +6,7 @@
 import argparse
 import importlib
 import inspect
+import json
 import logging
 from typing import Any
 
@@ -62,6 +63,35 @@ def sampling_arguments(parser: argparse.ArgumentParser) -> None:
         "--temperature", type=float, default=defaults["temperature"].default
     )
     parser.add_argument("--top-k", type=int, default=defaults["top_k"].default)
+
+
+def config_argument(parser: argparse.ArgumentParser) -> None:
+    """Add ``--config NAME=VALUE``, repeated.
+
+    Each value is parsed as JSON, else kept as a bare string, as
+    ``Model.from_checkpoint``'s ``config`` takes them; ``num_hidden_layers=2`` shrinks
+    the model to one a tuner's own changes run against in minutes, every design still
+    the full model's.
+    """
+
+    def field(text: str) -> tuple[str, Any]:
+        name, sep, value = text.partition("=")
+        if not sep or not name:
+            raise argparse.ArgumentTypeError(f"{text!r} is not NAME=VALUE")
+        try:
+            return name, json.loads(value)
+        except json.JSONDecodeError:
+            return name, value
+
+    parser.add_argument(
+        "--config",
+        type=field,
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="a field of the model's config, given another value (repeat for "
+        "more): num_hidden_layers=2 is a shallow model of the same designs",
+    )
 
 
 def parse_args(parser: argparse.ArgumentParser, args=None) -> argparse.Namespace:
@@ -187,3 +217,31 @@ def main(model_class: type[Model]):
             host = generate_on_host(model, tokens, args.num_tokens, sampler())
             differ = sum(a != b for a, b in zip(drawn, host))
             print(f"[Device] Tokens differing from the host loop: {differ}/{len(host)}")
+
+
+def application_model(name: str) -> type[Model]:
+    """Return ``name``'s model class, from ``iron.applications.<name>``.
+
+    The one its package exports that declares ``tune_calls``.
+
+    Raises:
+        ValueError: ``name`` names no such application, or its package
+            exports other than one such class.
+    """
+    try:
+        package = importlib.import_module(f"iron.applications.{name}")
+    except ImportError as e:
+        raise ValueError(f"no application {name!r}: {e}") from e
+    exported = [getattr(package, n) for n in vars(package).get("__all__", ())]
+    found = [
+        m
+        for m in exported
+        if isinstance(m, type)
+        and issubclass(m, Model)
+        and any("tune_calls" in vars(k) for k in m.__mro__ if k is not Model)
+    ]
+    if len(found) != 1:
+        raise ValueError(
+            f"iron.applications.{name} exports {len(found)} models to tune, not one"
+        )
+    return found[0]

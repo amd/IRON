@@ -24,7 +24,7 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
-from iron import Precision, lm
+from iron import Precision, Profile, lm
 from iron.applications.gemma4.audio import AudioConfig, AudioTower
 from iron.applications.gemma4.vision import VisionConfig, VisionTower
 from iron.lm import (
@@ -37,12 +37,15 @@ from iron.lm import (
     rope_angles,
 )
 from iron.lm.checkpoint import renamed, weights_file
+from iron.lm.cli import config_argument
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
-from iron.tune.autotune import Timed
+from iron.tune.autotune import Point, Timed
 
 PROFILES = Path(__file__).with_name("profiles")
+# A retrieval query's tokens, its task prefix included.
+QUERY_ROWS = 16
 
 
 @dataclasses.dataclass(frozen=True)
@@ -352,8 +355,8 @@ class EmbeddingGemma(Encoder):
         h = x.reshape(x.shape[0], 1, c.hidden_size)
         mean = MHA.step(
             self.query,
-            h,
-            h,
+            K=h,
+            V=h,
             heads_interleaved=True,
             kv_interleaved=True,
             causal=False,
@@ -405,6 +408,7 @@ class Multimodal(lm.Multimodal):
         weights: The checkpoint's: the text encoder's tree and each tower's.
     """
 
+    config = Config()
     profile = PROFILES
 
     def __init__(
@@ -464,31 +468,41 @@ class Multimodal(lm.Multimodal):
 
     @classmethod
     def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
-        """Add the checkpoint argument, whose header gives the weights' shapes.
-
-        Every version is timed at its longest call.
-        """
+        """Add ``--checkpoint``, whose weights the calls are recorded on, and ``--config``."""
         parser.add_argument(
             "--checkpoint",
             type=Path,
             default=weights_dir("embeddinggemma-2"),
-            help="the checkpoint directory, of whose weights only the header "
-            "is read (default: %(default)s)",
+            help="the checkpoint directory, whose weights the calls are recorded "
+            "on (default: %(default)s)",
         )
+        config_argument(parser)
 
     @classmethod
     def tune_calls(
-        cls, parser: argparse.ArgumentParser, args: argparse.Namespace
+        cls,
+        parser: argparse.ArgumentParser,
+        args: argparse.Namespace,
+        profile: Profile | None = None,
     ) -> list[Timed]:
-        """Return every version's longest call as a ``Timed``, on weights it never reads.
-
-        The text encoder, each tower and the merge; the one profile in
-        ``profiles/`` serves every version's designs.
-        """
-        weights = Checkpoint(weights_file(args.checkpoint)).tree("unread")
-        graph = cls(Config(), weights)
+        """Return every version's longest call and a short query call, as ``Timed``, recorded under ``profile``, else the model's own."""
+        config = dataclasses.replace(Config(), **dict(args.config))
+        weights = Checkpoint(weights_file(args.checkpoint)).tree(
+            layers=config.num_hidden_layers
+        )
+        graph = cls(config, weights)
+        if profile is not None:
+            graph.profile = profile
+        longest = graph.longest()
+        # A configuration switch costs the same at any length, so a short
+        # query is where it weighs most.
+        points = [
+            Point(0.5, {**longest, "rows": QUERY_ROWS}),
+            Point(0.5, longest),
+        ]
         return [
-            Timed(graph.record(**shapes), graph.longest()) for shapes in graph.shapes()
+            Timed(graph.record(**shapes), longest, points=points)
+            for shapes in graph.shapes()
         ]
 
 

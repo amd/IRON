@@ -24,7 +24,7 @@ import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.utils.compile.jit import operator as jit
 from aie.utils.compile.jit.operator import Unresolvable
-from aie.utils.compile.jit.params import PerCallMember
+from aie.utils.compile.jit.params import PerCallMember, Select
 from aie.utils.hostruntime.tensor_class import NpuTensor
 from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance, Verdict, compare
@@ -59,7 +59,13 @@ def spelled(v: Any) -> str:
         # A gather's rows, one pattern each: too many to spell out.
         return f"{len(v)}p{hashlib.sha256(repr(v).encode()).hexdigest()[:8]}"
     if isinstance(v, (list, tuple)):
-        return "x".join(str(x) for x in v)
+        return "x".join(spelled(x) for x in v)
+    if isinstance(v, type):
+        return v.__name__
+    if dataclasses.is_dataclass(v):
+        return type(v).__name__ + "".join(
+            f"{f.name}{spelled(vars(v)[f.name])}" for f in dataclasses.fields(v)
+        )
     if isinstance(v, TensorAccessPattern):
         return (
             f"o{v.offset}s{'x'.join(map(str, v.sizes))}"
@@ -81,6 +87,11 @@ class Built:
     rtps: list[Rtp] = dataclasses.field(default_factory=list)
 
 
+# Each lane's ``(lane, tap, length_parameter, length_unit)``: what
+# ``Operand.transfers`` derives, or an operator writing its own sequence gives.
+LaneTransfers = list[tuple[int, TensorAccessPattern, Value | None, int | None]]
+
+
 class Operator(jit.Operator, library=True):
     """An operator, whose subclass body is its declaration.
 
@@ -91,6 +102,8 @@ class Operator(jit.Operator, library=True):
         bound_values: The graph expression bound to each per-call value, by name.
         pinned: The tunables its caller gave, which the tuner holds; it may
             move a profile's and ``resolve()``'s.
+        given: The dimensions (``param()`` fields) its caller gave, which a
+            profile entry matches on (``Profile.dims``).
     """
 
     _external: ClassVar[Any] = None
@@ -99,6 +112,9 @@ class Operator(jit.Operator, library=True):
     own_preamble: ClassVar[bool] = False
     # A full ELF lowers every operator's sequence under the union.
     aiecc_flags: ClassVar[tuple[str, ...]] = ()
+    # One resolved operator per construction (device, design key, pinned and
+    # given tunables), so equal operators resolve once a process.
+    _resolutions: ClassVar[dict[tuple, Operator]] = {}
     # Per leading operand that may be a view: the param holding its pattern
     # and the per-call value a dynamic index binds.
     accept_views: ClassVar[tuple[tuple[str, str], ...]] = ()
@@ -107,6 +123,7 @@ class Operator(jit.Operator, library=True):
     # Rebound, never updated: a copy shares its operator's dict.
     bound_values: dict[str, Affine | None] = {}
     pinned: frozenset[str] = frozenset()
+    given: frozenset[str] = frozenset()
     _image: OperatorImage | None = None
 
     def __init_subclass__(cls, image=None, **kwargs) -> None:
@@ -150,6 +167,10 @@ class Operator(jit.Operator, library=True):
                 n for n in self.declaration.tunables if given.get(n) is not None
             )
         self.pinned = pinned
+        params = self.declaration.params
+        self.given = frozenset(
+            n for n in given if n in params and not params[n].tunable
+        )
         self._check_complete()
 
     def _check_complete(self) -> None:
@@ -170,6 +191,21 @@ class Operator(jit.Operator, library=True):
         ``Value``s an ``Rtp``.
         """
         raise NotImplementedError(f"{type(self).__name__}.build() is not implemented")
+
+    def fold(self, consumer: Self, at: int) -> Self | None:
+        """Return this operator with ``consumer`` finishing its output tile in its own cores.
+
+        ``consumer``'s kernel runs there before the tile leaves L1; its other inputs
+        become new streams of this operator's.
+
+        Args:
+            consumer: The operator finished into this one's cores.
+            at: Which of ``consumer``'s inputs is this operator's output tile.
+
+        Returns:
+            None where this operator does not finish others, or not this one.
+        """
+        return None
 
     def tolerance(self) -> Tolerance | None:
         """Return what each output of the resolved operator is judged by.
@@ -205,10 +241,11 @@ class Operator(jit.Operator, library=True):
     def shim_columns(
         cls, dev, num_channels: int = 1, flags: Mapping[str, Any] | None = None
     ) -> int:
-        """How many of ``dev``'s columns fit its streams in the shim DMA budget.
+        """How many of ``dev``'s columns fit the class's streams in the shim DMA budget.
 
-        A ``replicate`` stream costs once per channel, one with no ``per=``
-        once, and a ``when=`` flag ``flags`` leaves out is its default.
+        A ``replicate`` stream costs once per channel, one with no ``per=`` once, and a
+        ``when=`` flag, or an obj_shape ``Select``'s, ``flags`` leaves out is its
+        default.
 
         Raises:
             Unresolvable: Not even one column's streams fit.
@@ -217,7 +254,18 @@ class Operator(jit.Operator, library=True):
         streams = [
             m
             for m in cls.declaration.operands
-            if m.streamed and (m.when is None or flags.get(m.when.name, m.when.default))
+            if m.streamed
+            and (m.when is None or flags.get(m.when.name, m.when.default))
+            and not any(
+                isinstance(d, Select)
+                and (
+                    d.when_true
+                    if flags.get(d.flag.name, d.flag.default)
+                    else d.when_false
+                )
+                is None
+                for d in m.obj_dims or ()
+            )
         ]
         cols = dev.cols
         for drains, budget in (
@@ -293,13 +341,21 @@ class Operator(jit.Operator, library=True):
         return next((c for c in range(budget, 0, -1) if fits is None or fits(c)), 1)
 
     def addressed_inputs(
-        self, addresses: Mapping[str, int], rng: np.random.Generator
+        self,
+        addresses: Mapping[str, int],
+        rng: np.random.Generator,
+        values: Mapping[str, int],
     ) -> dict[str, np.ndarray]:
-        """Return the content of each input that names a device address.
+        """Return the content of each input that names a device address, for a run alone.
 
-        For a run alone: ``addresses`` is every buffer's device address, by
-        buffer name; random bytes there would steer the DMA anywhere. Other
-        inputs are filled at random.
+        Random bytes there would steer the DMA anywhere; other inputs are filled at
+        random.
+
+        Args:
+            addresses: Every buffer's device address, by buffer name.
+            rng: What fills the rest of such an input.
+            values: The call's per-call values by member name; an input built
+                from a bound (``valid_rows``) must follow it, as the call does.
         """
         return {}
 
@@ -401,6 +457,18 @@ class Operator(jit.Operator, library=True):
     def has_sequence_override(cls) -> bool:
         return cls.sequence is not Operator.sequence
 
+    def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
+        """Return ``operand``'s per-lane host access order, where ``sequence(rt)`` is hand-written and the derived order does not hold.
+
+        Returns:
+            ``Operand.transfers()``'s own ``(lane, tap, length_parameter, length_unit)``
+            tuples, one lane at a time. None where this operator does not describe
+            ``operand`` (``transfers()`` then falls back to the derived order, or
+            raises), including a lane whose bound start is not static or whose
+            ``length_parameter`` does not reach the round-robin axis.
+        """
+        return None
+
     def design_key(self):
         """Identity for sharing a build: equal keys generate byte-identical MLIR.
 
@@ -415,13 +483,33 @@ class Operator(jit.Operator, library=True):
         return cls, own
 
     def resolved(self, dev: Device | None = None) -> Self:
-        """Return this operator resolved for ``dev``, the bound device unless given."""
+        """Return this operator resolved for ``dev``, the bound device unless given.
+
+        An equal operator resolved before in this process gives its result, copied.
+        """
         dev = self.dev if dev is None else dev
         if dev is None:
             raise Unresolvable(
                 f"{type(self).__name__}: resolved() needs a device; none is bound"
             )
-        return super().resolved(dev)
+        if self._resolved or self._unresolved is not self:
+            return super().resolved(dev)
+        key = (dev, self.design_key(), self.pinned, self.given)
+        found = Operator._resolutions.get(key)
+        if found is None:
+            resolved = super().resolved(dev)
+            Operator._resolutions[key] = resolved
+            return resolved
+        # The design key names the class. A copy owns its values, so nothing this
+        # operator later binds reaches another.
+        new = cast(Self, found).copy()
+        new.bound_values, new.pinned, new.given = (
+            self.bound_values,
+            self.pinned,
+            self.given,
+        )
+        new._unresolved = self
+        return new
 
     def replace(self, **changes: Any) -> Self:
         """Return a copy with ``changes``, checked against the device once complete.
@@ -432,7 +520,7 @@ class Operator(jit.Operator, library=True):
         bound_values = changes.pop("bound_values", self.bound_values)
         pinned = changes.pop("pinned", self.pinned)
         new = super().replace(**changes)
-        new.bound_values, new.pinned = bound_values, pinned
+        new.bound_values, new.pinned, new.given = bound_values, pinned, self.given
         new._check_complete()
         return new
 

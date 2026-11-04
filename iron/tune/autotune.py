@@ -11,6 +11,7 @@ at, and returns a ``Profile`` naming the fastest for each shape.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import itertools
@@ -20,27 +21,44 @@ import math
 import urllib.request
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
+from types import FunctionType
 from typing import Any
 
 import numpy as np
 from aie.iron.device import Device
 from aie.utils.compile import NPU_CACHE_HOME
+from aie.utils.compile.jit.params import OperatorParam
 
 from iron.common.declare import Operator, Profile
+from iron.common.declare.profile import Version
 from iron.common.design import OperatorDesign
+from iron.common.graph.compiled import apply_profile
 from iron.common.graph.record import Recording
-from iron.common.image.compose import fits
+from iron.common.image.compose import Packing, fits
+from iron.common.image.step import Fusion
 from iron.operators.gemm import GEMM
 
-from .measure import Cache, Standalone, Timing, judge, measure, write
+from .failures import Kind, Ledger, device_timeout, first_error
+from .measure import (
+    CONTEXTS,
+    Cache,
+    NpuLock,
+    Standalone,
+    Timing,
+    judge,
+    measure,
+    time_kernels,
+    write,
+)
 
 logger = logging.getLogger(__name__)
 
 # Standard errors a setting's step must beat the recorded one's by to be taken.
 CONFIDENCE = 2.0
 
-# Past this many settings, a shape's tunables are searched one at a time.
-EXHAUSTIVE = 32
+# A shape is searched where a search could remove this share of a version
+# (``Survey.shares``).
+SHAPE_SHARE = 0.02
 
 FIT_CACHE = Path(NPU_CACHE_HOME) / "iron" / "fits"
 
@@ -106,28 +124,35 @@ class Point:
 class Timed:
     """One call of a recorded graph, as its operators are timed in.
 
-    The graph's per-call values, and what any buffer whose contents a
-    step's time follows holds, by graph buffer name. ``points`` are the
-    values its calls run at, where they differ from call to call: an
-    operator whose work they change is timed at each (``op_points``).
+    The graph's per-call values, and what any buffer whose contents a step's time
+    follows holds, by graph buffer name. ``points`` are the values its calls run at,
+    where they differ from call to call, shortest first: an operator whose work they
+    change is timed at each (``op_points``). ``varying`` is, by ``Shape.key`` of a
+    resolved operator, the dimensions a host sizes (a model's fitted context), which a
+    profile naming the shape leaves out. ``versions`` is every version of the graph (``Recording.version``), a
+    tune's calls or not; empty where only the recording's own is known.
     """
 
     recording: Recording
     values: Mapping[str, int] = dataclasses.field(default_factory=dict)
     contents: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
     points: Sequence[Point] = ()
+    varying: Mapping[Hashable, frozenset[str]] = dataclasses.field(default_factory=dict)
+    versions: frozenset[Version] = frozenset()
 
     def op_values(
         self, op: Operator, values: Mapping[str, int] | None = None
     ) -> dict[str, int]:
-        """Return the per-call values ``op`` is written in this call.
+        """Return the per-call values ``op`` is written in this call, ``values`` (a point's) over the graph's own, by member name.
 
-        Or at the graph's ``values``, by member name.
+        A point need only give what it moves from the call's, not every value an op's
+        binding might read.
         """
         # A table's address the graph fills in; a word step alone reads none.
         values = {
             **dict.fromkeys(self.recording.addresses, 0),
-            **(self.values if values is None else values),
+            **self.values,
+            **(values or {}),
         }
         return {
             b.member.name: b.expression.evaluate(values)
@@ -135,13 +160,41 @@ class Timed:
             if b.op is op
         }
 
+    def under(self, profile: Profile, dev) -> tuple[Timed, tuple[Fusion, ...], Packing]:
+        """Return this call as ``profile`` builds it on ``dev`` (``apply_profile``), with its fusions and packing.
+
+        The steps a fusion or packing rebuilds are new operators, bound in the built
+        recording alone: their values and inputs are read from the returned call.
+        """
+        recording, fused, packing = apply_profile(self.recording, profile, dev)
+        return dataclasses.replace(self, recording=recording), fused, packing
+
+    def shortest(self) -> Timed:
+        """Return this call at its first point alone, weighing all of it.
+
+        Where an end-to-end check decides: a packing's or a fold's gain is a fixed cost
+        per call, which the shortest point shows as well as every point does.
+        """
+        first = [Point(1.0, self.points[0].values)] if self.points else []
+        return dataclasses.replace(self, points=first)
+
+    def timed_points(self) -> list[tuple[float, dict[str, int]]]:
+        """Return where the whole call is timed, as ``(weight, values)`` pairs.
+
+        Each point's values over the call's own; with no points, the call's own.
+        """
+        return [(p.weight, {**self.values, **p.values}) for p in self.points] or [
+            (1.0, dict(self.values))
+        ]
+
     def op_points(self, op: Operator) -> list[tuple[float, dict[str, int]]]:
         """Return where ``op`` is timed, as ``(weight, values)`` pairs.
 
         Points that give ``op``'s bound extents the same values are merged:
         their weights are summed, and the first one's per-call values are
         kept. When every point gives them the same values, as when ``op``
-        has no bound extent, that is a single pair.
+        has no bound extent, that is a single pair; with no points, the
+        call's own values.
         """
         out: dict[tuple, tuple[float, dict[str, int]]] = {}
         for point in self.points:
@@ -149,9 +202,7 @@ class Timed:
             label = tuple(values[e] for e in sorted(op.bound_extents))
             weight, first = out.get(label, (0.0, values))
             out[label] = (weight + point.weight, first)
-        if len(out) > 1:
-            return list(out.values())
-        return [(1.0, self.op_values(op))]
+        return list(out.values()) or [(1.0, self.op_values(op))]
 
     def op_inputs(self, op: Operator) -> dict[str, np.ndarray]:
         """Return what ``op``'s buffers hold in this call, by ``op``'s buffer name."""
@@ -162,6 +213,15 @@ class Timed:
             for buf, ref in zip(op.buffers, step.refs())
             if ref.nbytes is None and ref.root in self.contents
         }
+
+
+def coding_tunables(op: Operator) -> set[str]:
+    """Return the tunables of ``op`` that make an input move as coded rows (``In(coded=)``)."""
+    return {
+        b.declared_coded.name
+        for b in op.inputs
+        if isinstance(b.declared_coded, OperatorParam) and b.declared_coded.tunable
+    }
 
 
 def settings(
@@ -289,6 +349,7 @@ class Shape:
         self.cls = type(op)
         given = {n: vars(op)[n] for n in op.declaration.params}
         self.dims = Profile.dims(self.cls, given)
+        self.given = op.given
         # Each operator, where it is timed (``Timed.op_points``) and what its
         # inputs hold (``Timed.op_inputs``).
         self.members: list[
@@ -301,19 +362,66 @@ class Shape:
     def key(self) -> Hashable:
         return (self.cls, tuple(self.dims.items()))
 
-    def named(self, covering: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    def named(
+        self, covering: Sequence[Mapping[str, Any]], derived: bool = False
+    ) -> dict[str, Any]:
         """Return the dimensions its entry names.
 
-        Those off their field's default, and every one an entry
-        ``covering`` it names, so it outranks them.
+        Those off their field's default, and every one an entry ``covering`` it names,
+        so it outranks them.
+
+        Args:
+            covering: The dimensions each entry covering this shape names.
+            derived: Name the dimensions its operators derive too; a call
+                leaving one to its operator gives it no value an entry
+                naming it matches (``Profile.dims``).
         """
         defaults = Profile.dims(self.cls, {})
         names = {n for matched in covering for n in matched}
+        params = self.cls.declaration.params
         return {
             k: v
             for k, v in self.dims.items()
-            if k in names or k not in defaults or v != defaults[k]
+            if k in names
+            or (k not in defaults or v != defaults[k])
+            and (
+                derived
+                or params[k].derive is None
+                and not isinstance(params[k].default, FunctionType)
+            )
         }
+
+    def entry(
+        self,
+        covering: Sequence[Mapping[str, Any]],
+        drop: frozenset[str],
+        resolved: Sequence[Operator],
+    ) -> dict[str, Any]:
+        """Return the dimensions a tunable entry for it names.
+
+        ``named``'s less ``drop`` (those a host sizes); where that names another shape
+        of ``resolved`` too, the derived ones its calls gave as well, and then ``drop``'s;
+        each JSON can hold (``_json_safe``).
+        """
+        plain = self.named(covering)
+        every = self.named(covering, derived=True)
+        for kept in (
+            {n: v for n, v in plain.items() if n not in drop},
+            {
+                n: v
+                for n, v in every.items()
+                if (n in plain or n in self.given) and n not in drop
+            },
+            every,
+        ):
+            if not any(
+                isinstance(r, self.cls)
+                and Shape(r).key != self.key
+                and Profile.matches(kept, Profile.dims(type(r), vars(r)))
+                for r in resolved
+            ):
+                break
+        return _json_safe(kept)
 
     def __str__(self) -> str:
         dims = " ".join(f"{k}={v}" for k, v in self.named(()).items())
@@ -332,7 +440,8 @@ def shapes(calls: Sequence[Timed], dev) -> list[Shape]:
             op = step.op
             shape = Shape(op)
             shape = found.setdefault(shape.key, shape)
-            shape.pinned |= op.pinned
+            # Coding is decided per array before the search (plan.coded_seed).
+            shape.pinned |= op.pinned | coding_tunables(op)
             identity = _identity(op, dev)
             if identity not in seen:
                 seen.add(identity)
@@ -349,24 +458,33 @@ def time_shape(
     repeats: int = 9,
     cache: Cache | None = None,
     remeasure: bool = False,
-    exhaustive: int = EXHAUSTIVE,
     cycles: Mapping[str, int] | None = None,
     core_mhz: float | None = None,
     log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
+    ledger: Ledger | None = None,
 ) -> list[Trial]:
     """Each setting of ``shape`` timed, the recorded one first.
 
-    Every setting its operators share and the placer takes where there are
-    at most ``exhaustive``, else those a coordinate descent tries, each
-    tunable's ``line`` through the fastest setting taken so far, until a
-    pass over the tunables moves it no further. A setting whose
-    ``least_us`` at ``cycles`` and ``core_mhz`` is no faster than the
-    fastest taken so far is not timed.
+    Every setting its operators share and the placer takes: tunables couple
+    (MHA's pipelines with its query block), so one at a time would stop at a
+    local best. A setting whose ``least_us`` at ``cycles`` and ``core_mhz``
+    is no faster than the fastest taken so far is not timed. None where its operators
+    share no setting (each held to its own pinned ones): it stays as recorded. Each
+    dispatch is under ``lock`` where given; a batch that hangs the device is refused,
+    and recorded in ``ledger`` where given.
     """
     found = settings(shape.members[0][0], dev, shape.pinned)
     for op, _, _ in shape.members[1:]:
         own = settings(op, dev, shape.pinned)
         found = [s for s in found if s in own]
+    if not found:
+        named = [
+            f"{type(op).__name__}({', '.join(f'{n}={vars(op)[n]}' for n in sorted(op.given))})"
+            for op, _, _ in shape.members
+        ]
+        log(f"    no setting {', '.join(named)} all take; left as recorded")
+        return []
     found = [found[0]] + [
         s
         for s in found[1:]
@@ -375,11 +493,25 @@ def time_shape(
     if len(found) == 1:
         return [Trial(found[0], 0.0, 0.0)]
     tried: dict[tuple, Trial] = {}
-    least = (
-        {_frozen(s): _least(shape, s, cycles, core_mhz, dev) for s in found[1:]}
-        if cycles and core_mhz and issubclass(shape.cls, GEMM)
-        else {}
-    )
+    least: dict[tuple, float | None] = {}
+    if cycles is not None and core_mhz and issubclass(shape.cls, GEMM):
+        kernels = {
+            fn.recipe_key: fn
+            for s in found[1:]
+            for op, _, _ in shape.members
+            if isinstance(moved := op._with_tunables(**s).resolved(dev), GEMM)
+            for fn in [moved.layout().matmul()]
+        }
+        cycles = {
+            **cycles,
+            **time_kernels(
+                (fn for key, fn in kernels.items() if key not in cycles),
+                cache,
+                log,
+                lock,
+            ),
+        }
+        least = {_frozen(s): _least(shape, s, cycles, core_mhz, dev) for s in found[1:]}
     recorded_us: float | None = None
 
     def slower(s: dict[str, Any]) -> bool:
@@ -399,25 +531,34 @@ def time_shape(
         if skipped := sum(1 for s in batch if slower(s) and _frozen(s) not in tried):
             log(f"    {skipped} slower by their kernel alone, not timed")
         trials, recorded_us = _time(
-            shape, todo, full_elf, timing, repeats, cache, remeasure, log
+            shape,
+            todo,
+            full_elf,
+            timing,
+            repeats,
+            cache,
+            remeasure,
+            log,
+            lock,
+            dev,
+            ledger,
         )
         for s, t in zip(todo, trials):
             tried[_frozen(s)] = t
 
-    if len(found) <= exhaustive:
-        if any(b is not None for b in least.values()):
-            run([])  # the recorded setting's own time, which a bound is held to
-        run(found)
+    if any(b is not None for b in least.values()):
+        run([])  # the recorded setting's own time, which a bound is held to
+        # Least bound first, two of measure's batches at a time, so each batch
+        # holds the rest to the best found so far.
+        ordered = sorted(
+            found[1:],
+            key=lambda s: (least.get(_frozen(s)) is None, least.get(_frozen(s)) or 0.0),
+        )
+        step = 2 * (CONTEXTS // 2 - 1)
+        for begin in range(0, len(ordered), step):
+            run(ordered[begin : begin + step])
     else:
-        best, moved = found[0], True
-        while moved:
-            moved = False
-            for name in found[0]:
-                run(line(found, best, name))
-                taken = [t for t in tried.values() if t.gains or t.tunables == found[0]]
-                fastest = min(taken, key=lambda t: t.delta_us)
-                if fastest.tunables != best:
-                    best, moved = fastest.tunables, True
+        run(found)
     return [tried[_frozen(s)] for s in found if _frozen(s) in tried]
 
 
@@ -453,12 +594,63 @@ def _time(
     cache: Cache | None,
     remeasure: bool,
     log: Callable[[str], None],
+    lock: NpuLock | None,
+    dev: Device,
+    ledger: Ledger | None,
 ) -> tuple[list[Trial], float]:
     """``found``'s settings timed and judged, and the recorded one's weighted step time.
 
     Timed and judged at each point of each of ``shape``'s operators, the
-    recorded one first; one that does not build is refused.
+    recorded one first; one that does not build is refused, and every one where the
+    batch hangs the device, recorded in ``ledger`` where given.
     """
+    try:
+        return _time_batch(
+            shape, found, full_elf, timing, repeats, cache, remeasure, log, lock
+        )
+    except Exception as e:
+        if not device_timeout(e):
+            raise
+        return refused_hang(e, shape, found, dev, ledger, log), 0.0
+
+
+def refused_hang(
+    e: Exception,
+    shape: Shape,
+    found: list[dict[str, Any]],
+    dev: Device,
+    ledger: Ledger | None,
+    log: Callable[[str], None],
+) -> list[Trial]:
+    """Return ``found``'s trials once their batch hung the device (``e``): every setting but the recorded one refused.
+
+    Which one hung is unknown, so none is taken. Logged, and recorded in ``ledger``
+    where given.
+    """
+    log(f"    refused, {Kind.HANG.value}: {first_error(str(e))}")
+    if ledger is not None:
+        batch = json.dumps(found[1:], default=str)
+        ledger.record(
+            Kind.HANG, dev.name, str(e), f"autotune {shape}, a batch of {batch}"
+        )
+    return [
+        Trial(s, 0.0, 0.0, None if i == 0 else Kind.HANG.value)
+        for i, s in enumerate(found)
+    ]
+
+
+def _time_batch(
+    shape: Shape,
+    found: list[dict[str, Any]],
+    full_elf: bool,
+    timing: Timing,
+    repeats: int,
+    cache: Cache | None,
+    remeasure: bool,
+    log: Callable[[str], None],
+    lock: NpuLock | None,
+) -> tuple[list[Trial], float]:
+    """``_time`` where the device completes every command."""
     recorded_us = 0.0
     deltas = [0.0] * len(found)
     variances: list[float | None] = [0.0] * len(found)
@@ -476,6 +668,7 @@ def _time(
                 cache=cache,
                 remeasure=remeasure,
                 log=log,
+                lock=lock,
             )
             default = ran[0]
             recorded_us += weight * default.t_step_us
@@ -483,7 +676,7 @@ def _time(
                 if i not in ran:
                     refused[i] = refused[i] or "does not build"
                     continue
-                delta, noise = ran[i].against_default()
+                delta, noise = ran[i].against_default(default)
                 deltas[i] += weight * delta
                 variance = variances[i]
                 variances[i] = (
@@ -492,7 +685,7 @@ def _time(
                     else variance + (weight * noise) ** 2
                 )
                 if refused[i] is None and ran[i].output != default.output:
-                    refused[i] = _judged(ops[0], ops[i], values, inputs, full_elf)
+                    refused[i] = _judged(ops[0], ops[i], values, inputs, full_elf, lock)
     return [
         Trial(s, d, 0.0 if i == 0 else (None if v is None else math.sqrt(v)), r)
         for i, (s, d, v, r) in enumerate(zip(found, deltas, variances, refused))
@@ -505,8 +698,9 @@ def _judged(
     values: Mapping[str, int],
     inputs: Mapping[str, np.ndarray],
     full_elf: bool,
+    lock: NpuLock | None,
 ) -> str | None:
-    """``judge`` on one run of ``op`` at ``values`` on ``inputs``."""
+    """``judge`` on one run of ``op`` at ``values`` on ``inputs``, under ``lock`` where given."""
     run = Standalone(
         f"judge_{_identity(op, op.dev)}",
         [op],
@@ -516,8 +710,72 @@ def _judged(
         inputs={op: inputs},
         full_elf=full_elf,
     )
-    run.digest()
-    return judge(default, op, run.inputs(), run.written(), values)
+    with lock or contextlib.nullcontext():
+        run.digest()
+        verdict = judge(default, op, run.inputs(), run.written(), values)
+        del run
+    return verdict
+
+
+def _json_safe(dims: Mapping[str, Any]) -> dict[str, Any]:
+    """Return ``dims`` (a ``Shape.named`` result) without values JSON cannot round-trip.
+
+    An access pattern it cannot serialize at all, and a tuple it gives back a list: a
+    profile entry still names what it can of a step whose shape is not wholly
+    representable.
+    """
+    out = {}
+    for k, v in dims.items():
+        try:
+            same = json.loads(json.dumps(v)) == v
+        except TypeError:
+            continue
+        if same:
+            out[k] = v
+    return out
+
+
+def replacing(
+    profile: Profile | None, found: Sequence[Shape]
+) -> tuple[dict[Hashable, list[Mapping[str, Any]]], dict[Hashable, dict[str, Any]]]:
+    """Return what of ``profile`` covers each of ``found``'s shapes and what it gives.
+
+    By shape key: what covers it (``covering``, for ``Shape.named``) and what it
+    already gives (``held``, kept where a new entry for it does not move it, as GEMM's
+    ``tile_k`` below ``HIGHEST``), what a shape's own new entry is written from
+    (``autotune``, the coded seed's ``coded``).
+    """
+    covering: dict[Hashable, list[Mapping[str, Any]]] = {s.key: [] for s in found}
+    held: dict[Hashable, dict[str, Any]] = {s.key: {} for s in found}
+    for cls, matched, tunables in profile or ():
+        for s in found:
+            if issubclass(s.cls, cls) and Profile.matches(matched, s.dims):
+                covering[s.key].append(matched)
+                held[s.key].update(tunables)
+    return covering, held
+
+
+def merged(
+    profile: Profile | None,
+    new: Sequence[tuple[type, Mapping[str, Any], Mapping[str, Any]]],
+) -> Profile:
+    """Return ``profile``'s entries with ``new``'s (class, dimensions, tunables) added.
+
+    Each replacing one that names exactly its dimensions (equal ranks would be
+    ambiguous): an entry a new one only outranks is kept, so a shape it matches that the
+    new ones' search did not see (another version's, under ``--versions``) keeps what it
+    gave.
+    """
+    out = Profile()
+    for cls, matched, tunables in profile or ():
+        if not any(
+            cls is c and matched.keys() == d.keys() and Profile.matches(matched, d)
+            for c, d, _ in new
+        ):
+            out.add(cls, **matched, **tunables)
+    for cls, dims, tunables in new:
+        out.add(cls, **dims, **tunables)
+    return out
 
 
 def autotune(
@@ -532,45 +790,53 @@ def autotune(
     remeasure: bool = False,
     cycles: Mapping[str, int] | None = None,
     core_mhz: float | None = None,
+    shares: Mapping[Hashable, float] | None = None,
     log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
+    ledger: Ledger | None = None,
 ) -> Profile:
-    """Return ``profile`` with an entry for each shape of ``calls`` (``shapes``).
+    """Return ``profile`` with an entry for each shape of ``calls`` (``shapes``) naming the fastest setting taken (``time_shape``).
 
-    Each entry names the fastest setting taken (``time_shape``), the
-    recorded one where none gains. ``profile``'s entries covering any of
-    those shapes are replaced; the rest are kept.
+    The recorded one where none gains, named without the dimensions a host sizes
+    (``Timed.varying``) wherever that still names only its own shape (``Shape.entry``),
+    merged into its other entries (``merged``). With ``shares``, only the shapes a
+    search could remove ``SHAPE_SHARE`` of a version from are searched, the costliest
+    first.
 
     Args:
-        calls: The calls whose graphs were recorded under ``profile``.
         dev: The device the calls' operators are timed on.
-        profile: The profile whose unreplaced entries are kept.
-        full_elf: How the calls' graphs are packaged.
+        profile: The profile the calls were recorded under, whose other entries are
+            kept.
         timing: How each setting's steps are timed.
-        repeats: How many times each setting's steps are timed.
+        repeats: Steps in each long run a step's time is taken from.
+        log: Where progress and the gains found are logged.
+        calls: The calls whose graphs were recorded under ``profile``.
+        full_elf: How the calls' graphs are packaged.
         cache: Where each time is kept across runs (``Cache.here()``).
         remeasure: Time again what ``cache`` holds.
         cycles: Kernel cycles per call by recipe key (``kernel_cycles``).
         core_mhz: The cores' clock the runtime reads (``core_mhz``), which
             ``cycles`` are timed at; None times every setting.
-        log: Where progress and the gains found are logged.
+        shares: Each shape's largest share of a version's time, by
+            ``Shape.key`` (``Survey.shares``).
+        lock: Held around each measurement; none taken where None.
+        ledger: Where a batch that hangs the device is recorded, or None.
     """
     found = shapes(calls, dev)
-    covering: dict[Hashable, list[Mapping[str, Any]]] = {s.key: [] for s in found}
-    # What the covering entries set that the search does not move, as
-    # GEMM's tile_k below HIGHEST.
-    held: dict[Hashable, dict[str, Any]] = {s.key: {} for s in found}
-    out = Profile()
-    for cls, matched, tunables in profile or ():
-        covered = [
-            s
-            for s in found
-            if issubclass(s.cls, cls) and Profile.matches(matched, s.dims)
-        ]
-        for s in covered:
-            covering[s.key].append(matched)
-            held[s.key].update(tunables)
-        if not covered:
-            out.add(cls, **matched, **tunables)
+    if shares is not None:
+        weighed = [s for s in found if shares.get(s.key, 0.0) >= SHAPE_SHARE]
+        log(
+            f"{len(found) - len(weighed)} of {len(found)} shapes could remove "
+            f"under {SHAPE_SHARE:.0%} of every version: not searched"
+        )
+        found = sorted(weighed, key=lambda s: -shares[s.key])
+    covering, held = replacing(profile, found)
+    new: list[tuple[type, dict[str, Any], dict[str, Any]]] = []
+    varying: dict[Hashable, frozenset[str]] = {}
+    for call in calls:
+        for key, names in call.varying.items():
+            varying[key] = varying.get(key, frozenset()) | names
+    resolved = [s.op.resolved(dev) for call in calls for s in call.recording.steps]
     for i, shape in enumerate(found):
         log(f"[{i + 1}/{len(found)}] {shape}")
         tried = time_shape(
@@ -584,14 +850,17 @@ def autotune(
             cycles=cycles,
             core_mhz=core_mhz,
             log=log,
+            lock=lock,
+            ledger=ledger,
         )
+        if not tried:
+            continue
         gains = [t for t in tried if t.gains]
         best = min(gains, key=lambda t: t.delta_us, default=tried[0])
         if gains:
             log(f"    {best.tunables}: {best.delta_us:+.1f} ± {best.noise_us:.1f} us")
-        out.add(
-            shape.cls,
-            **shape.named(covering[shape.key]),
-            **{**held[shape.key], **best.tunables},
+        kept = shape.entry(
+            covering[shape.key], varying.get(shape.key, frozenset()), resolved
         )
-    return out
+        new.append((shape.cls, kept, {**held[shape.key], **best.tunables}))
+    return merged(profile, new)

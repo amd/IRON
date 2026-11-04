@@ -29,7 +29,7 @@ from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
 from ..design import BuiltArray, OperatorDesign, configuration, identities
-from .step import BufferRef
+from .step import BufferRef, Edge, Fusion, FusionKind
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ SHIM_ADDRESS_ALIGNMENT = 4
 # stateful transform, since allocate alone on unsplit fifos checks nothing.
 _FIT_PIPELINE = (
     "builtin.module("
-    "aie.device(aie-place-tiles),"
+    "aie.device(aie-place-tiles{{placer={placer}}}),"
     "aie-lower-scratchpad-parameters,"
     "aie.device("
     "aie-objectFifo-stateful-transform,"
@@ -53,6 +53,13 @@ _FIT_PIPELINE = (
     "aie-create-pathfinder-flows"
     "))"
 )
+
+
+SEQUENTIAL, ANNEALED = "sequential_placer", "sa_placer"
+
+# Each packed group's placer and the diagnostic where none routes it, by its
+# designs' identities.
+_placed: dict[tuple[str, ...], tuple[str, str | None]] = {}
 
 
 class CoResidenceError(ValueError):
@@ -67,6 +74,9 @@ class Packing:
     """
 
     groups: tuple[tuple[str, ...], ...] = ()
+    # Designs whose device routes only as the annealing placer places it; out
+    # of the repr, so an image without one keeps its cache key.
+    annealed: tuple[str, ...] = dataclasses.field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         seen: set[str] = set()
@@ -109,7 +119,13 @@ class Packing:
             touched = [d for d in devices if d & mates]
             union = mates.union(*touched)
             devices = [d for d in devices if not d & mates] + [union]
-        return Packing(tuple(tuple(sorted(g, key=order.index)) for g in devices))
+        return dataclasses.replace(
+            self, groups=tuple(tuple(sorted(g, key=order.index)) for g in devices)
+        )
+
+    def annealed_devices(self) -> set[str]:
+        """Return the device symbols the annealing placer places before the image is built."""
+        return {self.device_of(d) for d in self.annealed}
 
     @staticmethod
     def device_name(group: Sequence[str]) -> str:
@@ -136,8 +152,9 @@ def unvalued(designs: Mapping[str, OperatorDesign]) -> None:
 # pyright's stub does not see through: every ir.<X> below is suppressed for it.
 def places(
     module: ir.Module,
+    placer: str = SEQUENTIAL,
 ) -> str | None:
-    """Return ``None`` if ``module``'s devices place and allocate, else the diagnostic."""
+    """Return ``None`` if ``module``'s devices place, allocate and route under ``placer``, else the diagnostic."""
     diagnostics: list[str] = []
 
     def collect(
@@ -152,7 +169,9 @@ def places(
     # MLIR's generated ir.pyi types the handler as object.
     assert isinstance(handler, ir.DiagnosticHandler)
     try:
-        PassManager.parse(_FIT_PIPELINE, module.context).run(module.operation)
+        PassManager.parse(_FIT_PIPELINE.format(placer=placer), module.context).run(
+            module.operation
+        )
     except ir.MLIRError as e:
         return "\n".join(diagnostics) or str(e)
     finally:
@@ -160,12 +179,53 @@ def places(
     return "\n".join(diagnostics) if diagnostics else None
 
 
-def fits(
-    designs: Mapping[str, OperatorDesign], words: Mapping[str, str] | None = None
-) -> str | None:
-    """Return ``None`` if ``designs``, by device name, place and allocate, else the diagnostic.
+def fused_configuration(
+    name: str,
+    fusion: Fusion,
+    designs: Sequence[OperatorDesign],
+    words: Mapping[str, str] | None = None,
+    dispatch: Sequence[Mapping[str, object]] | None = None,
+) -> tuple[DeviceConfiguration, list[BuiltArray]]:
+    """Return ``fusion``'s members, ``designs`` in its step order, as one device configuration ``name`` and their arrays.
 
-    ``words`` maps a design symbol to the scratchpad word it shares.
+    Each array fed where an edge feeds it (staged through memtiles in a staged fusion),
+    and one sequence running every member, in one task group, or back to back in a
+    merge. On an xclbin, ``dispatch`` is each member's dispatch-time scalars.
+    """
+    incoming: dict[int, list[Edge]] = {}
+    for e in fusion.edges:
+        incoming.setdefault(e.consumer, []).append(e)
+    arrays: dict[int, BuiltArray] = {}
+    scalars = [None] * len(designs) if dispatch is None else dispatch
+    for design, j, own in zip(designs, fusion.steps, scalars, strict=True):
+        fed = {}
+        for e in incoming.get(j, ()):
+            (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
+            fed[e.input] = source
+        arrays[j] = BuiltArray(
+            design, words, own, fed=fed, staged=fusion.kind is FusionKind.STAGED
+        )
+    configured = configuration(
+        name,
+        {str(j): arrays[j] for j in fusion.steps},
+        steps=[str(j) for j in fusion.steps],
+        # A merge's steps have no edge to keep alive across a shared task
+        # group; run them back to back, each fully awaited.
+        fuse=fusion.kind is not FusionKind.MERGE,
+    )
+    return configured, [arrays[j] for j in fusion.steps]
+
+
+def fits(
+    designs: Mapping[str, OperatorDesign],
+    words: Mapping[str, str] | None = None,
+    fusion: Fusion | None = None,
+    placer: str = SEQUENTIAL,
+) -> str | None:
+    """Return ``None`` if ``designs``, by device name, place, allocate and route under ``placer``, else the diagnostic.
+
+    ``words`` maps a design symbol to the scratchpad word it shares. Given ``fusion``,
+    ``designs`` are its members in step order, built fused (``fused_configuration``).
     """
     exported = [n for n, d in designs.items() if d.op.exported_design() is not None]
     try:
@@ -177,8 +237,13 @@ def fits(
                 ir.Context(),
             )
         else:
-            arrays = {n: BuiltArray(d, words) for n, d in designs.items()}
-            configured = configuration(next(iter(arrays)), arrays)
+            if fusion is None:
+                arrays = {n: BuiltArray(d, words) for n, d in designs.items()}
+                configured = configuration(next(iter(arrays)), arrays)
+            else:
+                configured, _ = fused_configuration(
+                    "fused", fusion, list(designs.values()), words
+                )
             module = Program.compose(
                 [configured], entry=configured.runtimes[0]
             ).resolve_program()
@@ -188,7 +253,7 @@ def fits(
         ir.MLIRError,
     ) as e:
         return str(e)
-    return places(module)
+    return places(module, placer)
 
 
 class Composition:
@@ -203,27 +268,89 @@ class Composition:
         designs, design_of = seq.unique_designs()
         # unique_designs() made one design per identity, so one name is a collision.
         own = [OperatorDesign(op) for op in designs]
-        self.designs: dict[str, OperatorDesign] = {}
+        named: dict[str, OperatorDesign] = {}
         for design in own:
-            existing = self.designs.setdefault(design.name, design)
+            existing = named.setdefault(design.name, design)
             if existing is not design:
                 raise ValueError(
                     f"{existing.op.name} and {design.op.name} are different designs "
                     f"whose device names collide, {design.name}; a tunable given "
                     f"to either one (a tile size, a column count) separates them"
                 )
-        self.steps = [(own[design_of[id(s.op)]].name, s.buffers) for s in seq.steps]
+        # A fusion is one step of the composition, at its first member's place.
+        self.fusions: dict[str, tuple[tuple[OperatorDesign, ...], Fusion]] = {}
+        steps = []
+        place: dict[int, int] = {}
+        for i, fusion in Fusion.dispatches(seq.fusions, len(seq.steps)):
+            place[i] = len(steps)
+            if fusion is None:
+                s = seq.steps[i]
+                steps.append((own[design_of[id(s.op)]].name, s.buffers))
+                continue
+            member_designs = tuple(
+                own[design_of[id(seq.steps[j].op)]] for j in fusion.steps
+            )
+            symbol = fusion.name([d.name for d in member_designs])
+            self.fusions[symbol] = (member_designs, fusion)
+            steps.append((symbol, fusion.host_refs(seq.steps)))
+        self.steps = steps
+        used = {name for name, _ in steps}
+        self.designs = {name: design for name, design in named.items() if name in used}
         # A full ELF expands its loads, configuring the array at every call,
         # where it runs more than one design: one design is configured by the
         # first dispatch alone, as the firmware skips an unexpanded load of
         # the PDI it has loaded, unless the build is traced or asks to
         # reconfigure.
-        self.expands = len(self.designs) > 1 or seq.traced or full_elf.reconfigure
+        self.expands = (
+            len(self.designs) + len(self.fusions) > 1
+            or seq.traced
+            or full_elf.reconfigure
+        )
         self.layout = seq.layout
         self.buffer_sizes = seq.buffer_sizes
-        self.commands = full_elf.commands
+        inside = set(range(len(seq.steps))) - set(place)
+        if inside & set(full_elf.commands):
+            raise ValueError(
+                f"a command starts at steps {sorted(inside & set(full_elf.commands))}, "
+                f"within a fusion's members, which are one call"
+            )
+        self.commands = tuple(place[i] for i in full_elf.commands)
         self.shared_words = full_elf.shared_words
-        self.packing = Packing()
+        self.packing = self.placed(full_elf.packing)
+
+    def placed(self, packing: Packing) -> Packing:
+        """Return ``packing``'s groups that place and route as one device.
+
+        A group the default placer cannot route is placed by the annealing one where
+        that routes it (``Packing.annealed``); one neither routes (an operator's
+        mapping changed since the profile was tuned) runs unpacked, with a warning.
+        """
+        groups, annealed = [], set()
+        for group in packing.groups:
+            members = {n: self.designs[n] for n in group if n in self.designs}
+            if len(members) < 2:
+                continue
+            key = tuple(d.identity for d in members.values())
+            if key not in _placed:
+                refused = fits(members)
+                if refused is None:
+                    _placed[key] = (SEQUENTIAL, None)
+                elif fits(members, placer=ANNEALED) is None:
+                    _placed[key] = (ANNEALED, None)
+                else:
+                    _placed[key] = (SEQUENTIAL, refused)
+            placer, refused = _placed[key]
+            if refused is not None:
+                logger.warning(
+                    "packing %s does not place, so it is not packed: %s",
+                    ", ".join(members),
+                    refused,
+                )
+                continue
+            groups.append(tuple(members))
+            if placer == ANNEALED:
+                annealed.update(members)
+        return Packing(tuple(groups), tuple(sorted(annealed)))
 
     @property
     def identity(self) -> str:
@@ -234,6 +361,9 @@ class Composition:
         h = hashlib.sha256()
         for name, design in self.designs.items():
             h.update(f"{name}={design.compilable().recipe_hash};".encode())
+        for symbol, (designs, _) in self.fusions.items():
+            recipe = "+".join(d.compilable().recipe_hash for d in designs)
+            h.update(f"{symbol}={recipe};".encode())
         state = (
             self.steps,
             self.layout,
@@ -242,6 +372,7 @@ class Composition:
             self.packing,
             # Absent when unsplit, so every one-command image keeps its key.
             *([self.commands] if self.commands else []),
+            *([self.packing.annealed] if self.packing.annealed else []),
             *(["expands"] if self.expands else []),
         )
         h.update(repr(state).encode())
@@ -279,7 +410,10 @@ class Composition:
         packing = self.packing.sharing(
             {n: of[n] if n in arrays else n for n in self.designs}
         )
-        device = next(iter(self.designs.values())).op.array_device()
+        sample = next(iter(self.designs.values()), None)
+        if sample is None:
+            sample = next(iter(self.fusions.values()))[0][0]
+        device = sample.op.array_device()
         configurations: dict[str, DeviceConfiguration] = {}
         runtimes: dict[str, Runtime] = {}
         types: dict[str, list] = {}
@@ -296,9 +430,22 @@ class Composition:
             else:
                 configured = configuration(symbol, {m: arrays[m] for m in members})
                 for m in members:
-                    types[m] = [b.flat_type for b in arrays[m].op.buffers]
+                    types[m] = [
+                        b.flat_type for b in arrays[m].op.buffers if not b.on_chip
+                    ]
             configurations[symbol] = configured
             runtimes.update(zip(members, configured.runtimes))
+
+        for symbol, (designs, fusion) in self.fusions.items():
+            configured, members = fused_configuration(symbol, fusion, designs, words)
+            configurations[symbol] = configured
+            runtimes[symbol] = configured.runtimes[0]
+            types[symbol] = [
+                b.flat_type
+                for array in members
+                for b in array.op.buffers
+                if not b.on_chip
+            ]
 
         calls = [
             (
@@ -353,6 +500,16 @@ class Composition:
             entry=entries[0],
             expand_load_pdis=self.expands or None,
         ).resolve_program()
+        # aiecc places the rest with its default placer; these route only so.
+        annealed = packing.annealed_devices()
+        place = PassManager.parse(
+            f"aie.device(aie-place-tiles{{placer={ANNEALED}}})", module.context
+        )
+        for op in module.body.operations:
+            if "sym_name" in op.attributes and (
+                ir.StringAttr(op.attributes["sym_name"]).value in annealed
+            ):
+                place.run(op.operation)
         return str(module)
 
     # The device configuration every full ELF's commands run on.

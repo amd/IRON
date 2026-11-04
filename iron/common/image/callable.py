@@ -15,13 +15,14 @@ from typing import TYPE_CHECKING
 import aie.utils as aie_utils
 import ml_dtypes
 import numpy as np
+from aie.utils.benchmark import CPU_WAIT_US
 from aie.utils.npukernel import NPUKernel
 from aie.utils.trace import get_trace_buffer
 
 from ..declare import Operator
 from .allocator import ALIGNMENT, BANK, ArenaPlan, Pool
 from .compose import Composition
-from .step import BufferRef
+from .step import BufferRef, Fusion
 
 if TYPE_CHECKING:
     import pyxrt  # pyright: ignore[reportMissingImports]
@@ -247,6 +248,9 @@ def _line_view(parent: XRTTensor, offset: int, length: int, dtype) -> XRTTensor:
     return parent.subview(offset, ((stop - offset) // dtype.itemsize,), dtype)
 
 
+WAIT_PER_DISPATCH_US = 2.0
+
+
 class ImageCallable:
     """What a caller invokes once a sequence ``op`` has an image.
 
@@ -281,6 +285,16 @@ class ImageCallable:
         (``aie.utils.benchmark``), or None, and the call's result.
         """
         raise NotImplementedError
+
+    @property
+    def dispatches(self) -> int:
+        """Return the commands a call issues from the host: one for a full ELF."""
+        return 1
+
+    def cpu_wait_cap_us(self) -> float:
+        """Return the most CPU wait a call's timing may show before it is refused as host contention."""
+        # An idle host still wakes about 1 us a dispatch (Phoenix, ~1100-dispatch steps).
+        return CPU_WAIT_US + WAIT_PER_DISPATCH_US * self.dispatches
 
     def _arena_grew(self) -> bool:
         """Whether the arena grew since the views were made, now made again."""
@@ -591,18 +605,20 @@ class PerStepCallable(ImageCallable):
     transients share one bank-split pool.
     """
 
+    @property
+    def dispatches(self) -> int:
+        """Return the commands a call issues from the host: one a step, a fusion's steps one."""
+        return len(self._steps)
+
     def __init__(self, seq, check: bool = False, arena: ScratchArena | None = None):
         super().__init__(seq, arena)
         self.check = check
         self.dispatch_values: dict[str, np.generic] = {}
         self._buffers: dict[BufferRef, XRTTensor] = {}
         self._storage: dict[str, XRTTensor] = {}
-        own_scratch: dict[str, tuple[int, int]] = {}
+        own_scratch = seq.own_scratch()
         for root, (kind, offset, length) in seq.layout.items():
-            if self.arena is not None and root in seq.residents:
-                continue
-            if kind == "scratch":
-                own_scratch[root] = (offset, length)
+            if kind == "scratch" or (self.arena is not None and root in seq.residents):
                 continue
             ref = BufferRef(root)
             dtype = seq.buffer_dtype(ref)
@@ -623,14 +639,19 @@ class PerStepCallable(ImageCallable):
             view = _line_view(self._scratch_banks[bank], offset, length, dtype)
             self._storage[root] = view
             self._buffers[BufferRef(root)] = view
-        # Each step is its own dispatch, over its own buffers.
+        # Each step is its own dispatch, over its own buffers; a fusion's
+        # steps are one dispatch, over its host-visible buffers.
         self._steps = []
-        # The step each dispatch starts at.
+        # The step each dispatch starts at, and its link.
         self._starts: list[int] = []
-        for i, step in enumerate(seq.steps):
-            link = seq.packaging.links[id(step.op)]
-            self._steps.append((step.op, link.kernel, step.buffers, []))
+        self._links = []
+        for i, fusion in Fusion.dispatches(seq.fusions, len(seq.steps)):
+            step = seq.steps[i]
+            link = seq.packaging.step_links[i]
+            refs = step.buffers if fusion is None else fusion.host_refs(seq.steps)
+            self._steps.append((step.op, link.kernel, refs, []))
             self._starts.append(i)
+            self._links.append(link)
         self._follow_arena()
         self._bind_steps()
 
@@ -699,17 +720,17 @@ class PerStepCallable(ImageCallable):
     def __call__(
         self, between: Mapping[int, Callable[[], None]] | None = None
     ) -> tuple[None, XRTKernelResult]:
-        """Dispatch each step.
+        """Dispatch each step, ``between[i]()`` running on the host before step ``i``.
 
-        ``between[i]()`` runs on the host before step ``i``, never inside
-        a pack's run; the handle is None, no one dispatch timed.
+        Never inside a pack's or a fusion's run; the handle is None, no one dispatch
+        timed.
         """
         between = dict(between or {})
         inside = set(between) - {*self._starts, len(self.op.steps)}
         if inside:
             raise ValueError(
                 f"{self.op.name}: host steps at {sorted(inside)} fall inside a "
-                f"run of a pack, one dispatch"
+                f"run of a pack or a fusion, one dispatch"
             )
         self._follow_arena()
         for root in self.op.inputs:
@@ -729,9 +750,13 @@ class PerStepCallable(ImageCallable):
                 )
             if checked:
                 inputs, expected = self._reference(step_op, args)
+            symbols = self._links[index].symbols
             kernel(
                 *args,
-                **{name: self.dispatch_values[name] for name in kernel.dispatch_params},
+                **{
+                    name: self.dispatch_values[symbols.get(name, name)]
+                    for name in kernel.dispatch_params
+                },
             )
             if checked:
                 written = {
@@ -759,13 +784,13 @@ class PerStepCallable(ImageCallable):
     ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
         """Return ``step_op``'s inputs and its reference on them, by buffer name.
 
-        Inputs are read as its buffers hold them.
+        Inputs are read as its buffers hold them, a coded one decoded.
         """
         held = {
             spec.name: buf.numpy()[: spec.elements].reshape(spec.shape).copy()
             for buf, spec in zip(args, step_op.buffers)
         }
-        inputs = {b.name: held[b.name] for b in step_op.inputs}
+        inputs = {b.name: b.logical_form(held[b.name]) for b in step_op.inputs}
         # A reference that takes its outputs writes them in place, keeping
         # what it does not touch (a cache a Copy scatters into).
         outputs = {b.name: held[b.name] for b in step_op.outputs if not b.fills}

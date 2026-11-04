@@ -431,12 +431,12 @@ def test_llama_decode_records_and_tunes():
     # The weights are pinned, and so are the caches, as state.
     layers = model.model.layers
     assert id(layers[1].self_attn.q_proj.weight) in t.weights
-    _, keys = t.states[id(layers[0].cache.keys)]
-    assert t.pinned[keys.name] == cfg.num_key_value_heads * L * cfg.head_dim * 2
-    # Every MHA attends over the keys up to the position, its one query
-    # packed by its heads.
+    _, kv = t.states[id(layers[0].cache.kv)]
+    assert t.pinned[kv.name] == cfg.num_key_value_heads * L * 2 * cfg.head_dim * 2
+    # Every MHA attends over the keys and values up to the position, its
+    # one query packed by its heads.
     mhas = [s.op for s in t.steps if type(s.op) is MHA]
-    assert all(op.kv_interleaved for op in mhas)
+    assert all(op.kv_paired for op in mhas)
     assert len(mhas) == cfg.num_hidden_layers
     assert all(
         {k: e.name for k, e in op.bound_values.items()} == {"kv_valid": "position_p1"}
@@ -480,8 +480,8 @@ def test_llama_prompt_records_over_the_same_caches():
     # so one arena holds them once for both.
     token = g.record(**g.shapes()[0])
     assert set(t.states) == set(token.states)
-    keys = "model.layers.0.cache.keys"
-    assert t.residents[keys] == token.residents[keys]
+    kv = "model.layers.0.cache.kv"
+    assert t.residents[kv] == token.residents[kv]
     assert set(t.weights) == set(token.weights)
     # Every projection reads the (out, in) checkpoint layout through the
     # column-major flag, which the recording carries into shape inference.
@@ -1007,8 +1007,8 @@ def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
             )  # (512, 64) x (256, 64)^T
             return MHA.step(
                 h.reshape(512, 4, 64),
-                h.reshape(512, 4, 64),
-                h.reshape(512, 4, 64),
+                K=h.reshape(512, 4, 64),
+                V=h.reshape(512, 4, 64),
                 heads_interleaved=True,
                 kv_interleaved=True,
                 num_pipelines=2,
@@ -1071,6 +1071,20 @@ def test_an_optional_input_gives_a_version_without_it():
     np.testing.assert_array_equal(g.reference(r=1), table[1])
     np.testing.assert_array_equal(g.reference(None, r=1), table[1])
     np.testing.assert_array_equal(g.reference(x, r=3), table[3] + x)
+
+
+class _Offset(iron.Graph):
+    """``x`` plus an array the body makes, as long as ``x``."""
+
+    def body(self, x):
+        return ElementwiseAdd.step(x, np.ones(x.shape, bfloat16))
+
+
+def test_held_bytes_keeps_each_version_s_own_weights_apart():
+    """Each version's body-made weight is its own resident, whatever id a freed one's had."""
+    sizes = [256 * k for k in range(1, 17)]
+    held = _Offset().held_bytes([{"x": (n,)} for n in sizes])
+    assert held >= sum(2 * n for n in sizes)
 
 
 class _Held(iron.Graph):
@@ -1337,6 +1351,44 @@ def test_a_version_reads_only_the_values_its_steps_read():
 def test_inline_records_only_into_a_body():
     with pytest.raises(TypeError, match="records into a graph's body"):
         _Summed(2).inline(_Summed(2).body)
+
+
+def _tiles(tile_size):
+    profile = Profile()
+    profile.add(SiLU, size=2048, tile_size=tile_size)
+    return profile
+
+
+class _Inner(iron.Graph):
+    profile = _tiles(256)
+
+    def body(self, x):
+        return SiLU.step(x)
+
+
+class _Outer(iron.Graph):
+    def __init__(self):
+        self.inner = _Inner()
+
+    def body(self, x):
+        return self.inner.inline(self.inner.body, x)
+
+
+@pytest.mark.parametrize(
+    "outer, inner, tile",
+    [(None, None, 256), (512, None, 512), (512, 1024, 1024)],
+    ids=["class", "outer_beats_class", "instance_beats_outer"],
+)
+def test_an_inlined_graph_records_under_its_instance_then_outer_then_class_profile(
+    outer, inner, tile
+):
+    g = _Outer()
+    if outer is not None:
+        g.profile = _tiles(outer)
+    if inner is not None:
+        g.inner.profile = _tiles(inner)
+    (step,) = g.record(x=(2048,)).steps
+    assert step.op.tile_size == tile
 
 
 class _DeviceIds(iron.Graph):

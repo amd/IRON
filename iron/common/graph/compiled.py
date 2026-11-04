@@ -30,7 +30,7 @@ from ml_dtypes import bfloat16
 from numpy.typing import DTypeLike
 
 from ..declare.operator import device_fit, graph_recorder
-from ..declare.profile import Profile
+from ..declare.profile import Profile, Version
 from ..declare.value import ExtentWord
 from ..image.allocator import ALIGNMENT, ArenaPlan
 from ..image.artifacts import Parameter
@@ -40,18 +40,22 @@ from ..image.callable import (
     PerStepCallable,
     ScratchArena,
 )
+from ..image.compose import Packing
 from ..image.link import FullELF, PerStep
 from ..image.packaging import Kind, Plan, plan, require_device
 from ..image.sequence import Image
-from ..image.step import BufferRef
+from ..image.step import BufferRef, Fusion
 from .carried import CARRY, EmitSite, attach_emit, compose
-from .handle import Carry, Dense, Handle, State, Weight, is_operand
-from .record import HostStep, Recorder, Recording
+from .coded import CodedWeight, Source
+from .fold import apply_folds, chosen_folds
+from .fusion import fusions as graph_fusions
+from .fusion_tunables import apply as apply_fusion_tunables
+from .handle import Carry, Dense, Handle, State, Weight, _Param, is_operand
+from .packing import apply as apply_packings
+from .packing import merges
+from .record import HostStep, Recorder, Recording, version_key
 
 logger = logging.getLogger(__name__)
-
-# One (parameter, shape, dtype name) per input: what picks a version.
-Signature = tuple[tuple[str, tuple[int, ...], str], ...]
 
 
 def _shape_and_dtype(spec):
@@ -171,23 +175,22 @@ class _Parameters:
         return cls(inputs, values, frozenset(optional), defaults)
 
 
-class _Param(np.ndarray):
-    """A ``param``: an array a graph holds as a weight."""
-
-
 class _Unbound(_Param):
     """A ``param`` not yet bound: no storage, only its shape and dtype."""
 
 
-def param(*shape, dtype=bfloat16) -> np.ndarray:
-    """Declare a weight a graph holds, as torch's ``nn.Parameter``.
+def param(*shape, dtype=bfloat16, source: Source | None = None) -> np.ndarray:
+    """Return a weight a graph holds, declared by shape for ``Graph.load_state_dict`` to bind, or ``param(array)`` holding ``array``.
 
-    Declared by shape for ``Graph.load_state_dict`` to bind, or
-    ``param(array)`` holding ``array``. A graph refuses to hold a bare array.
+    A graph refuses to hold a bare array. ``source`` says where in a file ``array``
+    was read from, keying a cache of what is derived from it.
     """
     if len(shape) == 1 and isinstance(shape[0], np.ndarray):
         a = shape[0]
-        return a if isinstance(a, _Param) else a.view(_Param)
+        held = a if isinstance(a, _Param) else a.view(_Param)
+        if source is not None:
+            held.source = source
+        return held
     return np.broadcast_to(np.zeros((), dtype), shape).view(_Unbound)
 
 
@@ -283,11 +286,16 @@ class Graph:
         return type(self).__name__
 
     @functools.cached_property
-    def _versions(self) -> dict[Signature, CompiledGraph]:
+    def _versions(self) -> dict[Version, CompiledGraph]:
         return {}
 
     @functools.cached_property
-    def _references(self) -> dict[Signature, Recording]:
+    def _references(self) -> dict[Version, Recording]:
+        return {}
+
+    @functools.cached_property
+    def _coded(self) -> dict:
+        """The coded rows derived from the weights, shared by every version."""
         return {}
 
     @functools.cached_property
@@ -301,19 +309,12 @@ class Graph:
         return State((2, len(self._parameters.carried)), np.int32, CARRY)
 
     @property
-    def versions(self) -> dict[Signature, CompiledGraph]:
+    def versions(self) -> dict[Version, CompiledGraph]:
         return dict(self._versions)
 
     @property
     def arena(self) -> ScratchArena:
         return self._arena
-
-    @staticmethod
-    def _signature(inputs: Mapping[str, tuple[tuple[int, ...], Any]]) -> Signature:
-        return tuple(
-            (name, shape, bfp.dtype_name(dtype))
-            for name, (shape, dtype) in inputs.items()
-        )
 
     def held(self) -> dict[int, tuple[str, Any]]:
         """Each ``param``, ``weight`` and state held, by ``id``, with its path.
@@ -453,7 +454,7 @@ class Graph:
             args.append(inputs[-1])
         values = [PerCall(n, kind, dtype) for n, (kind, dtype) in params.values.items()]
         with Recorder(
-            self.name, self._profile(), self.held(), params.inputs
+            self.name, self._profile(), self.held(), params.inputs, self._coded
         ) as recorder:
             result = self.body(*args, **{v.name: v for v in values})
         items, carry = self._split_carry(result)
@@ -564,18 +565,8 @@ class Graph:
             if dev is not None
             else contextlib.nullcontext()
         ):
-            recording = self.record(**shapes)
-            chosen = plan(
-                require_device(),
-                recording,
-                full_elf,
-                check,
-                step_words=_step_words(recording),
-            )
-            logger.info("%s", chosen.report(self.name))
-            signature = self._signature(
-                {h.name: (h.shape, h.dtype) for h in recording.inputs}
-            )
+            recording, chosen, fused, packing = self._planned(full_elf, check, shapes)
+            logger.info("%s", recording.report(chosen, self.name))
             emit, sized = self._emit(recording, chosen, feeds)
             version = CompiledGraph(
                 recording,
@@ -583,6 +574,8 @@ class Graph:
                 check=check,
                 arena=self._arena,
                 emit=emit,
+                fusions=fused,
+                packing=packing,
             )
             if sized is not None and len(version.parameters) != len(sized):
                 read = {p.name for p in version.parameters}
@@ -592,8 +585,55 @@ class Graph:
                     f"through a derivation cannot be fed yet (sized for but not "
                     f"read: {sorted(w.symbol for w in sized if w.symbol not in read)})"
                 )
-            self._versions[signature] = version
+            self._versions[recording.version] = version
             return version
+
+    def _planned(
+        self, full_elf: bool | None, check: bool, shapes: Mapping[str, Any]
+    ) -> tuple[Recording, Plan, tuple[Fusion, ...], Packing]:
+        """Record the version for ``shapes`` as ``compile`` builds it on the current device: weights coded, profile applied, planned."""
+        recording = self.record(**shapes)
+        recording.code_weights()
+        profile = self._profile()
+        fused: tuple[Fusion, ...] = ()
+        packing = Packing()
+        if not check and profile is not None:
+            recording, fused, packing = apply_profile(
+                recording, profile, require_device()
+            )
+        chosen = plan(
+            require_device(),
+            recording,
+            full_elf,
+            check,
+            step_words=_step_words(recording),
+            fusions=fused,
+        )
+        return recording, chosen, fused, packing
+
+    def held_bytes(
+        self, versions: Sequence[Mapping[str, Any]], dev: Device | None = None
+    ) -> int:
+        """Return bytes the versions for ``versions`` (input shapes) hold on the device once loaded, laid out as ``compile`` builds them but not built.
+
+        Their shared arena and each one's own buffers outside it (``Image.held_bytes``).
+        """
+        arena = ArenaPlan(ALIGNMENT)
+        held = 0
+        # The arena keys a resident by id(array): a freed version's ids may recur.
+        recordings = []
+        with (
+            aie_utils.set_current_device(dev)
+            if dev is not None
+            else contextlib.nullcontext()
+        ):
+            for shapes in versions:
+                recording, chosen, fused, packing = self._planned(None, False, shapes)
+                recordings.append(recording)
+                held += unbuilt_image(
+                    recording, chosen, arena=arena, fusions=fused, packing=packing
+                ).held_bytes()
+        return held + arena.size
 
     def _emit(
         self, recording: Recording, chosen: Plan, feeds: CompiledGraph | None
@@ -660,7 +700,7 @@ class Graph:
             name: (tuple(int(n) for n in t.shape), np.dtype(t.dtype).type)
             for name, t in given.items()
         }
-        signature = self._signature(shapes)
+        signature = version_key(shapes)
         version = self._versions.get(signature)
         if version is None:
             if any(v.is_loaded for v in self._versions.values()):
@@ -680,7 +720,8 @@ class Graph:
     def inline(self, method: Callable, /, *args, **kwargs) -> Any:
         """Record ``method``, one of this graph's, into the graph being recorded.
 
-        Recorded under this graph's profile; that graph names its values.
+        Recorded under a profile set on this instance, else the recording graph's, else
+        this class's; the recording graph names its values.
 
         Raises:
             TypeError: No graph's body is being recorded.
@@ -688,6 +729,8 @@ class Graph:
         recorder = graph_recorder.get()
         if recorder is None:
             raise TypeError(f"{self.name}: inline() records into a graph's body")
+        if "profile" not in vars(self) and recorder.profile is not None:
+            return method(*args, **kwargs)
         own = self._profile()
         if own is None:
             return method(*args, **kwargs)
@@ -720,7 +763,7 @@ class Graph:
             else contextlib.nullcontext()
         ):
             require_device()
-            signature = self._signature(shapes)
+            signature = version_key(shapes)
             recording = self._references.get(signature)
             if recording is None:
                 token = device_fit.set(False)
@@ -742,6 +785,51 @@ class Graph:
         return profile
 
 
+def apply_profile(
+    recording: Recording, profile: Profile, dev
+) -> tuple[Recording, tuple[Fusion, ...], Packing]:
+    """Return ``recording`` as ``profile`` compiles it on ``dev``.
+
+    Its folds applied, its fusions and their steps' tunables, and its packings.
+    """
+    folds = chosen_folds(recording, profile)
+    if folds:
+        recording = apply_folds(recording, folds)
+    fused = graph_fusions(recording, profile)
+    if fused:
+        recording = apply_fusion_tunables(recording, profile, fused, dev)
+    recording, packing = apply_packings(recording, profile, fused, dev)
+    return recording, fused, packing
+
+
+def unbuilt_image(
+    recording: Recording,
+    plan: Plan,
+    *,
+    check: bool = False,
+    arena: ArenaPlan | None = None,
+    fusions: Sequence[Fusion] = (),
+    packing: Packing = Packing(),
+) -> Image:
+    """Return ``recording``'s image under ``plan`` as ``CompiledGraph`` builds it, laid out (``Image.prepare``) and not built.
+
+    Its residents placed in ``arena`` where given, as a graph's versions share one.
+    """
+    _, shared = _words(recording, share=plan.full_elf, extents=not plan.full_elf)
+    if not plan.full_elf:
+        merged = merges(recording, fusions, packing, require_device())
+        fusions = sorted((*fusions, *merged), key=lambda f: f.steps[0])
+    packaging = (
+        FullELF(commands=plan.commands, shared_words=shared, packing=packing)
+        if plan.full_elf
+        else PerStep(check)
+    )
+    placement: dict[str, Any] = (
+        {} if arena is None else dict(arena=arena, residents=recording.residents)
+    )
+    return Image(recording, packaging, fusions=fusions, **placement).prepare()
+
+
 class CompiledGraph:
     """A recorded graph built into an image, ready to call.
 
@@ -756,6 +844,8 @@ class CompiledGraph:
         check: bool = False,
         arena: ScratchArena | None = None,
         emit: EmitSite | None = None,
+        fusions: Sequence[Fusion] = (),
+        packing: Packing = Packing(),
     ):
         self.recording = recording
         self.plan = plan
@@ -764,17 +854,14 @@ class CompiledGraph:
         self.words, self.shared = _words(
             recording, share=plan.full_elf, extents=not plan.full_elf
         )
-        packaging = (
-            FullELF(commands=plan.commands, shared_words=self.shared)
-            if plan.full_elf
-            else PerStep(check)
-        )
-        placement: dict[str, Any] = (
-            {}
-            if arena is None
-            else dict(arena=arena.plan, residents=recording.residents)
-        )
-        self.sequence = Image(recording, packaging, **placement).compile()
+        self.sequence = unbuilt_image(
+            recording,
+            plan,
+            check=check,
+            arena=None if arena is None else arena.plan,
+            fusions=fusions,
+            packing=packing,
+        ).compile()
         self.image = self.sequence.image
         self.artifacts = self.sequence.artifacts
         if plan.full_elf:
@@ -816,7 +903,7 @@ class CompiledGraph:
             f"{h.name}={h.shape} {bfp.dtype_name(h.dtype)}"
             for h in self.recording.inputs
         )
-        report = self.plan.report(f"{self.recording.name}({inputs})")
+        report = self.recording.report(self.plan, f"{self.recording.name}({inputs})")
         if self.artifacts.directory is None:
             return report
         return f"{report}\n  built in {self.artifacts.directory}"
@@ -871,6 +958,8 @@ class CompiledGraph:
         """Copy every closed-over weight into its buffer, once per storage."""
         for key, (tensor, handle) in self.recording.weights.items():
             if key not in self._loaded:
+                if isinstance(tensor, CodedWeight):
+                    tensor = tensor.encode()
                 self._copy_in(handle.name, tensor, release, piece_bytes)
                 self._loaded.add(key)
 
@@ -879,9 +968,12 @@ class CompiledGraph:
         release: Callable[[np.ndarray], None] | None = None,
         piece_bytes: int = UPLOAD_PIECE,
     ) -> CompiledGraph:
-        """Load the image and upload its weights now rather than on first call."""
-        self.callable
+        """Load the image, upload its weights and open its hw_context now rather than on first call."""
+        call = self.callable
         self.upload(release, piece_bytes)
+        if isinstance(call, FullELFCallable):
+            # The first hw_context after the NPU autosuspends pays its resume (~130 ms).
+            call.handle
         return self
 
     def __call__(self, *tensors, **values) -> Any:
@@ -919,11 +1011,8 @@ class CompiledGraph:
         for s in steps:
             reads = []
             for h in s.reads:
-                key = [slice(None)] * len(h.shape)
-                for axis, count in h.valid.items():
-                    key[axis] = slice(count.evaluate(values))
                 whole = self._storage(h).numpy()[: h.elements].reshape(h.shape)
-                reads.append(whole[tuple(key)])
+                reads.append(whole[h.valid_index(values)])
             with contextlib.ExitStack() as borrowed:
                 writes = [
                     borrowed.enter_context(self._storage(h).overwrite())[

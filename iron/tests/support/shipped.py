@@ -113,6 +113,7 @@ class Shipped(
     )
     emulate_bf16_mmul_with_bfp16: bool = tunable(default=True, repr=False, init=False)
     bfp16_b: bool = param(default=False, array=True, repr=False, init=False)
+    b_dtype: object = param(default=bfloat16, repr=False, init=False)
     l1_b_depth: int = tunable(default=QUEUE_DEPTH, repr=False, init=False)
     a_l2: int = tunable(default=M_TILE * K_TILE, repr=False, init=False)
     b_l2: int = tunable(default=K_TILE * N_TILE, repr=False, init=False)
@@ -128,11 +129,11 @@ class Shipped(
     )
     B = In(
         Select(
-            ProjectionGEMM.bfp16_b,
+            bfp16_b,
             (ProjectionGEMM.packed_blocks,),
             (ProjectionGEMM.K, ProjectionGEMM.N),
         ),
-        dtype=ProjectionGEMM.b_dtype,
+        dtype=b_dtype,
         obj_shape=(K_TILE, N_TILE),
         per=(ProjectionGEMM.cols,),
         depth=QUEUE_DEPTH,
@@ -149,7 +150,7 @@ class Shipped(
     # eight words behind a lock, written once per shape.
     n_val = m_row_blocks = k_iters = mode = clamp_min = clamp_max = None
     n_units = units_valid = units_repeat = a_half = c_half = valid = None
-    b_passes_repeat = b_resident = None
+    b_passes_repeat = b_peek_repeat = b_drained = None
     parameters = Block(PARAMETER_WORDS, derive=_parameter_words)
 
     def build(self) -> Built:

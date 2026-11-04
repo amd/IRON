@@ -18,7 +18,7 @@ specific to it and where to get its weights. The tests find a checkpoint at
 | Llama 3.2 1B, 3B | [llama](https://github.com/amd/IRON/blob/devel/iron/applications/llama/README.md) | `llama3.2-1b`, `llama3.2-3b` | Yes, a dispatch per step | Yes |
 | Granite 4.2 3B | [granite](https://github.com/amd/IRON/blob/devel/iron/applications/granite/README.md) | `granite-4.2-3b` | Yes, a dispatch per step | Yes |
 | Granite 4.0-H 1B | [granite_hybrid](https://github.com/amd/IRON/blob/devel/iron/applications/granite_hybrid/README.md) | `granite-4.0-h-1b` | Yes, a dispatch per step | Yes |
-| Gemma 4 E2B: text decoder, vision and audio towers | [gemma4](https://github.com/amd/IRON/blob/devel/iron/applications/gemma4/README.md) | `gemma-4-e2b-it` | Text decoder, a dispatch per step; towers untested | Yes |
+| Gemma 4 E2B: text decoder, vision and audio towers | [gemma4](https://github.com/amd/IRON/blob/devel/iron/applications/gemma4/README.md) | `gemma-4-e2b-it` | Yes, a dispatch per step | Yes |
 | EmbeddingGemma 2 | [embedding_gemma2](https://github.com/amd/IRON/blob/devel/iron/applications/embedding_gemma2/README.md) | `embeddinggemma-2` | Yes, a dispatch per step; the widest images are refused | Yes |
 | Gemma 4 E2B in FastFlowLM | [gemma4_engine](https://github.com/amd/IRON/tree/devel/iron/operators/flm/gemma4_engine) | `$FLM_MODEL_PATH` (the tests default to `fastflowlm`) | No | Yes |
 

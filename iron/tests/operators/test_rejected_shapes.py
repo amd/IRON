@@ -23,7 +23,10 @@ from iron import Scratchpad
 from iron.common import Precision, Unresolvable
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy, Gather
+from iron.operators.decode import Decode
 from iron.operators.depthwise_conv1d import DepthwiseConv1d
+from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.emit import Emit
 from iron.operators.flm.dequant.op import DequantBFP
 from iron.operators.flm.gemm.op import ProjectionGEMM
@@ -34,6 +37,7 @@ from iron.operators.flm.prefill_attn.op import (
     PrefillSlidingAttention,
 )
 from iron.operators.gemm import GEMM
+from iron.operators.gemv import GEMV
 from iron.operators.limbs import Limbs
 from iron.operators.magnitude import Magnitude
 from iron.operators.merge import Merge
@@ -187,6 +191,32 @@ def test_a_tile_past_what_one_core_holds_is_refused_not_split(npu2):
     assert RMSNorm(rows=2, tile_size=8192).resolved(npu2).tile_size == 8192
 
 
+def test_a_decode_whose_tiles_overflow_a_core_is_refused(npu2):
+    """Four 8192-wide rows are 64 KiB of output alone; resolution takes rows that fit."""
+    with pytest.raises(ValueError, match="bytes of a core's 65536"):
+        Decode(M=64, K=8192, rows=4, num_aie_columns=8).resolved(npu2)
+    op = Decode(M=64, K=8192).resolved(npu2)
+    assert op.held(npu2, op.rows) <= npu2.core_memory_bytes
+    assert op.rows == 1
+
+
+def test_a_streamed_softmax_past_aie2s_program_memory_is_refused(npu1):
+    """48 streamed rows a core fit AIE2P's program memory and overflow AIE2's."""
+    with pytest.raises(ValueError, match="at most 40 rows on aie2, not 48"):
+        Softmax(
+            rows=192,
+            cols=8192,
+            num_aie_columns=4,
+            block=1024,
+            streamed=True,
+        ).resolved(npu1)
+    assert (
+        Softmax(rows=160, cols=8192, num_aie_columns=4, block=1024, streamed=True)
+        .resolved(npu1)
+        .streamed
+    )
+
+
 def test_softmax_with_no_column_count_that_tiles_is_refused(npu2):
     """A tunable-free operator resolves to the widest column count dividing its shape.
 
@@ -321,6 +351,35 @@ def test_mha_of_one_query_that_does_not_pack_is_refused(kwargs, why, npu2):
     """
     with pytest.raises(ValueError, match=why):
         MHA(seq_len=1, kv_len=512, **kwargs).resolved(npu2)
+
+
+@pytest.mark.parametrize(
+    "kwargs,why",
+    [
+        (
+            dict(
+                num_heads=8,
+                d=128,
+                seq_len=256,
+                window=11,
+                scale=1.0,
+                num_pipelines=4,
+                soft_cap=50.0,
+            ),
+            "no soft cap or relative band",
+        ),
+    ],
+    ids=["soft_cap"],
+)
+def test_mha_one_core_a_block_past_aie2p_is_refused(kwargs, why, npu2):
+    """AIE2P's fused block caps no score and adds no band."""
+    with pytest.raises(Unresolvable, match=why):
+        MHA(
+            **{"num_pipelines": 8, **kwargs},
+            heads_interleaved=True,
+            kv_paired=True,
+            cores_per_block=1,
+        ).resolved(npu2)
 
 
 def test_sample_with_more_cores_than_a_memtile_joins_is_refused(npu2):
@@ -630,6 +689,34 @@ def test_flm_decode_layer_rejects_unknown_configurations(kwargs, match):
 
 
 @pytest.mark.parametrize(
+    "make",
+    [
+        lambda: GEMV(M=256, K=256, coded_a=True, a_capacity=7),
+        lambda: Decode(M=64, K=64, capacity=7),
+    ],
+    ids=["gemv", "decode"],
+)
+def test_coded_rows_take_no_capacity_but_the_kernels(make):
+    with pytest.raises(TypeError, match="takes no argument"):
+        make()
+
+
+def test_a_gemv_folds_one_binary_finish_step(npu2):
+    """A second two-input consumer is refused, not built past ``validate``."""
+    gemv = GEMV(
+        M=2048,
+        K=2048,
+        tile_size_input=4,
+        tile_size_output=512,
+        num_aie_columns=4,
+        num_channels=1,
+    )
+    added = gemv.fold(ElementwiseAdd(size=2048, tile_size=512), 1)
+    assert added is not None and not added.rides
+    assert added.fold(ElementwiseMul(size=2048, tile_size=512), 0) is None
+
+
+@pytest.mark.parametrize(
     "make, match",
     [
         (lambda: DepthwiseConv1d(rows=64, channels=48), "32-lane vectors"),
@@ -678,3 +765,16 @@ def test_flm_decode_layer_rejects_unknown_configurations(kwargs, match):
 def test_a_validate_or_compatible_branch_refuses(make, match, npu2):
     with pytest.raises(ValueError, match=match):
         make().resolved(npu2)
+
+
+@pytest.mark.parametrize(
+    "shape, match",
+    [
+        (dict(M=256, K=96), "multiple of 64"),
+        (dict(M=256, K=128, num_batches=8, repeat=4), "re-reads an activation A"),
+    ],
+)
+def test_a_coded_gemv_refuses_what_its_rows_cannot_carry(shape, match):
+    """Coded rows are whole 64-weight units, of a weight A read once."""
+    with pytest.raises(ValueError, match=match):
+        GEMV(**shape, coded_a=True).resolved()

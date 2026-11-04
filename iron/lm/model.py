@@ -8,6 +8,7 @@ Built from a checkpoint's files (``load``), which generates from a prompt;
 to its ids.
 """
 
+import argparse
 import dataclasses
 import datetime
 import functools
@@ -17,7 +18,7 @@ import logging
 import math
 import os
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
@@ -25,7 +26,10 @@ import numpy as np
 from aie.iron.device import Device
 
 import iron
+from iron.common.declare import Profile
 from iron.common.image.packaging import require_device
+from iron.tune.autotune import Timed
+from iron.tune.plan import Coding
 
 from .checkpoint import Checkpoint, weights_file
 from .config import Config, DecoderConfig
@@ -324,10 +328,12 @@ class Model(iron.Graph):
         *,
         random_weights: int | None = None,
         max_seq_len: int | None = None,
+        config: Mapping[str, Any] | None = None,
+        budget: int | None = None,
     ) -> Self:
         """Return the model of a Hugging Face repository's files, not yet loaded.
 
-        Its context is ``max_seq_len`` or else fitted to this host (``fit``).
+        Its context is ``max_seq_len`` or else fitted to ``budget`` (``fit``).
 
         Args:
             path: A directory holding ``config.json``, weights and
@@ -336,6 +342,11 @@ class Model(iron.Graph):
                 the checkpoint's shapes instead of read.
             max_seq_len: The longest context served, at most the
                 checkpoint's own.
+            config: Fields of the checkpoint's config given other values
+                (``config_argument``'s).
+            budget: The bytes its arena may hold without ``max_seq_len``
+                (default ``host_budget()``); half of it where two models
+                are held at once.
 
         Raises:
             ValueError: ``max_seq_len`` is past the checkpoint's own.
@@ -351,24 +362,26 @@ class Model(iron.Graph):
             ]
             directory = Path(snapshot_download(str(path), allow_patterns=files))
         weights = weights_file(directory)
-        config = cls.default_config(weights)
+        shape = dataclasses.replace(cls.default_config(weights), **(config or {}))
         if max_seq_len is None:
-            config = cls.fit(config, weights)
+            shape = cls.fit(shape, weights, budget)
         else:
-            assert isinstance(config, DecoderConfig), "a context is a decoder's"
-            if max_seq_len > config.max_seq_len:
+            assert isinstance(shape, DecoderConfig), "a context is a decoder's"
+            if max_seq_len > shape.max_seq_len:
                 raise ValueError(
                     f"max_seq_len {max_seq_len} is past the model's "
-                    f"{config.max_seq_len}"
+                    f"{shape.max_seq_len}"
                 )
-            config = dataclasses.replace(config, max_seq_len=max_seq_len)
+            shape = dataclasses.replace(shape, max_seq_len=max_seq_len)
         checkpoint = Checkpoint(weights)
+        # A shallower config than the checkpoint's reads its first layers.
+        layers = (config or {}).get("num_hidden_layers")
         tree = (
-            checkpoint.tree()
+            checkpoint.tree(layers=layers)
             if random_weights is None
-            else checkpoint.tree("random", random_weights)
+            else checkpoint.tree("random", random_weights, layers=layers)
         )
-        model = cls(config, tree)
+        model = cls(shape, tree)
         model.checkpoint, model.random_weights = checkpoint, random_weights
         if random_weights is None:
             settings = directory / "tokenizer_config.json"
@@ -417,41 +430,78 @@ class Model(iron.Graph):
         return cls.config
 
     @classmethod
-    def fit(cls, config: Config, weights_path, budget: int | None = None) -> Config:
-        """``config`` at its native context where the model's arena fits ``budget``.
+    def fit(
+        cls,
+        config: Config,
+        weights_path,
+        budget: int | None = None,
+        builds: int = 1,
+        coded: bool = False,
+    ) -> Config:
+        """Return ``config`` at its native context, or the longest whole number of prompt chunks whose model and ``builds`` builds fit ``budget``.
 
-        ``host_budget()`` by default, else at the longest whole number of
-        prompt chunks that does, logged either way.
+        ``budget`` is ``host_budget()`` by default. The model holds its weights on the
+        host once, plain and coded; each build
+        holds a version laid out on the device, as ``compile`` builds it. With
+        ``coded``, as a tune holds it: every codeable weight held plain and coded on
+        the host, and each build the larger of its plain and coded layouts.
         """
         if not isinstance(config, DecoderConfig):
             return config
         native, C = config.max_seq_len, config.prefill_chunk
         if native < 2 * C:
             return config
-        tree = Checkpoint(weights_path).tree("unread")
-        held = []
-        for length in (C, 2 * C):
-            model = cls(dataclasses.replace(config, max_seq_len=length), tree)
-            # What it holds does not follow its tunables, nor need a device.
-            model.profile = None
-            held.append(sum(model.record(**model.shapes()[0]).pinned.values()))
-        per_position = (held[1] - held[0]) / C
-        fixed = held[0] - per_position * C
+        tree = Checkpoint(weights_path).tree("unread", layers=config.num_hidden_layers)
+        dev = require_device()
         budget = host_budget() if budget is None else budget
-        need = fixed + per_position * native
-        if need <= budget:
+
+        def need(length: int) -> int:
+            model = cls(dataclasses.replace(config, max_seq_len=length), tree)
+            profiles = [model.profile]
+            if coded:
+                stock = model._profile() or Profile()
+
+                def record(profile: Profile) -> list[Timed]:
+                    model.profile = profile
+                    return [Timed(model.record(**s)) for s in model.shapes()]
+
+                coding = Coding(record(stock), dev, stock)
+                profiles.append(
+                    coding.profile(coding.recordable(record, dev, log=logger.info))
+                )
+            per_build = host = 0
+            for profile in profiles:
+                model.profile = profile
+                # Some weights follow the context (a rotary table's rows); a coded
+                # one is held plain and coded both until a build codes it.
+                weights = model.record(**model.shapes()[0]).weights.values()
+                host = max(host, sum(h.nbytes for _, h in weights))
+                per_build = max(per_build, model.held_bytes(model.shapes(), dev))
+            return host + builds * per_build
+
+        at_native = need(native)
+        if at_native <= budget:
             logger.info(
                 "max_seq_len %d, the model's native context: %.1f GiB of a %.1f GiB "
                 "budget",
                 native,
-                need / 2**30,
+                at_native / 2**30,
                 budget / 2**30,
             )
             return config
-        fits = int((budget - fixed) // per_position) // C * C
+        # Laid-out pools grow nearly, not exactly, linearly: the estimate only
+        # starts the search, each length taken is measured.
+        one, two = need(C), need(2 * C)
+        per_position = max(two - one, 1) / C
+        fits = int((budget - (one - per_position * C)) // per_position) // C * C
+        fits = min(max(fits, C), native - C)
+        while fits >= C and need(fits) > budget:
+            fits -= C
+        while C <= fits and fits + C < native and need(fits + C) <= budget:
+            fits += C
         if fits < C:
             raise ValueError(
-                f"{fixed / 2**30:.1f} GiB of weights and one {C}-position chunk "
+                f"{one / 2**30:.1f} GiB of weights and one {C}-position chunk "
                 f"do not fit a {budget / 2**30:.1f} GiB budget"
             )
         logger.warning(
@@ -460,7 +510,7 @@ class Model(iron.Graph):
             "GiB); --max-seq-len asks for up to %d",
             fits,
             native,
-            need / 2**30,
+            at_native / 2**30,
             budget / 2**30,
             HOST_RESERVE / 2**30,
             native,
@@ -595,6 +645,21 @@ class Model(iron.Graph):
         later = count - 1
         rate = later / (last - first) if later else math.nan
         self.stats = Stats(first - began, rate, count)
+
+    @classmethod
+    def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
+        """Add the flags the model's ``tune_calls`` follow from (``iron.lm.tune``)."""
+        raise NotImplementedError(f"{cls.__name__} is not tuned")
+
+    @classmethod
+    def tune_calls(
+        cls,
+        parser: argparse.ArgumentParser,
+        args: argparse.Namespace,
+        profile: Profile | None = None,
+    ) -> list[Timed]:
+        """Return the calls its designs are timed in (``iron.lm.tune``), recorded under ``profile``, else its own."""
+        raise NotImplementedError(f"{cls.__name__} is not tuned")
 
     def shapes(self) -> list[dict]:
         """Return the input shapes of each version, the decode step (no input) first.

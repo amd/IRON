@@ -97,7 +97,14 @@ pydocstyle rules, `D205` and `D401` included.
 - `iron/tune/`: autotuning, at the edge: nothing in the core imports it.
   `python -m iron.tune.cli GEMV M=2048 K=8192` times one operator;
   `python -m iron.lm.tune <application>` rewrites a model's
-  `profiles/<device>.json`.
+  `profiles/<device>.json` and writes `<device>.report.txt` beside it:
+  what it added and dropped, each version's end-to-end gain, and per phase
+  (seed, survey, each autotune round, packing, fusions, verify, validate)
+  its seconds waiting on builds, timing and checking, and each version's
+  gain on the phase before. `--budget SECONDS` bounds it: past each search's
+  first round the search stops once the time left is under the share kept
+  to finish, and what it found is still checked, verified, validated and
+  saved (the report says what the budget stopped).
 - `iron/lm/`: what every language model shares (see "Language models").
 - `iron/applications/<name>/`: one model each; `tests/applications/<name>/`
   its tests.
@@ -228,6 +235,71 @@ values, weights, state and profiles are named. The rules:
   reference and raises at the first step outside its tolerance.
 - `graph.reference(...)` runs the body through each operator's
   `reference()` on the host.
+- A profile's `"fusions"` entries name steps to run fused: a kind, its
+  steps' classes and dims, the edges between them, and the tunables a step
+  takes only inside it. `iron.common.graph.fusion.candidates` lists what a
+  recording admits. `Graph.compile` (not with `check=True`) applies the
+  folds a profile names, then builds each other fusion as one device
+  configuration: in a full ELF, one call; per step, one xclbin dispatched
+  once. The kinds:
+  - `stream`: an edge feeds a consumer's input from a producer's output
+    on-chip, their lanes meeting directly (`Operand.feed`); one output may
+    feed several consumers.
+  - `staged`: as `stream`, an edge whose lanes differ in count, tile or
+    order joined or split through memtiles (`Staging`).
+  - `pack`: independent steps issued concurrently.
+  - `fold`: a consumer's kernel run in its producer's cores
+    (`Operator.fold`).
+- A profile's `"packings"` entries name shapes whose designs share one
+  device configuration wherever a version runs them, so its steps run
+  without reconfiguring between them: in a full ELF one configuration, and
+  per step its steps in a row one xclbin dispatched once (a merge,
+  `iron.common.graph.packing.merges`); a member gives the
+  tunables every step of its shape takes there (narrower, so they
+  co-reside). An entry's `"versions"` (each a version's inputs by name,
+  `Recording.version`) limit it to those versions: a decode step and a
+  prompt chunk run the same arrays at other extents, so a grouping that
+  pays in one can cost in the other. A switch between configurations costs
+  about 40 us plus 7 us per column on npu2, and a dispatch per step about
+  120 us, the costs a packing removes (`iron.common.graph.packing`). `python -m iron.lm.tune <application>
+  --packings-only` groups a graph's arrays and narrows their widths
+  (`iron.tune.packings`), keeping a grouping only where its version is
+  bit-identical and faster end to end, and applying it in another version
+  only where that version is faster with it too. Its estimate of what a grouping
+  costs beyond its steps' own times is a per-device model
+  every end-to-end check refits, seeded from `iron/tune/costs/<device>.json`
+  and written back to `$NPU_CACHE_HOME/iron/costs/<device>.json`, so one
+  device's tunes start from the last. With
+  `--record-failures` a tune keeps each compiler crash, build failure,
+  hang or mismatch it hits in this machine's ledger with a repro;
+  `python -m iron.tune.failures --recheck` tries them again with the
+  current toolchain.
+  The search runs on the folds the tuner proposes first (a fold only where
+  every step on the producer's array takes it, so no shared array splits),
+  scoped to the versions they were found in; a version whose folds do not
+  gain keeps no folds and takes the packings searched without them. A
+  search leaves another graph's packings (an entry naming a shape these
+  graphs never run) as they are, so one profile holds several models'.
+- `python -m iron.lm.tune <application> --fusions-only` prices a graph's
+  candidates against its profile and writes the ones that gain.
+- Coded weights: a GEMV with `"coded_a": true` in its profile entry reads
+  its weight as mlir-aie's lossless coded rows (`aie.utils.coded`, about
+  0.76x the bytes, bit-identical output), so a decode step bound by weight
+  reads runs faster; a GEMM-bound prompt chunk or encoder does not gain.
+  The recorder binds the coded rows as a weight of their own, encoded at
+  compile and cached under `NPU_CACHE_HOME`; a weight with a row past
+  capacity (15 exceptions) is read plain, with a warning naming the row.
+  For a model's decoder:
+  1. Check its checkpoint fits: `aie.utils.coded.encode_rows` on each
+     decode GEMV weight raises, naming the row, where one does not
+     (every shipped decoder fits: Llama 3.2 1B and 3B, Granite 4.2 3B,
+     Granite 4.0-H 1B and Gemma 4 E2B).
+  2. Set `coded_a` on every GEMV shape whose steps share an array, or on
+     none of them: `coded_a` is part of the array, so coding some steps of
+     a shared array splits it, and a packing that fit runs out of cores.
+  3. Run one `--packings-only` tune from that profile, then one
+     `python -m iron.lm.validate` against the model's stock profile.
+  aie2p and aie2 both build the kernel; npu2 is the one measured.
 
 `iron/applications/llama/model.py` is the worked example;
 `iron/tests/common/test_graph.py` records it device-free and
@@ -249,8 +321,10 @@ Check the code before relying on a line here; it is the authority.
   over a cache costs the context, not the cache.
 - **One compile, any context.** A decoder is two versions, a decode step
   and a prompt chunk; `max_seq_len` sizes only the caches and the RoPE
-  table. Caches are `(max_seq_len, num_key_value_heads, head_dim)` so a
-  call's write is contiguous and no descriptor strides by the context.
+  table. Caches are `(max_seq_len, num_key_value_heads, 2, head_dim)`, a
+  position's keys and values side by side, so a call writes a run of
+  positions, a KV head's block of keys and values is one DMA pattern, and
+  no descriptor strides by the context.
   `tests/applications/long_context/`'s
   `test_nothing_grows_with_the_context` holds every decoder to this.
 - **DMA descriptors.** A pattern past one buffer descriptor's limits is
@@ -266,15 +340,22 @@ Check the code before relying on a line here; it is the authority.
 
 ### Not built, or limited
 
-- An xclbin image is one dispatch per step; several steps in one xclbin
-  dispatch are refused.
+- An xclbin image is one dispatch per step, or per fusion; `check=True`,
+  which checks each step on its own dispatch, refuses fusions.
 - A full ELF call is one command however long it runs: a prompt chunk's
   attention grows with the context, and a tower's with its image. The
   driver's command timeout must cover the longest, as the
   [installation](docs/installation.md) sets it.
-- Tuning times each operator alone, not inside the image it runs in.
-  Kernel cycle counts skip only GEMM settings, only on npu2, and never with
-  a column-major B.
+- Tuning times each operator's settings alone. A fusion is priced against
+  its steps apart, at the widths its members co-reside at, and kept only
+  where its whole version still gains and stays bit-identical. Kernel cycle
+  counts skip only GEMM settings, only on npu2, and never with a
+  column-major B.
+- Fusion: a staged edge under a per-call bound needs both sides to move
+  the same whole rounds every call; a staged lane must visit each element
+  once, so `flm.ProjectionGEMM`'s A, re-read once per column block, is not
+  fed on-chip; fused members never share an array, so steps of one design
+  packed each take their own cores.
 
 ## Tests
 
@@ -307,8 +388,9 @@ Each hardware workflow runs one job per runner, Phoenix (NPU1) and Krackan
   `main` and `devel`.
 - `examples.yml`: `tests/applications/`, non-extensive, on every PR: each
   model loaded once for its shortest call (a 13-token prompt, one token
-  drawn; an embedding model's or a toy's own checks) and the device-free
-  reference tests.
+  drawn; an embedding model's or a toy's own checks), a decoder's 20 benched
+  decode steps checked against its golden, and the device-free reference
+  tests.
 - `nightly.yml`: every `tests/applications/`
   test, extensive ones too, each night: the depth a model's checks have
   (accuracy, determinism, sampling, chat turns, long generations, the
@@ -385,6 +467,11 @@ tunables and profiles already do that job.
 - `cli.py`: `main`, the command line every model shares (`--help` lists
   its options, `-v` logs iron's INFO lines), and `exports`, a model
   package's lazy `__getattr__`.
+- `validate.py`: `python -m iron.lm.validate <application> --checkpoint DIR
+  --candidate PROFILE_DIR`, a candidate profile against the model's own on
+  real weights: live fusions and packings, bit identity over a prompt
+  ending in a partial chunk, KL against golden, TTFT and decode tok/s
+  interleaved, and with `--bisect` the entries a mismatch comes from.
 - `generation.py`, `testing.py`: sampling and the device tests' checks;
   they need only `logits(tokens)`. `tune.py`: `python -m iron.lm.tune`.
 

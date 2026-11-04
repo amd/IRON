@@ -21,6 +21,7 @@ from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
 import iron
+from iron.common.graph.fusion import fusions
 
 GUIDE = Path(__file__).resolve().parents[3] / "programming_guide"
 
@@ -264,3 +265,78 @@ def test_section8_toy_decoder_matches_numpy():
 def test_section8_toy_decoder_on_device():
     mod = _example("section-8", "toy_decoder")
     mod.main([])
+
+
+def _section9_graph(mod, profile):
+    rng = np.random.default_rng(0)
+    scale = 1 / np.sqrt(mod.HIDDEN)
+    shape = (mod.INTERMEDIATE, mod.HIDDEN)
+    w_gate = (rng.standard_normal(shape) * scale).astype(bfloat16)
+    w_up = (rng.standard_normal(shape) * scale).astype(bfloat16)
+    graph = mod.SwiGLU(w_gate, w_up)
+    graph.profile = profile
+    return graph, w_gate, w_up
+
+
+def test_section9_profile_names_the_mlp_fusion():
+    mod = _example("section-9", "swiglu_fusion")
+    fused, _, _ = _section9_graph(mod, mod.fused_profile())
+    recording = fused.record(x=(mod.HIDDEN,))
+    (fusion,) = fusions(recording, fused.profile)
+    assert fusion.kind is iron.FusionKind.STREAM
+    assert fusion.steps == (0, 1, 2, 3)
+    wiring = [(e.producer, e.output, e.consumer, e.input) for e in fusion.edges]
+    assert wiring == mod.MLP_EDGES
+
+    apart, _, _ = _section9_graph(mod, mod.tuned_profile())
+    assert fusions(apart.record(x=(mod.HIDDEN,)), apart.profile) == ()
+
+
+def test_section9_reference_matches_numpy():
+    mod = _example("section-9", "swiglu_fusion")
+    graph, w_gate, w_up = _section9_graph(mod, mod.fused_profile())
+    x = np.random.default_rng(1).standard_normal(mod.HIDDEN).astype(bfloat16)
+    reference = graph.reference(x)
+    f32 = np.float32
+    gate = (w_gate.astype(f32) @ x.astype(f32)).astype(bfloat16).astype(f32)
+    up = (w_up.astype(f32) @ x.astype(f32)).astype(bfloat16).astype(f32)
+    silu = (gate / (1 + np.exp(-gate))).astype(bfloat16).astype(f32)
+    expected = (silu * up).astype(bfloat16)
+    gemv = graph.record(x=(mod.HIDDEN,)).steps[0].op
+    verdict = compare(reference, expected, gemv.resolved().tolerance())
+    assert verdict, verdict.detail
+
+
+@pytest.mark.supported_devices("npu2")
+def test_section9_swiglu_fusion_on_device():
+    mod = _example("section-9", "swiglu_fusion")
+    mod.main(["--rounds", "2", "--calls", "5"])
+
+
+def test_section10_reference_matches_numpy():
+    mod = _example("section-10", "tune_graph")
+    w_gate, w_up = mod.weights()
+    graph = mod.MiniMLP(w_gate, w_up)
+    x = np.random.default_rng(1).standard_normal(mod.HIDDEN).astype(bfloat16)
+    reference = graph.reference(x)
+    f32 = np.float32
+    gate = (w_gate.astype(f32) @ x.astype(f32)).astype(bfloat16).astype(f32)
+    up = (w_up.astype(f32) @ x.astype(f32)).astype(bfloat16).astype(f32)
+    silu = (gate / (1 + np.exp(-gate))).astype(bfloat16).astype(f32)
+    expected = (silu * up).astype(bfloat16)
+    gemv = graph.record(x=(mod.HIDDEN,)).steps[0].op
+    verdict = compare(reference, expected, gemv.resolved().tolerance())
+    assert verdict, verdict.detail
+
+
+def test_section10_record_without_a_profile_lists_the_four_steps():
+    mod = _example("section-10", "tune_graph")
+    (call,) = mod.record(iron.Profile())
+    names = [type(s.op).__name__ for s in call.recording.steps]
+    assert names == ["GEMV", "GEMV", "SiLU", "ElementwiseMul"]
+
+
+@pytest.mark.supported_devices("npu2")
+def test_section10_tune_graph_on_device():
+    mod = _example("section-10", "tune_graph")
+    mod.main(["--rounds", "2", "--calls", "10", "--budget", "90", "--hold", "GEMV"])

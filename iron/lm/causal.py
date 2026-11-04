@@ -12,7 +12,7 @@ are a prompt chunk from ``start``, of which a call runs the first
 import dataclasses
 import logging
 from collections.abc import Iterator
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 
 import numpy as np
 from aie.iron.kernels.sample import ROW_WORDS
@@ -20,7 +20,7 @@ from ml_dtypes import bfloat16
 
 import iron
 import iron.functional as F
-from iron import Carried, Scratchpad
+from iron import Carried, Profile, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.compiled import walk
 from iron.common.graph.handle import State
@@ -31,7 +31,7 @@ from .blocks import DecoderLayer, Embedding, KVCache, Linear, RMSNorm, Rope
 from .checkpoint import Checkpoint, renamed, weights_file
 from .config import DecoderConfig
 from .generation import Sampler
-from .model import Model
+from .model import Model, host_budget
 from .session import Session
 
 logger = logging.getLogger(__name__)
@@ -367,24 +367,69 @@ class CausalLM(Model):
 
         arguments(parser)
 
+    def sibling(self, weights) -> Self:
+        """Return this model at another context of whole chunks whose graph holds the same states: half, else double.
+
+        A sliding window's cache rings only past three rings' rows, so halving can
+        drop its ring, which doubling keeps.
+
+        Args:
+            weights: The tree this model's constructor took (a subclass may keep
+                only part of it).
+
+        Raises:
+            ValueError: Neither context keeps this graph's states.
+        """
+        L, C = self.config.max_seq_len, self.config.prefill_chunk
+        mine = [path for path, *_ in walk(self)]
+        for other in (L // 2, 2 * L):
+            if other < C or other % C:
+                continue
+            twin = type(self)(
+                dataclasses.replace(self.config, max_seq_len=other), weights
+            )
+            if [path for path, *_ in walk(twin)] == mine:
+                return twin
+        raise ValueError(
+            f"{type(self).__name__}: no context but {L} keeps its graph's states"
+        )
+
     @classmethod
-    def tune_calls(cls, parser, args) -> list:
-        """``tune.calls`` on ``args``, built on weights it never reads."""
+    def tune_calls(cls, parser, args, profile: Profile | None = None) -> list:
+        """``tune.calls`` on ``args``, built on the checkpoint's weights (read lazily).
+
+        What a coded weight's capacity and a build's timing follow; recorded under
+        ``profile``, else the model's own.
+        """
         from .tune import calls  # which imports this module
 
         weights = weights_file(args.checkpoint)
-        config = cls.default_config(weights)
+        config = dataclasses.replace(cls.default_config(weights), **dict(args.config))
+        # A tune's checks hold a call built under two profiles, and validate two models.
+        config = cls.fit(config, weights, host_budget(), builds=2, coded=True)
         assert isinstance(config, DecoderConfig), "a decoder's"
-        model = cls(config, Checkpoint(weights).tree("unread"))
+        layers = config.num_hidden_layers
+        model = cls(config, Checkpoint(weights).tree(layers=layers))
         L, C = config.max_seq_len, config.prefill_chunk
-        if not C <= args.context <= L or args.context % C:
+        context = L if args.context is None else args.context
+        if not C <= context <= L or context % C:
             parser.error(
-                f"--context {args.context} is not whole {C}-token chunks within "
+                f"--context {context} is not whole {C}-token chunks within "
                 f"max_seq_len {L}"
             )
         sampler = Sampler(args.temperature, args.top_k)
+        sibling = model.sibling(Checkpoint(weights).tree(layers=layers))
+        if profile is not None:
+            model.profile = sibling.profile = profile
         return calls(
-            model, args.position, args.token, args.context, args.points, sampler
+            model,
+            args.position,
+            args.token,
+            context,
+            args.points,
+            sampler,
+            sibling,
+            args.versions,
         )
 
     def shapes(self) -> list[dict]:

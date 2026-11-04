@@ -9,13 +9,16 @@ import numpy as np
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import np_dtype_to_mlir_type
-from aie.iron import Buffer, In, ObjectFifo, Out, TaskGroup, Worker, ceildiv
+from aie.iron import Buffer, In, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, zero
 from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
+from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance
 
 from iron.common import Built, Operator, Rtp
+from iron.common.declare import Operand
+from iron.common.declare.operator import LaneTransfers
 from iron.common.testing import Case, Testing
 
 # softmax_bf16's vector step: its loops cover only whole steps.
@@ -26,8 +29,9 @@ _ROW_CAP = 4096
 _BLOCK = 1024
 # The floats a streamed row carries between blocks: the lanes' sums and the maximum.
 _STATE = 64
-# A streamed core unrolls its rows: 48 fit AIE2P's program memory, 64 do not.
-_STREAMED_ROWS = 48
+# A streamed core unrolls its rows, each about 272 bytes of program memory:
+# 40 fit AIE2's (44 do not), 48 AIE2P's (64 do not).
+_STREAMED_ROWS = {"aie2": 40, "aie2p": 48}
 
 
 def _kernel(op, n: int):
@@ -199,7 +203,8 @@ class Softmax(Operator):
         if block is None:
             bounded = "length" in self.bound_extents
             per_core = self.rows // (cols * self.num_channels)
-            long = self.cols > _ROW_CAP or (bounded and per_core <= _STREAMED_ROWS)
+            most = _STREAMED_ROWS[resolve_target_arch(dev)]
+            long = self.cols > _ROW_CAP or (bounded and per_core <= most)
             block = (
                 max(
                     (
@@ -241,10 +246,11 @@ class Softmax(Operator):
                 f"Softmax: a row a core holds whole is one block: block ({self.block}) "
                 f"must be cols ({self.cols}) unless streamed"
             )
-        if self.streamed and self.rows // self.cores > _STREAMED_ROWS:
+        most = _STREAMED_ROWS[resolve_target_arch(self.dev)]
+        if self.streamed and self.rows // self.cores > most:
             raise ValueError(
-                f"Softmax: a streamed core holds at most {_STREAMED_ROWS} rows, not "
-                f"{self.rows // self.cores}"
+                f"Softmax: a streamed core holds at most {most} rows on "
+                f"{resolve_target_arch(self.dev)}, not {self.rows // self.cores}"
             )
 
     def extent_unit(self, buffer: str) -> int:
@@ -265,8 +271,8 @@ class Softmax(Operator):
         mask_k = obj.bind("mask_bf16", [tile_ty, np.int32, np.int32])
         zero_k = zero(block, ml_dtypes.bfloat16)
         state_ty = np.ndarray[(_STATE,), np.dtype[np.float32]]
-        of_ins = [ObjectFifo(tile_ty) for k in range(n_cores)]
-        of_outs = [ObjectFifo(tile_ty) for k in range(n_cores)]
+        x_ins = self.x.fifos(self.x.depth)
+        y_outs = self.y.fifos(self.y.depth)
         counts = [self.valid_cols, self.blocks] if self.streamed else [self.valid_cols]
         rtps = [Rtp(counts) for _ in range(n_cores)]
 
@@ -338,7 +344,7 @@ class Softmax(Operator):
             workers = [
                 Worker(
                     streamed,
-                    [of_ins[k].cons(), of_outs[k].prod(), *kernels, mask_k, zero_k]
+                    [x_ins[k], y_outs[k], *kernels, mask_k, zero_k]
                     + [rtps[k]]
                     + [Buffer(state_ty) for r in range(rows_per_core)],
                 )
@@ -349,8 +355,8 @@ class Softmax(Operator):
                 Worker(
                     whole,
                     [
-                        of_ins[k].cons(),
-                        of_outs[k].prod(),
+                        x_ins[k],
+                        y_outs[k],
                         softmax_k,
                         mask_k,
                         zero_k,
@@ -359,8 +365,6 @@ class Softmax(Operator):
                 )
                 for k in range(n_cores)
             ]
-        self.x.bind([f.prod() for f in of_ins])
-        self.y.bind([f.cons() for f in of_outs])
         return Built(workers, rtps)
 
     def _build_f32(self, n_cores: int, rows_per_core: int, block: int) -> Built:
@@ -370,13 +374,9 @@ class Softmax(Operator):
         ``block`` at build time.
         """
         softmax_k = _kernel(self, block)
-        of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
-        of_outs = [ObjectFifo(self.y.obj_type) for _ in range(n_cores)]
-        of_addends = (
-            [ObjectFifo(self.addend.obj_type) for _ in range(n_cores)]
-            if self.has_addend
-            else None
-        )
+        x_ins = self.x.fifos(self.x.depth)
+        y_outs = self.y.fifos(self.y.depth)
+        addend_ins = self.addend.fifos(self.addend.depth) if self.has_addend else None
 
         def whole(of_in, of_out, softmax, *rest):
             of_addend = rest[0] if self.has_addend else None
@@ -395,15 +395,11 @@ class Softmax(Operator):
         workers = [
             Worker(
                 whole,
-                [of_ins[k].cons(), of_outs[k].prod(), softmax_k]
-                + ([of_addends[k].cons()] if of_addends else []),
+                [x_ins[k], y_outs[k], softmax_k]
+                + ([addend_ins[k]] if addend_ins else []),
             )
             for k in range(n_cores)
         ]
-        self.x.bind([f.prod() for f in of_ins])
-        self.y.bind([f.cons() for f in of_outs])
-        if of_addends is not None:
-            self.addend.bind([f.prod() for f in of_addends])
         return Built(workers)
 
     def _build_f32_banded(self, n_cores: int, rows_per_core: int, block: int) -> Built:
@@ -415,9 +411,9 @@ class Softmax(Operator):
         in the kernel.
         """
         banded_k = _kernel(self, block)
-        of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
-        of_addends = [ObjectFifo(self.addend.obj_type) for _ in range(n_cores)]
-        of_outs = [ObjectFifo(self.y.obj_type) for _ in range(n_cores)]
+        x_ins = self.x.fifos(self.x.depth)
+        addend_ins = self.addend.fifos(self.addend.depth)
+        y_outs = self.y.fifos(self.y.depth)
 
         def _whole(core_offset):
             def whole(of_in, of_addend, of_out, fn):
@@ -448,17 +444,14 @@ class Softmax(Operator):
             Worker(
                 _whole(k * rows_per_core),
                 [
-                    of_ins[k].cons(),
-                    of_addends[k].cons(),
-                    of_outs[k].prod(),
+                    x_ins[k],
+                    addend_ins[k],
+                    y_outs[k],
                     banded_k,
                 ],
             )
             for k in range(n_cores)
         ]
-        self.x.bind([f.prod() for f in of_ins])
-        self.addend.bind([f.prod() for f in of_addends])
-        self.y.bind([f.cons() for f in of_outs])
         return Built(workers)
 
     def sequence(self, rt):
@@ -476,7 +469,7 @@ class Softmax(Operator):
             for k in range(lanes)
         ]
         reads = 3 if self.streamed else 1
-        tg = TaskGroup()
+        tg = rt.task_group()
         for k, tap in enumerate(taps):
             self.x.fill(
                 tap.repeat(reads),
@@ -503,7 +496,31 @@ class Softmax(Operator):
                 length_parameter=blocks_valid,
                 length_unit=rows * self.block,
             )
-        tg.finish()
+        rt.finish(tg)
+
+    def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
+        """``x``'s rows are read thrice (streamed) or once, over blocks a bound may shorten; ``addend`` and ``y`` read or write that span once."""
+        if operand not in (self.x, self.y) and not (
+            self.has_addend and operand is self.addend
+        ):
+            return None
+        lanes = self.cores
+        rows = self.rows // lanes
+        blocks = ceildiv(self.length, self.block)
+        blocks_valid = self.blocks if self.streamed and self.blocks.per_call else None
+        full = TensorAccessPattern.full((self.rows, self.cols))
+        taps = [
+            full[k * rows : (k + 1) * rows, : blocks * self.block]
+            .split(1, self.block)
+            .permute((1, 0, 2))
+            for k in range(lanes)
+        ]
+        reads = 3 if self.streamed and operand is self.x else 1
+        length_unit = rows * self.block
+        return [
+            (k, tap.repeat(reads), blocks_valid, length_unit)
+            for k, tap in enumerate(taps)
+        ]
 
     def tolerance(self) -> Tolerance | None:
         base = _kernel(self, self.cols).contract.tolerance

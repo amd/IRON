@@ -6,19 +6,46 @@ from typing import Any, ClassVar
 
 import aie.dialects.index as index
 import numpy as np
-from aie.dialects.aie import T
+from aie.dialects.aie import AIETileType, T
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv
+from aie.iron import Buffer, ExternalFunction, In, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
-from aie.iron.kernels import eltwise, linalg
-from aie.utils.compile.jit.params import divisors, param, per_call, tunable, widths
+from aie.iron.kernels import datamovement, eltwise, linalg
+from aie.utils.compile.jit.params import (
+    Select,
+    divisors,
+    param,
+    per_call,
+    tunable,
+    widths,
+)
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import Built, Operator, Rtp
+from iron.common import Built, Rtp
 from iron.common.declare.operand import concrete
+from iron.common.elementwise import (
+    Finish,
+    Finishing,
+    FinishStep,
+    finish_bound,
+    finish_reference,
+)
 from iron.common.testing import Case, Testing
+
+# Bytes [at, at + n) of B from one head tile of a coded A stream: whole
+# 64-byte vectors, as a coded tile and B are.
+CODED_HEAD_COPY = """
+#include <aie_api/aie.hpp>
+#include <stdint.h>
+
+extern "C" void coded_head_copy(const uint8_t *__restrict head,
+                                uint8_t *__restrict b, int32_t at, int32_t n) {
+  for (int32_t i = 0; i < n; i += 64)
+    aie::store_v(b + at + i, aie::load_v<64>(head + i));
+}
+"""
 
 
 def _cases(cls, dev: Device):
@@ -73,14 +100,29 @@ def _cases(cls, dev: Device):
             case(256, 128, 2, 1, 32, num_channels=2, num_batches=8),
             case(2048, 64, 4, 4, 256, num_channels=2, num_batches=32, repeat=4),
         ]
+        # ... and B a real stream of its own, broadcast to every lane.
+        + [case(2048, 2048, 8, 4, 256, feed_b=True)]
+        # ... and A as coded rows: Llama 3.2 1B's decode shapes, B in A's
+        # head tile, in two where one coded row is shorter than B (2048x8192
+        # at one row a tile), and on its own stream.
+        + [
+            case(8192, 2048, 8, 4, 1024, coded_a=True, bench=True, lower=True),
+            case(2048, 2048, 4, 4, 256, coded_a=True, lower=True),
+            case(2048, 8192, 8, 1, 256, coded_a=True, lower=True),
+            case(2048, 8192, 8, 1, 256, coded_a=True, feed_b=True),
+            case(8192, 2048, 8, 4, 512, coded_a=True, num_channels=2),
+            case(128, 128, 1, 32, 128, coded_a=True),
+        ]
     )
 
 
-class GEMV(Operator):
+class GEMV(Finishing):
     """``C = A @ B`` as row-blocks of A per lane, ``tile_size_input`` rows per mv.cc call.
 
-    B rides each lane's A stream ahead of its rows so every input channel
-    of a column can carry A.
+    By default B rides each lane's A stream ahead of its rows so every input channel of
+    a column can carry A; ``feed_b`` instead makes B a real stream of its own, broadcast
+    to every lane since each one's dot products read the whole vector, which
+    ``B.feed()`` can then take from another operator's output on-chip.
     """
 
     test = Testing(_cases, draw=lambda op: dict(normal=(op.A, op.B)))
@@ -114,6 +156,20 @@ class GEMV(Operator):
     kernel_vector_size: int = tunable(repr=False)
     # Filled by resolve: A double-buffered where two of its tiles fit a core, else one.
     a_depth: int = tunable(repr=False, init=False)
+    # False (the head-tile layout) unless a fed B, or fusion pricing, asks
+    # for B's own stream: that costs a shim input channel, so it is not free.
+    feed_b: bool = tunable(default=False, domain=(False, True))
+    # A, a weight, streams as coded rows (aie.utils.coded): 0.76x the bytes,
+    # decoded in each core into the bits plain A gives.
+    coded_a: bool = tunable(default=False, domain=(False, True))
+    # One step folded into these cores, its output C's tile.
+    finish: tuple[FinishStep, ...] = param(default=(), array=True)
+    # A plain default, not derived: shim_columns() reads it from the class
+    # alone (a Testing case), before any instance exists to derive it from.
+    uses_extra: bool = param(default=False)
+    # feed_b already holds both of a core's input channels; a finish input
+    # then rides A's instead of its own (A's own tile re-read, below C's).
+    rides: bool = param(default=False, array=True)
 
     A = In(
         num_matrices,
@@ -122,14 +178,26 @@ class GEMV(Operator):
         obj_shape=(tile_size_input, K),
         per=(num_aie_columns, num_channels),
         depth=2,
+        coded=coded_a,
+        capacity=datamovement.CODED_CAPACITY,
     )
-    B = In(num_batches, K)
+    B = In(num_batches, K, obj_shape=Select(feed_b, (K,), None))
     C = Out(
         num_batches,
         M,
         obj_shape=(tile_size_output,),
         per=(num_aie_columns, num_channels),
         depth=2,
+    )
+    # A finish step's other input, on the channel feed_b would otherwise use,
+    # or, riding, no stream of its own (A's tile carries it, re-read).
+    finish0 = In(
+        num_batches,
+        M,
+        obj_shape=Select(rides, None, (tile_size_output,)),
+        per=(num_aie_columns, num_channels),
+        depth=2,
+        when=uses_extra,
     )
     valid = per_call(bounds=M)
     tiles = per_call(
@@ -163,12 +231,53 @@ class GEMV(Operator):
                 f"tile_size_input ({tsi})"
             )
         self._legal_kernel_vector_size()
-        if self.K % self._COPY_ELEMENTS:
+        if not self.feed_b and self.K % self._COPY_ELEMENTS:
             raise ValueError(
                 f"GEMV: K ({self.K}) must be a multiple of {self._COPY_ELEMENTS}: "
                 f"each core copies B out of its A stream in "
                 f"{self._COPY_ELEMENTS}-element vectors"
             )
+        if self.coded_a:
+            self._validate_coded()
+        if self.finish:
+            super().validate()
+            if self.feed_b and not self.rides:
+                raise ValueError(
+                    "GEMV: feed_b already holds both of a core's input "
+                    "channels, leaving none for a finish step's other input "
+                    "that does not ride A's"
+                )
+            if self.repeat > 1:
+                raise ValueError(
+                    f"GEMV: repeat ({self.repeat}) computes its batches out of "
+                    f"order, which a finish step's input does not follow"
+                )
+
+    def _validate_coded(self):
+        if self.K % 64:
+            raise ValueError(
+                f"GEMV: coded_a needs K ({self.K}) a multiple of 64, the "
+                f"coded rows' unit"
+            )
+        if self.repeat > 1:
+            raise ValueError(
+                f"GEMV: coded_a codes a weight; repeat ({self.repeat}) re-reads "
+                f"an activation A"
+            )
+        if self.rides:
+            raise ValueError(
+                "GEMV: coded_a's tiles are coded rows, which a finish input "
+                "cannot ride"
+            )
+
+    def _head_tiles(self) -> int:
+        """Return the tiles of A's stream that carry B to a lane each batch.
+
+        One, or for a coded tile shorter than B's 2K bytes, as many as hold it.
+        """
+        if not self.coded_a:
+            return 1
+        return -(-2 * self.K // math.prod(self.A.obj_shape))
 
     def _legal_kernel_vector_size(self) -> int:
         """Return the vector width the matvec kernel is compiled at.
@@ -228,8 +337,13 @@ class GEMV(Operator):
             return new.replace(a_depth=self.a_depth or new.A.depth)
         item = np.dtype(bfloat16).itemsize
         line, out = self.K * item, new.tile_size_output * item
-        tile_bytes = new.tile_size_input * line
+        tile_bytes = (
+            new.tile_size_input * new.A.shape[-1] * np.dtype(new.A.dtype).itemsize
+        )
         rest = line + new.C.depth * out + dev.default_core_stack_bytes
+        if new.coded_a:
+            # The rows a call decodes into, which the matvec then reads.
+            rest += new.tile_size_input * line
         depth = self.a_depth or new.A.depth
         if self.a_depth is None and depth * tile_bytes + rest > dev.core_memory_bytes:
             depth = 1
@@ -255,6 +369,48 @@ class GEMV(Operator):
                 raise ValueError(f"GEMV: {name} ({tile}) exceeds M/lanes ({rows})")
             if rows % tile:
                 raise ValueError(f"GEMV: {name} ({tile}) must divide M/lanes ({rows})")
+        for step in self.finish:
+            # Its kernel runs on this GEMV's output tile; the factory refuses one it cannot.
+            step.consumer_at(self.tile_size_output, self.dev).layout().kernel()
+
+    def fold(self, consumer, at: int):
+        # repeat computes its batches out of order, which a finish input does not follow.
+        return None if self.repeat > 1 else super().fold(consumer, at)
+
+    def _can_ride(self) -> bool:
+        """Whether A's own tile could carry a finish's other input instead of a stream of its own.
+
+        No batches or per-call bound to walk it by (one tile is this whole call, so one
+        extra transfer a lane suffices), A's tile holds a whole number of a finish
+        tile's, re-read at most a descriptor's iteration limit, and a lane's extra
+        transfer still fits its shim tile's descriptor budget.
+        """
+        if self.bound_extents or self.num_batches is not None or self.coded_a:
+            return False
+        try:
+            lanes = self.num_aie_columns * self.num_channels
+            if self.M != lanes * self.tile_size_output:
+                return False
+            carried, line = self.tile_size_input * self.K, self.tile_size_output
+            if carried % line:
+                return False
+        except TypeError:  # a tunable not yet resolved: not decidable here
+            return False
+        dev = self.dev
+        if dev is None:
+            return False
+        if carried // line > (1 << dev.get_dma_bd_iter_bits(0, 0)):
+            return False
+        shims = sum(
+            dev.get_tile_type(col, 0) is AIETileType.ShimNOCTile
+            for col in range(dev.cols)
+        )
+        held = (
+            dev.get_num_bds(AIETileType.ShimNOCTile)
+            * shims
+            // (dev.shim_dma_channels_in + dev.shim_dma_channels_out)
+        )
+        return 2 <= held
 
     def build(self) -> Built:
         K, lanes = self.K, self.num_aie_columns * self.num_channels
@@ -272,61 +428,131 @@ class GEMV(Operator):
             vectorized=True,
             vec_size=self.kernel_vector_size,
             output_rows=tile_size_output,
+            a_coded=self.coded_a,
         )
-        vector = np.ndarray[(K,), np.dtype[bfloat16]]
-        # A lossless copy of the head tile's first row, B, as 16-bit words.
-        copy = eltwise.passthrough(K, np.int16).object_file.bind(
-            "passThroughLine", [self.A.obj_type, vector, np.int32]
-        )
+        # The decoded rows of a coded tile, one buffer a lane: matvec's A.
+        decoded = [
+            [Buffer(matvec.arg_types()[3])] if self.coded_a else []
+            for _ in range(lanes)
+        ]
 
-        A_fifos = [
-            ObjectFifo(self.A.obj_type, depth=self.a_depth) for i in range(lanes)
-        ]
-        C_fifos = [
-            ObjectFifo(self.C.obj_type, depth=self.C.depth) for i in range(lanes)
-        ]
-        vectors = [Buffer(vector) for _ in range(lanes)]
+        A_ends = self.A.fifos(self.a_depth)
+        C_ends = self.C.fifos(self.C.depth)
         rtps = [Rtp([self.tiles, self.batches]) for _ in range(lanes)]
 
-        def core_body(A_fifo, C_fifo, b, matvec, copy, rtp):
+        if not self.feed_b:
+            if self.B.fed_from is not None:
+                raise ValueError(
+                    "GEMV: B is fed, which needs feed_b=True: unfed, its vector "
+                    "rides each lane's A stream, which a fed input cannot take"
+                )
+            vector = np.ndarray[(K,), np.dtype[bfloat16]]
+            if not self.coded_a:
+                # A lossless copy of the head tile's first row, B, as 16-bit words.
+                copy = eltwise.passthrough(K, np.int16).object_file.bind(
+                    "passThroughLine", [self.A.obj_type, vector, np.int32]
+                )
+                # Per head tile, the copy's arguments past the tile and b.
+                head_copies = [(K,)]
+            else:
+                # B's 2K bytes, from as many coded tiles as hold them. The
+                # symbol is the tile type's own, beside a plain GEMV's.
+                copy = ExternalFunction(
+                    "coded_head_copy",
+                    source_string=CODED_HEAD_COPY,
+                    arg_types=[self.A.obj_type, vector, np.int32, np.int32],
+                    symbol_prefix="coded_head_" + "x".join(map(str, self.A.obj_shape)),
+                )
+                tile, total = math.prod(self.A.obj_shape), 2 * K
+                head_copies = [
+                    (h * tile, min(tile, total - h * tile))
+                    for h in range(self._head_tiles())
+                ]
+            vectors = [Buffer(vector) for _ in range(lanes)]
+
+            finish = Finish(self, tile_size_output)
+            # Riding, a finish's other input is A's own tile re-read, cast down to
+            # one finish tile (A's holds several, identical repeats).
+            riding = any(f.binary for f in self.finish) and self.rides
+
+            def core_body(A_fifo, C_fifo, b, matvec, copy, *rest):
+                chain = rest[: finish.width]
+                rtp = rest[finish.width]
+                lane_decoded = rest[finish.width + 1 :]
+                words = rtp.read()
+                n = words[self.tiles]
+                batches = words[self.batches]
+                for _ in range_(batches):
+                    # The batch's head tiles carry B.
+                    for args in head_copies:
+                        head = A_fifo.acquire(1)
+                        copy(head, b, *args)
+                        A_fifo.release(1)
+                    for _ in range_(n):
+                        c = C_fifo.acquire(1)
+                        target = finish.target(chain, c)
+                        for j_idx in range_(tile_size_output // tile_size_input):
+                            j_i32: Any = index.casts(T.i32(), j_idx)
+                            output_row_offset = j_i32 * tile_size_input
+                            a = A_fifo.acquire(1)
+                            matvec(
+                                tile_size_input,
+                                output_row_offset,
+                                a,
+                                *lane_decoded,
+                                b,
+                                target,
+                            )
+                            A_fifo.release(1)
+                        finish.run(chain, c, A_fifo if riding else None, cast=riding)
+                        C_fifo.release(1)
+
+            workers = [
+                Worker(
+                    core_body,
+                    [A_ends[i], C_ends[i], vectors[i], matvec, copy]
+                    + finish.args(i)
+                    + [rtps[i]]
+                    + decoded[i],
+                )
+                for i in range(lanes)
+            ]
+            return Built(workers, rtps)
+
+        # One fifo, a fresh cons() per core: every lane reads the same
+        # vector, not a share of it. Depth 1, as the local buffer it
+        # replaces held: resolve()'s memory budget counts one copy. Fed,
+        # this gives every core its own reader end of the source's fifo.
+        (B_ends,) = self.B.fifos(1, readers=lanes)
+
+        def core_body_fed(A_fifo, B_fifo, C_fifo, matvec, rtp, *decoded):
             words = rtp.read()
             n = words[self.tiles]
             batches = words[self.batches]
             for _ in range_(batches):
-                # The batch's head tile carries B.
-                head = A_fifo.acquire(1)
-                copy(head, b, K)
-                A_fifo.release(1)
+                b = B_fifo.acquire(1)
                 for _ in range_(n):
                     c = C_fifo.acquire(1)
                     for j_idx in range_(tile_size_output // tile_size_input):
                         j_i32: Any = index.casts(T.i32(), j_idx)
                         output_row_offset = j_i32 * tile_size_input
                         a = A_fifo.acquire(1)
-                        matvec(tile_size_input, output_row_offset, a, b, c)
+                        matvec(tile_size_input, output_row_offset, a, *decoded, b, c)
                         A_fifo.release(1)
                     C_fifo.release(1)
+                B_fifo.release(1)
 
         workers = [
             Worker(
-                core_body,
-                [
-                    A_fifos[i].cons(),
-                    C_fifos[i].prod(),
-                    vectors[i],
-                    matvec,
-                    copy,
-                    rtps[i],
-                ],
+                core_body_fed,
+                [A_ends[i], B_ends[i], C_ends[i], matvec, rtps[i]] + decoded[i],
             )
             for i in range(lanes)
         ]
-        self.A.bind([f.prod() for f in A_fifos])
-        self.C.bind([f.cons() for f in C_fifos])
         return Built(workers, rtps)
 
     def sequence(self, rt):
-        """Sequence per batch and lane: B's head tile, then A's rows.
+        """Sequence per batch and lane: B's head tile (``feed_b``: one fill to B's own stream instead), then A's rows.
 
         C drains are issued first: an undrained C would stop A.
         """
@@ -338,6 +564,8 @@ class GEMV(Operator):
                         f"({self.repeat}) is above 1"
                     )
         M, K, tsi = self.M, self.K, self.tile_size_input
+        # A's row as it moves: K elements, or a coded row's bytes.
+        width = self.A.shape[-1]
         drains = [
             self.C.drain(
                 tap,
@@ -349,9 +577,19 @@ class GEMV(Operator):
             )
             for k, tap, word, unit in self.C.transfers()
         ]
+        binary_finish = any(f.binary for f in self.finish)
+        riding = binary_finish and self.rides
+        if binary_finish and not self.rides:
+            # finish0's shape matches C's, so the same per-lane walk fills it.
+            for k, tap, word, unit in self.finish0.transfers():
+                self.finish0.fill(
+                    tap, lane=k, length_parameter=word, length_unit=unit, managed=False
+                )
+        ride_taps = {k: tap for k, tap, _, _ in self.C.transfers()} if riding else {}
+        reads = (tsi * K) // self.tile_size_output if riding else 0
         rows = self.A.transfers()
         if (self.num_matrices or 1) > 1 and self.A.bounded is None:
-            parts = TensorAccessPattern.full((M, K)).partition(len(rows), 0)
+            parts = TensorAccessPattern.full((M, width)).partition(len(rows), 0)
             rows = [
                 (
                     k,
@@ -379,16 +617,40 @@ class GEMV(Operator):
                 for k, tap, word, unit in rows
             ]
         for b in range(self.num_batches or 1):
-            # B's row repeated over an A tile in the iteration dim (stride 0).
-            head = TensorAccessPattern(
-                self.B.shape, b * K, [tsi, 1, 1, K], [0, 0, 0, 1]
-            )
+            if self.feed_b:
+                self.B.fill(
+                    TensorAccessPattern(self.B.shape, b * K, [1, K], [0, 1]),
+                    managed=False,
+                )
+            elif self.coded_a:
+                # B, then the rest of its last head tile, unread: A's first
+                # bytes, one linear run.
+                pad = self._head_tiles() * tsi * width - 2 * K
+                heads = [
+                    (TensorAccessPattern(self.B.shape, b * K, [1, K], [0, 1]), self.B)
+                ]
+                if pad:
+                    heads.append(
+                        (TensorAccessPattern(self.A.shape, 0, [1, pad], [0, 1]), None)
+                    )
+            else:
+                # B's row repeated over an A tile in the iteration dim (stride 0).
+                heads = [
+                    (
+                        TensorAccessPattern(
+                            self.B.shape, b * K, [tsi, 1, 1, K], [0, 0, 0, 1]
+                        ),
+                        self.B,
+                    )
+                ]
             for k, tap, word, unit in rows:
-                self.A.fill(head, lane=k, source=self.B, managed=False)
+                if not self.feed_b:
+                    for head, source in heads:
+                        self.A.fill(head, lane=k, source=source, managed=False)
                 (offset,) = concrete((tap.offset,), tap)
                 matrix = TensorAccessPattern(
                     tap.tensor_dims,
-                    offset + b // self.repeat * M * K,
+                    offset + b // self.repeat * M * width,
                     tap.sizes,
                     tap.strides,
                 )
@@ -399,14 +661,37 @@ class GEMV(Operator):
                     length_unit=unit,
                     managed=False,
                 )
-        for task in drains:
-            task.await_()
+                if riding:
+                    # The finish's row, re-read to fill one of A's tiles.
+                    self.A.fill(
+                        ride_taps[k].repeat(reads),
+                        lane=k,
+                        source=self.finish0,
+                        managed=False,
+                    )
+        rt.await_tasks(drains)
 
     def ops(self) -> int:
-        return 2 * self.M * self.K * (self.num_batches or 1)
+        total = 2 * self.M * self.K * (self.num_batches or 1)
+        for step in self.finish:
+            consumer = step.consumer_at(self.tile_size_output, self.dev)
+            total += (
+                consumer.ops()
+                * self.M
+                * (self.num_batches or 1)
+                // self.tile_size_output
+            )
+        return total
 
-    def reference(self, A, B):
-        """``C = A @ B``, one product per batch."""
+    def reference(self, A, B, finish0=None):
+        """``C = A @ B``, one product per batch, then its finish step's."""
+        c = self._matvec_reference(A, B)
+        if not self.finish:
+            return c
+        extra = () if finish0 is None else (finish0,)
+        return finish_reference(self.finish, c, extra, self.dev, self.tile_size_output)
+
+    def _matvec_reference(self, A, B):
         if self.repeat > 1:
             A = np.repeat(A.reshape(-1, *A.shape[-2:]), self.repeat, axis=0)
         # float32: numpy's bf16 matmul accumulates in bf16, the kernel in f32.
@@ -417,5 +702,19 @@ class GEMV(Operator):
         return (a @ b.reshape(A.shape[-1])).astype(A.dtype)
 
     def tolerance(self) -> Tolerance:
-        """C accumulates in f32 and rounds once; tighter than linalg.mv's contract."""
-        return Tolerance.relative(0.04, 1e-3, note="f32 accumulation, rounded once")
+        """C accumulates in f32 and rounds once; tighter than linalg.mv's contract, then each finish step's own."""
+        own = Tolerance.relative(0.04, 1e-3, note="f32 accumulation, rounded once")
+        if not self.finish:
+            return own
+        return Tolerance.bounded(
+            finish_bound(
+                self.finish,
+                own,
+                self._matvec_reference,
+                2,
+                bfloat16,
+                self.dev,
+                self.tile_size_output,
+            ),
+            note="f32 accumulation rounded once, then each finish step's contract",
+        )

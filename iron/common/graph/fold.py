@@ -1,0 +1,225 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Folding a step into the producer of its one input.
+
+A recording rewrite collapsing the pair into one step, the producer's operator carrying
+the ``finish`` (``Operator.fold``). Unlike a stream fusion, which runs the consumer in
+cores of its own fed on-chip from the producer's, a fold leaves the consumer no cores:
+its kernel runs inside the producer's, on the tile before it leaves L1.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from collections import Counter
+from collections.abc import Sequence
+
+from ..declare.operator import Operator, Unresolvable
+from ..declare.profile import Profile
+from ..image.step import Edge, Fusion, FusionKind
+from .fusion import named
+from .record import Recording, Step
+
+
+def _admits(producer: Operator, consumer: Operator, at: int) -> Operator | None:
+    """``producer.fold(consumer, at)``, or None where it refuses or does not resolve on the current device."""
+    try:
+        fused = producer.fold(consumer, at)
+    except Unresolvable:
+        return None
+    if fused is None:
+        return None
+    try:
+        fused.resolved(fused.dev)
+    except (Unresolvable, ValueError):
+        return None
+    return fused
+
+
+def _buffer_adjacent(recording: Recording) -> dict[int, tuple[str, str]]:
+    """Index ``i``'s (producer's output operand name, consumer's input operand name).
+
+    Where step ``i``'s one output feeds only step ``i + 1``'s one matching input, same
+    tile shape and dtype, with no host step between.
+    """
+    excluded = recording.held
+    readers, writers = recording.users()
+    found: dict[int, tuple[str, str]] = {}
+    for i in range(len(recording.steps) - 1):
+        step, nxt = recording.steps[i], recording.steps[i + 1]
+        if recording.crosses_host(i, i + 1) or set(
+            step.op.bound_extents.values()
+        ) != set(nxt.op.bound_extents.values()):
+            continue
+        # Handle-level shapes, not the (possibly unresolved) Operand's: a
+        # Select()-shaped operand (ProjectionGEMM's B) needs its dtype
+        # tunable resolved before its own elements/dtype read.
+        outs = [
+            (buf, ref, h)
+            for buf, ref, h in zip(step.op.buffers, step.refs(), step.slots)
+            if buf.drains
+        ]
+        if len(outs) != 1:
+            continue
+        buf, ref, tile = outs[0]
+        if (
+            ref.nbytes is not None
+            or ref.root in excluded
+            or readers.get(ref.root) != [i + 1]
+            or writers.get(ref.root) != [i]
+        ):
+            continue
+        matches = [
+            (cbuf, cref, ch)
+            for cbuf, cref, ch in zip(nxt.op.buffers, nxt.refs(), nxt.slots)
+            if cbuf.fills and cref.root == ref.root
+        ]
+        if len(matches) != 1 or matches[0][1].nbytes is not None:
+            continue
+        cbuf, _, _ = matches[0]
+        if len([b for b in nxt.op.buffers if b.drains]) != 1:
+            continue
+        others = [
+            (b, r, h)
+            for b, r, h in zip(nxt.op.buffers, nxt.refs(), nxt.slots)
+            if b.fills and b.name != cbuf.name
+        ]
+        if any(
+            r.nbytes is not None or h.elements != tile.elements or h.dtype != tile.dtype
+            for _, r, h in others
+        ):
+            continue
+        found[i] = (buf.name, cbuf.name)
+    return found
+
+
+def _chain_from(
+    recording: Recording, lo: int, buffer_adjacent: dict[int, tuple[str, str]]
+) -> list[tuple[int, Operator, int]]:
+    """Return the admissible chain folding into step ``lo``.
+
+    Each entry the index folded in, the fused operator, and the input its tile entered
+    at, stopping at the first hop ``buffer_adjacent`` or ``_admits`` refuses.
+    """
+    chain: list[tuple[int, Operator, int]] = []
+    current = recording.steps[lo].op
+    k = lo
+    while True:
+        names = buffer_adjacent.get(k)
+        if names is None:
+            break
+        _, in_name = names
+        nxt = recording.steps[k + 1].op
+        at = next((i for i, b in enumerate(nxt.inputs) if b.name == in_name), None)
+        if at is None:
+            break
+        fused = _admits(current, nxt, at)
+        if fused is None:
+            break
+        current = fused
+        k += 1
+        chain.append((k, current, at))
+    return chain
+
+
+def fold_candidates(recording: Recording) -> tuple[Fusion, ...]:
+    """Return every admissible fold of a run of two or more consecutive steps (``_chain_from``), overlapping ones included.
+
+    A maximal chain from ``lo`` of length ``n`` admits every depth from 1 to ``n``; a
+    step that folds both its predecessor's output and its successor's input starts a
+    chain of its own.
+    """
+    buffer_adjacent = _buffer_adjacent(recording)
+    calls = Counter(id(s.op) for s in recording.steps)
+    found = []
+    for lo in range(len(recording.steps) - 1):
+        if calls[id(recording.steps[lo].op)] != 1:
+            continue
+        chain = _chain_from(recording, lo, buffer_adjacent)
+        for depth in range(1, len(chain) + 1):
+            hi = chain[depth - 1][0]
+            edges = tuple(
+                Edge(i, buffer_adjacent[i][0], i + 1, buffer_adjacent[i][1])
+                for i in range(lo, hi)
+            )
+            found.append(Fusion(FusionKind.FOLD, tuple(range(lo, hi + 1)), edges))
+    return tuple(found)
+
+
+def chosen_folds(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
+    """Return the ``fold_candidates(recording)`` that ``profile`` names, a step in at most one (``fusion.named``).
+
+    Named in ``recording.version``, so a fold entry scoped to another version never
+    takes here; first in step order wins, as ``Graph.compile`` picks among a graph's
+    other fusion kinds (``fusion.fusions``).
+    """
+    return named(recording, profile, fold_candidates(recording))
+
+
+def apply_folds(recording: Recording, folds: Sequence[Fusion]) -> Recording:
+    """Return ``recording`` with each of ``folds`` (``fold_candidates``'s, not overlapping) applied.
+
+    A run's steps collapsed into one at its first's position, its operator
+    ``Operator.fold``-ed in at each edge in turn, its slots the running operator's with
+    each hop's other input appended, its output the run's last step's.
+
+    Raises:
+        ValueError: Two of ``folds`` share a step, one spans a host step, or a hop no
+            longer admits (its operator changed since ``fold_candidates`` ran).
+    """
+    taken: dict[int, Fusion] = {}
+    for fusion in folds:
+        if fusion.kind is not FusionKind.FOLD:
+            raise ValueError(f"apply_folds: {fusion.kind.value} is not a fold")
+        if list(fusion.steps) != list(range(fusion.steps[0], fusion.steps[-1] + 1)):
+            raise ValueError(f"a fold's steps must be consecutive, not {fusion.steps}")
+        for s in fusion.steps:
+            if s in taken:
+                raise ValueError(f"step {s} is folded twice")
+            taken[s] = fusion
+        if recording.crosses_host(fusion.steps[0], fusion.steps[-1]):
+            raise ValueError(f"{fusion} folds across a host step")
+    steps: list[Step | None] = list(recording.steps)
+    replaced: dict[int, list[Operator]] = {}
+    for fusion in dict.fromkeys(taken.values()):
+        lo = fusion.steps[0]
+        start = recording.steps[lo]
+        current = start.op
+        (out_name,) = (b.name for b in current.buffers if b.drains)
+        out_idx = next(k for k, b in enumerate(current.buffers) if b.name == out_name)
+        slots = list(start.slots)
+        inputs = list(start.inputs)
+        result = None
+        for edge in fusion.edges:
+            nxt = recording.steps[edge.consumer]
+            at = next(k for k, b in enumerate(nxt.op.inputs) if b.name == edge.input)
+            fused = current.fold(nxt.op, at)
+            if fused is None:
+                raise ValueError(f"{fusion} no longer admits: {current!r} refuses it")
+            current = fused
+            (result_name,) = (b.name for b in nxt.op.buffers if b.drains)
+            result = next(
+                h for b, h in zip(nxt.op.buffers, nxt.slots) if b.name == result_name
+            )
+            extra = [
+                h
+                for b, h in zip(nxt.op.buffers, nxt.slots)
+                if b.fills and b.name != edge.input
+            ]
+            slots[out_idx] = result
+            slots += extra
+            inputs += extra
+        steps[lo] = Step(current, slots, inputs, [result], gather=start.gather)
+        for s in fusion.steps[1:]:
+            steps[s] = None
+        for s in fusion.steps:
+            replaced.setdefault(id(recording.steps[s].op), []).append(current)
+    kept = [s for s in steps if s is not None]
+    host = [
+        dataclasses.replace(h, at=h.at - sum(s is None for s in steps[: h.at]))
+        for h in recording.host
+    ]
+    folded = dataclasses.replace(recording, steps=kept, host=host)
+    folded.rebind(replaced)
+    return folded

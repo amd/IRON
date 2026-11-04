@@ -499,6 +499,23 @@ def test_a_bounded_prompt_chunk_moves_13_rows_not_2048():
     assert _moved(gather, 13).sum() == 13 * 4096 + 2035 * 16 == 85808
 
 
+def test_a_standalone_probes_control_words_as_a_real_call_would():
+    """``Gather.addressed_inputs`` must build its ``control`` chain at the same ``valid_rows`` its per-call ``values`` give, not always the unbounded one.
+
+    Otherwise the chain it writes and the drain the call's own bound stops early disagree, which hangs real hardware rather than erroring.
+    """
+    gather = Gather(rows=2048, table_rows=128256, row=2048, feeds=4)
+    address = 0x1000
+    for values in ({}, {"valid_rows": 2048}, {"valid_rows": 1214}, {"valid_rows": 0}):
+        seed = gather.rows  # addressed_inputs's own seeding, matched below
+        got = gather.addressed_inputs(
+            {"table": address}, np.random.default_rng(seed), values
+        )
+        ids = np.random.default_rng(seed).integers(0, gather.table_rows, gather.rows)
+        expected = gather.control_words(ids, address, values.get("valid_rows"))
+        assert np.array_equal(got["control"], expected), f"values={values}"
+
+
 def test_an_input_gathers_from_a_table_once(npu2, table):
     class Twice(iron.Graph):
         def __init__(self):

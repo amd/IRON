@@ -7,6 +7,7 @@ from . import flm
 from .axpy import AXPY
 from .clamp import Clamp
 from .copy import Copy, Gather, GatherWords
+from .decode import Decode
 from .depthwise_conv1d import DepthwiseConv1d
 from .elementwise_add import ElementwiseAdd, RowwiseAdd
 from .elementwise_mul import ElementwiseMul, RowwiseMul
@@ -35,6 +36,7 @@ __all__ = [
     "AXPY",
     "Clamp",
     "Copy",
+    "Decode",
     "DepthwiseConv1d",
     "ElementwiseAdd",
     "ElementwiseMul",

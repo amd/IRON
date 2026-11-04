@@ -1,0 +1,756 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Validate a candidate profile against a model's stock one, on real weights.
+
+Which fusions and packings are live in each compiled version, then a decoder's own
+battery (bit identity of greedy logits over a prompt that crosses a prefill chunk and
+ends in a partial one, KL against the model's golden, and TTFT / decode tokens per
+second, stock and candidate interleaved) or, for any other graph model (an encoder among
+them), each changed version compared on its own tune points (``compare_graphs``): bit
+identity within each output's bound, then latency, stock and candidate interleaved.
+``--bisect`` narrows a decoder's bit-identity mismatch to the candidate's profile
+entries at fault, one version at a time.
+
+``python -m iron.lm.validate <application> --checkpoint DIR --candidate
+PROFILE_DIR``: ``<application>`` is dotted under ``iron.applications``
+(``application_model``'s), ``PROFILE_DIR`` holds one ``<device>.json`` the
+way a model's own ``profile`` directory does.
+"""
+
+import argparse
+import dataclasses
+import json
+import statistics
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+import aie.utils as aie_utils
+from aie.iron.device import from_name
+
+from iron import Profile
+from iron.common.declare.profile import Version
+from iron.common.graph.coded import CodedWeight
+from iron.common.graph.compiled import CompiledGraph
+from iron.common.graph.record import Recording
+from iron.common.image.link import FullELF, PerStep
+from iron.common.image.packaging import require_device
+from iron.tune.autotune import Timed
+from iron.tune.fusions import Applied, NotBitIdentical, compare_graphs
+from iron.tune.measure import Timing
+from iron.tune.verify import touches
+
+from .causal import CausalLM
+from .cli import application_model, config_argument
+from .generation import Sampler, accuracy, differing_steps, greedy_logits, kl_stats
+from .model import Model, host_budget
+
+
+def version_labels(model: Model) -> list[str]:
+    """Return a label per ``model.shapes()``'s version, in compile order.
+
+    ``decode`` for no input, ``prompt`` for a chunk of ``ids``, ``placed`` for a tower's
+    merged ids, else ``version<i>``.
+    """
+    labels = []
+    for i, shape in enumerate(model.shapes()):
+        if not shape:
+            labels.append("decode")
+        elif "placed" in shape:
+            labels.append("placed")
+        elif "ids" in shape:
+            labels.append("prompt")
+        else:
+            labels.append(f"version{i}")
+    return labels
+
+
+def verify_live(label: str, model: Model) -> dict[str, dict[str, Any]]:
+    """Return, for each of ``model``'s compiled versions (``version_labels``), how live its fusions and packings are.
+
+    Returns:
+        Fusion counts by kind, design and fusion-device counts, packed groups,
+        composition identity (a full ELF's) and ``images`` (the full ELF, or each
+        distinct xclbin and instruction stream dispatched) -- proof a profile's
+        fusions and packings matched the live recording, not just that the profile
+        file has entries.
+
+    Raises:
+        TypeError: A version is packaged neither as a full ELF nor as an
+            xclbin per step.
+        ValueError: ``model`` holds other than one compiled version per
+            ``shapes()``: a caller compiled only some, or two shapes
+            collided on one ``Recording.version``.
+    """
+    out = {}
+    labels, versions = version_labels(model), model.versions.values()
+    for version_label, version in zip(labels, versions, strict=True):
+        fusions = version.sequence.fusions
+        packaging = version.sequence.packaging
+        if isinstance(packaging, FullELF):
+            composition = packaging.composition
+            assert (
+                composition is not None
+            ), "built once the full ELF links (Image.__init__)"
+            n_designs, n_fusion_devices = (
+                len(composition.designs),
+                len(composition.fusions),
+            )
+            packed = [len(g) for g in composition.packing.groups]
+            identity, images = composition.identity, [str(version.image)]
+        elif isinstance(packaging, PerStep):
+            fused = {f.steps[0] for f in fusions}
+            built: dict[int, tuple[Any, Any]] = {}
+            for i, link in sorted(packaging.step_links.items()):
+                entry = link.design.get_cache_entry()
+                assert entry is not None, "a linked design is in the cache"
+                built[i] = (link.kernel.xclbin_path, entry.insts)
+            n_designs = len({d for i, d in built.items() if i not in fused})
+            n_fusion_devices, packed, identity = len(fusions), [], None
+            images = list(dict.fromkeys(f"{x} {insts}" for x, insts in built.values()))
+        else:
+            raise TypeError(f"{version_label}: packaged as {type(packaging).__name__}")
+        out[version_label] = {
+            "n_fusions": len(fusions),
+            "kinds": dict(Counter(f.kind.value for f in fusions)),
+            "n_designs": n_designs,
+            "n_fusion_devices": n_fusion_devices,
+            "packed_groups": packed,
+            "composition_identity": identity,
+            "images": images,
+            "coded_weights": sorted(
+                w.name
+                for w, _ in version.recording.weights.values()
+                if isinstance(w, CodedWeight)
+            ),
+            "read_plain": dict(version.recording.read_plain),
+        }
+        print(
+            f"[{label}] {version_label}: {len(fusions)} live fusions "
+            f"{out[version_label]['kinds']}, {out[version_label]['n_designs']} designs + "
+            f"{out[version_label]['n_fusion_devices']} fusion-devices, "
+            f"packed groups {out[version_label]['packed_groups']}, "
+            f"identity {out[version_label]['composition_identity']}, "
+            f"{len(out[version_label]['coded_weights'])} coded weights, "
+            f"{len(out[version_label]['read_plain'])} read plain"
+        )
+    return out
+
+
+def changed_versions(stock_live: dict, candidate_live: dict) -> list[str]:
+    """Return ``version_labels`` whose candidate compile is not stock's image: its fusions, packings or tunables changed it.
+
+    Raises:
+        AssertionError: A version shares stock's compiled image while its
+            live fusions or packed groups are not stock's.
+    """
+    changed = []
+    for label, candidate_v in candidate_live.items():
+        stock_v = stock_live[label]
+        shared = stock_v["images"] == candidate_v["images"]
+        assert not (
+            shared
+            and any(
+                candidate_v[k] != stock_v[k]
+                for k in ("n_fusions", "kinds", "packed_groups")
+            )
+        ), f"{label}: candidate and stock share one compiled image"
+        if not shared:
+            changed.append(label)
+    return changed
+
+
+def load_model(
+    model_class: type[Model],
+    checkpoint: Path,
+    max_seq_len: int | None,
+    profile,
+    config: Mapping[str, Any] | None = None,
+    budget: int | None = None,
+) -> Model:
+    """Return ``model_class.from_checkpoint(checkpoint)`` with ``config``'s fields, fitted to ``budget``.
+
+    Under ``profile`` (a directory, or None for the model's own), every version compiled
+    as the device packages it (``Graph.compile``) and loaded.
+    """
+    model = model_class.from_checkpoint(
+        checkpoint, max_seq_len=max_seq_len, config=config, budget=budget
+    )
+    if profile is not None:
+        model.profile = profile
+    model.load_versions()
+    return model
+
+
+def bit_identity(
+    stock: CausalLM, candidate: CausalLM, tokens, num_tokens: int
+) -> list[int]:
+    """Return the steps (prompt and decode alike) at which ``candidate``'s greedy logits differ bitwise from ``stock``'s.
+
+    Over ``tokens`` and ``num_tokens`` decode steps after them.
+    """
+    stock.session.forget(0)
+    candidate.session.forget(0)
+    stock_logits = greedy_logits(stock, tokens, num_tokens)
+    candidate_logits = greedy_logits(candidate, tokens, num_tokens)
+    return differing_steps(candidate_logits, stock_logits)
+
+
+def run_accuracy(model: CausalLM, tokens, num_tokens: int) -> tuple[dict, int]:
+    """Return ``model``'s KL against its own golden (``Model.cpu_reference``), teacher-forced over ``num_tokens`` steps from ``tokens``.
+
+    Also its top-1 mismatch count.
+    """
+    model.session.forget(0)
+    results = accuracy(model, model.cpu_reference(), tokens, num_tokens)
+    stats = kl_stats(results)
+    mismatches = sum(not top1 for _, top1 in results)
+    return stats, mismatches
+
+
+def timed_round(model: CausalLM, tokens, num_tokens: int) -> tuple[float, float]:
+    model.session.forget(0)
+    model.generate(tokens, num_tokens, Sampler(temperature=0))
+    assert model.stats is not None, "set once the last token is drawn"
+    return model.stats.ttft, model.stats.tokens_per_s
+
+
+def speed(
+    stock: CausalLM, candidate: CausalLM, tokens, num_tokens: int, rounds: int
+) -> dict[str, dict[str, float]]:
+    """Return TTFT and decode tokens per second, each the min and the median.
+
+    ``stock`` and ``candidate`` interleaved over ``rounds`` rounds, so a drifting clock
+    or a warming cache costs both alike.
+    """
+    stock_ttft, stock_tps, candidate_ttft, candidate_tps = [], [], [], []
+    for _ in range(rounds):
+        t, s = timed_round(stock, tokens, num_tokens)
+        stock_ttft.append(t)
+        stock_tps.append(s)
+        t, s = timed_round(candidate, tokens, num_tokens)
+        candidate_ttft.append(t)
+        candidate_tps.append(s)
+    return {
+        "stock": {
+            "ttft_min": min(stock_ttft),
+            "ttft_median": statistics.median(stock_ttft),
+            "tps_min": min(stock_tps),
+            "tps_median": statistics.median(stock_tps),
+        },
+        "candidate": {
+            "ttft_min": min(candidate_ttft),
+            "ttft_median": statistics.median(candidate_ttft),
+            "tps_min": min(candidate_tps),
+            "tps_median": statistics.median(candidate_tps),
+        },
+    }
+
+
+def classify_entries(
+    candidate: Profile, recordings: dict[str, Recording]
+) -> list[tuple[tuple[str, Any], set[str]]]:
+    """Return each of ``candidate``'s fusion and packing entries, tagged ``("fusion"|"packing", entry)``.
+
+    With the labels of ``recordings``' versions it matches (``touches``), in the order
+    ``candidate`` holds them, fusions first.
+    """
+    classified = []
+    for entry in candidate.fusions():
+        matches = {k for k, r in recordings.items() if touches("fusion", entry, r)}
+        classified.append((("fusion", entry), matches))
+    for entry in candidate.packings():
+        matches = {k for k, r in recordings.items() if touches("packing", entry, r)}
+        classified.append((("packing", entry), matches))
+    return classified
+
+
+def build_variant(stock: Profile, tags) -> Profile:
+    """Return ``stock`` plus ``tags`` (``classify_entries``'s tagged entries), a profile ``save`` can write for a bisection trial."""
+    profile = Profile()
+    for cls, dims, tunables in stock:
+        profile.add(cls, **dims, **tunables)
+    for fusion in stock.fusions():
+        profile.add_fusion(*fusion)
+    for packing in stock.packings():
+        profile.add_packing(packing.members, packing.versions)
+    for kind, entry in tags:
+        if kind == "fusion":
+            profile.add_fusion(*entry)
+        else:
+            profile.add_packing(entry.members, entry.versions)
+    return profile
+
+
+def smallest_failing_prefix(
+    tags: Sequence, mismatch: list[int], trial: Callable[[list], list[int]]
+) -> tuple[list, list[int]]:
+    """Return the shortest prefix of ``tags`` whose variant mismatches, and the steps it mismatches at.
+
+    Halved between no tags (the stock profile, which matches) and all of them, which
+    mismatch at ``mismatch``; ``trial`` returns a prefix's mismatched steps, empty
+    where it matches.
+    """
+    lo, hi, best = 0, len(tags), (list(tags), mismatch)
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        found = trial(list(tags[:mid]))
+        if found:
+            hi, best = mid, (list(tags[:mid]), found)
+        else:
+            lo = mid
+    return best
+
+
+def bisect(
+    model_class: type[CausalLM],
+    checkpoint: Path,
+    max_seq_len: int | None,
+    candidate: Profile,
+    stock_profile: Profile,
+    out_dir: Path,
+    stock: CausalLM,
+    tokens,
+    decode_steps: int,
+    config: Mapping[str, Any] | None = None,
+    budget: int | None = None,
+) -> dict:
+    """Narrow a bit-identity mismatch to one version's entries, then to a prefix of them.
+
+    Classifies ``candidate``'s fusion and packing entries by which version each
+    matches (``classify_entries``), tries one version's entries at a time against the
+    stock profile, and halves a version whose variant still mismatches. Saves the
+    smallest failing profile under ``out_dir``; the first version to reproduce the
+    mismatch wins.
+    """
+    probe = model_class.from_checkpoint(
+        checkpoint, max_seq_len=max_seq_len, config=config, budget=budget
+    )
+    labels = version_labels(probe)
+    recordings = {k: probe.record(**s) for k, s in zip(labels, probe.shapes())}
+    dev = require_device()
+    classified = classify_entries(candidate, recordings)
+
+    for label in labels:
+        tags = [tag for tag, matches in classified if label in matches]
+        if not tags:
+            continue
+        profile_dir = out_dir / f"bisect-{label}"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        build_variant(stock_profile, tags).save(profile_dir / f"{dev.name}.json")
+        variant = load_model(
+            model_class, checkpoint, max_seq_len, profile_dir, config, budget
+        )
+        assert isinstance(variant, CausalLM), "model_class is a CausalLM"
+        mismatch = bit_identity(stock, variant, tokens, decode_steps)
+        variant.release()
+        if not mismatch:
+            continue
+        print(f"[bisect] {label} alone mismatches at steps {mismatch}; halving")
+
+        def trial(prefix: list, label: str = label) -> list[int]:
+            profile_dir = out_dir / f"bisect-{label}-{len(prefix)}"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            build_variant(stock_profile, prefix).save(profile_dir / f"{dev.name}.json")
+            variant = load_model(
+                model_class, checkpoint, max_seq_len, profile_dir, config, budget
+            )
+            assert isinstance(variant, CausalLM), "model_class is a CausalLM"
+            found = bit_identity(stock, variant, tokens, decode_steps)
+            variant.release()
+            return found
+
+        best, mismatch = smallest_failing_prefix(tags, mismatch, trial)
+        profile_dir = out_dir / f"bisect-{label}-minimal"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        build_variant(stock_profile, best).save(profile_dir / f"{dev.name}.json")
+        return {
+            "version": label,
+            "entry_count": len(best),
+            "mismatch_steps": mismatch,
+            "profile": str(profile_dir),
+        }
+    return {
+        "version": None,
+        "note": "no single version's entries reproduced the mismatch alone",
+    }
+
+
+def model_tune_points(
+    model_class: type[Model],
+    checkpoint: Path,
+    config: Mapping[str, Any] | None = None,
+) -> list[Timed]:
+    """Return ``model_class.tune_calls``'s own calls, over its own tune flags (``tune_arguments``) at their defaults save ``--checkpoint``.
+
+    A model-general way to the per-call points and weights a version is tuned at (a
+    decoder's context ladder, an encoder's query and longest call), not one battery
+    written for a decoder alone.
+    """
+    tune_parser = argparse.ArgumentParser(add_help=False)
+    model_class.tune_arguments(tune_parser)
+    fields = [f"{k}={json.dumps(v)}" for k, v in (config or {}).items()]
+    tune_args = tune_parser.parse_args(
+        ["--checkpoint", str(checkpoint)]
+        + [arg for f in fields for arg in ("--config", f)]
+    )
+    return model_class.tune_calls(tune_parser, tune_args)
+
+
+def version_recordings(model) -> dict[Version, Recording]:
+    """Return ``model``'s own ``Recording`` of each of ``shapes()``, by ``Recording.version``.
+
+    The identity ``version_builds`` matches ``model_tune_points``'s calls against.
+    """
+    out = {}
+    for shape in model.shapes():
+        recording = model.record(**shape)
+        out[recording.version] = recording
+    return out
+
+
+def version_builds(
+    model_class: type[Model],
+    checkpoint: Path,
+    max_seq_len: int | None,
+    profiles: Sequence[Profile],
+    label_to_version: Mapping[str, Version],
+    *,
+    config: Mapping[str, Any] | None = None,
+) -> dict[str, tuple[Timed, list[CompiledGraph]]]:
+    """Return each label's tune call (``model_tune_points``) and its version under each of ``profiles`` (``built``).
+
+    Each side recorded on real weights under its own profile, since a tunable applies
+    as a step is recorded; the call carries the first side's recording.
+
+    Raises:
+        ValueError: ``label_to_version`` names a version ``model_tune_points`` gives
+            no call for: ``tune_calls`` and ``shapes()`` name other sets, a bug.
+    """
+    dev = require_device()
+    calls = {
+        c.recording.version: c
+        for c in model_tune_points(model_class, checkpoint, config)
+    }
+    sides = []
+    for profile in profiles:
+        probe = model_class.from_checkpoint(
+            checkpoint, max_seq_len=max_seq_len, config=config
+        )
+        probe.profile = profile
+        sides.append(version_recordings(probe))
+    missing = [
+        label
+        for label, version in label_to_version.items()
+        if version not in calls or any(version not in side for side in sides)
+    ]
+    if missing:
+        raise ValueError(
+            f"{missing}: no tune point for these versions; "
+            f"{model_class.__name__}.tune_calls names other shapes than "
+            f"{model_class.__name__}.shapes() does"
+        )
+    out = {}
+    for label, version in label_to_version.items():
+        own = [
+            dataclasses.replace(calls[version], recording=side[version])
+            for side in sides
+        ]
+        out[label] = own[0], [
+            Applied.of(c, p, dev).built(dev) for c, p in zip(own, profiles)
+        ]
+    return out
+
+
+def compare_versions(
+    model_class: type[Model],
+    checkpoint: Path,
+    max_seq_len: int | None,
+    stock_profile: Profile,
+    candidate_profile: Profile,
+    labels: list[str],
+    label_to_version: dict[str, Version],
+    *,
+    config: Mapping[str, Any] | None = None,
+    timing: Timing = Timing(rounds=3, calls=10),
+    log=print,
+) -> dict[str, dict[str, Any]]:
+    """Return each of ``labels`` (``changed_versions``'s), built under both profiles (``version_builds``), compared bit for bit and timed (``compare_graphs``).
+
+    Only a bit-identity mismatch (``NotBitIdentical``) is reported; a build or dispatch
+    failure or a device timeout is raised.
+
+    Raises:
+        ValueError: A label's version has no tune point (``version_builds``).
+        RuntimeError: A build or dispatch failed, or the device timed out.
+    """
+    builds = version_builds(
+        model_class,
+        checkpoint,
+        max_seq_len,
+        [stock_profile, candidate_profile],
+        {label: label_to_version[label] for label in labels},
+        config=config,
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for label, (call, graphs) in builds.items():
+        try:
+            delta, noise = compare_graphs(call, *graphs, timing=timing, log=log)
+        except NotBitIdentical as e:
+            out[label] = {"bit_identical": False, "error": str(e)}
+            log(f"[{label}] not bit-identical: {e}")
+            continue
+        noise_s = "?" if noise is None else f"{noise:.1f}"
+        out[label] = {"bit_identical": True, "delta_us": delta, "noise_us": noise}
+        log(
+            f"[{label}] bit-identical; candidate {delta:+.1f} ± {noise_s} us vs "
+            f"stock end to end"
+        )
+    return out
+
+
+def validate(
+    model_class: type[Model],
+    checkpoint: Path,
+    candidate: Profile | Path,
+    stock: Profile | Path | None = None,
+    *,
+    max_seq_len: int | None = None,
+    prompt_chars: int = 12000,
+    decode_steps: int = 32,
+    accuracy_tokens: int = 40,
+    speed_tokens: int = 32,
+    speed_rounds: int = 5,
+    bisect_into: Path | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the battery, ``candidate`` against ``stock`` (a profile, or a directory holding one per device; the model's own where None), as a report.
+
+    Args:
+        model_class: The model validated.
+        checkpoint: Its checkpoint directory, real weights.
+        candidate: The profile validated, or a directory holding one per device.
+        stock: The profile it is validated against, or such a directory; the model's own
+            where None.
+        max_seq_len: The longest context the two models serve; where None, fitted to
+            the host's budget shared by every model held at once.
+        prompt_chars: Characters of the prompt a decoder is run on.
+        decode_steps: Decode steps compared for bit identity.
+        accuracy_tokens: Tokens judged against the golden.
+        speed_tokens: Tokens generated in each timed round.
+        speed_rounds: Timed rounds, stock and candidate interleaved.
+        bisect_into: Where a decoder's bit-identity mismatch is narrowed to
+            the candidate's entries at fault (``bisect``); not narrowed where None.
+        config: Fields of the model's config given other values (a shallow
+            model): its golden is the full model's, so accuracy is not judged.
+
+    Raises:
+        ValueError: The candidate changes no version, or a decoder's prompt
+            does not cross a prefill chunk and end in a partial one.
+    """
+    dev = require_device()
+    own = model_class.profile
+    if stock is None:
+        stock = own if own is not None else Profile()
+    profiles = [
+        Profile.load(Path(p) / f"{dev.name}.json") if isinstance(p, (str, Path)) else p
+        for p in (stock, candidate)
+    ]
+    stock_profile, candidate_profile = profiles
+    report: dict[str, Any] = {"candidate": str(candidate)}
+
+    # Stock and candidate are held at once, and a bisection's variant beside them.
+    budget = host_budget() // (2 if bisect_into is None else 3)
+    print("loading stock model (real weights)...")
+    stock_model = load_model(
+        model_class, checkpoint, max_seq_len, stock_profile, config, budget
+    )
+    print("loading candidate model...")
+    candidate_model = load_model(
+        model_class, checkpoint, max_seq_len, candidate_profile, config, budget
+    )
+
+    report["stock_live"] = verify_live("stock", stock_model)
+    report["candidate_live"] = verify_live("candidate", candidate_model)
+    report["changed_versions"] = changed_versions(
+        report["stock_live"], report["candidate_live"]
+    )
+    if not report["changed_versions"]:
+        raise ValueError(f"{candidate}: the candidate profile changes no version")
+
+    if isinstance(stock_model, CausalLM) and isinstance(candidate_model, CausalLM):
+        tokens = stock_model.prompt(prompt_chars)
+        C = stock_model.config.prefill_chunk
+        report["prompt_tokens"], report["prefill_chunk"] = len(tokens), C
+        print(f"prompt: {len(tokens)} tokens (prefill_chunk {C})")
+        if len(tokens) <= C or not len(tokens) % C:
+            raise ValueError(
+                f"{prompt_chars} prompt characters give {len(tokens)} tokens: the "
+                f"prompt must cross a {C}-token chunk and end in a partial one"
+            )
+
+        print(
+            f"bit identity over {len(tokens)}-token prompt + "
+            f"{decode_steps} decode steps..."
+        )
+        mismatch = bit_identity(stock_model, candidate_model, tokens, decode_steps)
+        report["bit_identical"] = not mismatch
+        report["mismatch_steps"] = mismatch
+        print(
+            f"bit identity: {'identical' if not mismatch else f'differs at {mismatch}'}"
+        )
+
+        if mismatch and bisect_into is not None:
+            print("bisecting...")
+            report["bisection"] = bisect(
+                type(stock_model),
+                checkpoint,
+                max_seq_len,
+                candidate_profile,
+                stock_profile,
+                bisect_into,
+                stock_model,
+                tokens,
+                decode_steps,
+                config,
+                budget,
+            )
+
+        if config:
+            print("accuracy: not judged, the golden is the full model's")
+        else:
+            print("accuracy against golden...")
+            stats, mismatches = run_accuracy(
+                candidate_model, stock_model.prompt(1024), accuracy_tokens
+            )
+            report["accuracy"] = {
+                **stats,
+                "top1_mismatches": mismatches,
+                "of": accuracy_tokens,
+            }
+            print(
+                f"accuracy: mean KL {stats['Mean']:.6f}  p90 {stats['P90']:.6f}  "
+                f"max {stats['Max']:.6f}  top-1 mismatches "
+                f"{mismatches}/{accuracy_tokens}"
+            )
+
+        print(f"speed: {speed_rounds} interleaved rounds...")
+        report["speed"] = speed(
+            stock_model, candidate_model, tokens, speed_tokens, speed_rounds
+        )
+        for label, s in report["speed"].items():
+            print(
+                f"[speed:{label}] TTFT min {s['ttft_min']:.4f}s median "
+                f"{s['ttft_median']:.4f}s | decode tok/s min {s['tps_min']:.2f} "
+                f"median {s['tps_median']:.2f}"
+            )
+    else:
+        label_to_version = dict(zip(version_labels(stock_model), stock_model.versions))
+        print(f"comparing {len(report['changed_versions'])} changed version(s)...")
+        report["versions"] = compare_versions(
+            model_class,
+            checkpoint,
+            max_seq_len,
+            stock_profile,
+            candidate_profile,
+            report["changed_versions"],
+            label_to_version,
+            config=config,
+        )
+        report["bit_identical"] = all(
+            v["bit_identical"] for v in report["versions"].values()
+        )
+        verdict = "OK" if report["bit_identical"] else "MISMATCH"
+        summary = ", ".join(
+            (
+                f"{label}: {v['delta_us']:+.1f} us"
+                if v["bit_identical"]
+                else f"{label}: MISMATCH"
+            )
+            for label, v in report["versions"].items()
+        )
+        print(f"[{verdict}] {model_class.__name__}: {summary}")
+    stock_model.release()
+    candidate_model.release()
+    return report
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "application", help="dotted under iron.applications (e.g. llama)"
+    )
+    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--candidate",
+        type=Path,
+        required=True,
+        help="a profile directory (one <device>.json per device) to validate "
+        "against the stock profile",
+    )
+    parser.add_argument(
+        "--stock",
+        type=Path,
+        default=None,
+        help="the profile directory the candidate is validated against "
+        "(default: the model's own)",
+    )
+    parser.add_argument("--max-seq-len", type=int, default=None)
+    config_argument(parser)
+    parser.add_argument("--prompt-chars", type=int, default=12000)
+    parser.add_argument("--decode-steps", type=int, default=32)
+    parser.add_argument("--accuracy-tokens", type=int, default=40)
+    parser.add_argument("--speed-tokens", type=int, default=32)
+    parser.add_argument("--speed-rounds", type=int, default=5)
+    parser.add_argument(
+        "--bisect",
+        action="store_true",
+        help="on a bit-identity mismatch, narrow it to the candidate's "
+        "profile entries at fault (bisect)",
+    )
+    parser.add_argument("--out", type=Path, default=Path("validate_report.json"))
+    parser.add_argument(
+        "--device",
+        choices=("npu1", "npu2"),
+        default=None,
+        help="bind this device explicitly (aie.iron.device.from_name); by "
+        "default the runtime's own, where one is already bound",
+    )
+    args = parser.parse_args(argv)
+
+    if args.device is not None:
+        aie_utils.set_current_device(from_name(args.device, n_cols=None))
+
+    model_class = application_model(args.application)
+    if args.bisect and not issubclass(model_class, CausalLM):
+        parser.error(
+            f"{args.application}'s model, {model_class.__name__}, is not a "
+            f"CausalLM: --bisect (narrowing a greedy-logits mismatch) is a "
+            f"decoder's"
+        )
+    report = {
+        "application": args.application,
+        **validate(
+            model_class,
+            args.checkpoint,
+            args.candidate,
+            args.stock,
+            max_seq_len=args.max_seq_len,
+            prompt_chars=args.prompt_chars,
+            decode_steps=args.decode_steps,
+            accuracy_tokens=args.accuracy_tokens,
+            speed_tokens=args.speed_tokens,
+            speed_rounds=args.speed_rounds,
+            bisect_into=args.out.parent if args.bisect else None,
+            config=dict(args.config),
+        ),
+    }
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(report, indent=2))
+    print(f"wrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()

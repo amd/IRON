@@ -211,7 +211,7 @@ def test_a_turn_runs_from_its_first_new_token(cpu):
     rng = np.random.default_rng(9)
     tokens = rng.integers(0, config.vocab_size, 300)
     model.logits(tokens)
-    before = np.array(model.model.layers[0].cache.keys.host)
+    before = np.array(model.model.layers[0].cache.kv.host)
     turn = np.concatenate([tokens[:270], rng.integers(0, config.vocab_size, 40)])
     session = model.session
     assert session.resume(session._held(turn)) == 270
@@ -220,7 +220,7 @@ def test_a_turn_runs_from_its_first_new_token(cpu):
     ]
     assert_close(model.logits(turn), reference.logits(turn))
     np.testing.assert_array_equal(
-        model.model.layers[0].cache.keys.host[:270], before[:270]
+        model.model.layers[0].cache.kv.host[:270], before[:270]
     )
 
 
