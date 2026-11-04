@@ -27,6 +27,7 @@ from urllib.parse import urlencode
 from pretty_common import (
     MEAN_SUFFIX,
     METRICS,
+    SUITE_SUBJECTS,
     UNKNOWN_METRIC,
     UNKNOWN_OPERATOR,
     comparable,
@@ -217,7 +218,7 @@ def build_report(
     `all_rows` holds the last two runs of each test. Their values reach a pull
     request comment, so every cell passes through `cell`. Given `history`, the
     website's Performance Checks page, each moved benchmark links to its history in
-    `suite` there.
+    `suite` there. `suite` also names what a row is (`SUITE_SUBJECTS`).
     """
     dates = sorted(
         {d for d in (parse_date(r, date_fmt) for r in all_rows) if d is not None}
@@ -251,18 +252,19 @@ def build_report(
     added = sorted(operators_now - operators_before - {UNKNOWN_OPERATOR})
     dropped = sorted(operators_before - operators_now - {UNKNOWN_OPERATOR})
 
+    subject = SUITE_SUBJECTS.get(suite, "Operator")
     out = ["# Performance trends", ""]
     if added:
-        out += [f"**Operators added:** {', '.join(cell(o) for o in added)}", ""]
+        out += [f"**{subject}s added:** {', '.join(cell(o) for o in added)}", ""]
     if dropped:
-        out += [f"**Operators dropped:** {', '.join(cell(o) for o in dropped)}", ""]
+        out += [f"**{subject}s dropped:** {', '.join(cell(o) for o in dropped)}", ""]
 
     if changes:
         fmt = f"{{:.{ndigits}f}}"
         out += [
             f"Benchmarks that moved by at least {threshold:g}%{gate(sigma)}:",
             "",
-            "| Operator | Parametrization | Metric | Previous | Current | Change |",
+            f"| {subject} | Parametrization | Metric | Previous | Current | Change |",
             "|---|---|---|---|---|---|",
         ]
         for operator, params, metric, prev_v, curr_v, pct in sorted(changes):

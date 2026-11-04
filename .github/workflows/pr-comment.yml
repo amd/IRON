@@ -83,23 +83,24 @@ jobs:
             const status = {};
             let foundAny = false;
 
+            // Every status: a run still going is reported pending, and its
+            // own completion triggers this workflow again to update the comment.
             const runs = await github.rest.actions.listWorkflowRunsForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
               head_sha: headSha,
-              status: 'completed',
               per_page: 100,
             });
 
             for (const [wf, name] of Object.entries(WORKFLOWS)) {
               const matching = runs.data.workflow_runs.filter(r => r.name === wf);
               if (matching.length === 0) {
-                core.info(`No completed run found for "${wf}" at ${headSha}`);
+                core.info(`No run found for "${wf}" at ${headSha}`);
                 continue;
               }
 
               const run = matching[0]; // most recent
-              core.info(`Found run ${run.id} for "${wf}" (${run.conclusion})`);
+              core.info(`Found run ${run.id} for "${wf}" (${run.status}, ${run.conclusion})`);
 
               // Each runner's job ends its name with the runner's.
               const jobs = await github.rest.actions.listJobsForWorkflowRun({
@@ -109,7 +110,8 @@ jobs:
               });
               for (const runner of RUNNERS) {
                 const job = jobs.data.jobs.find(j => j.name.toLowerCase().endsWith(` on ${runner}`));
-                status[`${runner}/${name}`] = job?.conclusion || 'unknown';
+                const done = job ? job.status === 'completed' : run.status === 'completed';
+                status[`${runner}/${name}`] = done ? (job?.conclusion || 'unknown') : 'pending';
               }
 
               const artifacts = await github.rest.actions.listWorkflowRunArtifacts({

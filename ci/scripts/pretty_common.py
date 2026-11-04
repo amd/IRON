@@ -127,6 +127,14 @@ SUITE_LABELS = {
     "nightly": "Applications, nightly",
 }
 
+# What a suite's report names each row's benchmark.
+SUITE_SUBJECTS = {
+    "small": "Operator",
+    "extensive": "Operator",
+    "examples": "Model",
+    "nightly": "Model",
+}
+
 # A pull request runs the default and the example suites. The extensive and
 # nightly suites run on a trunk branch alone, so no pull request reports them.
 PR_SUITES = ["small", "examples"]
