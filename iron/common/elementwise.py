@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Iterable, Mapping
-from typing import Any, ClassVar, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
+import aie.dialects.memref as memref
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
+from aie.helpers.util import np_ndarray_type_to_memref_type
 from aie.iron import Buffer, In, ObjectFifo, Out, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
@@ -194,57 +196,18 @@ class FinishStep:
         return self.consumer(**fields).resolved(dev)
 
 
-def finish_reference(
-    finish: tuple[FinishStep, ...], y: np.ndarray, extra: tuple, dev, line: int
-) -> np.ndarray:
-    """``y``, a producer's own output, through its finish chain on the host.
+class Finishing(Operator):
+    """An operator whose cores can run elementwise consumers on its output tile (``fold``).
 
-    Each step's reference over the tile, taking the next of ``extra`` where it reads
-    another input, as ``Finish.apply`` runs on the device. ``line`` is the producer's
-    own tile, which its finish's kernel matches.
-    """
-    given = iter(extra)
-    tile = np.ravel(y)
-    for step in finish:
-        consumer = step.consumer_at(line, dev, elements=tile.size)
-        args = [
-            tile if i == step.at else next(given) for i in range(len(consumer.inputs))
-        ]
-        tile = np.ravel(np.asarray(consumer.reference(*args)))
-    return tile.reshape(y.shape).astype(y.dtype, copy=False)
-
-
-class Elementwise(Operator):
-    """The array for an elementwise kernel over lines of ``tile_size`` elements.
-
-    Subclasses declare operands with the line as their tile, most split
-    over every core (``per=CORES``), and implement ``kernel``;
-    ``tile_cap`` is the longest line.
+    Its ``finish`` steps, each but at most one unary: its one free input channel is the
+    one binary step's (``finish0``, declared ``when=uses_extra``), or, ``rides``, a
+    stream of its own carries that input too.
     """
 
-    num_aie_columns: int = tunable(domain=widths)
-    num_channels: int = tunable(default=1, domain=widths)
-    tile_size: int = tunable(
-        domain=lambda op, dev, t: divisors(
-            t, of=op.outputs[0].elements, step=64, cap=op.tile_cap, span=3
-        ),
-    )
-
-    count = per_call(
-        derive=lambda op: ceildiv(op.valid_elements, op.cores * op.tile_size),
-    )
-
-    # A chain of steps folded into this one's cores, its output their tile,
-    # each but at most one unary: its one free input channel is the one
-    # binary step's, or, a channel-full producer, its first input's own.
-    finish: tuple[FinishStep, ...] = param(default=(), array=True)
-    # A plain default, not derived: shim_columns() reads it from the class
-    # alone (a Sweep's cases), before any instance exists to derive it from.
-    uses_extra: bool = param(default=False)
-    rides: bool = param(default=False, array=True)
-
-    default_tile: ClassVar[int] = DEFAULT_TILE
-    tile_cap: ClassVar[int] = 4096
+    if TYPE_CHECKING:
+        finish: tuple[FinishStep, ...]
+        uses_extra: bool
+        rides: bool
 
     def validate(self) -> None:
         if sum(f.binary for f in self.finish) > 1:
@@ -254,18 +217,8 @@ class Elementwise(Operator):
             )
 
     def _can_ride(self) -> bool:
-        """Whether this producer's first input could carry a finish's other input beside its own.
-
-        No per-call bound to chunk around, and exactly one tile a lane, so a single
-        extra transfer a lane suffices (the general multi-tile case needs its own
-        re-read chunking, not this).
-        """
-        if self.bound_extents or not self.inputs:
-            return False
-        try:
-            return self.lines == self.cores
-        except (TypeError, ZeroDivisionError):
-            return False
+        """Whether a stream of its own could carry a finish's other input beside its own."""
+        raise NotImplementedError(f"{type(self).__name__} declares no _can_ride()")
 
     def fold(self, consumer: Operator, at: int) -> Self | None:
         # A row-wise consumer reads whole rows, not the tiles a finish step runs on.
@@ -311,6 +264,173 @@ class Elementwise(Operator):
             finish=self.finish + (step,),
             uses_extra=self.uses_extra or binary,
         )
+
+
+class Finish:
+    """A producer's finish chain as its cores run it, over its first output's tile.
+
+    Each step's kernel runs on the tile the call before it wrote, ping-ponging between
+    two scratch buffers until the last writes the output tile. A binary step's other
+    input streams in on ``finish0``, or rides a fifo of the producer's own.
+
+    Args:
+        producer: The operator whose cores run it; built with none, it is empty.
+        line: The elements of the tile each step's kernel runs on.
+    """
+
+    def __init__(self, producer: Finishing, line: int) -> None:
+        self.line = line
+        out = producer.outputs[0]
+        finish0 = next(
+            (b for b in producer.inputs if b.name == "finish0" and b.streamed), None
+        )
+        self.fifos = None if finish0 is None else finish0.fifos(finish0.l1_depth)
+        self.kernels = []
+        self.calls = []
+        for step in producer.finish:
+            consumer = step.consumer_at(line, producer.dev)
+            kernel = consumer.layout().kernel()
+            positions, scalars = consumer.arguments(
+                kernel, consumer.scalars(), len(consumer.inputs), 1
+            )
+            self.kernels.append(kernel)
+            self.calls.append((positions, scalars, step.at, step.binary))
+        # A second scratch buffer, to ping-pong, only past one step: an L1 line
+        # this core otherwise never holds at once.
+        self.scratch = [
+            [Buffer(out.obj_type) for _ in range(out.lanes)]
+            for _ in range(min(len(self.calls), 2))
+        ]
+        self.width = len(self.args(0))
+
+    def args(self, lane: int) -> list:
+        """Return what lane ``lane``'s worker takes for the chain: ``finish0``'s end, the kernels, the scratch."""
+        own = [] if self.fifos is None else [self.fifos[lane]]
+        return own + self.kernels + [s[lane] for s in self.scratch]
+
+    def target(self, chain: tuple, out: Any) -> Any:
+        """Return the tile the producer's own kernel writes: the first scratch buffer, else ``out``."""
+        return chain[-len(self.scratch)] if self.scratch else out
+
+    def run(self, chain: tuple, out: Any, ridden: Any = None, cast: bool = False):
+        """Run each step in a core, the last writing ``out``.
+
+        Args:
+            chain: The core's arguments ``args`` gave its worker.
+            out: The output tile.
+            ridden: The producer's fifo a binary step's other input rides, if it rides.
+            cast: A ridden element holds more than one tile; the step reads its first.
+        """
+        if not self.calls:
+            return
+        source = ridden if ridden is not None else (chain[0] if self.fifos else None)
+        fns = chain[
+            len(chain) - len(self.scratch) - len(self.kernels) : -len(self.scratch)
+        ]
+        scratch = chain[-len(self.scratch) :]
+        tile = scratch[0]
+        for idx, (fn, (positions, scalars, at, binary)) in enumerate(
+            zip(fns, self.calls)
+        ):
+            last = idx == len(self.calls) - 1
+            dst = out if last else (scratch[1] if tile is scratch[0] else scratch[0])
+            extra = None
+            if binary:
+                assert source is not None, "the ridden fifo or finish0's own"
+                extra = source.acquire(1)
+                if cast:
+                    extra = memref.reinterpret_cast(
+                        np_ndarray_type_to_memref_type(
+                            np.ndarray[(self.line,), np.dtype[bfloat16]]
+                        ),
+                        extra,
+                        [],
+                        [],
+                        [],
+                        [0],
+                        [self.line],
+                        [1],
+                    )
+            order = {i: j for j, i in enumerate(positions)}
+            elements = [tile if i == at else extra for i in range(len(positions) - 1)]
+            elements.append(dst)
+            fn(
+                *(
+                    elements[order[i]] if i in order else scalars[i]
+                    for i in range(len(positions) + len(scalars))
+                )
+            )
+            if binary:
+                assert source is not None, "the ridden fifo or finish0's own"
+                source.release(1)
+            tile = dst
+
+
+def finish_reference(
+    finish: tuple[FinishStep, ...], y: np.ndarray, extra: tuple, dev, line: int
+) -> np.ndarray:
+    """``y``, a producer's own output, through its finish chain on the host.
+
+    Each step's reference over the tile, taking the next of ``extra`` where it reads
+    another input, as ``Finish.apply`` runs on the device. ``line`` is the producer's
+    own tile, which its finish's kernel matches.
+    """
+    given = iter(extra)
+    tile = np.ravel(y)
+    for step in finish:
+        consumer = step.consumer_at(line, dev, elements=tile.size)
+        args = [
+            tile if i == step.at else next(given) for i in range(len(consumer.inputs))
+        ]
+        tile = np.ravel(np.asarray(consumer.reference(*args)))
+    return tile.reshape(y.shape).astype(y.dtype, copy=False)
+
+
+class Elementwise(Finishing):
+    """The array for an elementwise kernel over lines of ``tile_size`` elements.
+
+    Subclasses declare operands with the line as their tile, most split
+    over every core (``per=CORES``), and implement ``kernel``;
+    ``tile_cap`` is the longest line.
+    """
+
+    num_aie_columns: int = tunable(domain=widths)
+    num_channels: int = tunable(default=1, domain=widths)
+    tile_size: int = tunable(
+        domain=lambda op, dev, t: divisors(
+            t, of=op.outputs[0].elements, step=64, cap=op.tile_cap, span=3
+        ),
+    )
+
+    count = per_call(
+        derive=lambda op: ceildiv(op.valid_elements, op.cores * op.tile_size),
+    )
+
+    # A chain of steps folded into this one's cores, its output their tile,
+    # each but at most one unary: its one free input channel is the one
+    # binary step's, or, a channel-full producer, its first input's own.
+    finish: tuple[FinishStep, ...] = param(default=(), array=True)
+    # A plain default, not derived: shim_columns() reads it from the class
+    # alone (a Sweep's cases), before any instance exists to derive it from.
+    uses_extra: bool = param(default=False)
+    rides: bool = param(default=False, array=True)
+
+    default_tile: ClassVar[int] = DEFAULT_TILE
+    tile_cap: ClassVar[int] = 4096
+
+    def _can_ride(self) -> bool:
+        """Whether this producer's first input could carry a finish's other input beside its own.
+
+        No per-call bound to chunk around, and exactly one tile a lane, so a single
+        extra transfer a lane suffices (the general multi-tile case needs its own
+        re-read chunking, not this).
+        """
+        if self.bound_extents or not self.inputs:
+            return False
+        try:
+            return self.lines == self.cores
+        except (TypeError, ZeroDivisionError):
+            return False
 
     def resolve(self, dev) -> Self:
         (out,) = self.outputs
@@ -596,8 +716,7 @@ class Elementwise(Operator):
 
     def build(self) -> Built:
         streams = [b for b in self.buffers if b.streamed]
-        finish_in = next((b for b in streams if b.name == "finish0"), None)
-        ins = [b for b in streams if b.role is In and b is not finish_in]
+        ins = [b for b in streams if b.role is In and b.name != "finish0"]
         outs = [b for b in streams if b.drains]
         n_in = len(ins)
         cores = self.cores
@@ -605,119 +724,36 @@ class Elementwise(Operator):
         positions, scalars = self.arguments(kernel, self.scalars(), n_in, len(outs))
         order = {i: k for k, i in enumerate(positions)}
         n_args = len(positions) + len(scalars)
-
-        def slot(k: int) -> str:
-            col, chan = divmod(k, self.num_channels)
-            return f"{col}" if self.num_channels == 1 else f"{col}_{chan}"
-
         segments = self.held_segments()
 
         # A held line, acquired once per call, is one fifo per lane, every
         # core of the lane taking its own cons() (fifos()'s readers=); feed()
         # refuses a held input, so a fed one is never replicate.
         of_ins = [
-            s.fifos(segments, readers=cores // s.lanes) if s.replicate else s.fifos()
+            (
+                s.fifos(segments, readers=cores // s.lanes)
+                if s.replicate
+                else s.fifos(s.l1_depth)
+            )
             for s in ins
         ]
-        of_outs = [s.fifos() for s in outs]
+        of_outs = [s.fifos(s.l1_depth) for s in outs]
         rtps = [Rtp([self.count]) for _ in range(cores)]
         n_fifos = n_in + len(outs)
         held = [s.replicate for s in ins] + [False] * len(outs)
-
-        def core_fn(*args):
-            fifos = args[:n_fifos]
-            kernel_fn, rtp = args[n_fifos:]
-            n = rtp.read()[self.count]
-            kept = {j: f.acquire(segments) for j, f in enumerate(fifos) if held[j]}
-            for _ in range_(n):
-                for s in range(segments):
-                    elements = [
-                        (
-                            (kept[j] if segments == 1 else kept[j][s])
-                            if held[j]
-                            else f.acquire(1)
-                        )
-                        for j, f in enumerate(fifos)
-                    ]
-                    kernel_fn(
-                        *(
-                            elements[order[i]] if i in order else scalars[i]
-                            for i in range(n_args)
-                        )
-                    )
-                    for j, f in enumerate(fifos):
-                        if not held[j]:
-                            f.release(1)
-            for j in kept:
-                fifos[j].release(segments)
-
-        if not self.finish:
-            workers = [
-                Worker(
-                    core_fn,
-                    [
-                        (
-                            of[k % len(of)][k // len(of)]
-                            if s.replicate
-                            else of[k % len(of)]
-                        )
-                        for s, of in zip(ins, of_ins)
-                    ]
-                    + [of[k] for of in of_outs]
-                    + [kernel, rtps[k]],
-                )
-                for k in range(cores)
-            ]
-            return Built(workers, rtps)
-
-        # The chain of steps folded into these cores: each kernel runs after
-        # the one before it, over the tile the previous call wrote; it
-        # ping-pongs between two scratch buffers until the last call writes
-        # the real output. At most one step's other input, if any, streams
-        # in on finish_in, or, this producer's cores already full, rides
-        # its first input's own stream, one more acquire of the same fifo.
-        of_finish = finish_in.fifos() if finish_in is not None else None
-        ride_index = (
+        finish = Finish(self, self.tile_size)
+        # Riding, a finish's other input is one more acquire of the first input's fifo.
+        ride = (
             next(i for i, b in enumerate(ins) if b is self.inputs[0])
             if self.rides
             else None
         )
-        chain_meta = []
-        chain_kernels = []
-        for step in self.finish:
-            consumer = step.consumer_at(self.tile_size, self.dev)
-            c_kernel = consumer.layout().kernel()
-            c_positions, c_scalars = consumer.arguments(
-                c_kernel, consumer.scalars(), len(consumer.inputs), 1
-            )
-            c_order = {i: j for j, i in enumerate(c_positions)}
-            n_c_args = len(c_positions) + len(c_scalars)
-            chain_kernels.append(c_kernel)
-            chain_meta.append(
-                (c_positions, c_scalars, c_order, n_c_args, step.at, step.binary)
-            )
-        # A second scratch buffer, to ping-pong, only past one finish step:
-        # an L1 line this core otherwise never holds at once.
-        scratch_as = [Buffer(self.outputs[0].obj_type) for _ in range(cores)]
-        scratch_bs = (
-            [Buffer(self.outputs[0].obj_type) for _ in range(cores)]
-            if len(chain_meta) > 1
-            else None
-        )
 
-        def core_fn_chain(*args):
+        def core_fn(*args):
             fifos = args[:n_fifos]
-            tail = args[n_fifos:]
-            finish_fifo = tail[0] if of_finish is not None else None
-            tail = tail[1:] if of_finish is not None else tail
-            kernel_fn = tail[0]
-            chain_fns = tail[1 : 1 + len(chain_meta)]
-            tail = tail[1 + len(chain_meta) :]
-            if scratch_bs is not None:
-                scratch_a, scratch_b, rtp = tail
-            else:
-                scratch_a, rtp = tail
-                scratch_b = None
+            kernel_fn = args[n_fifos]
+            chain = args[n_fifos + 1 : -1]
+            rtp = args[-1]
             n = rtp.read()[self.count]
             kept = {j: f.acquire(segments) for j, f in enumerate(fifos) if held[j]}
             for _ in range_(n):
@@ -731,70 +767,37 @@ class Elementwise(Operator):
                         for j, f in enumerate(fifos)
                     ]
                     targets = list(elements)
-                    targets[n_in] = scratch_a
+                    targets[n_in] = finish.target(chain, elements[n_in])
                     kernel_fn(
                         *(
                             targets[order[i]] if i in order else scalars[i]
                             for i in range(n_args)
                         )
                     )
-                    # Released here, not in the loop below: a finish step
-                    # rides this same fifo for its own transfer next, and
-                    # acquiring it again before releasing a's would be
-                    # cumulative on the same outstanding acquire, not a new
-                    # one.
-                    if ride_index is not None and not held[ride_index]:
-                        fifos[ride_index].release(1)
-                    tile = scratch_a
-                    for idx, (c_fn, meta) in enumerate(zip(chain_fns, chain_meta)):
-                        c_positions, c_scalars, c_order, n_c_args, at, binary = meta
-                        last = idx == len(chain_meta) - 1
-                        dst = (
-                            elements[n_in]
-                            if last
-                            else (scratch_b if tile is scratch_a else scratch_a)
-                        )
-                        extra = None
-                        source = (
-                            fifos[ride_index] if ride_index is not None else finish_fifo
-                        )
-                        if binary:
-                            assert source is not None, "the ridden fifo or its own"
-                            extra = source.acquire(1)
-                        c_inputs = [
-                            tile if i == at else extra
-                            for i in range(len(c_positions) - 1)
-                        ]
-                        c_elements = c_inputs + [dst]
-                        c_fn(
-                            *(
-                                c_elements[c_order[i]] if i in c_order else c_scalars[i]
-                                for i in range(n_c_args)
-                            )
-                        )
-                        if binary:
-                            assert source is not None, "the ridden fifo or its own"
-                            source.release(1)
-                        tile = dst
+                    # Released before the chain: a step riding this fifo
+                    # acquires it again, which before this release would be
+                    # cumulative on the same outstanding acquire, not a new one.
+                    if ride is not None and not held[ride]:
+                        fifos[ride].release(1)
+                    finish.run(
+                        chain, elements[n_in], None if ride is None else fifos[ride]
+                    )
                     for j, f in enumerate(fifos):
-                        if not held[j] and j != ride_index:
+                        if not held[j] and j != ride:
                             f.release(1)
             for j in kept:
                 fifos[j].release(segments)
 
         workers = [
             Worker(
-                core_fn_chain,
+                core_fn,
                 [
                     (of[k % len(of)][k // len(of)] if s.replicate else of[k % len(of)])
                     for s, of in zip(ins, of_ins)
                 ]
                 + [of[k] for of in of_outs]
-                + ([of_finish[k]] if of_finish is not None else [])
                 + [kernel]
-                + chain_kernels
-                + [scratch_as[k]]
-                + ([scratch_bs[k]] if scratch_bs is not None else [])
+                + finish.args(k)
                 + [rtps[k]],
             )
             for k in range(cores)
