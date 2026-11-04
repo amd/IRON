@@ -10,8 +10,9 @@ xclbin per step each dispatch's (a packing's steps in a row run as one).
 Every end-to-end check of a packing adds a sample (how its features and its
 time beyond its steps moved), and the terms are refitted, pulled toward
 their prior by ``PRIOR_WEIGHT`` samples' worth so a few samples cannot throw
-them far. ``costs/<device>.json`` beside this module is the model a tune
-starts from and writes back, so one device's tunes bootstrap the next.
+them far. A tune writes its refit to ``<device>.json`` under the NPU cache
+(``NPU_CACHE_HOME/iron/costs``), so one device's tunes bootstrap the next;
+``costs/<device>.json`` beside this module seeds a device without one.
 """
 
 from __future__ import annotations
@@ -22,6 +23,9 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
+from aie.utils.compile import NPU_CACHE_HOME
+
+from .measure import write
 
 FEATURES = ("switches", "switch_cores", "packed_steps", "dispatches")
 # npu2 (Strix Halo, turbo): a 1-core design alternated with designs of 1 to
@@ -34,7 +38,8 @@ PRIOR = {
     "dispatches": 123.0,
 }
 PRIOR_WEIGHT = 3.0
-COSTS = Path(__file__).with_name("costs")
+SEEDS = Path(__file__).with_name("costs")
+REFITS = Path(NPU_CACHE_HOME) / "iron" / "costs"
 
 
 @dataclasses.dataclass
@@ -75,9 +80,11 @@ class CostModel:
         self.terms = {f: float(v) for f, v in zip(FEATURES, fitted)}
 
     @classmethod
-    def load(cls, device: str, directory: Path = COSTS) -> CostModel | None:
-        """``device``'s model, or None where none is kept."""
+    def load(cls, device: str, directory: Path = REFITS) -> CostModel | None:
+        """``device``'s refit in ``directory``, else its packaged seed, else None."""
         path = Path(directory) / f"{device}.json"
+        if not path.exists():
+            path = SEEDS / f"{device}.json"
         if not path.exists():
             return None
         data = json.loads(path.read_text())
@@ -87,11 +94,10 @@ class CostModel:
             prior=data["prior"],
         )
 
-    def save(self, device: str, directory: Path = COSTS) -> Path:
-        """Write ``device``'s model; return its path."""
+    def save(self, device: str, directory: Path = REFITS) -> Path:
+        """Write ``device``'s model to ``directory``; return its path."""
         path = Path(directory) / f"{device}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
         samples = [{"change": c, "extra_us": t} for c, t in self.samples]
         data = {"terms": self.terms, "prior": self.prior, "samples": samples}
-        path.write_text(json.dumps(data, indent=1) + "\n")
+        write(path, json.dumps(data, indent=1) + "\n")
         return path

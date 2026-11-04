@@ -267,8 +267,9 @@ values, weights, state and profiles are named. The rules:
   bit-identical and faster end to end, and applying it in another version
   only where that version is faster with it too. Its estimate of what a grouping
   costs beyond its steps' own times is a per-device model
-  (`iron/tune/costs/<device>.json`) every end-to-end check refits and a
-  tune writes back, so one device's tunes start from the last. With
+  every end-to-end check refits, seeded from `iron/tune/costs/<device>.json`
+  and written back to `$NPU_CACHE_HOME/iron/costs/<device>.json`, so one
+  device's tunes start from the last. With
   `--record-failures` a tune keeps each compiler crash, build failure,
   hang or mismatch it hits in this machine's ledger with a repro;
   `python -m iron.tune.failures --recheck` tries them again with the

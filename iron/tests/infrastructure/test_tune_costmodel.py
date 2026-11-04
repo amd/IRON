@@ -6,9 +6,14 @@
 Its prior, its fit to samples, and its file.
 """
 
-import pytest
+import hashlib
+import inspect
+from pathlib import Path
 
-from iron.tune.costmodel import PRIOR, CostModel
+import pytest
+from aie.utils.compile import NPU_CACHE_HOME
+
+from iron.tune.costmodel import PRIOR, SEEDS, CostModel
 
 
 def test_a_model_without_samples_predicts_by_its_prior():
@@ -37,6 +42,20 @@ def test_a_model_round_trips_through_its_file(tmp_path):
     loaded = CostModel.load("npu2", tmp_path)
     assert loaded == model
     assert CostModel.load("npu1", tmp_path) is None
+
+
+def test_a_refit_is_kept_in_the_cache_and_the_packaged_seed_is_untouched(tmp_path):
+    seed = SEEDS / "npu2.json"
+    before = hashlib.sha256(seed.read_bytes()).hexdigest()
+    packaged = CostModel.load("npu2", tmp_path)
+    assert packaged is not None and packaged == CostModel.load("npu2", SEEDS)
+    refit = CostModel(packaged.terms, list(packaged.samples), packaged.prior)
+    refit.add({"switches": -4, "switch_cores": -20, "packed_steps": 8}, -300.0)
+    assert refit.save("npu2", tmp_path) == tmp_path / "npu2.json"
+    assert CostModel.load("npu2", tmp_path) == refit
+    assert hashlib.sha256(seed.read_bytes()).hexdigest() == before
+    default = inspect.signature(CostModel.save).parameters["directory"].default
+    assert default == Path(NPU_CACHE_HOME) / "iron" / "costs"
 
 
 def test_a_calibrated_model_is_pulled_toward_its_measured_switch():
