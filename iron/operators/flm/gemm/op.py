@@ -87,6 +87,7 @@ class _BPool(NamedTuple):
     queue: int  # entries in a DMA channel's task queue, shim or memtile
     lock_max: int  # the largest value a lock holds
     passes: int  # passes one queue push makes over a memtile chain
+    bds: int  # runtime BD ids B's two memtile channels share
 
 
 # The kernel's clamp bounds as the int32 bit patterns the parameter words
@@ -744,6 +745,7 @@ class ProjectionGEMM(Operator):
             queue=tm.get_dma_task_queue_depth(),
             lock_max=tm.get_max_lock_value(),
             passes=tm.get_max_repeat_count() + 1,
+            bds=self._b_bds,
         )
 
         # Data, not an immediate folded into the program: the core programs
@@ -937,6 +939,23 @@ class ProjectionGEMM(Operator):
         )
 
     @property
+    def _b_bds(self) -> int:
+        """Return the runtime BD ids B's memtile fill and drain chains share.
+
+        A memtile channel reaches only its parity's half of the BD ids, and
+        B's two channels share theirs with one C join's ends. Past it, aiecc
+        reclaims a live fill's ids behind a poll that never returns.
+        """
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable(
+                "flm.ProjectionGEMM: B's memtile BD ids are per device; none is bound"
+            )
+        tm = get_target_model(dev.resolve())
+        row = next(r for r in range(tm.rows()) if tm.is_mem_tile(0, r))
+        return tm.get_num_bds(0, row) // 2 - 2 * C_DEPTH * (self.rows // self.joins)
+
+    @property
     def _b_resident(self) -> bool:
         """Whether a column-block of B stays in the memtile for all of M's units."""
         dev = self.dev
@@ -945,19 +964,26 @@ class ProjectionGEMM(Operator):
                 "flm.ProjectionGEMM: B's residency depends on the device; none is bound"
             )
         lock_max = get_target_model(dev.resolve()).get_max_lock_value()
-        return self._k_iters <= self._b_slots and self._n_units <= lock_max
+        # Fill and drain chains, and a bound's peeks.
+        chains = 3 if "valid" in self.bound_extents else 2
+        return (
+            self._k_iters <= self._b_slots
+            and self._n_units <= lock_max
+            and chains * self._k_iters <= self._b_bds
+        )
 
     @property
     def _b_ring(self) -> int:
         """Return the slots B's memtile ring uses under a bound.
 
         Every k tile where B is resident, else the most that one unit's k
-        tiles fill whole, so that a call's ring passes follow the units it
-        reaches.
+        tiles fill whole and B's BD ids hold, so that a call's ring passes
+        follow the units it reaches.
         """
         if self._b_resident:
             return self._k_iters
-        return max(s for s in range(1, self._b_slots + 1) if self._k_iters % s == 0)
+        most = min(self._b_slots, self._b_bds // 2)
+        return max(s for s in range(1, most + 1) if self._k_iters % s == 0)
 
     def sequence(self, rt):
         M, K, N = self.M, self.K, self.N
@@ -967,6 +993,12 @@ class ProjectionGEMM(Operator):
         pool = rt.built.b_pool
         B_SLOTS, b_slot_elems = pool.slots, pool.slot_elems
         bounded = "valid" in self.bound_extents
+        # Resident, B's chains are fill and drain, and a bound's peeks; each
+        # holds a BD id per slot (_b_bds).
+        fits_resident = k_iters <= B_SLOTS and (
+            (3 if bounded else 2) * k_iters <= pool.bds
+        )
+        ring_slots = min(B_SLOTS, pool.bds // 2)
         # Sweeps where all COLS columns have work, plus a trailing group of
         # rem_blocks columns (0 <= rem_blocks < COLS) that do one block more.
         n_full = N // (N_TILE * COLS)
@@ -1013,7 +1045,7 @@ class ProjectionGEMM(Operator):
 
             Armed at once.
             """
-            if k_iters <= B_SLOTS and units <= pool.lock_max:
+            if fits_resident and units <= pool.lock_max:
                 resident, b_slots, b_uses = True, k_iters, 1 if bounded else units
             elif bounded:
                 # Streamed under a bound, the ring passes follow the units
@@ -1023,7 +1055,7 @@ class ProjectionGEMM(Operator):
                 # Streamed, a chain pass must cover whole units, so the ring
                 # must divide what one takes.
                 b_slots = max(
-                    s for s in range(1, B_SLOTS + 1) if (units * k_iters) % s == 0
+                    s for s in range(1, ring_slots + 1) if (units * k_iters) % s == 0
                 )
                 resident, b_uses = False, 1
             return _Slab(first, units, resident, b_slots, b_uses)
@@ -1063,7 +1095,7 @@ class ProjectionGEMM(Operator):
         for n_slabs in range(1, n_units + 1):
             slabs = cut(n_slabs)
             if all(map(slab_fits, slabs)) and (
-                k_iters > B_SLOTS or all(s.b_resident for s in slabs)
+                not fits_resident or all(s.b_resident for s in slabs)
             ):
                 break
         else:
@@ -1339,11 +1371,13 @@ class ProjectionGEMM(Operator):
         tm = get_target_model(dev.resolve())
         queue, passes_cap = tm.get_dma_task_queue_depth(), tm.get_max_repeat_count() + 1
         k_iters, n_units, b_slots = self._k_iters, self._n_units, self._b_slots
+        bds = self._b_bds
         if self._b_resident:
             passes = (1, n_units)
-        elif k_iters > b_slots:
+        elif k_iters > b_slots or 2 * k_iters > bds:
+            ring_slots = min(b_slots, bds // 2)
             divisor = max(
-                s for s in range(1, b_slots + 1) if (n_units * k_iters) % s == 0
+                s for s in range(1, ring_slots + 1) if (n_units * k_iters) % s == 0
             )
             passes = (n_units * k_iters // divisor,) * 2
         else:
