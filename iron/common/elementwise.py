@@ -174,12 +174,11 @@ class FinishStep:
     binary: bool
 
     def consumer_at(self, line: int, dev, elements: int | None = None) -> Elementwise:
-        """``consumer`` whose cores run a ``line``-element tile, the producer's own (so its kernel matches), resolved for ``dev``.
+        """Return ``consumer``, resolved for ``dev``, whose cores run a ``line``-element tile matching the producer's own.
 
-        Sized to run on ``elements`` total, or one tile alone where None (a build's own
-        kernel, which never reads more than one). A one-core grid, where ``consumer``
-        takes it as a constructor argument; some (``SiLU``'s ``num_channels``) fix it
-        instead.
+        Sized to run on ``elements`` total, or one tile alone where None. A one-core
+        grid, where ``consumer`` takes it as a constructor argument; some (``SiLU``'s
+        ``num_channels``) fix it instead.
         """
         params = self.consumer.declaration.params
         one = {
@@ -372,7 +371,7 @@ def finish_reference(
     """``y``, a producer's own output, through its finish chain on the host.
 
     Each step's reference over the tile, taking the next of ``extra`` where it reads
-    another input, as ``Finish.apply`` runs on the device. ``line`` is the producer's
+    another input, as ``Finish.run`` runs on the device. ``line`` is the producer's
     own tile, which its finish's kernel matches.
     """
     given = iter(extra)

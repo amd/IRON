@@ -544,9 +544,9 @@ class Recording:
         return returned, carry
 
     def code_weights(self) -> None:
-        """Encode every coded weight, a thread each, and give a weight that a coded read no longer leaves any step reading uncoded no buffer of its own.
+        """Encode every coded weight, a thread each, falling a refused one back to reading it plain.
 
-        What a compile runs, and a reference, which reads the weights themselves, does
+        What a compile runs; a reference, which reads the weights themselves, does
         not. A weight with a row past its capacity is read plain instead, with a
         warning: a profile keyed by shape may meet a checkpoint whose weights its
         capacity does not hold.

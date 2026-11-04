@@ -575,7 +575,7 @@ class Packer:
                 return groups, score
 
     def members(self, group: Group) -> list:
-        """``group`` as a packing entry's members (``Profile.add_packing``).
+        """Return ``group`` as a packing entry's members (``Profile.add_packing``).
 
         Each shape once, at its unit's setting, named without the dimensions a host
         sizes (``Timed.varying``) wherever the shape is still the only one of the
@@ -633,22 +633,20 @@ def price_packings(
     refused: dict[frozenset, str] | None = None,
     memo: dict[tuple[Hashable, Hashable], Compared] | None = None,
 ) -> Profile:
-    """``profile`` with a packing entry for each group of arrays a version gains from sharing one device configuration (``Packer``).
+    """Return ``profile`` with a packing entry for each group of arrays a version gains from sharing one device configuration (``Packer``).
 
-    Its members' settings in it, applying in that version; a version whose grouping does
-    not gain end to end, beyond the noise, adds none. Each entry then applies in another
-    version it matches only where that version gains from it too (``widen_packings``).
-    A version searched keeps ``profile``'s own packings for it unless a grouping is
-    faster end to end than they are (an unscoped one beaten still applies in every
-    other version of the graph, ``Timed.versions``); every other entry (another graph's,
-    ``_foreign``, so one profile can hold several models' packings, or one scoped to
-    versions not searched) is kept as it is. A version whose every switch, priced by
-    ``model``, costs under ``MIN_SWITCH_SHARE`` of its steps' own time is not searched.
+    A version whose grouping does not gain end to end, beyond the noise, adds none;
+    each entry found then also applies in another version it matches, where that
+    version gains from it too (``widen_packings``). A version searched keeps
+    ``profile``'s own packings unless a grouping beats them end to end; every other
+    entry (another graph's, or one scoped to versions not searched) is kept as it is.
+    A version whose every switch, priced by ``model``, costs under
+    ``MIN_SWITCH_SHARE`` of its steps' own time is not searched.
 
-    A grouping whose version does not build, hangs, is not bit-identical or
-    cannot be timed is refused and the version searched again without it,
-    until one is kept or none packs; a version ``profile`` itself does not build
-    is not searched. Each is recorded in ``ledger`` where one is given.
+    A grouping whose version does not build, hangs, is not bit-identical or cannot be
+    timed is refused and the version searched again without it, until one is kept or
+    none packs; a version ``profile`` itself does not build is not searched. Each
+    refusal is recorded in ``ledger`` where one is given.
 
     Args:
         calls: The calls whose versions are packed.
@@ -946,19 +944,16 @@ def price_folds_before_packing(
 
     The folds are ``iron.tune.fold.fold_profile``'s, scoped so a fold never splits a
     device array a call site that does not take it still shares, and to the graph
-    versions it was found in; packed by ``price_packings``, so the search groups the
-    same folded step list ``apply_profile`` builds from at build time. Kept per
-    version, the way ``widen_packings`` decides a packing entry's own widening:
-    a version keeps its folds only where it, folded and packed, beats ``profile`` as it
-    stands (its own packings, or none) end to end (``compare_graphs``); one that does
-    not gain, or does not build, hangs or is not bit-identical folded (recorded in
-    ``ledger``), keeps the profile as it stood instead, its own fold entries narrowed back
-    out rather than the whole packed result discarded (``_narrow_for_rejected``), and
-    its packings searched again without them (``_rejoin``): the ones found on its folded
-    steps were never priced unfolded. The plain ``price_packings`` search on ``profile``
-    alone runs, and its result is returned, where folding admits nothing at all. The
-    fold entries this adds are the tuner's own proposal, not Erika's (``chosen_folds``
-    still takes any a hand-written profile names, unscoped).
+    versions it was found in; packed by ``price_packings``. A version keeps its folds
+    only where it, folded and packed, beats ``profile`` as it stands end to end
+    (``compare_graphs``); one that does not gain, or does not build, hangs or is not
+    bit-identical folded (recorded in ``ledger``) keeps the profile as it stood instead,
+    its fold entries narrowed back out (``_narrow_for_rejected``) and its packings
+    searched again without them (``_rejoin``), since the ones found on its folded steps
+    were never priced unfolded. The plain ``price_packings`` search on ``profile`` alone
+    runs, and its result is returned, where folding admits nothing at all. The fold
+    entries this adds are the tuner's own proposal, not a hand-written profile's
+    (``chosen_folds`` still takes any such profile names, unscoped).
     """
     with_folds = fold_profile(profile, calls)
     refused: dict[frozenset, str] = {}
@@ -1112,7 +1107,7 @@ def widen_packings(
     memo: dict[tuple[Hashable, Hashable], Compared] | None = None,
     cap_s: float = math.inf,
 ) -> Profile:
-    """``profile`` with each packing entry that names its versions applying also in each version of ``calls`` it matches but does not name.
+    """Return ``profile`` with each packing entry that names its versions applying also in each version of ``calls`` it matches but does not name.
 
     Where that version, built with them, is faster end to end beyond the noise;
     elsewhere, or where it does not build, hangs or is not bit-identical with them

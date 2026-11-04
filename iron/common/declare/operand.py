@@ -41,13 +41,11 @@ class Operand:
 
     The resolved ``In``, ``Out`` or ``InOut``, read through on use (a shape may follow a
     tunable), and its bound ``lane_handles``. An ``InOut`` keeps what its stream does
-    not drain. ``lane_fifos`` is the ``ObjectFifo`` ``fifos()`` made each lane from,
-    kept past binding so a fed consumer with several readers, or ``fifos()`` asked for
-    several, can add more ends to the one already bound.
+    not drain. ``lane_fifos`` holds the fifos ``fifos()`` made for each lane, kept past
+    binding so another reader can add more ends to one already bound.
 
-    A fed input reads ``fed_from``'s lanes, or, ``staged``, the fifo a
-    ``Staging`` restaged them into for each of its lanes; an output lists
-    every input it ``feeds``.
+    A fed input reads ``fed_from``'s lanes, or ``staged`` fifos where ``Staging``
+    restaged them; an output lists every input it ``feeds``.
     """
 
     def __init__(self, member: Any, op: Operator) -> None:
@@ -172,27 +170,22 @@ class Operand:
         obj_type: Any = None,
         **objectfifo_kwargs: Any,
     ) -> list[Any]:
-        """Return a fifo per lane, ``depth`` deep (else ``l1_depth``), of ``obj_type`` (else this operand's own), bound as this operand's lanes.
+        """Return a fifo per lane, bound as this operand's lanes.
 
         Plain (``readers=None``, ``tiles=None``), returns the build's end of each: an
-        input's consumer end, an output's producer end.
+        input's consumer end, an output's producer end. A fed input gets its source's
+        ends or fifos the same way, through ``Operand.reader``; a ``staged`` input
+        reads fifos built for it.
 
-        ``readers`` several consumer ends a lane instead of one -- a lane
-        several cores read -- each lane then its own list of them (even at
-        ``readers=1``, so a caller that always indexes a lane's list need not
-        special-case one reader), not a bare end; refused on an output, which
-        has one producer. ``tiles`` places each lane's host end (the shim
-        tile its runtime transfer binds to) and, since placement is usually
-        followed by more of the fifo's own wiring (a ``split()``, ``join()``
-        or ``forward()``), returns the fifo itself, one per lane, rather than
-        an end. ``objectfifo_kwargs`` reach every lane's ``ObjectFifo(...)``.
-
-        A fed input gets its source's ends or fifos the same way, each end
-        from ``Operand.reader``, so the end bound for the source's drain is
-        read rather than left a dangling extra consumer; ``tiles`` and
-        ``obj_type`` are the source's own, already built, as is the depth of
-        that first end. A ``staged`` input reads fifos built for it, each end
-        ``depth`` deep (else ``l1_depth``).
+        Args:
+            depth: Fifo depth; ``l1_depth`` when None.
+            readers: Several consumer ends a lane instead of one, each lane
+                then its own list of them; refused on an output, which has
+                one producer.
+            tiles: Places each lane's host end and returns the fifo itself,
+                one per lane, rather than an end.
+            obj_type: The fifo element type; this operand's own when None.
+            objectfifo_kwargs: Reach every lane's ``ObjectFifo(...)``.
 
         Raises:
             ValueError: ``readers`` and ``tiles`` are both given, ``readers``
@@ -249,8 +242,7 @@ class Operand:
     def feed(self, source: Operand, staged: bool = False) -> None:
         """Take this input's stream on-chip from ``source``, another operator's output.
 
-        Its cores read the fifos ``source``'s cores write, so neither is a host
-        transfer. Several inputs may each be fed one source.
+        Neither is a host transfer; several inputs may each be fed one source.
 
         Args:
             source: The output, its lanes bound, whose stream this input reads.
@@ -313,9 +305,8 @@ class Operand:
     def reader(self, lane: int, depth: int | None = None) -> Any:
         """Return a consumer end of output lane ``lane`` for an on-chip reader.
 
-        The end bound for its drain, which no host transfer takes once fed, then a new
-        one of the lane's fifo for each reader after, ``depth`` deep (else the fifo's
-        own).
+        The first call returns the end bound for the lane's drain; later calls return
+        a new end of the lane's fifo, ``depth`` deep (else the fifo's own).
 
         Raises:
             ValueError: The lane has a reader already and its build bound the
@@ -378,11 +369,11 @@ class Operand:
         repeat_parameter: Value | None = None,
         managed: bool = True,
     ):
-        """Fill ``lane`` of this operand's stream from the host in ``sequence(rt)``; returns the ``Task``.
+        """Fill ``lane`` of this operand's stream from the host in ``sequence(rt)``.
 
-        Or None and emits nothing for an on-chip operand, fed on-chip from another
-        operator's output. A per-call ``Value`` is patched into the descriptor on a full
-        ELF; on an xclbin it regenerates the instruction stream every call.
+        Returns the ``Task``, or None for an on-chip operand fed from another
+        operator's output. A per-call ``Value`` is patched into the descriptor on a
+        full ELF; on an xclbin it regenerates the instruction stream every call.
 
         Args:
             tap: The walk over ``source``; all of it where None.
@@ -434,9 +425,9 @@ class Operand:
     ):
         """Drain lane ``lane`` of this operand's stream to the host.
 
-        Or emit nothing and return None for an on-chip operand, fed to another
-        operator's input; the arguments are ``fill``'s, and a drain the sequence must
-        see finish before it ends passes ``wait=True``.
+        Emits nothing and returns None for an on-chip operand, fed to another
+        operator's input. The arguments are ``fill``'s, and a drain the sequence
+        must see finish before it ends passes ``wait=True``.
         """
         if self.on_chip:
             return None
@@ -661,19 +652,15 @@ class Operand:
 class Staging:
     """``source``'s lanes restaged through memtiles into ``sink``'s, where they do not meet directly.
 
-    Each of ``sink``'s lanes joined from whole lanes of ``source`` (each a slot of a
-    memtile object, filled a round at a time), or each lane of ``source`` split among
-    ``sink``'s (a round per object of it). Derived from both operands' ``transfers()``
-    and checked element for element against them, so every lane of ``sink`` reads, round
-    by round, what the host round trip gives it.
+    Each of ``sink``'s lanes joined from whole lanes of ``source``, or each lane of
+    ``source`` split among ``sink``'s. Derived from both operands' ``transfers()`` and
+    checked element for element against them, so every lane of ``sink`` reads, round by
+    round, what the host round trip gives it. A per-call bound is honored only where
+    both sides move the same whole rounds every call.
 
     ``joins`` holds, per lane of ``sink``, the lanes of ``source`` joined into
     it and each one's slot of a round, in elements; ``splits``, per lane of
     ``source``, the lanes of ``sink`` it is split into and each one's slot.
-
-    A per-call bound is honored where both sides follow one graph value and
-    move, a tile a lane, the same elements a call, in tiles of whole rounds:
-    every call is then the same whole rounds on both sides.
 
     Raises:
         ValueError: The two are not one buffer, a side's lanes do not visit
@@ -697,16 +684,14 @@ class Staging:
                 f"are not one buffer"
             )
         streams: list[list[np.ndarray]] = []
-        # Per side, under a bound: the graph expression its extent follows,
-        # the extent every lane together moves a tile at a time and those
-        # elements, and a lane's tile.
+        # Per side, under a bound: the graph expression, rows per tile,
+        # elements per tile, and length unit.
         bounds: list[tuple[Any, int, int, int | None] | None] = []
         for side in (source, sink):
             transfers = side.transfers()
             bounded = side.bounded
             if bounded is None and any(w is not None for _, _, w, _ in transfers):
-                # An operator's own description moving a per-call length no
-                # declared bound names: no round count is known to compare.
+                # A per-call length with no declared bound: no round count to compare.
                 raise ValueError(
                     f"{edge}: {side.name}'s lanes move a per-call length, but "
                     f"no bound of its operator names it"
@@ -742,8 +727,8 @@ class Staging:
             streams.append(stream)
         produced, consumed = streams
         produce, consume = math.prod(source.obj_shape), math.prod(sink.obj_shape)
-        # A memtile's rounds are fixed at build: a call bounded short of a whole
-        # round would stall it, so both sides must move the same whole rounds.
+        # A memtile's rounds are fixed at build: a short round would stall it,
+        # so both sides must move whole rounds.
         if (bounds[0] is None) != (bounds[1] is None):
             raise ValueError(
                 f"{edge}: one side is bounded per call and the other moves its "
@@ -754,9 +739,8 @@ class Staging:
             assert consumed_bound is not None, "both sides bounded, checked above"
             graph_p, rows_p, round_p, _ = produced_bound
             graph_c, rows_c, round_c, _ = consumed_bound
-            # A call moves ceil(extent / rows) rounds a side: one count for
-            # every value where the two extents are one linear expression
-            # of it, a round of each side's rows apart.
+            # One round count works for every value only where both extents
+            # are one linear expression of it, a round apart.
             if (
                 graph_p is None
                 or graph_c is None
@@ -807,7 +791,7 @@ class Staging:
                     len(stream) // consume,
                 )
                 # The most rounds, so the smallest memtile object, whose slots
-                # are whole 32-bit words.
+                # must still be whole 32-bit words.
                 for k in range(rounds, 0, -1):
                     slots = [len(produced[j]) // k for j in group]
                     if rounds % k or any(s * self.item % 4 for s in slots):
@@ -884,10 +868,11 @@ class Staging:
             )
 
     def build(self) -> list[ObjectFifo]:
-        """Wire the plan at memtiles over ends of ``source``'s lanes (``Operand.reader``); returns.
+        """Wire the plan at memtiles over ends of ``source``'s lanes (``Operand.reader``).
 
-        Per lane of ``sink``, the fifo it reads, of ``sink``'s ``obj_type`` at its
-        consumers.
+        Returns:
+            Per lane of ``sink``, the fifo it reads, of ``sink``'s ``obj_type`` at
+            its consumers.
         """
         source, sink = self.source, self.sink
         fifos: list[Any] = [None] * sink.lanes
@@ -917,8 +902,10 @@ class Staging:
     def joined(self, ends: list, slots: list[int], read_as: Any) -> ObjectFifo:
         """Return a memtile fifo whose objects join ``ends``' objects.
 
-        Each its slot (``slots``, in elements); its consumers read objects of
-        ``read_as`` where given.
+        Args:
+            ends: The producer ends joined into one fifo's objects.
+            slots: Each end's slot of the joined object, in elements.
+            read_as: The type its consumers read objects as, where given.
         """
         obj = np.ndarray[(sum(slots),), np.dtype[self.sink.dtype]]
         fifo = ObjectFifo(

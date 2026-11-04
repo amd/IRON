@@ -233,7 +233,7 @@ class BuiltArray:
 
     @functools.cached_property
     def reads(self) -> frozenset[str]:
-        """The scratchpad words this design's cores read.
+        """Return the scratchpad words this design's cores read.
 
         Beside its ``array_key``, all its array depends on. Read off the design built
         anew and resolved alone, since a core reads a word through the parameter its
@@ -312,7 +312,7 @@ def configuration(
     steps: Sequence[str] = (),
     fuse: bool = False,
 ) -> DeviceConfiguration:
-    """``arrays`` as one device configuration ``name``.
+    """Build ``arrays`` as one device configuration ``name``.
 
     One array per identity, and each entry's sequence over it, ``sequence`` if it is
     alone, else named for its key. Given ``steps`` (keys of ``arrays``), one
@@ -327,8 +327,7 @@ def configuration(
     if fuse and not steps:
         raise ValueError("fuse needs steps to fuse")
     # Fused steps issue at once, so each keeps its own array: on one, a later
-    # step's preamble rewrites the words and re-sets the barrier the core has
-    # not yet read for an earlier one, losing a pass (the core then stalls).
+    # step's preamble would rewrite words an earlier step's core has not read yet.
     of = (
         {key: id(array) for key, array in arrays.items()}
         if fuse

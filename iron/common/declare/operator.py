@@ -192,9 +192,15 @@ class Operator(jit.Operator, library=True):
     def fold(self, consumer: Self, at: int) -> Self | None:
         """Return this operator with ``consumer`` finishing its output tile in its own cores.
 
-        ``consumer``'s kernel runs there before the tile leaves L1, input ``at`` the
-        tile and its others new streams of this operator's. None where this operator
-        does not finish others, or not this one.
+        ``consumer``'s kernel runs there before the tile leaves L1; its other inputs
+        become new streams of this operator's.
+
+        Args:
+            consumer: The operator finished into this one's cores.
+            at: Which of ``consumer``'s inputs is this operator's output tile.
+
+        Returns:
+            None where this operator does not finish others, or not this one.
         """
         return None
 
@@ -337,9 +343,9 @@ class Operator(jit.Operator, library=True):
         rng: np.random.Generator,
         values: Mapping[str, int],
     ) -> dict[str, np.ndarray]:
-        """For a run alone, the content of each input that names device ``addresses`` (every buffer's, by name), by buffer name.
+        """Return the content of each input that names a device address, for a run alone.
 
-        Random bytes there would steer the DMA anywhere. Other inputs are filled at
+        Random bytes there would steer the DMA anywhere; other inputs are filled at
         random.
 
         Args:
@@ -449,15 +455,14 @@ class Operator(jit.Operator, library=True):
         return cls.sequence is not Operator.sequence
 
     def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
-        """``operand``'s per-lane host access order, where ``sequence(rt)`` is hand-written and the derived order does not hold.
+        """Return ``operand``'s per-lane host access order, where ``sequence(rt)`` is hand-written and the derived order does not hold.
 
-        ``Operand.transfers()``'s own ``(lane, tap, length_parameter, length_unit)``
-        tuples, one lane at a time. None where this operator does not describe
-        ``operand`` (``transfers()`` then falls back to the derived order, or raises).
-
-        A lane whose bound start is not static, or whose ``length_parameter``
-        does not reach ``Operand.transfers()``'s own round-robin axis, is
-        also not describable here; return None for it too.
+        Returns:
+            ``Operand.transfers()``'s own ``(lane, tap, length_parameter, length_unit)``
+            tuples, one lane at a time. None where this operator does not describe
+            ``operand`` (``transfers()`` then falls back to the derived order, or
+            raises), including a lane whose bound start is not static or whose
+            ``length_parameter`` does not reach the round-robin axis.
         """
         return None
 

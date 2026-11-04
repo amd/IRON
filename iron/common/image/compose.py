@@ -182,7 +182,7 @@ def fused_configuration(
     words: Mapping[str, str] | None = None,
     dispatch: Sequence[Mapping[str, object]] | None = None,
 ) -> tuple[DeviceConfiguration, list[BuiltArray]]:
-    """``fusion``'s members, ``designs`` in its step order, as one device configuration ``name`` and their arrays.
+    """Return ``fusion``'s members, ``designs`` in its step order, as one device configuration ``name`` and their arrays.
 
     Each array fed where an edge feeds it (staged through memtiles in a staged fusion),
     and one sequence running every member, in one task group, or back to back in a
@@ -218,11 +218,10 @@ def fits(
     fusion: Fusion | None = None,
     placer: str = SEQUENTIAL,
 ) -> str | None:
-    """``None`` if ``designs``, by device name, place, allocate and route under ``placer``.
+    """Return ``None`` if ``designs``, by device name, place, allocate and route under ``placer``, else the diagnostic.
 
-    Else the diagnostic; ``words`` maps a design symbol to the scratchpad word it
-    shares. Given ``fusion``, ``designs`` are its members in step order, built fused
-    (``fused_configuration``).
+    ``words`` maps a design symbol to the scratchpad word it shares. Given ``fusion``,
+    ``designs`` are its members in step order, built fused (``fused_configuration``).
     """
     exported = [n for n, d in designs.items() if d.op.exported_design() is not None]
     try:

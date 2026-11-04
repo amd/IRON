@@ -73,14 +73,10 @@ class Image:
         self._artifacts: Artifacts | None = None
 
     def _validate_fusions(self) -> None:
-        """Each ``Fusion``'s steps are real, consecutive steps, none in two fusions, and each of its edges names a real hand-off.
+        """Raise ``ValueError`` unless each fusion's steps are valid.
 
-        The producer's drained output and the consumer's filled input, both the whole of
-        one buffer. A pack's steps are independent: none drains a buffer root another
-        fills or drains, a hazard were they issued concurrently.
-
-        Raises:
-            ValueError: Any of the above does not hold.
+        Real, consecutive and claimed once, a pack's steps independent, and each edge
+        names a real whole-buffer hand-off.
         """
         claimed: set[int] = set()
         for fusion in self.fusions:

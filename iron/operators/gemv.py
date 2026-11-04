@@ -552,10 +552,9 @@ class GEMV(Finishing):
         return Built(workers, rtps)
 
     def sequence(self, rt):
-        """Per batch and lane.
+        """Sequence per batch and lane: B's head tile (``feed_b``: one fill to B's own stream instead), then A's rows.
 
-        B's head tile (``feed_b``: one fill to B's own stream instead), then A's rows. C
-        drains are issued first: an undrained C would stop A.
+        C drains are issued first: an undrained C would stop A.
         """
         if self.repeat > 1:
             for buf in (self.A, self.C):

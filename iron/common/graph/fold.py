@@ -38,15 +38,10 @@ def _admits(producer: Operator, consumer: Operator, at: int) -> Operator | None:
 
 
 def _buffer_adjacent(recording: Recording) -> dict[int, tuple[str, str]]:
-    """Index ``i``'s (producer's output operand name, consumer's input operand name) where step ``i``'s one output is read only by step ``i + 1``.
+    """Index ``i``'s (producer's output operand name, consumer's input operand name).
 
-    Never again, is not a graph output, feedback, pinned or resident buffer, and names
-    its whole buffer; no host step runs between the two; step ``i + 1`` has one output, and its matching input, and every
-    other input it fills, do too, of the tile's element count and dtype; and the two
-    operators are bound to the same per-call extent, or neither is (``bound_extents``)
-    -- a prompt chunk's own row count folds, its buffers walking it alike. Independent
-    of any fold already taken: the buffer graph these read is the recording's own,
-    unaffected by ``Operator.fold`` replacing an operator.
+    Where step ``i``'s one output feeds only step ``i + 1``'s one matching input, same
+    tile shape and dtype, with no host step between.
     """
     excluded = recording.held
     readers, writers = recording.users()
@@ -104,10 +99,8 @@ def _chain_from(
 ) -> list[tuple[int, Operator, int]]:
     """Return the admissible chain folding into step ``lo``.
 
-    Each entry (the index folded in, the fused operator after it, the input its tile
-    entered at), in order, stopping at the first hop the buffers (``buffer_adjacent``)
-    or ``producer.fold(consumer, at)`` (``_admits``, where the channel budget, the
-    shapes and dtypes, and a tile a later call reads are refused) does not admit.
+    Each entry the index folded in, the fused operator, and the input its tile entered
+    at, stopping at the first hop ``buffer_adjacent`` or ``_admits`` refuses.
     """
     chain: list[tuple[int, Operator, int]] = []
     current = recording.steps[lo].op
@@ -131,11 +124,11 @@ def _chain_from(
 
 
 def fold_candidates(recording: Recording) -> tuple[Fusion, ...]:
-    """Every admissible fold of a run of two or more consecutive steps (``_chain_from``), overlapping ones included.
+    """Return every admissible fold of a run of two or more consecutive steps (``_chain_from``), overlapping ones included.
 
-    A maximal chain from ``lo`` of length ``n`` admits every depth from 1 to ``n``, and
-    a step that admits folding both its predecessor's output and feeding its successor's
-    starts a chain of its own, found separately.
+    A maximal chain from ``lo`` of length ``n`` admits every depth from 1 to ``n``; a
+    step that folds both its predecessor's output and its successor's input starts a
+    chain of its own.
     """
     buffer_adjacent = _buffer_adjacent(recording)
     calls = Counter(id(s.op) for s in recording.steps)

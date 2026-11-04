@@ -533,36 +533,24 @@ def narrow_group(
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
 ) -> tuple[Trial, tuple[dict[str, Any], ...] | None]:
-    """``group`` priced at the fastest setting of its members that co-resides, against ``group.steps`` run apart at their own.
+    """Return ``group`` priced at the fastest setting of its members that co-resides, against ``group.steps`` run apart at their own.
 
     Its own (as recorded) setting where that already co-resides, so a group that already
     fits is never searched or narrowed; otherwise each Pareto-maximal combination
     ``narrowings`` finds, widest first, timed (``time_fusion_group``) until one is not
-    refused, the fastest of those kept.
+    refused, the fastest of those kept. A fusion with edges shares its buffer rather
+    than needing one of its own per member (``group_fit_verdict``'s generic placement
+    check does not see this), so its own width is tried first and taken without a
+    search where that builds.
 
-    A fusion with edges (a stream, a staged one, a fan-out) shares its
-    buffer rather than needing one of its own per member, so it takes less
-    of a device than ``group.steps`` co-resident without a feed between
-    them would (``group_fit_verdict``'s generic placement check does not
-    see this); its own width is tried first, by building it, and taken
-    without a search where that builds (a plain stream's usually does,
-    ``iron.common.graph.fusion`` having already found it fused at its
-    members' own width, ``admits``, when it was proposed; a fan-out's may
-    not, its several consumers sharing a shim budget the search then
-    narrows to fit).
+    A device command timeout refuses the group outright, without trying another
+    setting or being caught past here: a hang is a property of actually running it,
+    which another setting may share.
 
     Returns:
-        The trial, and the settings taken for each of the group's members in
-        order, or None where its own setting already co-resides or builds,
-        or none of its members' widths co-reside (or build fused) at all
-        (refused).
-
-    A device command timeout (the driver's own, not a build or placement
-    failure) refuses the group outright, without trying another setting:
-    a hang is a property of actually running it, which another setting may
-    share, so retrying risks hanging the NPU again rather than finding one
-    that works. It is never caught past here, so one run never retries a
-    group it has already hung on.
+        The trial, and the settings taken for each of the group's members in order, or
+        None where its own setting already co-resides or builds, or none of its
+        members' widths co-reside (or build fused) at all (refused).
     """
     if group.edges:
         try:
@@ -1022,17 +1010,14 @@ def confirm_fusions(
     lock: NpuLock | None = None,
     cap_s: float = math.inf,
 ) -> dict[FusionGroup, frozenset[Version]]:
-    """Each of ``taken`` with the versions it runs in that gain from it beyond the noise.
+    """Return each of ``taken`` with the versions it runs in that gain from it beyond the noise.
 
-    ``time_fusion_group`` prices a fusion against the steps it fuses alone, over one
-    call; this times each recording's version with every group of ``taken`` it runs
-    fused (``combos``' narrowing, where it has one, applied via
-    ``iron.common.graph.fusion_tunables`` the way a shipped profile would) against the
-    same version unfused at its own, interleaved at the call's shortest point
-    (``Timed.shortest``; the tune's final ``verify`` times every point), and drops the
-    smallest predicted gain
-    (``priced``) among those active in a version that regresses, retrying it, until what
-    is left gains or none is left to drop. A group no version keeps is left out.
+    Times each recording's version with every group of ``taken`` it runs fused (at
+    ``combos``' narrowing, where it has one) against the same version unfused, at the
+    call's shortest point (``Timed.shortest``; the final ``verify`` times every point),
+    dropping the smallest predicted gain (``priced``) among those active in a version
+    that regresses and retrying, until what is left gains or none is left to drop. A
+    group no version keeps is left out.
 
     Args:
         calls: The calls whose versions are confirmed.
@@ -1189,16 +1174,12 @@ def price_fusions(
     (``confirm_fusions``), taken cheapest first, skipping one that would share a step
     with a fusion already taken (``select_rewrites``).
 
-    A member narrowed to co-reside writes its own tunables into the fusion
-    entry itself (``FusionGroup.dims``, ``Profile.add_fusion``), applied
-    only to a step running inside this fusion
-    (``iron.common.graph.fusion_tunables``): the same shape running unfused,
-    or fused differently, elsewhere keeps what it already takes there.
-    A taken fusion's entry names the versions it gains in. A fusion entry
-    covering a shape found is replaced in the versions it is found in, an
-    unscoped one kept in every other version of the graph (``Timed.versions``);
-    every tunable entry, and a fusion entry's other versions, are kept as
-    ``profile`` has them.
+    A member narrowed to co-reside writes its own tunables into the fusion entry itself
+    (``FusionGroup.dims``, ``Profile.add_fusion``), applied only inside this fusion
+    (``iron.common.graph.fusion_tunables``). A taken fusion's entry names the versions
+    it gains in; an existing entry covering a shape found is replaced in those
+    versions, kept in every other (``Timed.versions``). Everything else in ``profile``
+    is kept as it is.
 
     Args:
         calls: The calls whose graphs' fusions are priced.
@@ -1214,20 +1195,16 @@ def price_fusions(
         fit_cache: Where each group's fit verdict is kept.
         log: Where each group's price is logged.
         kinds: The kinds priced, every kind the graphs admit by default.
-        checkpoint: Where to write the decisions so far (``_checkpoint``)
-            after every group is priced, so a run that dies partway still
-            leaves something behind beyond the cache alone. Each group's
-            price is written beside it (``checkpoint.with_suffix(".priced.json")``)
-            and taken from there by a later call, batched or a restart after
-            one, until every group is priced; a group a device timeout
-            refused (``.refused.json``) is never retried.
-        max_price: Price at most this many groups not yet priced in this
-            call; where that leaves any unpriced, return None without
-            selecting, confirming or saving. A caller holding the device lock
-            for this call alone, and calling again (fresh lock, so another
-            agent's own short run is never kept waiting behind a whole
-            multi-hour sweep) until it gets a profile back, never holds the
-            lock past one batch.
+        checkpoint: Where to write the decisions so far (``_checkpoint``) after every
+            group is priced, so a run that dies partway still leaves something behind.
+            Each group's price is also written beside it
+            (``checkpoint.with_suffix(".priced.json")``) and taken from there by a
+            later call until every group is priced; a group refused by a device
+            timeout (``.refused.json``) is never retried.
+        max_price: Price at most this many groups not yet priced in this call; where
+            that leaves any unpriced, return None without selecting, confirming or
+            saving. Lets a caller batch a multi-hour sweep across short device-lock
+            holds instead of one long one.
         lock: Held for each measurement's own lifetime; none taken where None.
         budget: The tune's time: past the first group, one not yet priced
             once it ends is left unpriced, so not taken; each confirming
