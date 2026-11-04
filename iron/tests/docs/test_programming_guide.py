@@ -311,3 +311,32 @@ def test_section9_reference_matches_numpy():
 def test_section9_swiglu_fusion_on_device():
     mod = _example("section-9", "swiglu_fusion")
     mod.main(["--rounds", "2", "--calls", "5"])
+
+
+def test_section10_reference_matches_numpy():
+    mod = _example("section-10", "tune_graph")
+    w_gate, w_up = mod.weights()
+    graph = mod.MiniMLP(w_gate, w_up)
+    x = np.random.default_rng(1).standard_normal(mod.HIDDEN).astype(bfloat16)
+    reference = graph.reference(x)
+    f32 = np.float32
+    gate = (w_gate.astype(f32) @ x.astype(f32)).astype(bfloat16).astype(f32)
+    up = (w_up.astype(f32) @ x.astype(f32)).astype(bfloat16).astype(f32)
+    silu = (gate / (1 + np.exp(-gate))).astype(bfloat16).astype(f32)
+    expected = (silu * up).astype(bfloat16)
+    gemv = graph.record(x=(mod.HIDDEN,)).steps[0].op
+    verdict = compare(reference, expected, gemv.resolved().tolerance())
+    assert verdict, verdict.detail
+
+
+def test_section10_record_without_a_profile_lists_the_four_steps():
+    mod = _example("section-10", "tune_graph")
+    (call,) = mod.record(iron.Profile())
+    names = [type(s.op).__name__ for s in call.recording.steps]
+    assert names == ["GEMV", "GEMV", "SiLU", "ElementwiseMul"]
+
+
+@pytest.mark.supported_devices("npu2")
+def test_section10_tune_graph_on_device():
+    mod = _example("section-10", "tune_graph")
+    mod.main(["--rounds", "2", "--calls", "10", "--budget", "90", "--hold", "GEMV"])

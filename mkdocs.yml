@@ -175,6 +175,7 @@ nav:
     - programming_guide/section-7/README.md
     - programming_guide/section-8/README.md
     - programming_guide/section-9/README.md
+    - programming_guide/section-10/README.md
   - Models: models.md
   - API:
     - api/index.md
