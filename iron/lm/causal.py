@@ -12,7 +12,7 @@ are a prompt chunk from ``start``, of which a call runs the first
 import dataclasses
 import logging
 from collections.abc import Iterator
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 
 import numpy as np
 from aie.iron.kernels.sample import ROW_WORDS
@@ -367,6 +367,29 @@ class CausalLM(Model):
 
         arguments(parser)
 
+    def sibling(self) -> Self:
+        """Return this model at another context of whole chunks whose graph holds the same states: half, else double.
+
+        A sliding window's cache rings only past three rings' rows, so halving can
+        drop its ring, which doubling keeps.
+
+        Raises:
+            ValueError: Neither context keeps this graph's states.
+        """
+        L, C = self.config.max_seq_len, self.config.prefill_chunk
+        mine = [path for path, *_ in walk(self)]
+        for other in (L // 2, 2 * L):
+            if other < C or other % C:
+                continue
+            twin = type(self)(
+                dataclasses.replace(self.config, max_seq_len=other), self.weights
+            )
+            if [path for path, *_ in walk(twin)] == mine:
+                return twin
+        raise ValueError(
+            f"{type(self).__name__}: no context but {L} keeps its graph's states"
+        )
+
     @classmethod
     def tune_calls(cls, parser, args, profile: Profile | None = None) -> list:
         """``tune.calls`` on ``args``, built on the checkpoint's weights (read lazily).
@@ -391,12 +414,7 @@ class CausalLM(Model):
                 f"max_seq_len {L}"
             )
         sampler = Sampler(args.temperature, args.top_k)
-        # Another context a host could fit, the shorter where one is whole chunks.
-        other = L // 2 if L // 2 >= C and not (L // 2) % C else 2 * L
-        sibling = cls(
-            dataclasses.replace(config, max_seq_len=other),
-            Checkpoint(weights).tree(layers=layers),
-        )
+        sibling = model.sibling()
         if profile is not None:
             model.profile = sibling.profile = profile
         return calls(

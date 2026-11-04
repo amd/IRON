@@ -440,3 +440,17 @@ def test_a_decode_steps_q_and_o_share_one_array(npu2):
     gemvs = [s.op.resolved(npu2) for s in steps if isinstance(s.op, GEMV)]
     q, o = (g for g in gemvs if (g.M, g.K) == (2048, 2048))
     assert q.array_key() == o.array_key()
+
+
+@pytest.mark.parametrize("context,expected", [(1024, 512), (2048, 4096)])
+def test_a_sibling_context_keeps_the_kv_cache_layout(context, expected):
+    """A 64-position window rings past 1536 rows: 2048's half would drop the ring and record other steps, so its sibling doubles."""
+    model = small(max_seq_len=context, sliding_window=65)
+    twin = model.sibling()
+    assert twin.config.max_seq_len == expected
+    steps = len(model.record(**model.shapes()[0]).steps)
+    assert len(twin.record(**twin.shapes()[0]).steps) == steps
+    halved = small(max_seq_len=context // 2, sliding_window=65)
+    assert (len(halved.record(**halved.shapes()[0]).steps) == steps) is (
+        expected < context
+    )
