@@ -19,6 +19,10 @@ _CLIP_BOUNDS = {
     "output_max": 1.0,
 }
 
+#: Elements a matrix is drawn in at a time: a large one (Gemma 4's per-layer
+#: embeddings) never holds a float32 or float64 copy of itself.
+_DRAW = 1 << 22
+
 
 def filled(
     fill: str, named: Mapping[str, tuple[tuple[int, ...], Any]], seed: int = 0
@@ -34,12 +38,18 @@ def filled(
     rng = np.random.default_rng(seed)
     out = {}
     for n, (shape, dtype) in named.items():
-        x = rng.standard_normal(shape, dtype=np.float32)
         bound = _CLIP_BOUNDS.get(n.rsplit(".", 1)[-1])
+        if bound is None and len(shape) >= 2:
+            scale = np.sqrt(math.prod(shape[1:]))
+            out[n] = np.empty(shape, dtype)
+            flat = out[n].reshape(-1)
+            for start in range(0, flat.size, _DRAW):
+                x = rng.standard_normal(min(_DRAW, flat.size - start), np.float32)
+                flat[start : start + x.size] = (x / scale).astype(dtype)
+            continue
+        x = rng.standard_normal(shape, dtype=np.float32)
         if bound is not None:
             out[n] = np.asarray(bound, dtype)
-        elif len(shape) >= 2:
-            out[n] = (x / np.sqrt(math.prod(shape[1:]))).astype(dtype)
         else:
             # An array even of no axes, where numpy's arithmetic gives a scalar.
             out[n] = np.asarray(x / 10 + (not n.endswith("bias")), dtype)
