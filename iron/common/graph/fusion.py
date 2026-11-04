@@ -66,8 +66,8 @@ def _hand_offs(
     streamed, non-``replicate`` input, no host step reads it, and every reader's edge
     admits (``admits``). An input that streams only with one of its reader's bool
     tunables flipped (GEMV's ``B``, at ``feed_b``) is admitted so, that variant
-    replacing the reader in ``ops``: a tuner finds and writes the setting the fusion
-    runs at.
+    replacing the reader in ``ops`` once every reader of the root admits: a tuner finds
+    and writes the setting the fusion runs at.
     """
     excluded = (
         {h.name for h in recording.outputs}
@@ -101,6 +101,7 @@ def _hand_offs(
             if not reads or min(reads) <= i:
                 continue
             fed: dict[int, str] = {}
+            chosen: dict[int, Operator] = {}
             for j in dict.fromkeys(reads):
                 nxt = recording.steps[j]
                 inputs = [
@@ -142,9 +143,11 @@ def _hand_offs(
                         break
                 elif admits(ops[i], buf.name, reader, cbuf.name) is None:
                     break
-                ops[j] = reader
+                chosen[j] = reader
                 fed[j] = cbuf.name
             else:
+                for j, reader in chosen.items():
+                    ops[j] = reader
                 found[root] = (i, buf.name, fed)
     return found
 

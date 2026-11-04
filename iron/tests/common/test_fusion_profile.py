@@ -16,7 +16,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Profile, Scratchpad
 from iron.common.graph.compiled import _words
-from iron.common.graph.fusion import admits, candidates, fusions
+from iron.common.graph.fusion import _hand_offs, admits, candidates, fusions
 from iron.common.graph.packing import apply as apply_packings
 from iron.common.image.step import Edge, Fusion, FusionKind
 from iron.operators.copy import Copy
@@ -468,6 +468,31 @@ def test_an_edge_that_raises_raises_again_rather_than_caching_no_fusion():
     for _ in range(2):
         with pytest.raises(KeyError, match="nonexistent"):
             admits(silu, "y", mul, "nonexistent")
+
+
+class _FlipThenBreak(iron.Graph):
+    """SiLU's ``x`` fed to a GEMV's ``B`` (streamed only at ``feed_b``), and with ``twice`` read twice by one later step."""
+
+    def __init__(self, twice: bool):
+        self.w = iron.param(np.zeros((2048, 2048), bfloat16))
+        self.twice = twice
+
+    def body(self, a, r):
+        x = SiLU.step(a, tile_size=256)
+        y = GEMV.step(self.w, x, tile_size_input=4, tile_size_output=256)
+        z = ElementwiseAdd.step(y, r, tile_size=256)
+        if self.twice:
+            return z, ElementwiseMul.step(x, x, tile_size=256)
+        return z
+
+
+@pytest.mark.parametrize("twice", [False, True])
+def test_a_reader_flips_only_where_its_root_is_a_hand_off(twice):
+    recording = _FlipThenBreak(twice).record(a=(2048,), r=(2048,))
+    ops = [s.op.resolved() for s in recording.steps]
+    hand_offs = _hand_offs(recording, ops)
+    assert ("silu0" in hand_offs) is not twice
+    assert ops[1].feed_b is not twice
 
 
 def test_matching_tile_sizes_admit_the_edge():
