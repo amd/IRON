@@ -111,6 +111,8 @@ def serve(input_stream, output_stream):
                 send(output_stream, {"ok": True})
             elif name == "embed":
                 text = read_exact(input_stream, command["size"]).decode()
+                if model is None:
+                    raise RuntimeError("No model is loaded")
                 value = np.asarray(
                     model.embed(text, command["task"], command["dimensions"]),
                     dtype="<f4",

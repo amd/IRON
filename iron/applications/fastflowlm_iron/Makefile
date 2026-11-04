@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 FLM_REPO   := https://github.com/andrej/FastFlowLM.git
-FLM_COMMIT := c01a0e3c233814d78906a8cb6f7269915b0de9d7
+FLM_COMMIT := f1dad8901403c69a9bb4edadb55190efdaf4ff15
 BUILD      := $(CURDIR)/build
 FLM_ROOT   := $(BUILD)/FastFlowLM
 
@@ -10,7 +10,11 @@ FLM_ROOT   := $(BUILD)/FastFlowLM
 flm: $(FLM_ROOT)/.git/iron-$(FLM_COMMIT)
 	BUILD_DIR=$(BUILD)/flm FLM_PREFIX=$(BUILD)/install \
 	    CMAKE_BUILD_PARALLEL_LEVEL=$${CMAKE_BUILD_PARALLEL_LEVEL:-2} \
-	    $(FLM_ROOT)/src/home_install.sh --iron
+	    $(FLM_ROOT)/src/home_install.sh
+	cmake -S $(FLM_ROOT)/extensions/iron -B $(BUILD)/plugin \
+	    -DCMAKE_PREFIX_PATH=$(BUILD)/install -DCMAKE_BUILD_TYPE=Release
+	cmake --build $(BUILD)/plugin --parallel $${CMAKE_BUILD_PARALLEL_LEVEL:-2}
+	ctest --test-dir $(BUILD)/plugin --output-on-failure
 
 $(FLM_ROOT)/.git/iron-$(FLM_COMMIT):
 	git init $(FLM_ROOT)

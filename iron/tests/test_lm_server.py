@@ -201,3 +201,15 @@ def test_future_server_preserves_legacy_capabilities(monkeypatch):
     assert responses(output.getvalue(), []) == [
         {"ok": True, "protocol_version": 1, "capabilities": 3}
     ]
+
+
+def test_embedding_requires_loaded_model():
+    commands = request(
+        {"command": "embed", "size": 5, "task": "query", "dimensions": 128}, b"hello"
+    ) + request({"command": "close"})
+    output = io.BytesIO()
+    lm_server.serve(io.BytesIO(commands), output)
+    assert responses(output.getvalue(), []) == [
+        {"ok": False, "error": "No model is loaded"},
+        {"ok": True},
+    ]

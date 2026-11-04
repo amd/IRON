@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""One chat request through FastFlowLM, its pipe client and the IRON server."""
+"""Exercise chat and embeddings through the installed FastFlowLM IRON plugin."""
 
 import contextlib
 import json
@@ -14,6 +14,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from iron import applications
@@ -22,26 +23,56 @@ from iron.lm.testing import require, weights_dir
 APP = Path(applications.__file__).with_name("fastflowlm_iron")
 
 
-@pytest.mark.supported_devices("npu2")
-def test_chat(tmp_path):
-    root = Path(os.environ.get("FLM_MODEL_PATH", weights_dir("fastflowlm")))
-    model = root / "models" / "llama3.2-1b-instruct"
-    require(
-        model / "config.json",
-        model / "model.safetensors",
-        model / "tokenizer.json",
-        model / "tokenizer_config.json",
-    )
+@pytest.fixture(scope="module")
+def installation():
+    # An explicit build permits testing a freshly built local FLM/plugin pair.
+    if build := os.environ.get("FLM_TEST_BUILD"):
+        return Path(build)
     env = dict(os.environ, PATH=f"{Path(sys.executable).parent}:{os.environ['PATH']}")
     subprocess.run(["make", "flm"], cwd=APP, env=env, check=True, timeout=1800)
+    return APP / "build"
 
+
+def post(url, path, body):
+    request = urllib.request.Request(
+        url + path,
+        headers={"Content-Type": "application/json"},
+        data=json.dumps(body).encode(),
+    )
+    with urllib.request.urlopen(request, timeout=180) as response:
+        return json.load(response)
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize(
+    "tag,name",
+    [
+        ("llama3.2-iron:1b", "llama3.2-1b-instruct"),
+        ("embeddinggemma-2:740m", "embeddinggemma-2"),
+    ],
+)
+def test_model(tmp_path, installation, tag, name):
+    root = Path(os.environ.get("FLM_MODEL_PATH", weights_dir("fastflowlm")))
+    model = root / "models" / name
+    require(
+        *(
+            model / f
+            for f in (
+                "config.json",
+                "model.safetensors",
+                "tokenizer.json",
+                "tokenizer_config.json",
+            )
+        )
+    )
+    env = dict(os.environ, PATH=f"{Path(sys.executable).parent}:{os.environ['PATH']}")
     # Keep FastFlowLM's writable files away from CI's read-only weights mount.
     (tmp_path / "models").mkdir()
     (tmp_path / "models" / model.name).symlink_to(
         model.resolve(), target_is_directory=True
     )
     env["FLM_MODEL_PATH"] = str(tmp_path)
-    env["FLM_MODELINFO_PATH"] = str(APP / "build/install/share/flm/model_info.json")
+    env["FLM_MODELINFO_PATH"] = str(installation / "install/share/flm/model_info.json")
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -52,11 +83,13 @@ def test_chat(tmp_path):
             [
                 "bash",
                 "-c",
-                'source "$1" && exec flm serve llama3.2-iron:1b '
-                '--ctx-len 2048 --port "$2"',
+                'source "$1" && exec flm serve "$3" '
+                '--ctx-len 2048 --port "$2" --model-extension "$4"',
                 "bash",
-                str(APP / "build/install/flm_env.sh"),
+                str(installation / "install/flm_env.sh"),
                 str(port),
+                tag,
+                str(installation / "plugin/extension.json"),
             ],
             env=env,
             stdout=output,
@@ -73,29 +106,68 @@ def test_chat(tmp_path):
                 except OSError:
                     assert time.monotonic() < deadline, "FastFlowLM startup timed out"
                     time.sleep(1)
-            request = urllib.request.Request(
-                url + "/v1/chat/completions",
-                headers={"Content-Type": "application/json"},
-                data=json.dumps(
+            if name == "embeddinggemma-2":
+                texts = [
+                    "The capital of France is Paris.",
+                    "A dog is playing in the park.",
+                ]
+                result = post(url, "/v1/embeddings", {"model": tag, "input": texts})
+                vectors = np.asarray([r["embedding"] for r in result["data"]])
+                assert vectors.shape == (2, 768)
+                assert np.isfinite(vectors).all()
+                np.testing.assert_allclose(
+                    np.linalg.norm(vectors, axis=1), 1, atol=0.02
+                )
+                assert np.dot(*vectors) < 0.99
+                again = post(url, "/v1/embeddings", {"model": tag, "input": texts[0]})
+                np.testing.assert_allclose(
+                    again["data"][0]["embedding"], vectors[0], atol=1e-5
+                )
+                short = post(
+                    url,
+                    "/v1/embeddings",
                     {
-                        "model": "llama3.2-iron:1b",
-                        "stream": False,
-                        "temperature": 0,
-                        "max_tokens": 16,
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": "Name the capital of France in a short sentence.",
-                            }
-                        ],
+                        "model": tag,
+                        "input": texts[0],
+                        "dimensions": 128,
+                    },
+                )
+                expected = vectors[0, :128] / np.linalg.norm(vectors[0, :128])
+                np.testing.assert_allclose(
+                    short["data"][0]["embedding"], expected, atol=0.01
+                )
+                print(
+                    "EmbeddingGemma-2: normalized, deterministic 768/128-dimensional embeddings"
+                )
+            else:
+                messages = [
+                    {
+                        "role": "user",
+                        "content": "Name the capital of France in a short sentence.",
                     }
-                ).encode(),
-            )
-            with urllib.request.urlopen(request, timeout=120) as response:
-                reply = json.load(response)
-            print(reply["choices"][0]["message"]["content"])
-            assert "paris" in reply["choices"][0]["message"]["content"].lower()
-            assert reply["usage"]["completion_tokens"] > 1
+                ]
+                body = {
+                    "model": tag,
+                    "stream": False,
+                    "temperature": 0,
+                    "max_tokens": 16,
+                    "messages": messages,
+                }
+                reply = post(url, "/v1/chat/completions", body)
+                answer = reply["choices"][0]["message"]["content"]
+                print(answer)
+                assert "paris" in answer.lower()
+                assert reply["usage"]["completion_tokens"] > 1
+                messages.extend(
+                    [
+                        {"role": "assistant", "content": answer},
+                        {"role": "user", "content": "Which country is that city in?"},
+                    ]
+                )
+                reply = post(url, "/v1/chat/completions", body)
+                answer = reply["choices"][0]["message"]["content"]
+                print(answer)
+                assert "france" in answer.lower()
         except BaseException:
             print(log.read_text())
             raise
