@@ -3,10 +3,8 @@
 
 """Gemma 4's fused decode layer on the whole array, one token through one layer.
 
-Reproduces FastFlowLM's xclbin and runtime sequence. One core runs each
-stage (RMS norm and residual, RoPE, 16 q4nx projection cores, GLU, the
-per-layer-input path, one attention pair per kind); the sequence writes the
-layer type into RTPs, then streams the weights, KV cache and hidden state.
+Workers schedule RMS/residual, RoPE, projection, GLU, per-layer input and
+attention. The runtime follows FastFlowLM's weight and KV-cache protocol.
 """
 
 from dataclasses import dataclass, field

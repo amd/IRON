@@ -666,6 +666,7 @@ class MHA(Operator):
         )
 
         # Each stream is blocked as the product that reads or writes it takes it.
+        assert isinstance(matmul_QK, kernels.linalg.MatrixKernel)
         qk = matmul_QK.stream_dims
         pv = mm_stream_dims(
             B_q,
