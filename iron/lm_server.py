@@ -11,7 +11,7 @@ ignored; incompatible payload or command changes require a new version.
 Keep the initial length-prefixed JSON exchange readable across versions.
 Missing fields mean version 1 and bits 0 + 1, the unversioned protocol.
 Keep these legacy defaults fixed when adding capabilities. FastFlowLM's
-``iron/worker.hpp`` declares the matching client bits.
+``iron/applications/fastflowlm_iron/worker.hpp`` declares the matching client bits.
 """
 
 import inspect

@@ -24,3 +24,8 @@ path = "**/goldens/*.npz"
 precedence = "closest"
 SPDX-FileCopyrightText = "Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved."
 SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = "iron/applications/fastflowlm_iron/model-list.json"
+SPDX-FileCopyrightText = "Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved."
+SPDX-License-Identifier = "MIT"

@@ -7,7 +7,10 @@ SPDX-License-Identifier: Apache-2.0
 
 On an NPU2 machine, install [IRON](../../../README.md#installation-linux) and
 [the build dependencies](../../../ci/docker-based/Dockerfile)
-(the IRON CI container includes them). Run from this directory:
+(the IRON CI container includes them). `make flm` builds FastFlowLM and this
+plugin against its installed extension SDK. FastFlowLM is temporarily pinned to
+[`feat/embedding-model-extensions`](https://github.com/andrej/FastFlowLM/tree/feat/embedding-model-extensions)
+until that interface merges. Run from this directory:
 
 ```bash
 source /opt/xilinx/xrt/setup.sh
@@ -28,9 +31,15 @@ artifacts in `$NPU_CACHE_HOME` (default `~/.npu/cache`).
 Replace `llama3.2-iron:1b` with `embeddinggemma-2:740m` to serve embeddings,
 or use `flm run` for interactive chat. Models must be registered in both
 [IRON](../__init__.py) and the
-[plugin catalog](https://github.com/andrej/FastFlowLM/blob/feat/iron-model-extension/extensions/iron/model-list.json).
+[plugin catalog](model-list.json).
 The plugin reuses FLM's Llama frontend and exchanges tokens/logits or
-text/embeddings with the IRON server.
+text/embeddings with the IRON server. Its C++ sources and catalog live here;
+FastFlowLM needs only the generic plugin interfaces.
+
+To add a model, register it in [model_extension.cpp](model_extension.cpp) and
+add its pinned weight records to the catalog; `iron_model` selects the IRON
+registry entry. The bundle is `extension.json`, `model-list.json`, and the shared
+library in `build/plugin/`. `make flm` also runs its C++ contract/pipe tests.
 
 The [integration test](../../../tests/applications/fastflowlm_iron/test.py) checks
 Llama chat and EmbeddingGemma-2 through the HTTP API on NPU2. CI needs
