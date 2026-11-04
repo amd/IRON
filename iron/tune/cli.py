@@ -176,20 +176,15 @@ def tune(
     profiles: Path,
     validate: Callable[[Profile, Profile], dict] | None = None,
 ) -> Path:
-    """Rewrite ``profiles/<device>.json``.
+    """Rewrite ``profiles/<device>.json``, and return its path.
 
-    From the planner's seed (``coded_seed``, kept per version where it gains on the
-    starting profile), time the settings the calls run fastest at (``autotune``), price
-    the fusions their graphs admit (``price_fusions``), then fold what their arrays
-    admit and group the result into shared device configurations
-    (``price_folds_before_packing``); ``--fusions-only`` skips the first search and
-    ``--packings-only`` the first two. What the search finds goes to
-    ``<device>.found.json`` as it goes; what is saved is what ``verify`` keeps of it
-    against the seed (at each call's shortest point) and then the starting profile (at
-    every point), once it passes ``validate`` where given, reported beside it (``write_report``) with each phase's seconds and each
-    version's gain on the phase before (``Phases``, and the seed's check, at each
-    call's shortest point; the final ``verify`` at every point). Timed as ``args`` says;
-    return its path.
+    From the planner's seed (``coded_seed``), times the calls' fastest settings
+    (``autotune``), prices the fusions their graphs admit (``price_fusions``), then
+    folds and packs what their arrays admit (``price_folds_before_packing``);
+    ``--fusions-only`` skips the first search and ``--packings-only`` the first two.
+    Saves what ``verify`` keeps against the seed and the starting profile, once it
+    passes ``validate`` where given, with a report of each phase's seconds and gain
+    (``write_report``).
 
     Args:
         args: The command line: how settings are timed, and which searches it skips.

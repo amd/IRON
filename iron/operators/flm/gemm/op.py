@@ -1351,7 +1351,7 @@ class ProjectionGEMM(Operator):
         return all(p <= queue * passes_cap for p in passes)
 
     def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
-        """Return a and C's order, one slab, ``m_chunk=1`` and unbounded.
+        """Return A and C's order, one slab, ``m_chunk=1`` and unbounded.
 
         Past that a second slab, or a row bound's dynamic start (the second half of the
         core rows, ``a_half``/``c_half``) and its ``n_units`` axis truncation, are not

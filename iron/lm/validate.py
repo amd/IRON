@@ -68,13 +68,14 @@ def version_labels(model: Model) -> list[str]:
 
 
 def verify_live(label: str, model: Model) -> dict[str, dict[str, Any]]:
-    """For each of ``model``'s compiled versions (``version_labels``).
+    """Return, for each of ``model``'s compiled versions (``version_labels``), how live its fusions and packings are.
 
-    How many of its ``sequence.fusions`` are live, by kind, its design and fusion-device
-    counts, packed groups and composition identity (a full ELF's), and ``images``, what
-    it runs: the full ELF, or each distinct xclbin and instruction stream its steps
-    dispatch in turn -- proof a profile's fusions and packings matched the live
-    recording, not just that the profile file has entries.
+    Returns:
+        Fusion counts by kind, design and fusion-device counts, packed groups,
+        composition identity (a full ELF's) and ``images`` (the full ELF, or each
+        distinct xclbin and instruction stream dispatched) -- proof a profile's
+        fusions and packings matched the live recording, not just that the profile
+        file has entries.
 
     Raises:
         TypeError: A version is packaged neither as a full ELF nor as an
@@ -139,9 +140,7 @@ def verify_live(label: str, model: Model) -> dict[str, dict[str, Any]]:
 
 
 def changed_versions(stock_live: dict, candidate_live: dict) -> list[str]:
-    """``version_labels`` whose candidate compile is not stock's image.
-
-    Its fusions, packings or tunables changed it.
+    """Return ``version_labels`` whose candidate compile is not stock's image: its fusions, packings or tunables changed it.
 
     Raises:
         AssertionError: A version shares stock's compiled image while its
@@ -171,7 +170,7 @@ def load_model(
     config: Mapping[str, Any] | None = None,
     budget: int | None = None,
 ) -> Model:
-    """``model_class.from_checkpoint(checkpoint)`` with ``config``'s fields, fitted to ``budget``.
+    """Return ``model_class.from_checkpoint(checkpoint)`` with ``config``'s fields, fitted to ``budget``.
 
     Under ``profile`` (a directory, or None for the model's own), every version compiled
     as the device packages it (``Graph.compile``) and loaded.
@@ -200,10 +199,9 @@ def bit_identity(
 
 
 def run_accuracy(model: CausalLM, tokens, num_tokens: int) -> tuple[dict, int]:
-    """``model``'s KL against its own golden (``Model.cpu_reference``).
+    """Return ``model``'s KL against its own golden (``Model.cpu_reference``), teacher-forced over ``num_tokens`` steps from ``tokens``.
 
-    Teacher-forced over ``num_tokens`` steps from ``tokens``, and its top-1 mismatch
-    count.
+    Also its top-1 mismatch count.
     """
     model.session.forget(0)
     results = accuracy(model, model.cpu_reference(), tokens, num_tokens)
@@ -222,10 +220,10 @@ def timed_round(model: CausalLM, tokens, num_tokens: int) -> tuple[float, float]
 def speed(
     stock: CausalLM, candidate: CausalLM, tokens, num_tokens: int, rounds: int
 ) -> dict[str, dict[str, float]]:
-    """TTFT and decode tokens per second.
+    """Return TTFT and decode tokens per second, each the min and the median.
 
-    ``stock`` and ``candidate`` interleaved over ``rounds`` rounds (so a drifting clock
-    or a warming cache costs both alike), each the min and the median.
+    ``stock`` and ``candidate`` interleaved over ``rounds`` rounds, so a drifting clock
+    or a warming cache costs both alike.
     """
     stock_ttft, stock_tps, candidate_ttft, candidate_tps = [], [], [], []
     for _ in range(rounds):
@@ -254,7 +252,7 @@ def speed(
 def classify_entries(
     candidate: Profile, recordings: dict[str, Recording]
 ) -> list[tuple[tuple[str, Any], set[str]]]:
-    """Each of ``candidate``'s fusion and packing entries, tagged ``("fusion"|"packing", entry)``.
+    """Return each of ``candidate``'s fusion and packing entries, tagged ``("fusion"|"packing", entry)``.
 
     With the labels of ``recordings``' versions it matches (``touches``), in the order
     ``candidate`` holds them, fusions first.
@@ -270,10 +268,7 @@ def classify_entries(
 
 
 def build_variant(stock: Profile, tags) -> Profile:
-    """``stock`` plus ``tags`` (``classify_entries``'s tagged entries).
-
-    A profile ``save`` can write for a bisection trial.
-    """
+    """Return ``stock`` plus ``tags`` (``classify_entries``'s tagged entries), a profile ``save`` can write for a bisection trial."""
     profile = Profile()
     for cls, dims, tunables in stock:
         profile.add(cls, **dims, **tunables)
@@ -324,11 +319,11 @@ def bisect(
 ) -> dict:
     """Narrow a bit-identity mismatch to one version's entries, then to a prefix of them.
 
-    Classify ``candidate``'s fusion and packing entries by which version of a fresh
-    recording each matches (``classify_entries``), build a profile of the stock plus one
-    version's entries at a time, and keep halving a version whose variant still
-    mismatches. Saves the smallest failing profile under ``out_dir`` and returns a
-    summary; the first version to reproduce the mismatch wins.
+    Classifies ``candidate``'s fusion and packing entries by which version each
+    matches (``classify_entries``), tries one version's entries at a time against the
+    stock profile, and halves a version whose variant still mismatches. Saves the
+    smallest failing profile under ``out_dir``; the first version to reproduce the
+    mismatch wins.
     """
     probe = model_class.from_checkpoint(
         checkpoint, max_seq_len=max_seq_len, config=config, budget=budget
@@ -388,7 +383,7 @@ def model_tune_points(
     checkpoint: Path,
     config: Mapping[str, Any] | None = None,
 ) -> list[Timed]:
-    """``model_class.tune_calls``'s own calls, over its own tune flags (``tune_arguments``) at their defaults save ``--checkpoint``.
+    """Return ``model_class.tune_calls``'s own calls, over its own tune flags (``tune_arguments``) at their defaults save ``--checkpoint``.
 
     A model-general way to the per-call points and weights a version is tuned at (a
     decoder's context ladder, an encoder's query and longest call), not one battery
@@ -405,7 +400,7 @@ def model_tune_points(
 
 
 def version_recordings(model) -> dict[Version, Recording]:
-    """``model``'s own ``Recording`` of each of ``shapes()``, by ``Recording.version``.
+    """Return ``model``'s own ``Recording`` of each of ``shapes()``, by ``Recording.version``.
 
     The identity ``version_builds`` matches ``model_tune_points``'s calls against.
     """
@@ -425,7 +420,7 @@ def version_builds(
     *,
     config: Mapping[str, Any] | None = None,
 ) -> dict[str, tuple[Timed, list[CompiledGraph]]]:
-    """Each label's tune call (``model_tune_points``) and its version under each of ``profiles`` (``built``).
+    """Return each label's tune call (``model_tune_points``) and its version under each of ``profiles`` (``built``).
 
     Each side recorded on real weights under its own profile, since a tunable applies
     as a step is recorded; the call carries the first side's recording.
@@ -482,7 +477,7 @@ def compare_versions(
     timing: Timing = Timing(rounds=3, calls=10),
     log=print,
 ) -> dict[str, dict[str, Any]]:
-    """``labels`` (``changed_versions``'s), each built under both profiles (``version_builds``), compared bit for bit and timed (``compare_graphs``).
+    """Return each of ``labels`` (``changed_versions``'s), built under both profiles (``version_builds``), compared bit for bit and timed (``compare_graphs``).
 
     Only a bit-identity mismatch (``NotBitIdentical``) is reported; a build or dispatch
     failure or a device timeout is raised.

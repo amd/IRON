@@ -288,7 +288,7 @@ class ImageCallable:
 
     @property
     def dispatches(self) -> int:
-        """Commands a call issues from the host: one for a full ELF."""
+        """Return the commands a call issues from the host: one for a full ELF."""
         return 1
 
     def cpu_wait_cap_us(self) -> float:
@@ -607,7 +607,7 @@ class PerStepCallable(ImageCallable):
 
     @property
     def dispatches(self) -> int:
-        """Commands a call issues from the host: one a step, a fusion's steps one."""
+        """Return the commands a call issues from the host: one a step, a fusion's steps one."""
         return len(self._steps)
 
     def __init__(self, seq, check: bool = False, arena: ScratchArena | None = None):

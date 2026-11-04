@@ -696,7 +696,7 @@ def merged(
     profile: Profile | None,
     new: Sequence[tuple[type, Mapping[str, Any], Mapping[str, Any]]],
 ) -> Profile:
-    """``profile``'s entries with ``new``'s (class, dimensions, tunables) added.
+    """Return ``profile``'s entries with ``new``'s (class, dimensions, tunables) added.
 
     Each replacing one that names exactly its dimensions (equal ranks would be
     ambiguous): an entry a new one only outranks is kept, so a shape it matches that the
@@ -731,7 +731,7 @@ def autotune(
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
 ) -> Profile:
-    """``profile`` with an entry for each shape of ``calls`` (``shapes``) naming the fastest setting taken (``time_shape``).
+    """Return ``profile`` with an entry for each shape of ``calls`` (``shapes``) naming the fastest setting taken (``time_shape``).
 
     The recorded one where none gains, named without the dimensions a host sizes
     (``Timed.varying``) wherever that still names only its own shape (``Shape.entry``),

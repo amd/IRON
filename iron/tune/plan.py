@@ -115,7 +115,7 @@ def coded_seed(
     profile: Profile,
     log: Callable[[str], None] = print,
 ) -> Profile:
-    """``profile`` with every input a tunable can code coded wherever its array codes whole.
+    """Return ``profile`` with every input a tunable can code coded wherever its array codes whole.
 
     A shape is coded only where every array its steps share with other shapes
     (``array_key`` as ``profile`` runs them) holds shapes that all record coded and

@@ -277,10 +277,10 @@ class Gather(Operator):
         rt.await_tasks(drained)
 
     def lane_transfers(self, operand):
-        """``y``'s lanes, a feed's own run of batches.
+        """Return ``y``'s lanes, a feed's own run of batches, as ``sequence`` moves them.
 
-        As ``sequence`` moves them; the bound shortens the drain's length (``drainedN``,
-        in 16-byte units), not which elements a lane starts from.
+        The bound shortens the drain's length (``drainedN``, in 16-byte units), not
+        which elements a lane starts from.
         """
         if operand is not self.y:
             return None
@@ -1067,10 +1067,10 @@ class Copy(Operator):
         rt.finish(tg)
 
     def lane_transfers(self, operand):
-        """Each channel's share of ``src``/``dst``.
+        """Return each channel's share of ``src``/``dst``, as ``sequence`` moves it.
 
-        As ``sequence`` moves it; a per-call view offset (``accept_views``) or a
-        repeated or multi-walk source is not describable here.
+        None where a per-call view offset (``accept_views``) or a repeated or
+        multi-walk source is not describable here.
         """
         if operand not in (self.x, self.y):
             return None

@@ -180,11 +180,10 @@ class _Unbound(_Param):
 
 
 def param(*shape, dtype=bfloat16, source: Source | None = None) -> np.ndarray:
-    """Return a weight a graph holds, declared by shape for ``Graph.load_state_dict`` to bind.
+    """Return a weight a graph holds, declared by shape for ``Graph.load_state_dict`` to bind, or ``param(array)`` holding ``array``.
 
-    Or ``param(array)`` holding ``array``, as torch's ``nn.Parameter``; ``source`` says
-    where in a file ``array`` was read from, which keys a cache of what is derived from
-    it. A graph refuses to hold a bare array.
+    A graph refuses to hold a bare array. ``source`` says where in a file ``array``
+    was read from, keying a cache of what is derived from it.
     """
     if len(shape) == 1 and isinstance(shape[0], np.ndarray):
         a = shape[0]
@@ -615,7 +614,7 @@ class Graph:
     def held_bytes(
         self, versions: Sequence[Mapping[str, Any]], dev: Device | None = None
     ) -> int:
-        """Bytes the versions for ``versions`` (each one's input shapes) hold on the device once loaded, built as ``compile`` builds them but laid out only.
+        """Return bytes the versions for ``versions`` (input shapes) hold on the device once loaded, laid out as ``compile`` builds them but not built.
 
         Their shared arena and each one's own buffers outside it (``Image.held_bytes``).
         """

@@ -9,9 +9,9 @@ from typing import Any
 
 import numpy as np
 
-#: A ``Clipped`` bound's leaf name (``iron.applications.gemma4.audio``): drawn
-#: fixed rather than per-tensor, so every one agrees (``Clipped.same_input``'s
-#: linears, which share an input, among them) and a min never exceeds its max.
+#: A ``Clipped`` bound's leaf name: drawn fixed rather than per-tensor, so every
+#: one agrees (``Clipped.same_input``'s linears, which share an input, among
+#: them) and a min never exceeds its max.
 _CLIP_BOUNDS = {
     "input_min": -1.0,
     "output_min": -1.0,

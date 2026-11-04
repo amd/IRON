@@ -60,7 +60,7 @@ class Decode(Operator):
             )
 
     def held(self, dev, rows: int) -> int:
-        """Return a core's L1 bytes at `rows` rows a call: A's and out's tiles at their depths, and the stack."""
+        """Return a core's L1 bytes at ``rows`` rows a call: A's and out's tiles at their depths, and the stack."""
         a = rows * self.A.shape[-1] * np.dtype(self.A.dtype).itemsize
         out = rows * self.K * np.dtype(self.out.dtype).itemsize
         return self.A.depth * a + self.out.depth * out + dev.default_core_stack_bytes

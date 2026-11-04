@@ -438,16 +438,13 @@ class Model(iron.Graph):
         builds: int = 1,
         coded: bool = False,
     ) -> Config:
-        """``config`` at its native context where the model and ``builds`` builds of it fit ``budget``.
+        """Return ``config`` at its native context, or the longest whole number of prompt chunks whose model and ``builds`` builds fit ``budget``.
 
-        ``host_budget()`` by default, else at the longest whole number of
-        prompt chunks that does, logged either way. The model holds its weights on
-        the host once, plain and coded (its decode version's ``Recording.weights``);
-        a build holds every version laid out as ``compile`` builds them on the
-        current device (``Graph.held_bytes``): their arena and each one's own
-        buffers, a per-step image's scratch pool among them. With ``coded``, as a
-        tune holds it: every weight its seed could code coded beside its plain copy
-        on the host, and each build the larger of its plain and coded layouts.
+        ``budget`` is ``host_budget()`` by default. The model holds its weights on the
+        host once, plain and coded; each build
+        holds a version laid out on the device, as ``compile`` builds it. With
+        ``coded``, as a tune holds it: every codeable weight held plain and coded on
+        the host, and each build the larger of its plain and coded layouts.
         """
         if not isinstance(config, DecoderConfig):
             return config

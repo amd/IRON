@@ -485,13 +485,7 @@ class Multimodal(lm.Multimodal):
         args: argparse.Namespace,
         profile: Profile | None = None,
     ) -> list[Timed]:
-        """Every version (the text encoder, each tower and the merge) on the checkpoint's weights (read lazily).
-
-        The one profile in ``profiles/`` serving every version's designs: half its calls
-        a query of ``QUERY_ROWS`` text rows, half its longest call. A call's
-        configuration switches cost the same at any length, so a short query is where
-        they weigh. Recorded under ``profile``, else the model's own.
-        """
+        """Return every version's longest call and a short query call, as ``Timed``, recorded under ``profile``, else the model's own."""
         config = dataclasses.replace(Config(), **dict(args.config))
         weights = Checkpoint(weights_file(args.checkpoint)).tree(
             layers=config.num_hidden_layers
@@ -500,6 +494,8 @@ class Multimodal(lm.Multimodal):
         if profile is not None:
             graph.profile = profile
         longest = graph.longest()
+        # A configuration switch costs the same at any length, so a short
+        # query is where it weighs most.
         points = [
             Point(0.5, {**longest, "rows": QUERY_ROWS}),
             Point(0.5, longest),

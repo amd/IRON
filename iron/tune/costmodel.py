@@ -81,7 +81,7 @@ class CostModel:
 
     @classmethod
     def load(cls, device: str, directory: Path = REFITS) -> CostModel | None:
-        """``device``'s refit in ``directory``, else its packaged seed, else None."""
+        """Return ``device``'s refit in ``directory``, else its packaged seed, else None."""
         path = Path(directory) / f"{device}.json"
         if not path.exists():
             path = SEEDS / f"{device}.json"
