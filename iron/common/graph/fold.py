@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from ..declare.operator import Operator, Unresolvable
 from ..declare.profile import Profile
 from ..image.step import Edge, Fusion, FusionKind
-from .record import Binding, Recording, Step
+from .record import Recording, Step
 
 
 def _excluded(recording: Recording) -> set[str]:
@@ -209,16 +209,6 @@ def chosen_folds(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
     return tuple(found)
 
 
-def _rebind(
-    op: Operator, fused: Operator, bindings: Sequence[Binding]
-) -> list[Binding]:
-    """``bindings``, each on ``op`` moved onto ``fused``, which declares the same per-call members (a fold only adds a ``finish`` and its input)."""
-    return [
-        Binding(fused, fused.value(b.member.name), b.expression) if b.op is op else b
-        for b in bindings
-    ]
-
-
 def _handle_at(step: Step, name: str) -> tuple[int, object]:
     """Return the index into ``step.slots`` and the handle there, the operand declared ``name``'s."""
     i = next(k for k, b in enumerate(step.op.buffers) if b.name == name)
@@ -249,7 +239,7 @@ def apply_folds(recording: Recording, folds: Sequence[Fusion]) -> Recording:
         if any(fusion.steps[0] < h.at <= fusion.steps[-1] for h in recording.host):
             raise ValueError(f"{fusion} folds across a host step")
     steps: list[Step | None] = list(recording.steps)
-    bindings = list(recording.bindings)
+    replaced: dict[int, list[Operator]] = {}
     for fusion in dict.fromkeys(taken.values()):
         lo = fusion.steps[0]
         start = recording.steps[lo]
@@ -280,10 +270,12 @@ def apply_folds(recording: Recording, folds: Sequence[Fusion]) -> Recording:
         for s in fusion.steps[1:]:
             steps[s] = None
         for s in fusion.steps:
-            bindings = _rebind(recording.steps[s].op, current, bindings)
+            replaced.setdefault(id(recording.steps[s].op), []).append(current)
     kept = [s for s in steps if s is not None]
     host = [
         dataclasses.replace(h, at=h.at - sum(s is None for s in steps[: h.at]))
         for h in recording.host
     ]
-    return dataclasses.replace(recording, steps=kept, bindings=bindings, host=host)
+    folded = dataclasses.replace(recording, steps=kept, host=host)
+    folded.rebind(replaced)
+    return folded

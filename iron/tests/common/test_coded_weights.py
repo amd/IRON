@@ -21,6 +21,7 @@ from ml_dtypes import bfloat16
 from safetensors.numpy import save_file
 
 import iron
+from iron import Scratchpad
 from iron.common.design.design import OperatorDesign
 from iron.common.graph.coded import CodedWeight, _publish
 from iron.lm import Checkpoint
@@ -109,6 +110,30 @@ def test_a_weight_past_its_capacity_is_read_plain_with_a_warning(caplog):
     assert [s.inputs[0].name for s in t.steps] == ["w", "w", "other"]
     assert not any(s.op.coded_a for s in t.steps)
     assert all(b.op in [s.op for s in t.steps] for b in t.bindings)
+
+
+class SharedReader(iron.Graph):
+    """One bounded coded GEMV instance reading ``bad`` and then ``good``."""
+
+    def __init__(self, bad, good):
+        self.bad = iron.param(bad)
+        self.good = iron.param(good)
+        self.gemv = GEMV(M=E, K=E, coded_a=True, tile_size_input=4)
+
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        return self.gemv(self.bad, x, valid=n), self.gemv(self.good, x, valid=n)
+
+
+def test_a_reader_still_reading_another_weight_coded_keeps_its_bindings():
+    bad, good = _weights()
+    bad[5, :120] = np.exp2(np.arange(-60.0, 60.0)).astype(bfloat16)
+    t = SharedReader(bad, good).record(x=(E,))
+    t.code_weights()
+    assert [(s.op.coded_a, s.inputs[0].name) for s in t.steps] == [
+        (False, "bad"),
+        (True, "good.coded"),
+    ]
+    assert {id(s.op) for s in t.steps} == {id(b.op) for b in t.bindings}
 
 
 def _checkpoint(tmp_path, overflow=False):

@@ -248,6 +248,24 @@ def test_a_host_step_after_a_fold_keeps_its_place():
     assert len(folded.steps) == 2 and host.at == 1
 
 
+class _SharedAdd(iron.Graph):
+    """One bounded ``ElementwiseAdd`` instance called at steps 1 and 3."""
+
+    def __init__(self):
+        self.add = ElementwiseAdd(size=2048, tile_size=256)
+
+    def body(self, x, r, *, n: Scratchpad[np.int32]):
+        y = self.add(SiLU.step(x[:n], tile_size=256), r[:n])
+        return self.add(SiLU.step(y, tile_size=256), r[:n])
+
+
+def test_a_fold_keeps_the_bindings_of_an_instance_another_step_still_runs():
+    rec = _SharedAdd().record(x=(2048,), r=(2048,))
+    fold = next(f for f in fold_candidates(rec) if f.steps == (0, 1))
+    folded = apply_folds(rec, (fold,))
+    assert {id(s.op) for s in folded.steps} == {id(b.op) for b in folded.bindings}
+
+
 def test_a_graph_output_is_not_folded_away():
     """``mid``, both an intermediate and a graph output, keeps its own step.
 

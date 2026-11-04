@@ -73,17 +73,6 @@ def rebuild(
         steps[i] = dataclasses.replace(steps[i], op=narrowed)
     if not rebuilt:
         return recording
-    # A narrowed design reads its own value symbols, so each per-call value
-    # bound to the step's operator is bound to its narrowed one instead.
-    kept = {id(s.op) for s in steps}
-    bindings = []
-    for b in recording.bindings:
-        if id(b.op) in kept:
-            bindings.append(b)
-        for narrowed in rebuilt.get(id(b.op), ()):
-            bindings.append(
-                dataclasses.replace(
-                    b, op=narrowed, member=narrowed.value(b.member.name)
-                )
-            )
-    return dataclasses.replace(recording, steps=steps, bindings=bindings)
+    result = dataclasses.replace(recording, steps=steps)
+    result.rebind(rebuilt)
+    return result

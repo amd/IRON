@@ -9,7 +9,7 @@ import dataclasses
 import itertools
 import logging
 import math
-from collections.abc import Callable, Hashable, Iterable, Mapping
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -368,6 +368,24 @@ class Recording:
                     f"[{limit.lo}, {limit.hi}) for {limit.view}"
                 )
 
+    def rebind(self, replaced: Mapping[int, Sequence[Operator]]) -> None:
+        """Bind each per-call value of an operator ``replaced`` names (by ``id``) to each of its replacements too.
+
+        Run once ``steps`` hold the replacements: a replaced operator keeps its own
+        bindings only while a step still runs it (one instance called at several
+        steps, only some of them replaced).
+        """
+        running = {id(s.op) for s in self.steps}
+        bindings = []
+        for b in self.bindings:
+            if id(b.op) in running or id(b.op) not in replaced:
+                bindings.append(b)
+            bindings += [
+                dataclasses.replace(b, op=new, member=new.value(b.member.name))
+                for new in replaced.get(id(b.op), ())
+            ]
+        self.bindings = bindings
+
     def reference(
         self, tensors: Mapping[str, np.ndarray], values: Mapping[str, int]
     ) -> tuple[list[np.ndarray], dict[str, int]]:
@@ -559,18 +577,7 @@ class Recording:
             step.op = rebuilt[id(op)]
             step.slots = [plain if h is derived else h for h in step.slots]
             step.inputs = [plain if h is derived else h for h in step.inputs]
-        self.bindings = [
-            (
-                dataclasses.replace(
-                    b,
-                    op=rebuilt[id(b.op)],
-                    member=rebuilt[id(b.op)].value(b.member.name),
-                )
-                if id(b.op) in rebuilt
-                else b
-            )
-            for b in self.bindings
-        ]
+        self.rebind({k: [op] for k, op in rebuilt.items()})
 
     @property
     def operators(self) -> list:
