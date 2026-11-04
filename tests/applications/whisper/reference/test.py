@@ -321,10 +321,7 @@ def test_long_form_does_not_duplicate_unfinished_speech():
     )
     assert [w["seek"] for w in windows] == [0, 8]
     assert [
-        t
-        for w in windows
-        for t in w["tokens"]
-        if t < WhisperConfig().eos_token_id
+        t for w in windows for t in w["tokens"] if t < WhisperConfig().eos_token_id
     ] == [10, 20]
 
 
