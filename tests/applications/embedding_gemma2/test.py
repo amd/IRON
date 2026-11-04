@@ -179,6 +179,22 @@ def weights():
     return Checkpoint(DIRECTORY / "model.safetensors").tree()
 
 
+def test_text_task_defaults_and_validation():
+    """Keep default-task selection and task prefixes in the model's processor."""
+    processor = TextProcessor.__new__(TextProcessor)
+    processor.config = Config()
+    processor.tokenizer = SimpleNamespace(
+        encode=lambda text: SimpleNamespace(ids=list(text.encode()))
+    )
+    assert processor.encode("hello") == processor.encode("hello", "query")
+    for task in ("document", "QuestionAnswering"):
+        assert bytes(processor.encode("hello", task)).decode() == (
+            TextProcessor.TASKS[task] + "hello"
+        )
+    with pytest.raises(ValueError, match="Unsupported EmbeddingGemma task"):
+        processor.encode("hello", "unknown")
+
+
 @pytest.fixture(scope="module")
 def processor():
     require(DIRECTORY / "tokenizer.json")

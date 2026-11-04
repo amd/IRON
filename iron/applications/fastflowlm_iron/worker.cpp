@@ -177,9 +177,13 @@ nlohmann::json Worker::request(const nlohmann::json &command, const void *payloa
         read_all(response.data(), response.size());
         auto result = nlohmann::json::parse(response);
         if (!result.value("ok", false)) {
+            if (result.value("invalid_argument", false))
+                throw std::invalid_argument(result.value("error", "Invalid embedding arguments"));
             throw std::runtime_error(result.value("error", "IRON server failed"));
         }
         return result;
+    } catch (const std::invalid_argument &) {
+        throw;
     } catch (...) {
         poisoned_ = true;
         throw;

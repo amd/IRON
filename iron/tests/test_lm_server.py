@@ -213,3 +213,31 @@ def test_embedding_requires_loaded_model():
         {"ok": False, "error": "No model is loaded"},
         {"ok": True},
     ]
+
+
+@pytest.mark.parametrize("task", [None, "", "provider-task"])
+def test_embedding_task_passthrough_and_recovery(monkeypatch, task):
+    class Model:
+        def embed(self, text, received_task, dimensions):
+            if received_task == "unknown":
+                raise ValueError("Unsupported task")
+            assert received_task == (task or "")
+            return np.asarray([len(text)], dtype=np.float32)
+
+    monkeypatch.setattr(lm_server, "load_model", lambda command: Model())
+    commands = request({"command": "load_model", "model": "test", "model_path": "/m"})
+    for name in ("unknown", task):
+        header = {"command": "embed", "size": 5, "dimensions": 128}
+        if name is not None:
+            header["task"] = name
+        commands += request(header, b"hello")
+    output = io.BytesIO()
+    lm_server.serve(io.BytesIO(commands), output)
+    replies = responses(output.getvalue(), [4])
+    assert replies[1] == {
+        "ok": False,
+        "error": "Unsupported task",
+        "invalid_argument": True,
+    }
+    assert replies[2] == {"ok": True, "count": 1}
+    assert replies[3] == np.asarray([5], dtype=np.float32).tobytes()

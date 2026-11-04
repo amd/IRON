@@ -165,13 +165,17 @@ class TextProcessor:
         self.config = config
 
     def encode(
-        self, text: str, task: str, audio_tokens: int = 0, image_tokens: int = 0
+        self, text: str, task: str = "", audio_tokens: int = 0, image_tokens: int = 0
     ) -> list[int]:
         """Encode `text` behind `task`'s prefix (`TASKS`), with BOS and EOS.
 
+        An omitted or empty task defaults to ``query``.
         Each `<|audio|>` and `<|image|>` in it is a run of that many
         placeholders between its markers.
         """
+        task = task or "query"
+        if task not in self.TASKS:
+            raise ValueError(f"Unsupported EmbeddingGemma task: {task}")
         c, out = self.config, []
         runs = {
             c.audio_token: [c.boa, *[c.audio_token] * audio_tokens, c.eoa],
@@ -386,7 +390,7 @@ class EmbeddingGemma(Encoder):
             model.processor = TextProcessor(directory / "tokenizer.json", model.config)
         return model
 
-    def embed(self, text: str, task: str, dims: int = 768) -> np.ndarray:
+    def embed(self, text: str, task: str = "", dims: int = 768) -> np.ndarray:
         """Return the embedding of `text` for `task`, its first `dims` renormalized."""
         if self.processor is None:
             raise RuntimeError(
@@ -441,7 +445,7 @@ class Multimodal(lm.Multimodal):
         return c.truncated(self.run(tokens, raw).numpy(), dims)
 
     def embed(
-        self, text: str, task: str, dims: int = 768, audio=None, image=None
+        self, text: str, task: str = "", dims: int = 768, audio=None, image=None
     ) -> np.ndarray:
         """Return the embedding of `text` for `task`, its first `dims` renormalized.
 

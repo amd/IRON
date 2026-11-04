@@ -26,6 +26,8 @@ template <class F> int Guard(const flm_error_sink_v1 *error, F action) noexcept
     } catch (const std::exception &e) {
         if (error && error->set_error)
             error->set_error(error->context, e.what(), std::char_traits<char>::length(e.what()));
+        if (dynamic_cast<const std::invalid_argument *>(&e))
+            return FLM_MODEL_EXTENSION_STATUS_INVALID_ARGUMENT;
     } catch (...) {
         if (error && error->set_error)
             error->set_error(error->context, "IRON provider failed", 20);

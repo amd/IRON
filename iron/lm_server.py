@@ -10,6 +10,8 @@ Only use an optional feature when its bit was negotiated. Unknown bits are
 ignored; incompatible payload or command changes require a new version.
 Keep the initial length-prefixed JSON exchange readable across versions.
 Missing fields mean version 1 and bits 0 + 1, the unversioned protocol.
+An embedding error with ``invalid_argument: true`` consumed its input and
+leaves the model usable; clients may retry with valid arguments.
 Keep these legacy defaults fixed when adding capabilities. FastFlowLM's
 ``iron/applications/fastflowlm_iron/worker.hpp`` declares the matching client bits.
 """
@@ -114,7 +116,7 @@ def serve(input_stream, output_stream):
                 if model is None:
                     raise RuntimeError("No model is loaded")
                 value = np.asarray(
-                    model.embed(text, command["task"], command["dimensions"]),
+                    model.embed(text, command.get("task", ""), command["dimensions"]),
                     dtype="<f4",
                 )
                 send(output_stream, {"ok": True, "count": value.size}, value.tobytes())
@@ -124,7 +126,10 @@ def serve(input_stream, output_stream):
             else:
                 raise ValueError(f"unknown command: {name}")
         except Exception as error:
-            send(output_stream, {"ok": False, "error": str(error)})
+            reply = {"ok": False, "error": str(error)}
+            if command.get("command") == "embed" and isinstance(error, ValueError):
+                reply["invalid_argument"] = True
+            send(output_stream, reply)
 
 
 def main():

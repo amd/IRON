@@ -128,12 +128,33 @@ def test_model(tmp_path, installation, tag, name):
                     with error.value as response:
                         assert response.code == 400
                         assert json.load(response)["error"]["message"]
+                with pytest.raises(urllib.error.HTTPError) as error:
+                    post(
+                        url,
+                        "/v1/embeddings",
+                        {"model": tag, "input": texts[0], "task": "unknown"},
+                    )
+                with error.value as response:
+                    assert response.code == 400
+                    assert (
+                        "Unsupported EmbeddingGemma task"
+                        in json.load(response)["error"]["message"]
+                    )
                 again = post(
-                    url, "/v1/embeddings", {"model": "Ollama/" + tag, "input": texts[0]}
+                    url,
+                    "/v1/embeddings",
+                    {"model": "Ollama/" + tag, "input": texts[0], "task": "query"},
                 )
                 np.testing.assert_allclose(
                     again["data"][0]["embedding"], vectors[0], atol=1e-5
                 )
+                custom = post(
+                    url,
+                    "/v1/embeddings",
+                    {"model": tag, "input": texts[0], "task": "QuestionAnswering"},
+                )["data"][0]["embedding"]
+                assert len(custom) == 768
+                np.testing.assert_allclose(np.linalg.norm(custom), 1, atol=0.02)
                 short = post(
                     url,
                     "/v1/embeddings",

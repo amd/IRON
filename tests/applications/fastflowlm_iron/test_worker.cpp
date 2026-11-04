@@ -93,6 +93,10 @@ int ServeFake()
         } else if (name == "embed") {
             std::string text(command.at("size").get<std::size_t>(), '\0');
             read(text.data(), text.size());
+            if (command.at("task") == "unknown") {
+                send({{"ok", false}, {"error", "Unsupported task"}, {"invalid_argument", true}});
+                continue;
+            }
             const float values[] = {static_cast<float>(text.size()), command.at("dimensions").get<float>()};
             send({{"ok", true}, {"count", 2}}, values, sizeof(values));
         } else {
@@ -121,6 +125,8 @@ int main(int argc, char **argv)
     TEST_REQUIRE(!llama.poisoned());
 
     flm::iron::Worker embedding("/unused", "embedding_gemma2");
+    RequireContains(RequireThrows([&] { embedding.embed("hello", "unknown"); }), "Unsupported task");
+    TEST_REQUIRE(!embedding.poisoned());
     const auto result = embedding.embed("hello", "query", 128);
     TEST_REQUIRE(result == std::vector<float>({5.0f, 128.0f}));
 

@@ -78,7 +78,9 @@ void test_plugin()
     TEST_REQUIRE(emb.load(emb.object, Span("/unused"), metadata, 1, nullptr) != 0);
     TEST_REQUIRE(emb.load(emb.object, Span("/unused"), metadata, 0, nullptr) == 0);
     flm_f32_view_v1 vector{};
-    TEST_REQUIRE(emb.embed(emb.object, Span("hello"), Span("query"), 0, &vector, nullptr) == 0);
+    TEST_REQUIRE(emb.embed(emb.object, Span("hello"), Span("unknown"), 0, &vector, nullptr) ==
+                 FLM_MODEL_EXTENSION_STATUS_INVALID_ARGUMENT);
+    TEST_REQUIRE(emb.embed(emb.object, Span("hello"), Span(""), 0, &vector, nullptr) == 0);
     TEST_REQUIRE(vector.size == 2 && vector.data[0] == 5 && vector.data[1] == 768);
     TEST_REQUIRE(emb.embed(emb.object, Span("hello"), Span("document"), 128, &vector, nullptr) == 0);
     TEST_REQUIRE(vector.data[1] == 128);
