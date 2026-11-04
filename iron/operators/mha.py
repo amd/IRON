@@ -879,6 +879,17 @@ class MHA(Operator):
     # Fused, the key block per head dimension, as today's pipeline takes it
     # on npu1, so the two mappings are one result (D5).
     FUSED_KEY_BLOCKS: ClassVar[dict[int, int]] = {64: 64, 128: 32, 256: 16}
+    # The fused core loop's own frame below the kernel's (an ELF's measure).
+    FUSED_LOOP_FRAME: ClassVar[int] = 192
+    # The fused core's RTP words in order, the round groups' last.
+    FUSED_WORDS: ClassVar[tuple[str, ...]] = (
+        "heads",
+        "s_q",
+        "s_kv",
+        "q_start",
+        "q_offset",
+        *(f"{w}_{g}" for g in range(ROUND_GROUPS) for w in ("rounds", "kv_blocks")),
+    )
 
     def resolve_fused(self, dev):
         """``resolve`` for one core a query block: every core of ``num_pipelines`` columns.
@@ -1023,8 +1034,14 @@ class MHA(Operator):
     def fused_core_bytes(
         self, dev: Device, B_q: int, B_kv: int, f32: bool = False, kv_depth: int = 2
     ) -> int:
-        """Return a fused core's L1 bytes: Q, ``kv_depth`` key blocks, O's two forms, S (float32 where ``f32``), P, state, words and stack."""
+        """Return a fused core's L1 bytes: Q, ``kv_depth`` key blocks, O's two forms, S (float32 where ``f32``), P, state, words and stack.
+
+        The stack is aiecc's: the loop's own frame and the kernel's, never
+        under the default. The kernel's static data is what attend_block
+        reaches; the core's other entries reach none.
+        """
         d = self.d
+        params = sum(self.value(name).per_call for name in self.FUSED_WORDS)
         data = (
             2 * B_q * d  # Q, one block deep
             + kv_depth * 4 * B_kv * d  # K and V
@@ -1034,15 +1051,19 @@ class MHA(Operator):
             + 2 * B_q * B_kv  # P
             + (4 * 32 * B_q if self.relative_band else 0)  # Q R^T
             + 16 * B_q  # the online state
-            + 12  # the block index
-            + 4 * (5 + 2 * self.ROUND_GROUPS)  # the core's words
-            + 4 * 2 * self.ROUND_GROUPS  # each group's rounds and key blocks
+            # Each small buffer takes 32 bytes: the block index, the groups
+            # copied, a per-call word's 8-byte scratchpad parameter (in a full
+            # ELF; elsewhere in the RTP) and the RTP's other words.
+            + 32
+            + 4 * 2 * self.ROUND_GROUPS
+            + 32 * params
+            + ceildiv(4 * (len(self.FUSED_WORDS) - params), 32) * 32
         )
         with set_current_device(dev), compile_context(_iron_kernel_registry=set()):
             frame = self.fused_kernel(
                 dev, B_q, B_kv, self.num_heads // self.num_KV_heads, f32=f32
-            ).frame_bytes(resolve_target_arch(dev))
-        return dev.default_core_stack_bytes + data + frame
+            ).frame_bytes(resolve_target_arch(dev), reached_only=True)
+        return data + max(dev.default_core_stack_bytes, self.FUSED_LOOP_FRAME + frame)
 
     def split_mapping(self, dev: Device) -> dict:
         """``resolve_fused``'s tunables for one query: a core a KV lane, each over every ``kv_lanes``-th key block from its own.
@@ -1808,18 +1829,7 @@ class MHA(Operator):
         self.KV.bind([inKV.prod(tile=AnyShimTile)])
         memKV = inKV.cons().forward(to_stream=kv_tiled, depth=2, tile=AnyMemTile)
 
-        groups = [
-            (self.value(f"rounds_{g}"), self.value(f"kv_blocks_{g}"))
-            for g in range(self.ROUND_GROUPS)
-        ]
-        values = [
-            self.heads,
-            self.s_q,
-            self.s_kv,
-            self.q_start,
-            self.q_offset,
-            *(v for group in groups for v in group),
-        ]
+        values = [self.value(name) for name in self.FUSED_WORDS]
 
         def core(of_q, of_kv, of_o, attend, init, rescale, first, rtp, *bufs):
             # A relative band's relative_rows and Q R^T buffer come last.

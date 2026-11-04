@@ -117,19 +117,21 @@ def test_a_fused_cores_estimate_holds_what_it_declares(device, seq_len, f32_scor
             cores_per_block=1,
             f32_scores=f32_scores,
         ).resolved(dev)
+        arch = resolve_target_arch(dev)
         if op.split:
             estimate = op.split_core_bytes(dev, op.B_kv, op.kv_lanes, op.lane_heads)
             kernel = op.fused_kernel(dev, op.B_q, op.B_kv, 1, op.lane_heads)
+            stack = dev.default_core_stack_bytes + kernel.frame_bytes(arch)
         else:
             estimate = op.fused_core_bytes(
                 dev, op.B_q, op.B_kv, op.f32_scores, op.kv_depth
             )
             kernel = op.fused_kernel(dev, op.B_q, op.B_kv, op.group, f32=op.f32_scores)
-        room = (
-            estimate
-            - dev.default_core_stack_bytes
-            - kernel.frame_bytes(resolve_target_arch(dev))
-        )
+            stack = max(
+                dev.default_core_stack_bytes,
+                op.FUSED_LOOP_FRAME + kernel.frame_bytes(arch, reached_only=True),
+            )
+        room = estimate - stack
         for worker in BuiltArray(OperatorDesign(op)).workers:
             held = 0
             for arg in worker.fn_args:
