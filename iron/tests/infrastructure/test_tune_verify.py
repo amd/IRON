@@ -21,13 +21,13 @@ from iron.operators.silu import SiLU
 from iron.operators.tanh import Tanh
 from iron.tests.support.llama_model import small
 from iron.tune.autotune import Point, Timed
+from iron.tune.fusions import Applied
 from iron.tune.measure import SPENT, Timing, measure
 from iron.tune.verify import (
     Check,
     Phase,
     Phases,
     entries,
-    fingerprint,
     narrowed,
     touches,
     verify,
@@ -128,8 +128,27 @@ def test_a_fingerprint_moves_with_a_tunable_and_not_with_an_entry_elsewhere():
     moved = Profile()
     moved.add(ReLU, size=LARGE, tile_size=512)
     [other_large, _], [moved_large, _] = recorded(other), recorded(moved)
-    assert fingerprint(large, Profile(), dev) == fingerprint(other_large, other, dev)
-    assert fingerprint(moved_large, moved, dev) != fingerprint(large, Profile(), dev)
+    prints = [
+        Applied.of(call, profile, dev).fingerprint(dev)
+        for call, profile in (
+            (large, Profile()),
+            (other_large, other),
+            (moved_large, moved),
+        )
+    ]
+    assert prints[0] == prints[1] != prints[2]
+
+
+def test_a_version_builds_from_the_profile_applied_for_its_fingerprint():
+    """``compared`` applies each profile once: the build takes the recording fingerprinted."""
+    dev = aie_utils.ensure_current_device()
+    [large, _] = recorded(Profile())
+    applied = Applied.of(large, Profile(), dev)
+    version = applied.built(dev)
+    assert version.recording is applied.recording
+    assert applied.fingerprint(dev) == Applied.of(large, Profile(), dev).fingerprint(
+        dev
+    )
 
 
 def test_a_report_names_what_the_saved_profile_adds_and_drops(tmp_path):

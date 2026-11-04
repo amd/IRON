@@ -13,7 +13,7 @@ from iron.operators.gemv import GEMV
 from iron.operators.relu import ReLU
 from iron.tests.support.tools import requires
 from iron.tune.autotune import Timed
-from iron.tune.fusions import built, compare_graphs
+from iron.tune.fusions import Applied, compare_graphs
 from iron.tune.measure import Timing
 from iron.tune.plan import coded_seed
 
@@ -46,14 +46,14 @@ def test_a_tuned_build_holds_a_coded_weight_coded_only(device):
 
     seed = coded_seed(record, device, Profile())
     [call] = record(seed)
-    layout = built(call, seed, device).sequence.layout
+    layout = Applied.of(call, seed, device).built(device).sequence.layout
     assert {"w", "w.coded"} & layout.keys() == {"w.coded"}
 
 
 def test_compare_graphs_names_the_input_two_builds_take_differently(device):
     call = Timed(Rectify().record(x=(4096,)))
     other = Timed(Rectify().record(x=(8192,)))
-    before = built(call, Profile(), device)
-    after = built(other, Profile(), device)
+    before = Applied.of(call, Profile(), device).built(device)
+    after = Applied.of(other, Profile(), device).built(device)
     with pytest.raises(ValueError, match=r"after .*'input 0', \(4096,\).*\(8192,\)"):
         compare_graphs(call, before, after, timing=Timing(rounds=1, calls=1))

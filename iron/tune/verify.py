@@ -22,14 +22,13 @@ from aie.iron.device import Device
 
 from iron.common.declare import Profile
 from iron.common.declare.profile import PackingEntry, Version
-from iron.common.graph.compiled import apply_profile
 from iron.common.graph.fold import chosen_folds
 from iron.common.graph.fusion import fusions as graph_fusions
 from iron.common.graph.record import Recording
 from iron.common.image.step import FusionKind
 
-from .autotune import CONFIDENCE, Timed, _identity
-from .fusions import Compared, built, compare_graphs
+from .autotune import CONFIDENCE, Timed
+from .fusions import Applied, Compared, compare_graphs
 from .measure import SPENT, CheckTooLong, CpuWaitRefused, NpuLock, Spent, Timing
 
 
@@ -51,16 +50,6 @@ class Check:
     @property
     def gains(self) -> bool:
         return self.noise_us is not None and self.delta_us < -CONFIDENCE * self.noise_us
-
-
-def fingerprint(call: Timed, profile: Profile, dev) -> Hashable:
-    """Return what ``call``'s version builds under ``profile``.
-
-    Its steps' designs, fusions and packing; two profiles giving one fingerprint build
-    one image.
-    """
-    recording, fused, packing = apply_profile(call.recording, profile, dev)
-    return tuple(_identity(s.op, dev) for s in recording.steps), fused, packing
 
 
 def touches(kind: str, entry: Any, recording: Recording) -> bool:
@@ -162,7 +151,7 @@ def compared(
     """``new``'s version under ``after`` against ``old``'s under ``before`` (``compare_graphs`` at ``old``'s points), each packaged as ``dev`` does.
 
     Its delta and that delta's standard error, or None where the two build one image
-    (``fingerprint``). Read from ``memo``, by the two builds' fingerprints, where it
+    (``Applied.fingerprint``). Read from ``memo``, by the two builds' fingerprints, where it
     holds every point; else built and timed at the points it does not hold, which are
     added to it.
 
@@ -180,7 +169,8 @@ def compared(
         cap_s: The most its timing takes (``compare_graphs``).
     """
     memo = {} if memo is None else memo
-    pair = (fingerprint(old, before, dev), fingerprint(new, after, dev))
+    was, now = Applied.of(old, before, dev), Applied.of(new, after, dev)
+    pair = (was.fingerprint(dev), now.fingerprint(dev))
     if pair[0] == pair[1]:
         return None
     known = memo.setdefault(pair, Compared())
@@ -190,8 +180,8 @@ def compared(
         return found
     return compare_graphs(
         old,
-        built(old, before, dev),
-        built(new, after, dev),
+        was.built(dev),
+        now.built(dev),
         timing=timing,
         log=log,
         lock=lock,

@@ -49,7 +49,8 @@ from iron.common.declare.profile import Version
 from iron.common.design import BuiltArray, OperatorDesign, configuration
 from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
 from iron.common.graph.fusion import admits, candidates
-from iron.common.image.compose import fused_configuration, unvalued
+from iron.common.graph.record import Recording
+from iron.common.image.compose import Packing, fused_configuration, unvalued
 from iron.common.image.packaging import plan
 from iron.common.image.step import Edge, Fusion, FusionKind
 
@@ -59,6 +60,7 @@ from .autotune import (
     Shape,
     Timed,
     Trial,
+    _identity,
     _json_safe,
     line,
     settings,
@@ -805,22 +807,55 @@ class NotBitIdentical(RuntimeError):
     """
 
 
-def built(call: Timed, profile: Profile, dev) -> CompiledGraph:
-    """Return ``call``'s version under ``profile``, packaged as ``dev`` does.
+@dataclasses.dataclass(frozen=True)
+class Applied:
+    """A call's recording as a profile compiles it, its weights coded.
 
-    Its weights coded as ``Graph.compile`` codes them (``Recording.code_weights``), in
-    ``call``'s recording itself: how a weight is read is its recording's, the same
-    under every profile.
+    Attributes:
+        recording: The recording with the profile applied.
+        fused: The fusions it takes.
+        packing: The packing it takes.
     """
-    begun = time.perf_counter()
-    call.recording.code_weights()
-    recording, fused, packing = apply_profile(call.recording, profile, dev)
-    chosen = plan(
-        dev, recording, None, False, step_words=_step_words(recording), fusions=fused
-    )
-    out = CompiledGraph(recording, chosen, fusions=fused, packing=packing)
-    Spent.charge(build_s=time.perf_counter() - begun)
-    return out
+
+    recording: Recording
+    fused: tuple[Fusion, ...]
+    packing: Packing
+
+    @classmethod
+    def of(cls, call: Timed, profile: Profile, dev) -> Applied:
+        """Return ``call`` under ``profile`` on ``dev``.
+
+        Its weights coded as ``Graph.compile`` codes them (``Recording.code_weights``),
+        in ``call``'s recording itself: how a weight is read is its recording's, the
+        same under every profile.
+        """
+        begun = time.perf_counter()
+        call.recording.code_weights()
+        out = cls(*apply_profile(call.recording, profile, dev))
+        Spent.charge(build_s=time.perf_counter() - begun)
+        return out
+
+    def fingerprint(self, dev) -> Hashable:
+        """Return what this builds: two with one fingerprint build one image."""
+        steps = tuple(_identity(s.op, dev) for s in self.recording.steps)
+        return steps, self.fused, self.packing
+
+    def built(self, dev) -> CompiledGraph:
+        """Return the version, packaged as ``dev`` does."""
+        begun = time.perf_counter()
+        chosen = plan(
+            dev,
+            self.recording,
+            None,
+            False,
+            step_words=_step_words(self.recording),
+            fusions=self.fused,
+        )
+        out = CompiledGraph(
+            self.recording, chosen, fusions=self.fused, packing=self.packing
+        )
+        Spent.charge(build_s=time.perf_counter() - begun)
+        return out
 
 
 @dataclasses.dataclass
@@ -1045,8 +1080,8 @@ def confirm_fusions(
             for entry in profile.packings():
                 trial_profile.add_packing(entry.members, entry.versions)
             try:
-                plain_cg = built(call, profile, dev)
-                fused_cg = built(call, trial_profile, dev)
+                plain_cg = Applied.of(call, profile, dev).built(dev)
+                fused_cg = Applied.of(call, trial_profile, dev).built(dev)
             except (ValueError, RuntimeError, ir.MLIRError) as e:
                 # A build failure is a property of this version (this
                 # particular combination of active groups' fusions), not of

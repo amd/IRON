@@ -38,7 +38,7 @@ from iron.common.graph.record import Recording
 from iron.common.image.link import FullELF, PerStep
 from iron.common.image.packaging import require_device
 from iron.tune.autotune import Timed
-from iron.tune.fusions import NotBitIdentical, built, compare_graphs
+from iron.tune.fusions import Applied, NotBitIdentical, compare_graphs
 from iron.tune.measure import Timing
 from iron.tune.verify import touches
 
@@ -463,7 +463,9 @@ def version_builds(
             dataclasses.replace(calls[version], recording=side[version])
             for side in sides
         ]
-        out[label] = own[0], [built(c, p, dev) for c, p in zip(own, profiles)]
+        out[label] = own[0], [
+            Applied.of(c, p, dev).built(dev) for c, p in zip(own, profiles)
+        ]
     return out
 
 
