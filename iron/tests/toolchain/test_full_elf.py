@@ -196,9 +196,9 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
     """
     model = llama_1b(num_hidden_layers=1)
     version = build_elf(model, **model.shapes()[1])
-    # The chunk's embedding rows and RoPE rows, the block, the last row,
-    # norm, head and draw.
-    assert len(version.recording.steps) == 2 + 18 + 4
+    # The chunk's embedding rows and RoPE rows, the block (its gate product
+    # folded into SiLU by the npu2 profile), the last row, norm, head and draw.
+    assert len(version.recording.steps) == 2 + 17 + 4
     _assert_values_in_table(version)
 
 
