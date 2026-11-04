@@ -367,11 +367,15 @@ class CausalLM(Model):
 
         arguments(parser)
 
-    def sibling(self) -> Self:
+    def sibling(self, weights) -> Self:
         """Return this model at another context of whole chunks whose graph holds the same states: half, else double.
 
         A sliding window's cache rings only past three rings' rows, so halving can
         drop its ring, which doubling keeps.
+
+        Args:
+            weights: The tree this model's constructor took (a subclass may keep
+                only part of it).
 
         Raises:
             ValueError: Neither context keeps this graph's states.
@@ -382,7 +386,7 @@ class CausalLM(Model):
             if other < C or other % C:
                 continue
             twin = type(self)(
-                dataclasses.replace(self.config, max_seq_len=other), self.weights
+                dataclasses.replace(self.config, max_seq_len=other), weights
             )
             if [path for path, *_ in walk(twin)] == mine:
                 return twin
@@ -414,7 +418,7 @@ class CausalLM(Model):
                 f"max_seq_len {L}"
             )
         sampler = Sampler(args.temperature, args.top_k)
-        sibling = model.sibling()
+        sibling = model.sibling(Checkpoint(weights).tree(layers=layers))
         if profile is not None:
             model.profile = sibling.profile = profile
         return calls(

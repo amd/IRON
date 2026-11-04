@@ -446,7 +446,7 @@ def test_a_decode_steps_q_and_o_share_one_array(npu2):
 def test_a_sibling_context_keeps_the_kv_cache_layout(context, expected):
     """A 64-position window rings past 1536 rows: 2048's half would drop the ring and record other steps, so its sibling doubles."""
     model = small(max_seq_len=context, sliding_window=65)
-    twin = model.sibling()
+    twin = model.sibling(checkpoint(model.config).tree("random", 0))
     assert twin.config.max_seq_len == expected
     steps = len(model.record(**model.shapes()[0]).steps)
     assert len(twin.record(**twin.shapes()[0]).steps) == steps
