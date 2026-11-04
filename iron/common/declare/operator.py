@@ -112,6 +112,9 @@ class Operator(jit.Operator, library=True):
     own_preamble: ClassVar[bool] = False
     # A full ELF lowers every operator's sequence under the union.
     aiecc_flags: ClassVar[tuple[str, ...]] = ()
+    # One resolved operator per construction (device, design key, pinned and
+    # given tunables), so equal operators resolve once a process.
+    _resolutions: ClassVar[dict[tuple, Operator]] = {}
     # Per leading operand that may be a view: the param holding its pattern
     # and the per-call value a dynamic index binds.
     accept_views: ClassVar[tuple[tuple[str, str], ...]] = ()
@@ -480,13 +483,31 @@ class Operator(jit.Operator, library=True):
         return cls, own
 
     def resolved(self, dev: Device | None = None) -> Self:
-        """Return this operator resolved for ``dev``, the bound device unless given."""
+        """Return this operator resolved for ``dev``, the bound device unless given.
+
+        An equal operator resolved before in this process gives its result, copied.
+        """
         dev = self.dev if dev is None else dev
         if dev is None:
             raise Unresolvable(
                 f"{type(self).__name__}: resolved() needs a device; none is bound"
             )
-        return super().resolved(dev)
+        if self._resolved or self._unresolved is not self:
+            return super().resolved(dev)
+        key = (dev, self.design_key(), self.pinned, self.given)
+        found = Operator._resolutions.get(key)
+        if found is None:
+            found = Operator._resolutions[key] = super().resolved(dev)
+            return found
+        # A copy owns its values, so nothing this operator later binds reaches another.
+        new = found.copy()
+        new.bound_values, new.pinned, new.given = (
+            self.bound_values,
+            self.pinned,
+            self.given,
+        )
+        new._unresolved = self
+        return new
 
     def replace(self, **changes: Any) -> Self:
         """Return a copy with ``changes``, checked against the device once complete.

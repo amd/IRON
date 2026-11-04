@@ -588,3 +588,34 @@ def test_a_reference_only_operator_takes_no_image():
 
         class Shipped(Doubled, image=Xclbin(url="u", sha256="0" * 64, filename="f")):
             pass
+
+
+def test_an_equal_operator_resolves_from_the_first_unless_a_binding_differs(npu2):
+    """npu2's float32 d=128 core holds two key blocks, one once three of its words are bound per call.
+
+    An equal operator takes the first's resolution as a copy of its own; one with
+    bindings resolves afresh.
+    """
+
+    shape = dict(
+        num_heads=24,
+        num_KV_heads=8,
+        d=128,
+        seq_len=2048,
+        kv_len=4096,
+        num_pipelines=8,
+        heads_interleaved=True,
+        kv_paired=True,
+        cores_per_block=1,
+    )
+    first = MHA(**shape).resolved(npu2)
+    bound = MHA(**shape)
+    for name in ("s_q", "s_kv", "q_start"):
+        bound.use_value(name)
+    again = MHA(**shape)
+    assert first.kv_depth == 2
+    assert bound.resolved(npu2).kv_depth == 1
+    copied = again.resolved(npu2)
+    assert copied.kv_depth == 2 and copied is not first
+    again.use_value("s_q")
+    assert not copied.value("s_q").per_call and first.bound_values == {}
