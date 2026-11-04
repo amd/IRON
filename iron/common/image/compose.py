@@ -57,6 +57,10 @@ _FIT_PIPELINE = (
 
 SEQUENTIAL, ANNEALED = "sequential_placer", "sa_placer"
 
+# Each packed group's placer and the diagnostic where none routes it, by its
+# designs' identities.
+_placed: dict[tuple[str, ...], tuple[str, str | None]] = {}
+
 
 class CoResidenceError(ValueError):
     """The designs cannot share one device configuration."""
@@ -312,7 +316,41 @@ class Composition:
             )
         self.commands = tuple(place[i] for i in full_elf.commands)
         self.shared_words = full_elf.shared_words
-        self.packing = full_elf.packing
+        self.packing = self.placed(full_elf.packing)
+
+    def placed(self, packing: Packing) -> Packing:
+        """Return ``packing``'s groups that place and route as one device.
+
+        A group the default placer cannot route is placed by the annealing one where
+        that routes it (``Packing.annealed``); one neither routes (an operator's
+        mapping changed since the profile was tuned) runs unpacked, with a warning.
+        """
+        groups, annealed = [], set()
+        for group in packing.groups:
+            members = {n: self.designs[n] for n in group if n in self.designs}
+            if len(members) < 2:
+                continue
+            key = tuple(d.identity for d in members.values())
+            if key not in _placed:
+                refused = fits(members)
+                if refused is None:
+                    _placed[key] = (SEQUENTIAL, None)
+                elif fits(members, placer=ANNEALED) is None:
+                    _placed[key] = (ANNEALED, None)
+                else:
+                    _placed[key] = (SEQUENTIAL, refused)
+            placer, refused = _placed[key]
+            if refused is not None:
+                logger.warning(
+                    "packing %s does not place, so it is not packed: %s",
+                    ", ".join(members),
+                    refused,
+                )
+                continue
+            groups.append(tuple(members))
+            if placer == ANNEALED:
+                annealed.update(members)
+        return Packing(tuple(groups), tuple(sorted(annealed)))
 
     @property
     def identity(self) -> str:

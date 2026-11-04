@@ -270,10 +270,11 @@ def test_a_pack_only_the_annealing_placer_routes_is_placed_by_it(
         (Copy, {}, {"num_channels": 2}),
     )
     packed, packing = apply_packings(recording, profile, (), npu2)
-    (group,) = packing.groups
-    assert bool(packing.annealed) is annealed
     seq = Image(packed, FullELF(packing=packing))
     seq._prepare()
+    composition = Composition(seq)
+    (group,) = composition.packing.groups
+    assert bool(composition.packing.annealed) is annealed
     device = Packing.device_name(list(group))
-    body = Composition(seq).text().split(f"@{device} {{", 1)[1].split("\n  }\n", 1)[0]
+    body = composition.text().split(f"@{device} {{", 1)[1].split("\n  }\n", 1)[0]
     assert ("logical_tile" in body) is not annealed

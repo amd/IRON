@@ -20,7 +20,9 @@ from iron.common.declare.profile import PackingEntry
 from iron.common.graph.compiled import apply_profile
 from iron.common.graph.packing import apply as apply_packings
 from iron.common.graph.record import Recording
-from iron.common.image.compose import Packing
+from iron.common.image.compose import Composition, Packing
+from iron.common.image.link import FullELF
+from iron.common.image.sequence import Image
 from iron.common.image.step import FusionKind
 from iron.lm.generation import Sampler
 from iron.lm.tune import calls
@@ -316,7 +318,7 @@ def test_a_packing_names_no_dimension_a_hosts_context_sizes(npu2, tmp_path):
     assert sizes[0] == sizes[1] and sizes[0], sizes
 
 
-def test_a_pack_no_placer_places_runs_unpacked(npu2, caplog):
+def test_a_pack_no_placer_places_runs_unpacked_in_a_full_elf(npu2, caplog):
     """Every decode design of the small model in one group places under neither placer: it is not packed, and a warning says why."""
     model = small()
     decode, _ = calls(model, 0, 0, 256, 1, Sampler(0.7, 50), small(max_seq_len=512))
@@ -334,8 +336,13 @@ def test_a_pack_no_placer_places_runs_unpacked(npu2, caplog):
     )
     profile = iron.Profile()
     profile.add_packing(packer.members({k: {} for k in packer.shapes}))
-    _, packing = apply_packings(model.record(**model.shapes()[0]), profile, [], npu2)
-    assert packing == Packing()
+    packed, packing = apply_packings(
+        model.record(**model.shapes()[0]), profile, [], npu2
+    )
+    assert packing.groups
+    seq = Image(packed, FullELF(packing=packing))
+    seq._prepare()
+    assert Composition(seq).packing == Packing()
     assert "does not place, so it is not packed" in caplog.text
 
 
