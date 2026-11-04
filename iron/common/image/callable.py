@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 import aie.utils as aie_utils
 import ml_dtypes
 import numpy as np
+from aie.utils.benchmark import CPU_WAIT_US
 from aie.utils.npukernel import NPUKernel
 from aie.utils.trace import get_trace_buffer
 
@@ -247,6 +248,9 @@ def _line_view(parent: XRTTensor, offset: int, length: int, dtype) -> XRTTensor:
     return parent.subview(offset, ((stop - offset) // dtype.itemsize,), dtype)
 
 
+WAIT_PER_DISPATCH_US = 2.0
+
+
 class ImageCallable:
     """What a caller invokes once a sequence ``op`` has an image.
 
@@ -281,6 +285,16 @@ class ImageCallable:
         (``aie.utils.benchmark``), or None, and the call's result.
         """
         raise NotImplementedError
+
+    @property
+    def dispatches(self) -> int:
+        """Commands a call issues from the host: one for a full ELF."""
+        return 1
+
+    def cpu_wait_cap_us(self) -> float:
+        """The CPU wait a call's timing may show before it is refused as host contention."""
+        # An idle host still wakes about 1 us a dispatch (Phoenix, ~1100-dispatch steps).
+        return CPU_WAIT_US + WAIT_PER_DISPATCH_US * self.dispatches
 
     def _arena_grew(self) -> bool:
         """Whether the arena grew since the views were made, now made again."""
@@ -590,6 +604,11 @@ class PerStepCallable(ImageCallable):
     ``check`` holds each step to its reference; residents are arena views,
     transients share one bank-split pool.
     """
+
+    @property
+    def dispatches(self) -> int:
+        """Commands a call issues from the host: one a step, a fusion's steps one."""
+        return len(self._steps)
 
     def __init__(self, seq, check: bool = False, arena: ScratchArena | None = None):
         super().__init__(seq, arena)

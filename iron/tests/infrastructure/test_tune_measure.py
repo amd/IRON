@@ -8,9 +8,21 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
+from ml_dtypes import bfloat16
 
+from iron.common.image.callable import WAIT_PER_DISPATCH_US
+from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.silu import SiLU
-from iron.tune.measure import Cache, Measurement, NpuLock, standard_error
+from iron.tests.support.graphs import Adds
+from iron.tune.measure import (
+    Cache,
+    Measurement,
+    NpuLock,
+    Timing,
+    standard_error,
+    time_interleaved,
+)
 
 
 def test_npu_lock_keeps_another_process_out_until_its_outermost_exit(tmp_path):
@@ -65,3 +77,18 @@ def test_a_cached_measurement_names_the_operator_it_timed(tmp_path, npu2):
     assert named["params"]["size"] == 2048 and named["params"]["tile_size"] == 256
     cache.put("plain", m)
     assert cache.get("plain") == m
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_per_step_call_is_timed_with_a_cpu_wait_cap_its_dispatches_earn():
+    x, w = (np.full(1024, v, bfloat16) for v in (1.0, 0.5))
+    graph = Adds(ElementwiseAdd(size=1024, tile_size=128), 64)
+    per_step = graph.compile(full_elf=False, x=(1024,), w=(1024,))
+    whole = graph.compile(full_elf=True, x=(1024,), w=(1024,))
+    assert per_step.callable.dispatches == 64 and whole.callable.dispatches == 1
+    extra = per_step.callable.cpu_wait_cap_us() - whole.callable.cpu_wait_cap_us()
+    assert extra == 63 * WAIT_PER_DISPATCH_US
+    expected = (x.astype(np.float32) + 64 * 0.5).astype(bfloat16)
+    assert np.array_equal(np.asarray(per_step(x, w)), expected)
+    (stats,) = time_interleaved([per_step.callable], Timing(rounds=2, calls=5), log=lambda _: None)
+    assert stats.median_us > 0

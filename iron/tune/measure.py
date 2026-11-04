@@ -525,7 +525,8 @@ def time_interleaved(
 
     Each call's figure the time the image itself took, which its
     ``KernelResult`` carries: mlir-aie's ``run_interleaved``, whose arguments
-    and errors these are. Dispatches under ``lock`` where given.
+    and errors these are, its CPU-wait guard scaled to the most dispatches a call
+    of ``runs`` issues. Dispatches under ``lock`` where given.
     """
     with lock or contextlib.nullcontext():
         return run_interleaved(
@@ -537,6 +538,7 @@ def time_interleaved(
             groups=list(groups) or None,
             fastest_us=fastest,
             completion_cores=True,
+            max_cpu_wait_us=max(run.cpu_wait_cap_us() for run in runs),
             idle=True,
             log=log,
         )
