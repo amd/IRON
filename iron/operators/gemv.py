@@ -5,11 +5,9 @@ import math
 from typing import Any, ClassVar
 
 import aie.dialects.index as index
-import aie.dialects.memref as memref
 import numpy as np
 from aie.dialects.aie import AIETileType, T
 from aie.helpers.taplib import TensorAccessPattern
-from aie.helpers.util import np_ndarray_type_to_memref_type
 from aie.iron import Buffer, ExternalFunction, In, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
@@ -25,12 +23,12 @@ from aie.utils.compile.jit.params import (
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import Built, Operator, Rtp
+from iron.common import Built, Rtp
 from iron.common.declare.operand import concrete
 from iron.common.elementwise import (
-    Elementwise,
+    Finish,
+    Finishing,
     FinishStep,
-    Rowwise,
     finish_bound,
     finish_reference,
 )
@@ -118,7 +116,7 @@ def _cases(cls, dev: Device):
     )
 
 
-class GEMV(Operator):
+class GEMV(Finishing):
     """``C = A @ B`` as row-blocks of A per lane, ``tile_size_input`` rows per mv.cc call.
 
     By default B rides each lane's A stream ahead of its rows so every input channel of
@@ -242,11 +240,7 @@ class GEMV(Operator):
         if self.coded_a:
             self._validate_coded()
         if self.finish:
-            if sum(f.binary for f in self.finish) > 1:
-                raise ValueError(
-                    "GEMV: only one of its finish steps takes another input; "
-                    "its one free input channel is already another's"
-                )
+            super().validate()
             if self.feed_b and not self.rides:
                 raise ValueError(
                     "GEMV: feed_b already holds both of a core's input "
@@ -380,53 +374,8 @@ class GEMV(Operator):
             step.consumer_at(self.tile_size_output, self.dev).layout().kernel()
 
     def fold(self, consumer, at: int):
-        # A row-wise consumer reads whole rows, not the tiles a finish step runs on.
-        if (
-            not isinstance(consumer, Elementwise)
-            or isinstance(consumer, Rowwise)
-            or self.repeat > 1
-        ):
-            return None
-        others = [i for i in range(len(consumer.inputs)) if i != at]
-        if len(others) > 1:
-            return None
-        binary = bool(others)
-        # One finish step may take another input (``validate``).
-        if binary and any(f.binary for f in self.finish):
-            return None
-        used = sum(b.streamed for b in self.inputs)
-        rides = False
-        dev = self.dev
-        if dev is None:
-            return None
-        if binary and used + 1 > dev.core_dma_channels_in:
-            if self.rides or not self._can_ride():
-                return None
-            rides = True
-        dims = tuple(
-            sorted(
-                (n, vars(consumer)[n])
-                for n, p in type(consumer).declaration.params.items()
-                if p.init
-                and n
-                not in (
-                    "size",
-                    "tile_size",
-                    "num_aie_columns",
-                    "num_channels",
-                    "finish",
-                    "uses_extra",
-                    "rides",
-                )
-                and vars(consumer)[n] is not None
-            )
-        )
-        step = FinishStep(type(consumer), dims, at, binary)
-        return self.replace(
-            finish=self.finish + (step,),
-            uses_extra=self.uses_extra or binary,
-            rides=self.rides or rides,
-        )
+        # repeat computes its batches out of order, which a finish input does not follow.
+        return None if self.repeat > 1 else super().fold(consumer, at)
 
     def _can_ride(self) -> bool:
         """Whether A's own tile could carry a finish's other input instead of a stream of its own.
@@ -521,110 +470,27 @@ class GEMV(Operator):
                 ]
             vectors = [Buffer(vector) for _ in range(lanes)]
 
-            if not self.finish:
+            finish = Finish(self, tile_size_output)
+            # Riding, a finish's other input is A's own tile re-read, cast down to
+            # one finish tile (A's holds several, identical repeats).
+            riding = any(f.binary for f in self.finish) and self.rides
 
-                def core_body(A_fifo, C_fifo, b, matvec, copy, rtp, *decoded):
-                    words = rtp.read()
-                    n = words[self.tiles]
-                    batches = words[self.batches]
-                    for _ in range_(batches):
-                        # The batch's head tiles carry B.
-                        for args in head_copies:
-                            head = A_fifo.acquire(1)
-                            copy(head, b, *args)
-                            A_fifo.release(1)
-                        for _ in range_(n):
-                            c = C_fifo.acquire(1)
-                            for j_idx in range_(tile_size_output // tile_size_input):
-                                j_i32: Any = index.casts(T.i32(), j_idx)
-                                output_row_offset = j_i32 * tile_size_input
-                                a = A_fifo.acquire(1)
-                                matvec(
-                                    tile_size_input,
-                                    output_row_offset,
-                                    a,
-                                    *decoded,
-                                    b,
-                                    c,
-                                )
-                                A_fifo.release(1)
-                            C_fifo.release(1)
-
-                workers = [
-                    Worker(
-                        core_body,
-                        [A_ends[i], C_ends[i], vectors[i], matvec, copy, rtps[i]]
-                        + decoded[i],
-                    )
-                    for i in range(lanes)
-                ]
-                return Built(workers, rtps)
-
-            # The chain of steps folded into these cores: each kernel runs
-            # after the one before it, over the tile the previous call
-            # wrote in a scratch buffer, ping-ponging between two until the
-            # last writes C; at most one step's other input streams in on
-            # finish0, or, riding, is A's own tile re-read, cast down to one
-            # finish tile's size (A's holds several, identical repeats).
-            binary_finish = any(f.binary for f in self.finish)
-            of_finish = (
-                self.finish0.fifos() if binary_finish and not self.rides else None
-            )
-            ride_view = (
-                np_ndarray_type_to_memref_type(
-                    np.ndarray[(tile_size_output,), np.dtype[bfloat16]]
-                )
-                if binary_finish and self.rides
-                else None
-            )
-            chain_meta = []
-            chain_kernels = []
-            for step in self.finish:
-                consumer = step.consumer_at(tile_size_output, self.dev)
-                c_kernel = consumer.layout().kernel()
-                c_positions, c_scalars = consumer.arguments(
-                    c_kernel, consumer.scalars(), len(consumer.inputs), 1
-                )
-                c_order = {i: j for j, i in enumerate(c_positions)}
-                n_c_args = len(c_positions) + len(c_scalars)
-                chain_kernels.append(c_kernel)
-                chain_meta.append(
-                    (c_positions, c_scalars, c_order, n_c_args, step.at, step.binary)
-                )
-            scratch_ty = np.ndarray[(tile_size_output,), np.dtype[bfloat16]]
-            # A second scratch buffer, to ping-pong, only past one finish
-            # step: an L1 line this core otherwise never holds at once.
-            scratch_as = [Buffer(scratch_ty) for _ in range(lanes)]
-            scratch_bs = (
-                [Buffer(scratch_ty) for _ in range(lanes)]
-                if len(chain_meta) > 1
-                else None
-            )
-
-            def core_body_chain(*args):
-                A_fifo, C_fifo, b, matvec, copy = args[:5]
-                tail = args[5:]
-                finish_fifo = tail[0] if of_finish is not None else None
-                tail = tail[1:] if of_finish is not None else tail
-                chain_fns = tail[: len(chain_meta)]
-                tail = tail[len(chain_meta) :]
-                lane_decoded = tail[len(tail) - len(decoded[0]) :]
-                tail = tail[: len(tail) - len(decoded[0])]
-                if scratch_bs is not None:
-                    scratch_a, scratch_b, rtp = tail
-                else:
-                    scratch_a, rtp = tail
-                    scratch_b = None
+            def core_body(A_fifo, C_fifo, b, matvec, copy, *rest):
+                chain = rest[: finish.width]
+                rtp = rest[finish.width]
+                lane_decoded = rest[finish.width + 1 :]
                 words = rtp.read()
                 n = words[self.tiles]
                 batches = words[self.batches]
                 for _ in range_(batches):
+                    # The batch's head tiles carry B.
                     for args in head_copies:
                         head = A_fifo.acquire(1)
                         copy(head, b, *args)
                         A_fifo.release(1)
                     for _ in range_(n):
                         c = C_fifo.acquire(1)
+                        target = finish.target(chain, c)
                         for j_idx in range_(tile_size_output // tile_size_input):
                             j_i32: Any = index.casts(T.i32(), j_idx)
                             output_row_offset = j_i32 * tile_size_input
@@ -635,65 +501,17 @@ class GEMV(Operator):
                                 a,
                                 *lane_decoded,
                                 b,
-                                scratch_a,
+                                target,
                             )
                             A_fifo.release(1)
-                        tile = scratch_a
-                        for idx, (c_fn, meta) in enumerate(zip(chain_fns, chain_meta)):
-                            c_positions, c_scalars, c_order, n_c_args, at, binary = meta
-                            last = idx == len(chain_meta) - 1
-                            dst = (
-                                c
-                                if last
-                                else (scratch_b if tile is scratch_a else scratch_a)
-                            )
-                            extra = None
-                            if binary and ride_view is not None:
-                                ridden = A_fifo.acquire(1)
-                                extra = memref.reinterpret_cast(
-                                    ride_view,
-                                    ridden,
-                                    [],
-                                    [],
-                                    [],
-                                    [0],
-                                    [tile_size_output],
-                                    [1],
-                                )
-                            elif binary:
-                                assert finish_fifo is not None, "a finish's own fifo"
-                                extra = finish_fifo.acquire(1)
-                            c_inputs = [
-                                tile if i == at else extra
-                                for i in range(len(c_positions) - 1)
-                            ]
-                            c_elements = c_inputs + [dst]
-                            c_fn(
-                                *(
-                                    (
-                                        c_elements[c_order[i]]
-                                        if i in c_order
-                                        else c_scalars[i]
-                                    )
-                                    for i in range(n_c_args)
-                                )
-                            )
-                            if binary and ride_view is not None:
-                                A_fifo.release(1)
-                            elif binary:
-                                assert finish_fifo is not None, "a finish's own fifo"
-                                finish_fifo.release(1)
-                            tile = dst
+                        finish.run(chain, c, A_fifo if riding else None, cast=riding)
                         C_fifo.release(1)
 
             workers = [
                 Worker(
-                    core_body_chain,
+                    core_body,
                     [A_ends[i], C_ends[i], vectors[i], matvec, copy]
-                    + ([of_finish[i]] if of_finish is not None else [])
-                    + chain_kernels
-                    + [scratch_as[i]]
-                    + ([scratch_bs[i]] if scratch_bs is not None else [])
+                    + finish.args(i)
                     + [rtps[i]]
                     + decoded[i],
                 )
