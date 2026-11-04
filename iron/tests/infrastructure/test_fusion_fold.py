@@ -8,9 +8,7 @@ leaves L1, so the consumer takes no cores and no DMA hop of its own. No toolchai
 NPU above the "On the device" line.
 """
 
-import contextlib
 import re
-import signal
 import statistics
 
 import numpy as np
@@ -35,64 +33,11 @@ from iron.operators.gelu import GELU
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
-from iron.tests.support import sequences
+from iron.tests.support import fusable, hang, sequences
 from iron.tests.support.llama_model import llama_1b, small
 from iron.tune.measure import Timing, time_interleaved
 
 pytestmark = pytest.mark.usefixtures("npu2")
-
-
-@contextlib.contextmanager
-def _bounded(seconds: int):
-    """Fail, rather than hang, a device call past ``seconds``.
-
-    A new finish chain's host/core acquire order is exactly the kind of mistake that
-    hangs silently instead of erroring.
-    """
-
-    def _raise(signum, frame):
-        raise TimeoutError(f"a device call ran past {seconds}s: likely a hang")
-
-    previous = signal.signal(signal.SIGALRM, _raise)
-    signal.alarm(seconds)
-    try:
-        yield
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
-
-
-def _stream(producer: int, output: str, input: str) -> Fusion:
-    """Return a two-step stream fusion, the alternative a fold measures against."""
-    return Fusion(
-        FusionKind.STREAM,
-        (producer, producer + 1),
-        (Edge(producer, output, producer + 1, input),),
-    )
-
-
-def _silu_mul(size, tile, **extra):
-    silu = SiLU(size=size, tile_size=tile, **extra)
-    mul = ElementwiseMul(size=size, tile_size=tile, **extra)
-    return silu, mul
-
-
-def _silu_mul_recording(name, silu, mul):
-    steps = sequences.steps((silu, "x", "mid"), (mul, "mid", "up", "out"))
-    return Recording.of_steps(name, steps, ["x", "up"], ["out"])
-
-
-def _gemv_add(M, K, tile_size_input, tile_size_output):
-    gemv = GEMV(
-        M=M, K=K, tile_size_input=tile_size_input, tile_size_output=tile_size_output
-    )
-    add = ElementwiseAdd(size=M, tile_size=tile_size_output)
-    return gemv, add
-
-
-def _gemv_add_recording(name, gemv, add):
-    steps = sequences.steps((gemv, "A", "B", "mid"), (add, "r", "mid", "out"))
-    return Recording.of_steps(name, steps, ["A", "B", "r"], ["out"])
 
 
 # ---------------------------------------------------------------------------
@@ -101,8 +46,8 @@ def _gemv_add_recording(name, gemv, add):
 
 
 def test_silu_folds_elementwise_mul_candidate():
-    silu, mul = _silu_mul(2048, 256)
-    rec = _silu_mul_recording("silu_mul", silu, mul)
+    silu, mul = fusable.silu_mul(2048, 256)
+    rec = fusable.silu_mul_recording("silu_mul", silu, mul)
     (fusion,) = fold_candidates(rec)
     assert fusion == Fusion(FusionKind.FOLD, (0, 1), (Edge(0, "y", 1, "a"),))
     folded = apply_folds(rec, (fusion,))
@@ -115,8 +60,8 @@ def test_silu_folds_elementwise_mul_candidate():
 
 
 def test_gemv_folds_elementwise_add_candidate():
-    gemv, add = _gemv_add(2048, 2048, 4, 256)
-    rec = _gemv_add_recording("gemv_add", gemv, add)
+    gemv, add = fusable.gemv_add(2048, 2048, 4, 256)
+    rec = fusable.gemv_add_recording("gemv_add", gemv, add)
     (fusion,) = fold_candidates(rec)
     assert fusion == Fusion(FusionKind.FOLD, (0, 1), (Edge(0, "C", 1, "b"),))
     folded = apply_folds(rec, (fusion,))
@@ -271,7 +216,7 @@ def test_a_graph_output_is_not_folded_away():
 
     Folding it would drop the step the host reads it from.
     """
-    silu, mul = _silu_mul(2048, 256)
+    silu, mul = fusable.silu_mul(2048, 256)
     steps = sequences.steps((silu, "x", "mid"), (mul, "mid", "up", "out"))
     rec = Recording.of_steps("kept_output", steps, ["x", "up"], ["mid", "out"])
     assert fold_candidates(rec) == ()
@@ -279,7 +224,7 @@ def test_a_graph_output_is_not_folded_away():
 
 def test_a_tile_read_again_is_not_folded_away():
     """``mid`` read by a third step too: folding it would lose that read."""
-    silu, mul = _silu_mul(2048, 256)
+    silu, mul = fusable.silu_mul(2048, 256)
     mul2 = ElementwiseMul(size=2048, tile_size=256)
     steps = sequences.steps(
         (silu, "x", "mid"), (mul, "mid", "up", "out"), (mul2, "mid", "up2", "out2")
@@ -326,7 +271,7 @@ def test_feed_b_leaves_no_channel_for_a_finish():
     """With neither its columns resolved nor riding built for it (batched), feed_b's two channels leave no room for a finish's other input."""
     gemv = GEMV(M=2048, K=2048, tile_size_input=4, tile_size_output=256, feed_b=True)
     add = ElementwiseAdd(size=2048, tile_size=256)
-    rec = _gemv_add_recording("feed_b", gemv, add)
+    rec = fusable.gemv_add_recording("feed_b", gemv, add)
     assert fold_candidates(rec) == ()
 
     batched = GEMV(
@@ -340,7 +285,7 @@ def test_feed_b_leaves_no_channel_for_a_finish():
         num_batches=2,
     )
     add2 = ElementwiseAdd(size=2 * 2048, tile_size=256)
-    rec2 = _gemv_add_recording("feed_b_batched", batched, add2)
+    rec2 = fusable.gemv_add_recording("feed_b_batched", batched, add2)
     assert fold_candidates(rec2) == ()
 
 
@@ -360,7 +305,7 @@ def test_gemv_rides_a_when_feed_b_leaves_no_channel():
         feed_b=True,
     )
     add = ElementwiseAdd(size=2048, tile_size=256)
-    rec = _gemv_add_recording("feed_b_rides", gemv, add)
+    rec = fusable.gemv_add_recording("feed_b_rides", gemv, add)
     (fusion,) = fold_candidates(rec)
     folded = apply_folds(rec, (fusion,))
     (step,) = folded.steps
@@ -375,8 +320,8 @@ def test_chosen_folds_matches_the_profile_and_is_applied_once():
 
     A step in at most one.
     """
-    silu, mul = _silu_mul(2048, 256)
-    rec = _silu_mul_recording("profile_pick", silu, mul)
+    silu, mul = fusable.silu_mul(2048, 256)
+    rec = fusable.silu_mul_recording("profile_pick", silu, mul)
     profile = Profile()
     profile.add_fusion(
         FusionKind.FOLD, [(SiLU, {}), (ElementwiseMul, {})], [(0, "y", 1, "a")]
@@ -392,14 +337,14 @@ def test_chosen_folds_matches_the_profile_and_is_applied_once():
 
 def test_the_folded_design_builds():
     """The finish chain's MLIR is real: it builds on the current device."""
-    silu, mul = _silu_mul(2048, 256)
-    rec = _silu_mul_recording("builds", silu, mul)
+    silu, mul = fusable.silu_mul(2048, 256)
+    rec = fusable.silu_mul_recording("builds", silu, mul)
     folded = apply_folds(rec, fold_candidates(rec))
     op = folded.steps[0].op.resolved(folded.steps[0].op.dev)
     BuiltArray(OperatorDesign(op))
 
-    gemv, add = _gemv_add(2048, 2048, 4, 256)
-    rec2 = _gemv_add_recording("builds2", gemv, add)
+    gemv, add = fusable.gemv_add(2048, 2048, 4, 256)
+    rec2 = fusable.gemv_add_recording("builds2", gemv, add)
     folded2 = apply_folds(rec2, fold_candidates(rec2))
     op2 = folded2.steps[0].op.resolved(folded2.steps[0].op.dev)
     BuiltArray(OperatorDesign(op2))
@@ -407,14 +352,10 @@ def test_the_folded_design_builds():
 
 def test_a_folded_operator_s_name_is_a_symbol():
     """A finish step is spelled into the operator's name, which per-call values and xclbin dispatch parameters are named from."""
-    silu, mul = _silu_mul(2048, 256)
+    silu, mul = fusable.silu_mul(2048, 256)
     op = silu.fold(mul, 0)
     assert op is not None and re.fullmatch(r"\w+", op.name), op.name
     OperatorDesign(op, full_elf=False)
-
-
-def _kinds(recording, fusion) -> tuple[str, ...]:
-    return tuple(type(recording.steps[i].op.resolved()).__name__ for i in fusion.steps)
 
 
 def test_fold_candidates_on_small_llama():
@@ -428,13 +369,13 @@ def test_fold_candidates_on_small_llama():
     decode_shapes, prompt_shapes = model.shapes()
     decode, prompt = model.record(**decode_shapes), model.record(**prompt_shapes)
     folds = fold_candidates(decode)
-    kinds = sorted(_kinds(decode, f) for f in folds)
+    kinds = sorted(fusable.kinds(decode, f) for f in folds)
     assert kinds == sorted(
         [("GEMV", "ElementwiseAdd")] * 4 + [("SiLU", "ElementwiseMul")] * 2
     )
     prompt_folds = fold_candidates(prompt)
     assert (
-        sorted(_kinds(prompt, f) for f in prompt_folds)
+        sorted(fusable.kinds(prompt, f) for f in prompt_folds)
         == [("SiLU", "ElementwiseMul")] * 2
     )
 
@@ -444,12 +385,12 @@ def test_fold_candidates_on_llama_1b_header():
     decode_shapes, prompt_shapes = model.shapes()
     decode, prompt = model.record(**decode_shapes), model.record(**prompt_shapes)
     folds = fold_candidates(decode)
-    kinds = sorted(_kinds(decode, f) for f in folds)
+    kinds = sorted(fusable.kinds(decode, f) for f in folds)
     assert kinds == sorted(
         [("GEMV", "ElementwiseAdd")] * 2 + [("SiLU", "ElementwiseMul")]
     )
     prompt_folds = fold_candidates(prompt)
-    assert sorted(_kinds(prompt, f) for f in prompt_folds) == [
+    assert sorted(fusable.kinds(prompt, f) for f in prompt_folds) == [
         ("SiLU", "ElementwiseMul")
     ]
 
@@ -490,13 +431,17 @@ def test_silu_folds_elementwise_mul_on_device(size, tile, record_property):
     It is bit-equal to the pair run unfused, and timed against both the unfused pair
     and the same pair stream-fused.
     """
-    silu, mul = _silu_mul(size, tile)
+    silu, mul = fusable.silu_mul(size, tile)
     folded_op = silu.fold(mul, 0)
     assert folded_op is not None
 
     folded_rec = Recording.of_step(folded_op)
-    unfused_rec = _silu_mul_recording("silu_mul_unfused", *_silu_mul(size, tile))
-    stream_rec = _silu_mul_recording("silu_mul_stream", *_silu_mul(size, tile))
+    unfused_rec = fusable.silu_mul_recording(
+        "silu_mul_unfused", *fusable.silu_mul(size, tile)
+    )
+    stream_rec = fusable.silu_mul_recording(
+        "silu_mul_stream", *fusable.silu_mul(size, tile)
+    )
 
     folded_img = Image(folded_rec, FullELF())
     folded_img.compile()
@@ -506,7 +451,7 @@ def test_silu_folds_elementwise_mul_on_device(size, tile, record_property):
     unfused_img.compile()
     unfused_run = unfused_img.get_callable()
 
-    stream_img = Image(stream_rec, FullELF(), fusions=(_stream(0, "y", "a"),))
+    stream_img = Image(stream_rec, FullELF(), fusions=(fusable.stream(0, "y", "a"),))
     stream_img.compile()
     stream_run = stream_img.get_callable()
 
@@ -552,16 +497,16 @@ def test_gemv_folds_elementwise_add_on_device(M, K, record_property):
     unfused; timed against both the unfused pair and the same pair stream-fused.
     """
     tile_size_input, tile_size_output = (4, 256) if K == 2048 else (1, 256)
-    gemv, add = _gemv_add(M, K, tile_size_input, tile_size_output)
+    gemv, add = fusable.gemv_add(M, K, tile_size_input, tile_size_output)
     folded_op = gemv.fold(add, 1)
     assert folded_op is not None
 
     folded_rec = Recording.of_step(folded_op)
-    unfused_rec = _gemv_add_recording(
-        "gemv_add_unfused", *_gemv_add(M, K, tile_size_input, tile_size_output)
+    unfused_rec = fusable.gemv_add_recording(
+        "gemv_add_unfused", *fusable.gemv_add(M, K, tile_size_input, tile_size_output)
     )
-    stream_rec = _gemv_add_recording(
-        "gemv_add_stream", *_gemv_add(M, K, tile_size_input, tile_size_output)
+    stream_rec = fusable.gemv_add_recording(
+        "gemv_add_stream", *fusable.gemv_add(M, K, tile_size_input, tile_size_output)
     )
 
     folded_img = Image(folded_rec, FullELF())
@@ -572,7 +517,7 @@ def test_gemv_folds_elementwise_add_on_device(M, K, record_property):
     unfused_img.compile()
     unfused_run = unfused_img.get_callable()
 
-    stream_img = Image(stream_rec, FullELF(), fusions=(_stream(0, "C", "b"),))
+    stream_img = Image(stream_rec, FullELF(), fusions=(fusable.stream(0, "C", "b"),))
     stream_img.compile()
     stream_run = stream_img.get_callable()
 
@@ -615,7 +560,7 @@ def test_a_three_step_chain_matches_reference_and_unfused_on_device():
     run unfused.
     """
     M, K = 2048, 2048
-    gemv, add = _gemv_add(M, K, 4, 256)
+    gemv, add = fusable.gemv_add(M, K, 4, 256)
     silu = SiLU(size=M, tile_size=256)
     chain_op = gemv.fold(add, 1).fold(silu, 0)
     assert chain_op is not None
@@ -707,14 +652,12 @@ def test_a_bounded_fold_matches_across_different_per_call_counts():
         ), f"n={valid}: the folded device differs from the graph's own reference"
 
 
-@pytest.mark.supported_devices("npu2")
-def test_binary_elementwise_rides_matches_reference_and_unfused_on_device():
-    """ElementwiseAdd(a, b) -> ElementwiseMul.
+# Up to three compiles and their dispatches.
+_RIDE_TIMEOUT_S = 900
 
-    Folded by riding a's channel (one tile, the whole call, so no stream of its own for
-    Mul's other input), holds to the two operators' references composed and is bit-equal
-    to the pair run unfused.
-    """
+
+def _ride_binary() -> None:
+    """ElementwiseAdd folded into by ElementwiseMul riding a's channel, checked on the device."""
     size, tile = 256, 256
     add = ElementwiseAdd(size=size, num_aie_columns=1, num_channels=1, tile_size=tile)
     mul = ElementwiseMul(size=size, num_aie_columns=1, num_channels=1, tile_size=tile)
@@ -744,8 +687,7 @@ def test_binary_elementwise_rides_matches_reference_and_unfused_on_device():
         run.get_buffer(BufferRef(names[0])).numpy_view()[:] = a_vec.reshape(-1)
         run.get_buffer(BufferRef(names[1])).numpy_view()[:] = b_vec.reshape(-1)
         run.get_buffer(BufferRef(names[2])).numpy_view()[:] = up.reshape(-1)
-        with _bounded(30):
-            run()
+        run()
         return run.get_buffer(BufferRef(names[3])).numpy()[:size].copy()
 
     out = dispatch(ride_run, ("a", "b", "finish0", "y"))
@@ -765,20 +707,18 @@ def test_binary_elementwise_rides_matches_reference_and_unfused_on_device():
 
 
 @pytest.mark.supported_devices("npu2")
-def test_gemv_rides_a_matches_reference_unfused_and_stream_on_device(record_property):
-    """GEMV(2048, 2048) -> ElementwiseAdd residual.
+def test_binary_elementwise_rides_matches_reference_and_unfused_on_device():
+    """ElementwiseAdd(a, b) -> ElementwiseMul.
 
-    Folded by riding A's channel (``feed_b=True`` leaves no channel of its own for it),
-    holds to the two operators' references composed and is bit-equal to the pair run
-    unfused; timed against the unfused pair and the same pair stream-fused.
-
-    4 columns, not the decode tunable's 8: at 8, GEMV(feed_b=True)'s stream
-    fusion into Add needs the shim's whole 16-channel output budget plus
-    one more (A/B already claim it as two input streams a lane, so C can't
-    land on-chip and still needs its own output channel, same as Add's);
-    that is an existing stream-placement limit, not a riding one, so this
-    column count is the one where all three variants are buildable.
+    Folded by riding a's channel (one tile, the whole call, so no stream of its own for
+    Mul's other input), holds to the two operators' references composed and is bit-equal
+    to the pair run unfused.
     """
+    hang.bounded(_RIDE_TIMEOUT_S, _ride_binary)
+
+
+def _ride_gemv() -> dict:
+    """GEMV folded into by its residual add riding A's channel, checked on the device; its times."""
     M, K = 2048, 2048
     tile_size_input, cols = 4, 4
     tile_size_output = M // cols
@@ -796,7 +736,7 @@ def test_gemv_rides_a_matches_reference_unfused_and_stream_on_device(record_prop
     assert ride_op is not None and ride_op.rides
 
     ride_rec = Recording.of_step(ride_op)
-    unfused_rec = _gemv_add_recording(
+    unfused_rec = fusable.gemv_add_recording(
         "gemv_ride_unfused",
         GEMV(
             M=M,
@@ -809,7 +749,7 @@ def test_gemv_rides_a_matches_reference_unfused_and_stream_on_device(record_prop
         ),
         ElementwiseAdd(size=M, tile_size=tile_size_output),
     )
-    stream_rec = _gemv_add_recording(
+    stream_rec = fusable.gemv_add_recording(
         "gemv_ride_stream",
         GEMV(
             M=M,
@@ -831,7 +771,7 @@ def test_gemv_rides_a_matches_reference_unfused_and_stream_on_device(record_prop
     unfused_img.compile()
     unfused_run = unfused_img.get_callable()
 
-    stream_img = Image(stream_rec, FullELF(), fusions=(_stream(0, "C", "b"),))
+    stream_img = Image(stream_rec, FullELF(), fusions=(fusable.stream(0, "C", "b"),))
     stream_img.compile()
     stream_run = stream_img.get_callable()
 
@@ -844,8 +784,7 @@ def test_gemv_rides_a_matches_reference_unfused_and_stream_on_device(record_prop
         run.get_buffer(BufferRef(names[0])).numpy_view()[:] = A.reshape(-1)
         run.get_buffer(BufferRef(names[1])).numpy_view()[:] = B.reshape(-1)
         run.get_buffer(BufferRef(names[2])).numpy_view()[:] = r.reshape(-1)
-        with _bounded(30):
-            run()
+        run()
         return run.get_buffer(BufferRef(names[3])).numpy()[:M].copy()
 
     out = dispatch(ride_run, ("A", "B", "finish0", "C"))
@@ -860,7 +799,25 @@ def test_gemv_rides_a_matches_reference_unfused_and_stream_on_device(record_prop
         out.view(np.uint16), baseline.view(np.uint16)
     ), "the ridden and unfused devices differ"
 
-    times = _time(ride_run, unfused_run, stream_run)
+    return _time(ride_run, unfused_run, stream_run)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_gemv_rides_a_matches_reference_unfused_and_stream_on_device(record_property):
+    """GEMV(2048, 2048) -> ElementwiseAdd residual.
+
+    Folded by riding A's channel (``feed_b=True`` leaves no channel of its own for it),
+    holds to the two operators' references composed and is bit-equal to the pair run
+    unfused; timed against the unfused pair and the same pair stream-fused.
+
+    4 columns, not the decode tunable's 8: at 8, GEMV(feed_b=True)'s stream
+    fusion into Add needs the shim's whole 16-channel output budget plus
+    one more (A/B already claim it as two input streams a lane, so C can't
+    land on-chip and still needs its own output channel, same as Add's);
+    that is an existing stream-placement limit, not a riding one, so this
+    column count is the one where all three variants are buildable.
+    """
+    times = hang.bounded(_RIDE_TIMEOUT_S, _ride_gemv)
     for name, (lo, med) in times.items():
         record_property(f"{name} min us", lo)
         record_property(f"{name} median us", med)

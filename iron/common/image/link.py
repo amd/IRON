@@ -237,8 +237,8 @@ class FusedDesign:
 
     @property
     def name(self) -> str:
-        """The fusion's device symbol, content-named like a full ELF's (``Composition.fusion_name``), so a recurring fusion hits the cache."""
-        return Composition.fusion_name(self.fusion, [d.name for d in self.designs])
+        """The fusion's device symbol, content-named like a full ELF's (``Fusion.name``), so a recurring fusion hits the cache."""
+        return self.fusion.name([d.name for d in self.designs])
 
     def compilable(self, **options) -> CompilableDesign:
         flags = [
@@ -301,18 +301,14 @@ class PerStep:
         configs = [
             op.xclbin_operator() if op.external is None else None for op in designs
         ]
-        starts = {fusion.steps[0]: fusion for fusion in seq.fusions}
-        consumed = {s for fusion in seq.fusions for s in fusion.steps[1:]}
+        dispatches = list(Fusion.dispatches(seq.fusions, len(seq.steps)))
         chain_items: list[Operator | Fusion] = []
         plain_idx: dict[int, int] = {}
-        for i, step in enumerate(seq.steps):
-            if i in consumed:
-                continue
-            fusion = starts.get(i)
+        for i, fusion in dispatches:
             if fusion is not None:
                 chain_items.append(fusion)
                 continue
-            idx = design_of[id(step.op)]
+            idx = design_of[id(seq.steps[i].op)]
             if configs[idx] is not designs[idx] or idx in plain_idx:
                 continue
             plain_idx[idx] = len(chain_items)
@@ -379,12 +375,9 @@ class PerStep:
             i = design_of[id(op)]
             if i in links:
                 self.links[id(op)] = links[i]
-        for i, step in enumerate(seq.steps):
-            if i in consumed:
-                continue
-            fusion = starts.get(i)
+        for i, fusion in dispatches:
             if fusion is None:
-                idx = design_of[id(step.op)]
+                idx = design_of[id(seq.steps[i].op)]
                 if idx in links:
                     self.step_links[i] = links[idx]
                 continue

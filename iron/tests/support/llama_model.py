@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 from ml_dtypes import bfloat16
 
 from iron import Profile
@@ -153,3 +154,11 @@ def llama_1b(num_hidden_layers=16) -> Llama:
     """
     config = dataclasses.replace(REAL_1B, num_hidden_layers=num_hidden_layers)
     return Llama(config, checkpoint(config).tree("unread"))
+
+
+@pytest.fixture(scope="module")
+def llama_recordings():
+    """``small()``'s decode step and prompt chunk, recorded."""
+    model = small()
+    decode_shapes, prompt_shapes = model.shapes()
+    return model.record(**decode_shapes), model.record(**prompt_shapes)

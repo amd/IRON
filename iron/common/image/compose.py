@@ -258,36 +258,22 @@ class Composition:
                     f"whose device names collide, {design.name}; a tunable given "
                     f"to either one (a tile size, a column count) separates them"
                 )
-        # A step fed by another in its fusion is not a step of its own; the
-        # fusion reports one combined entry, at its first member's place.
-        consumed = {s for fusion in seq.fusions for s in fusion.steps[1:]}
-        starts = {fusion.steps[0]: fusion for fusion in seq.fusions}
+        # A fusion is one step of the composition, at its first member's place.
         self.fusions: dict[str, tuple[tuple[OperatorDesign, ...], Fusion]] = {}
         steps = []
         place: dict[int, int] = {}
-        for i, s in enumerate(seq.steps):
-            if i in consumed:
-                continue
+        for i, fusion in Fusion.dispatches(seq.fusions, len(seq.steps)):
             place[i] = len(steps)
-            fusion = starts.get(i)
             if fusion is None:
+                s = seq.steps[i]
                 steps.append((own[design_of[id(s.op)]].name, s.buffers))
                 continue
             member_designs = tuple(
                 own[design_of[id(seq.steps[j].op)]] for j in fusion.steps
             )
-            symbol = self.fusion_name(fusion, [d.name for d in member_designs])
+            symbol = fusion.name([d.name for d in member_designs])
             self.fusions[symbol] = (member_designs, fusion)
-            elided = {(e.producer, e.output) for e in fusion.edges} | {
-                (e.consumer, e.input) for e in fusion.edges
-            }
-            buffers = tuple(
-                ref
-                for j in fusion.steps
-                for ref, b in zip(seq.steps[j].buffers, seq.steps[j].op.buffers)
-                if (j, b.name) not in elided
-            )
-            steps.append((symbol, buffers))
+            steps.append((symbol, fusion.host_refs(seq.steps)))
         self.steps = steps
         used = {name for name, _ in steps}
         self.designs = {name: design for name, design in named.items() if name in used}
@@ -303,9 +289,7 @@ class Composition:
         )
         self.layout = seq.layout
         self.buffer_sizes = seq.buffer_sizes
-        inside = {
-            i for f in seq.fusions for i in range(f.steps[0] + 1, f.steps[-1] + 1)
-        }
+        inside = set(range(len(seq.steps))) - set(place)
         if inside & set(full_elf.commands):
             raise ValueError(
                 f"a command starts at steps {sorted(inside & set(full_elf.commands))}, "
@@ -314,24 +298,6 @@ class Composition:
         self.commands = tuple(place[i] for i in full_elf.commands)
         self.shared_words = full_elf.shared_words
         self.packing = full_elf.packing
-
-    @staticmethod
-    def fusion_name(fusion: Fusion, designs: Sequence[str]) -> str:
-        """Return a fusion's device symbol.
-
-        Content-named, so one hits the cache across processes, and distinct from any
-        member's own. Wiring is spelled by each member's place in the fusion, not in the
-        sequence, so one recurring down a model shares a symbol.
-        """
-        local = {step: i for i, step in enumerate(fusion.steps)}
-        wiring = ",".join(
-            f"{local[e.producer]}:{e.output}>{local[e.consumer]}:{e.input}"
-            for e in fusion.edges
-        )
-        digest = hashlib.sha256(
-            f"{fusion.kind.value}[{'|'.join(designs)}]({wiring})".encode()
-        ).hexdigest()[:8]
-        return f"fusion{len(designs)}_{digest}"
 
     @property
     def identity(self) -> str:

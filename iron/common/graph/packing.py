@@ -18,7 +18,6 @@ from ..declare import Profile
 from ..design import OperatorDesign
 from ..image.compose import Packing, fits
 from ..image.step import Fusion, FusionKind
-from .fusion import _crosses_host
 from .fusion_tunables import rebuild
 from .record import Recording
 
@@ -104,7 +103,7 @@ def merges(
             hi < len(groups)
             and groups[hi] is not None
             and groups[hi] == groups[lo]
-            and not _crosses_host(recording, hi - 1, hi)
+            and not recording.crosses_host(hi - 1, hi)
             and sum(hosted[lo : hi + 1]) <= HOST_BUFFERS
         ):
             if designs[hi].name in firsts:

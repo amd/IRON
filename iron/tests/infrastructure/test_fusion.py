@@ -25,85 +25,11 @@ from iron.common.testing import vectors
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Gather
 from iron.operators.elementwise_add import ElementwiseAdd
-from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
-from iron.operators.silu import SiLU
-from iron.tests.support import sequences
+from iron.tests.support import fusable, sequences
 from iron.tune.measure import Timing, time_interleaved
 
 pytestmark = pytest.mark.usefixtures("npu2")
-
-
-def _fuse(producer: int, output: str, input: str) -> Fusion:
-    """Return a two-step stream fusion, as a ``Chain`` used to be spelled."""
-    return Fusion(
-        FusionKind.STREAM,
-        (producer, producer + 1),
-        (Edge(producer, output, producer + 1, input),),
-    )
-
-
-def _steps(silu, mul, mid):
-    """SiLU's ``y`` and ElementwiseMul's ``a`` name ``mid``, the one fused."""
-    return sequences.steps((silu, "x", mid), (mul, mid, "up", "out"))
-
-
-def _silu_mul(size, cols, tile, **extra):
-    silu = SiLU(size=size, num_aie_columns=cols, tile_size=tile, **extra)
-    mul = ElementwiseMul(size=size, num_aie_columns=cols, tile_size=tile, **extra)
-    return silu, mul
-
-
-def _recording(name, silu, mul):
-    return Recording.of_steps(name, _steps(silu, mul, "mid"), ["x", "up"], ["out"])
-
-
-def _gemv_add(M, K, **extra):
-    # Llama decode's own profile tunables for M=2048, K=2048.
-    gemv = GEMV(M=M, K=K, tile_size_input=4, tile_size_output=256, **extra)
-    add = ElementwiseAdd(size=M, tile_size=256, **extra)
-    return gemv, add
-
-
-def _gemv_add_steps(gemv, add, mid):
-    """GEMV's ``C`` and ElementwiseAdd's ``b`` name ``mid``, the one fused."""
-    return sequences.steps((gemv, "A", "B", mid), (add, "r", mid, "out"))
-
-
-def _gemv_add_recording(name, gemv, add):
-    return Recording.of_steps(
-        name, _gemv_add_steps(gemv, add, "mid"), ["A", "B", "r"], ["out"]
-    )
-
-
-def _gemv_silu_mul(M, cols, tile, **extra):
-    gemv = GEMV(M=M, K=M, tile_size_input=4, tile_size_output=tile, **extra)
-    silu, mul = _silu_mul(M, cols, tile, **extra)
-    return gemv, silu, mul
-
-
-def _gemv_silu_mul_steps(gemv, silu, mul, mid1, mid2):
-    """GEMV's ``C`` feeds SiLU's ``x``, SiLU's ``y`` feeds ElementwiseMul's ``a``."""
-    return sequences.steps(
-        (gemv, "A", "B", mid1), (silu, mid1, mid2), (mul, mid2, "up", "out")
-    )
-
-
-def _gemv_silu_mul_recording(name, gemv, silu, mul):
-    return Recording.of_steps(
-        name,
-        _gemv_silu_mul_steps(gemv, silu, mul, "mid1", "mid2"),
-        ["A", "B", "up"],
-        ["out"],
-    )
-
-
-def _three_step_fusion() -> Fusion:
-    return Fusion(
-        FusionKind.STREAM,
-        (0, 1, 2),
-        (Edge(0, "C", 1, "x"), Edge(1, "y", 2, "a")),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -115,11 +41,11 @@ def _three_step_fusion() -> Fusion:
 def test_fused_pair_is_one_device_configuration(size, cols):
     """A fused pair places as one device, which is one fewer ``aie.device`` than the same two steps unfused; its identity differs too."""
     tile = 1024
-    silu, mul = _silu_mul(size, cols, tile)
+    silu, mul = fusable.silu_mul(size, tile, num_aie_columns=cols)
     fused = Image(
-        _recording(f"fuse_struct_{size}_{cols}", silu, mul),
+        fusable.silu_mul_recording(f"fuse_struct_{size}_{cols}", silu, mul),
         FullELF(),
-        fusions=(_fuse(0, "y", "a"),),
+        fusions=(fusable.stream(0, "y", "a"),),
     )
     fused._prepare()
     fused_composition = Composition(fused)
@@ -128,8 +54,11 @@ def test_fused_pair_is_one_device_configuration(size, cols):
         diagnostic = places(ir.Module.parse(fused_text))
     assert diagnostic is None, diagnostic
 
-    silu2, mul2 = _silu_mul(size, cols, tile)
-    unfused = Image(_recording(f"unfuse_struct_{size}_{cols}", silu2, mul2), FullELF())
+    silu2, mul2 = fusable.silu_mul(size, tile, num_aie_columns=cols)
+    unfused = Image(
+        fusable.silu_mul_recording(f"unfuse_struct_{size}_{cols}", silu2, mul2),
+        FullELF(),
+    )
     unfused._prepare()
     unfused_text = Composition(unfused).text()
 
@@ -139,15 +68,17 @@ def test_fused_pair_is_one_device_configuration(size, cols):
 
 
 def test_fused_identity_differs_from_unfused():
-    silu, mul = _silu_mul(2048, 1, 1024)
+    silu, mul = fusable.silu_mul(2048, 1024, num_aie_columns=1)
     fused = Image(
-        _recording("fuse_identity_fused", silu, mul),
+        fusable.silu_mul_recording("fuse_identity_fused", silu, mul),
         FullELF(),
-        fusions=(_fuse(0, "y", "a"),),
+        fusions=(fusable.stream(0, "y", "a"),),
     )
     fused._prepare()
-    silu2, mul2 = _silu_mul(2048, 1, 1024)
-    unfused = Image(_recording("fuse_identity_unfused", silu2, mul2), FullELF())
+    silu2, mul2 = fusable.silu_mul(2048, 1024, num_aie_columns=1)
+    unfused = Image(
+        fusable.silu_mul_recording("fuse_identity_unfused", silu2, mul2), FullELF()
+    )
     unfused._prepare()
     assert Composition(fused).identity != Composition(unfused).identity
 
@@ -157,11 +88,11 @@ def test_gemv_to_elementwiseadd_fused_pair_is_one_device_configuration():
 
     The generalization is not restricted to ``Elementwise``.
     """
-    gemv, add = _gemv_add(2048, 2048)
+    gemv, add = fusable.gemv_add(2048, 2048)
     fused = Image(
-        _gemv_add_recording("gemv_add_struct_fused", gemv, add),
+        fusable.gemv_add_recording("gemv_add_struct_fused", gemv, add),
         FullELF(),
-        fusions=(_fuse(0, "C", "b"),),
+        fusions=(fusable.stream(0, "C", "b"),),
     )
     fused._prepare()
     fused_composition = Composition(fused)
@@ -170,9 +101,9 @@ def test_gemv_to_elementwiseadd_fused_pair_is_one_device_configuration():
         diagnostic = places(ir.Module.parse(fused_text))
     assert diagnostic is None, diagnostic
 
-    gemv2, add2 = _gemv_add(2048, 2048)
+    gemv2, add2 = fusable.gemv_add(2048, 2048)
     unfused = Image(
-        _gemv_add_recording("gemv_add_struct_unfused", gemv2, add2), FullELF()
+        fusable.gemv_add_recording("gemv_add_struct_unfused", gemv2, add2), FullELF()
     )
     unfused._prepare()
     unfused_text = Composition(unfused).text()
@@ -184,11 +115,11 @@ def test_gemv_to_elementwiseadd_fused_pair_is_one_device_configuration():
 
 def test_three_step_fusion_is_one_device_configuration():
     """GEMV -> SiLU -> ElementwiseMul, all three fused, drops two ``aie.device``s against the same steps unfused."""
-    gemv, silu, mul = _gemv_silu_mul(2048, 1, 2048)
+    gemv, silu, mul = fusable.gemv_silu_mul(2048, 1, 2048)
     fused = Image(
-        _gemv_silu_mul_recording("three_step_struct_fused", gemv, silu, mul),
+        fusable.gemv_silu_mul_recording("three_step_struct_fused", gemv, silu, mul),
         FullELF(),
-        fusions=(_three_step_fusion(),),
+        fusions=(fusable.three_step(),),
     )
     fused._prepare()
     fused_text = Composition(fused).text()
@@ -196,9 +127,11 @@ def test_three_step_fusion_is_one_device_configuration():
         diagnostic = places(ir.Module.parse(fused_text))
     assert diagnostic is None, diagnostic
 
-    gemv2, silu2, mul2 = _gemv_silu_mul(2048, 1, 1024)
+    gemv2, silu2, mul2 = fusable.gemv_silu_mul(2048, 1, 1024)
     unfused = Image(
-        _gemv_silu_mul_recording("three_step_struct_unfused", gemv2, silu2, mul2),
+        fusable.gemv_silu_mul_recording(
+            "three_step_struct_unfused", gemv2, silu2, mul2
+        ),
         FullELF(),
     )
     unfused._prepare()
@@ -215,17 +148,17 @@ def test_three_step_fusion_is_one_device_configuration():
 
 
 def test_bad_step_index_refused():
-    silu, mul = _silu_mul(2048, 1, 1024)
-    recording = _recording("fuse_bad_index", silu, mul)
+    silu, mul = fusable.silu_mul(2048, 1024, num_aie_columns=1)
+    recording = fusable.silu_mul_recording("fuse_bad_index", silu, mul)
     with pytest.raises(ValueError, match="names no step"):
-        Image(recording, FullELF(), fusions=(_fuse(1, "y", "a"),))
+        Image(recording, FullELF(), fusions=(fusable.stream(1, "y", "a"),))
 
 
 @pytest.mark.parametrize(
     "packaging", [FullELF(), PerStep()], ids=["full_elf", "per_step"]
 )
 def test_an_image_refuses_a_fusion_with_a_gap(packaging):
-    silu, mul = _silu_mul(2048, 1, 1024)
+    silu, mul = fusable.silu_mul(2048, 1024, num_aie_columns=1)
     steps = sequences.steps((silu, "x", "a"), (mul, "a", "up", "b"), (silu, "up", "c"))
     recording = Recording.of_steps("gap", steps, ["x", "up"], ["b", "c"])
     with pytest.raises(ValueError, match="must be consecutive"):
@@ -233,21 +166,21 @@ def test_an_image_refuses_a_fusion_with_a_gap(packaging):
 
 
 def test_wrong_buffer_names_refused():
-    silu, mul = _silu_mul(2048, 1, 1024)
+    silu, mul = fusable.silu_mul(2048, 1024, num_aie_columns=1)
     with pytest.raises(ValueError, match="no drained buffer"):
         Image(
-            _recording("fuse_bad_output", silu, mul),
+            fusable.silu_mul_recording("fuse_bad_output", silu, mul),
             FullELF(),
-            fusions=(_fuse(0, "nope", "a"),),
+            fusions=(fusable.stream(0, "nope", "a"),),
         )
-    silu, mul = _silu_mul(2048, 1, 1024)
+    silu, mul = fusable.silu_mul(2048, 1024, num_aie_columns=1)
     with pytest.raises(ValueError, match="no filled buffer"):
         Image(
-            _recording("fuse_bad_input", silu, mul),
+            fusable.silu_mul_recording("fuse_bad_input", silu, mul),
             FullELF(),
-            fusions=(_fuse(0, "y", "nope"),),
+            fusions=(fusable.stream(0, "y", "nope"),),
         )
-    silu, mul = _silu_mul(2048, 1, 1024)
+    silu, mul = fusable.silu_mul(2048, 1024, num_aie_columns=1)
     split = Recording.of_steps(
         "fuse_split_roots",
         sequences.steps((silu, "x", "mid_a"), (mul, "mid_b", "up", "out")),
@@ -255,14 +188,18 @@ def test_wrong_buffer_names_refused():
         ["out"],
     )
     with pytest.raises(ValueError, match="do not name one whole buffer"):
-        Image(split, FullELF(), fusions=(_fuse(0, "y", "a"),))
+        Image(split, FullELF(), fusions=(fusable.stream(0, "y", "a"),))
 
 
 def test_step_in_two_fusions_refused():
-    silu, mul = _silu_mul(2048, 1, 1024)
-    recording = _recording("fuse_double_claim", silu, mul)
+    silu, mul = fusable.silu_mul(2048, 1024, num_aie_columns=1)
+    recording = fusable.silu_mul_recording("fuse_double_claim", silu, mul)
     with pytest.raises(ValueError, match="is in two fusions"):
-        Image(recording, FullELF(), fusions=(_fuse(0, "y", "a"), _fuse(0, "y", "a")))
+        Image(
+            recording,
+            FullELF(),
+            fusions=(fusable.stream(0, "y", "a"), fusable.stream(0, "y", "a")),
+        )
 
 
 def test_perstep_builds_fusions_but_check_refuses_them():
@@ -270,15 +207,17 @@ def test_perstep_builds_fusions_but_check_refuses_them():
 
     Since it holds each step to its reference on its own dispatch.
     """
-    silu, mul = _silu_mul(2048, 1, 1024)
+    silu, mul = fusable.silu_mul(2048, 1024, num_aie_columns=1)
     Image(
-        _recording("fuse_perstep", silu, mul), PerStep(), fusions=(_fuse(0, "y", "a"),)
+        fusable.silu_mul_recording("fuse_perstep", silu, mul),
+        PerStep(),
+        fusions=(fusable.stream(0, "y", "a"),),
     )
 
-    silu2, mul2 = _silu_mul(2048, 1, 1024)
-    recording = _recording("fuse_perstep_check", silu2, mul2)
+    silu2, mul2 = fusable.silu_mul(2048, 1024, num_aie_columns=1)
+    recording = fusable.silu_mul_recording("fuse_perstep_check", silu2, mul2)
     with pytest.raises(ValueError, match="check=True"):
-        Image(recording, PerStep(check=True), fusions=(_fuse(0, "y", "a"),))
+        Image(recording, PerStep(check=True), fusions=(fusable.stream(0, "y", "a"),))
 
 
 def test_fusion_needs_at_least_two_steps():
@@ -372,12 +311,16 @@ def test_fused_matches_reference_and_unfused():
     size, cols, tile = 2048, 1, 1024
 
     def build(fusions):
-        silu, mul = _silu_mul(size, cols, tile)
-        img = Image(_recording("fuse_device", silu, mul), FullELF(), fusions=fusions)
+        silu, mul = fusable.silu_mul(size, tile, num_aie_columns=cols)
+        img = Image(
+            fusable.silu_mul_recording("fuse_device", silu, mul),
+            FullELF(),
+            fusions=fusions,
+        )
         img.compile()
         return img.get_callable(), silu, mul
 
-    fused_run, silu, mul = build((_fuse(0, "y", "a"),))
+    fused_run, silu, mul = build((fusable.stream(0, "y", "a"),))
     plain_run, _, _ = build(())
 
     gate = vectors(silu).inputs["x"]
@@ -414,7 +357,9 @@ def test_fused_per_call_shared_value():
     Which the device still reads correctly.
     """
     size, cols, tile = 2048, 1, 1024
-    silu, mul = _silu_mul(size, cols, tile, bound_values={"valid": None})
+    silu, mul = fusable.silu_mul(
+        size, tile, num_aie_columns=cols, bound_values={"valid": None}
+    )
     # "valid" bounds each core's trip count only through "count", derived from
     # it; that is the word a core reads, and the one the two operators share.
     shared = {
@@ -422,9 +367,9 @@ def test_fused_per_call_shared_value():
         mul.value("count").symbol: "fuse_count",
     }
     img = Image(
-        _recording("fuse_device_per_call", silu, mul),
+        fusable.silu_mul_recording("fuse_device_per_call", silu, mul),
         FullELF(shared_words=shared),
-        fusions=(_fuse(0, "y", "a"),),
+        fusions=(fusable.stream(0, "y", "a"),),
     )
     img.compile()
     assert (
@@ -471,16 +416,16 @@ def test_gemv_to_elementwiseadd_matches_reference_and_unfused(record_property):
     M, K = 2048, 2048
 
     def build(fusions):
-        gemv, add = _gemv_add(M, K)
+        gemv, add = fusable.gemv_add(M, K)
         img = Image(
-            _gemv_add_recording("gemv_add_device", gemv, add),
+            fusable.gemv_add_recording("gemv_add_device", gemv, add),
             FullELF(),
             fusions=fusions,
         )
         img.compile()
         return img.get_callable(), gemv, add
 
-    fused_run, gemv, add = build((_fuse(0, "C", "b"),))
+    fused_run, gemv, add = build((fusable.stream(0, "C", "b"),))
     plain_run, _, _ = build(())
 
     A = vectors(gemv).inputs["A"]
@@ -526,16 +471,16 @@ def test_three_step_fusion_matches_reference_and_unfused():
     M, cols, tile = 2048, 1, 2048
 
     def build(fusions):
-        gemv, silu, mul = _gemv_silu_mul(M, cols, tile)
+        gemv, silu, mul = fusable.gemv_silu_mul(M, cols, tile)
         img = Image(
-            _gemv_silu_mul_recording("three_step_device", gemv, silu, mul),
+            fusable.gemv_silu_mul_recording("three_step_device", gemv, silu, mul),
             FullELF(),
             fusions=fusions,
         )
         img.compile()
         return img.get_callable(), gemv, silu, mul
 
-    fused_run, gemv, silu, mul = build((_three_step_fusion(),))
+    fused_run, gemv, silu, mul = build((fusable.three_step(),))
     plain_run, _, _, _ = build(())
 
     A = vectors(gemv).inputs["A"]

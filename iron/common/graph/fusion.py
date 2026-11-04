@@ -69,26 +69,8 @@ def _hand_offs(
     replacing the reader in ``ops`` once every reader of the root admits: a tuner finds
     and writes the setting the fusion runs at.
     """
-    excluded = (
-        {h.name for h in recording.outputs}
-        | set(recording.feedback)
-        | set(recording.pinned)
-        | set(recording.residents)
-    )
-    readers: dict[str, list[int]] = {}
-    writers: dict[str, list[int]] = {}
-    for i, step in enumerate(recording.steps):
-        for buf, ref in zip(step.op.buffers, step.refs()):
-            if buf.fills:
-                readers.setdefault(ref.root, []).append(i)
-            if buf.drains:
-                writers.setdefault(ref.root, []).append(i)
-    for host_step in recording.host:
-        for h in host_step.reads:
-            readers.setdefault(h.ref().root, []).append(-1)
-        for h in host_step.writes:
-            writers.setdefault(h.ref().root, []).append(-1)
-
+    excluded = recording.held
+    readers, writers = recording.users()
     found: dict[str, tuple[int, str, dict[int, str]]] = {}
     for i, step in enumerate(recording.steps):
         for buf, ref in zip(step.op.buffers, step.refs()):
@@ -162,15 +144,7 @@ def _stream_runs(recording: Recording) -> list[Fusion]:
     """
     resolved = [step.op.resolved() for step in recording.steps]
     hand_offs = _hand_offs(recording, resolved)
-    uses: list[tuple[set[str], set[str]]] = []
-    for step in recording.steps:
-        reads, writes = set(), set()
-        for buf, ref in zip(step.op.buffers, step.refs()):
-            if buf.fills:
-                reads.add(ref.root)
-            if buf.drains:
-                writes.add(ref.root)
-        uses.append((reads, writes))
+    uses = [step.roots() for step in recording.steps]
     found: list[Fusion] = []
     n = len(recording.steps)
     if not n:
@@ -183,12 +157,12 @@ def _stream_runs(recording: Recording) -> list[Fusion]:
     cores = dev.cols * len(dev.core_rows)
     for lo in range(n):
         for hi in range(lo + 1, min(lo + cores, n)):
-            if _crosses_host(recording, lo, hi):
+            if recording.crosses_host(lo, hi):
                 break
             window = range(lo, hi + 1)
             touched: dict[str, list[int]] = {}
             for s in window:
-                for root in uses[s][0] | uses[s][1]:
+                for root in dict.fromkeys(uses[s][0] + uses[s][1]):
                     touched.setdefault(root, []).append(s)
             edges: list[Edge] = []
             valid = True
@@ -219,32 +193,15 @@ def _stream_runs(recording: Recording) -> list[Fusion]:
     return found
 
 
-def _crosses_host(recording: Recording, lo: int, hi: int) -> bool:
-    """Whether a host step runs between steps ``lo`` and ``hi`` (inclusive).
-
-    Host code the model's own graph runs between two device dispatches, which neither
-    packing concurrently nor merging back to back may skip past.
-    """
-    return any(lo < s.at <= hi for s in recording.host)
-
-
 def _pack_conflicts(recording: Recording) -> set[tuple[int, int]]:
     """Index pairs ``(i, j)``, ``i < j``, whose steps are not independent.
 
     One writes a host buffer root the other reads or writes too (root-level, so a
     byte-range part of a buffer stands for the whole of it).
     """
-    reads: list[set[str]] = []
-    writes: list[set[str]] = []
-    for step in recording.steps:
-        r, w = set(), set()
-        for buf, ref in zip(step.op.buffers, step.refs()):
-            if buf.fills:
-                r.add(ref.root)
-            if buf.drains:
-                w.add(ref.root)
-        reads.append(r)
-        writes.append(w)
+    uses = [step.roots() for step in recording.steps]
+    reads = [set(r) for r, _ in uses]
+    writes = [set(w) for _, w in uses]
     conflicts: set[tuple[int, int]] = set()
     for i in range(len(recording.steps)):
         for j in range(i + 1, len(recording.steps)):
@@ -268,7 +225,7 @@ def _pack_runs(recording: Recording) -> list[Fusion]:
         while (
             end + 1 < n
             and not any((i, end + 1) in conflicts for i in range(start, end + 1))
-            and not _crosses_host(recording, start, end + 1)
+            and not recording.crosses_host(start, end + 1)
         ):
             end += 1
         if end > start:
@@ -307,27 +264,35 @@ _EVERY_KIND = (
 )
 
 
-def fusions(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
-    """``candidates(recording, kinds)`` of every kind that ``profile`` names (``Profile.fused``), a step in at most one fusion.
+def named(
+    recording: Recording, profile: Profile, ordered: Sequence[Fusion]
+) -> tuple[Fusion, ...]:
+    """Return the fusions of ``ordered`` that ``profile`` names (``Profile.fused``) in ``recording.version``, a step in at most one.
 
-    First in step order wins: the earliest first step, at a tie a stream or staged run
-    before a pack, then the shorter.
+    The first of ``ordered`` wins.
     """
     found: list[Fusion] = []
     taken: set[int] = set()
     version = recording.version
-    ordered = sorted(candidates(recording, _EVERY_KIND), key=lambda f: f.steps[0])
     for fusion in ordered:
         if taken & set(fusion.steps):
             continue
         steps = [recording.steps[i].op.resolved() for i in fusion.steps]
-        local = {step: i for i, step in enumerate(fusion.steps)}
-        edges = tuple(
-            (local[e.producer], e.output, local[e.consumer], e.input)
-            for e in fusion.edges
-        )
-        if not profile.fused(fusion.kind, steps, edges, version):
+        if not profile.fused(fusion.kind, steps, fusion.local_edges, version):
             continue
         found.append(fusion)
         taken.update(fusion.steps)
     return tuple(found)
+
+
+def fusions(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
+    """``candidates(recording, kinds)`` of every kind that ``profile`` names, a step in at most one fusion (``named``).
+
+    First in step order wins: the earliest first step, at a tie a stream or staged run
+    before a pack, then the shorter.
+    """
+    return named(
+        recording,
+        profile,
+        sorted(candidates(recording, _EVERY_KIND), key=lambda f: f.steps[0]),
+    )

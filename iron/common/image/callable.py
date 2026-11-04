@@ -22,7 +22,7 @@ from aie.utils.trace import get_trace_buffer
 from ..declare import Operator
 from .allocator import ALIGNMENT, BANK, ArenaPlan, Pool
 from .compose import Composition
-from .step import BufferRef
+from .step import BufferRef, Fusion
 
 if TYPE_CHECKING:
     import pyxrt  # pyright: ignore[reportMissingImports]
@@ -292,7 +292,7 @@ class ImageCallable:
         return 1
 
     def cpu_wait_cap_us(self) -> float:
-        """The CPU wait a call's timing may show before it is refused as host contention."""
+        """Return the most CPU wait a call's timing may show before it is refused as host contention."""
         # An idle host still wakes about 1 us a dispatch (Phoenix, ~1100-dispatch steps).
         return CPU_WAIT_US + WAIT_PER_DISPATCH_US * self.dispatches
 
@@ -640,38 +640,18 @@ class PerStepCallable(ImageCallable):
             self._storage[root] = view
             self._buffers[BufferRef(root)] = view
         # Each step is its own dispatch, over its own buffers; a fusion's
-        # steps are one dispatch, over every member's buffers but the ones
-        # an edge feeds on-chip (fed_edges), in fusion order.
+        # steps are one dispatch, over its host-visible buffers.
         self._steps = []
         # The step each dispatch starts at, and its link.
         self._starts: list[int] = []
         self._links = []
-        starts = {fusion.steps[0]: fusion for fusion in seq.fusions}
-        i, n = 0, len(seq.steps)
-        while i < n:
-            fusion = starts.get(i)
-            if fusion is None:
-                step = seq.steps[i]
-                link = seq.packaging.step_links[i]
-                self._steps.append((step.op, link.kernel, step.buffers, []))
-                self._starts.append(i)
-                self._links.append(link)
-                i += 1
-                continue
-            fed_edges = {(e.producer, e.output) for e in fusion.edges} | {
-                (e.consumer, e.input) for e in fusion.edges
-            }
-            refs = tuple(
-                ref
-                for j in fusion.steps
-                for ref, b in zip(seq.steps[j].buffers, seq.steps[j].op.buffers)
-                if (j, b.name) not in fed_edges
-            )
+        for i, fusion in Fusion.dispatches(seq.fusions, len(seq.steps)):
+            step = seq.steps[i]
             link = seq.packaging.step_links[i]
-            self._steps.append((seq.steps[fusion.steps[0]].op, link.kernel, refs, []))
+            refs = step.buffers if fusion is None else fusion.host_refs(seq.steps)
+            self._steps.append((step.op, link.kernel, refs, []))
             self._starts.append(i)
             self._links.append(link)
-            i = fusion.steps[-1] + 1
         self._follow_arena()
         self._bind_steps()
 

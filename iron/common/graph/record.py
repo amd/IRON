@@ -22,7 +22,7 @@ from ..declare import Operator, Value
 from ..declare.operand import concrete
 from ..declare.operator import graph_recorder
 from ..declare.profile import Profile, Version
-from ..image.packaging import Kind
+from ..image.packaging import Kind, Plan
 from ..image.step import BufferRef, SequenceStep
 from .coded import CodedWeight, encode_all
 from .handle import (
@@ -55,6 +55,10 @@ class Step:
     def refs(self) -> tuple[BufferRef, ...]:
         """Where each declared buffer of the step is."""
         return tuple(h.ref() for h in self.slots)
+
+    def roots(self) -> tuple[list[str], list[str]]:
+        """Return the buffer roots this step fills and those it drains, a root once per buffer naming it."""
+        return SequenceStep(self.op, self.refs()).roots()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -358,6 +362,44 @@ class Recording:
         found.update((h.name, key) for key, (_, h) in self.states.items())
         return found
 
+    @property
+    def held(self) -> set[str]:
+        """The buffer roots the host or a later call holds: outputs, feedback, pinned and resident buffers."""
+        return (
+            {h.name for h in self.outputs}
+            | set(self.feedback)
+            | set(self.pinned)
+            | set(self.residents)
+        )
+
+    def users(self) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
+        """Return the steps reading and writing each buffer root, a host step's index -1.
+
+        In step order, a step once per buffer it names the root with.
+        """
+        readers: dict[str, list[int]] = {}
+        writers: dict[str, list[int]] = {}
+        for i, step in enumerate(self.steps):
+            reads, writes = step.roots()
+            for root in reads:
+                readers.setdefault(root, []).append(i)
+            for root in writes:
+                writers.setdefault(root, []).append(i)
+        for host_step in self.host:
+            for h in host_step.reads:
+                readers.setdefault(h.ref().root, []).append(-1)
+            for h in host_step.writes:
+                writers.setdefault(h.ref().root, []).append(-1)
+        return readers, writers
+
+    def crosses_host(self, lo: int, hi: int) -> bool:
+        """Whether a host step runs between steps ``lo`` and ``hi`` (inclusive).
+
+        Host code the model's own graph runs between two device dispatches, which neither
+        packing concurrently nor merging back to back nor folding may skip past.
+        """
+        return any(lo < s.at <= hi for s in self.host)
+
     def check_limits(self, values: Mapping[str, int]) -> None:
         """Raise ``IndexError`` if ``values`` index or bound a view outside it."""
         for limit in self.limits:
@@ -550,6 +592,12 @@ class Recording:
                 )
         lines += [f"{name}: read plain: {why}" for name, why in self.read_plain.items()]
         return lines
+
+    def report(self, plan: Plan, name: str) -> str:
+        """Return ``plan``'s report for this recording as ``name``, then its ``coded_report``."""
+        return "\n".join(
+            [plan.report(name)] + [f"  {line}" for line in self.coded_report()]
+        )
 
     def _read_plain(self, key) -> None:
         """Point every reader of the coded weight ``key`` back at the weight it codes, each reader rebuilt with its operand's coded flag cleared."""

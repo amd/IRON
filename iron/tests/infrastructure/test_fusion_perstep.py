@@ -41,69 +41,17 @@ from iron.common.graph.record import Recording
 from iron.common.image.callable import PerStepCallable
 from iron.common.image.link import FusedDesign, PerStep
 from iron.common.image.sequence import Image
-from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind
+from iron.common.image.step import BufferRef, Fusion, FusionKind
 from iron.common.testing import vectors
 from iron.lm.testing import require
 from iron.operators.copy import Copy
-from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
-from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
-from iron.tests.support import sequences
+from iron.tests.support import fusable, sequences
 from iron.tests.support.graphs import Chain
 from iron.tests.support.llama_model import llama_1b
 
 LLAMA_1B_WEIGHTS = Path("/scratch/ehunhoff/iron-next/weights-220/llama3.2-1b")
-
-
-def _fuse(producer: int, output: str, input: str) -> Fusion:
-    return Fusion(
-        FusionKind.STREAM,
-        (producer, producer + 1),
-        (Edge(producer, output, producer + 1, input),),
-    )
-
-
-def _silu_mul(size, cols, tile, **extra):
-    silu = SiLU(size=size, num_aie_columns=cols, tile_size=tile, **extra)
-    mul = ElementwiseMul(size=size, num_aie_columns=cols, tile_size=tile, **extra)
-    return silu, mul
-
-
-def _silu_mul_recording(name, silu, mul):
-    steps = sequences.steps((silu, "x", "mid"), (mul, "mid", "up", "out"))
-    return Recording.of_steps(name, steps, ["x", "up"], ["out"])
-
-
-def _gemv_add():
-    # Llama decode's own profile tunables for M=2048, K=2048.
-    gemv = GEMV(M=2048, K=2048, tile_size_input=4, tile_size_output=256)
-    add = ElementwiseAdd(size=2048, tile_size=256)
-    return gemv, add
-
-
-def _gemv_add_recording(name, gemv, add):
-    steps = sequences.steps((gemv, "A", "B", "mid"), (add, "r", "mid", "out"))
-    return Recording.of_steps(name, steps, ["A", "B", "r"], ["out"])
-
-
-def _gemv_silu_mul():
-    gemv = GEMV(M=2048, K=2048, tile_size_input=4, tile_size_output=2048)
-    silu, mul = _silu_mul(2048, 1, 2048)
-    return gemv, silu, mul
-
-
-def _gemv_silu_mul_recording(name, gemv, silu, mul):
-    steps = sequences.steps(
-        (gemv, "A", "B", "mid1"), (silu, "mid1", "mid2"), (mul, "mid2", "up", "out")
-    )
-    return Recording.of_steps(name, steps, ["A", "B", "up"], ["out"])
-
-
-def _three_step_fusion() -> Fusion:
-    return Fusion(
-        FusionKind.STREAM, (0, 1, 2), (Edge(0, "C", 1, "x"), Edge(1, "y", 2, "a"))
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -121,12 +69,16 @@ def test_silu_mul_fused_matches_reference_and_unfused(size, cols):
     tile = 1024
 
     def build(name, fusions):
-        silu, mul = _silu_mul(size, cols, tile)
-        img = Image(_silu_mul_recording(name, silu, mul), PerStep(), fusions=fusions)
+        silu, mul = fusable.silu_mul(size, tile, num_aie_columns=cols)
+        img = Image(
+            fusable.silu_mul_recording(name, silu, mul), PerStep(), fusions=fusions
+        )
         img.compile()
         return img.get_callable(), silu, mul
 
-    fused_run, silu, mul = build(f"perstep_fused_{size}_{cols}", (_fuse(0, "y", "a"),))
+    fused_run, silu, mul = build(
+        f"perstep_fused_{size}_{cols}", (fusable.stream(0, "y", "a"),)
+    )
     plain_run, _, _ = build(f"perstep_plain_{size}_{cols}", ())
 
     gate = vectors(silu).inputs["x"]
@@ -162,11 +114,13 @@ def test_silu_mul_fused_per_call_bound_value():
     as its own ``dispatch_params``.
     """
     size, cols, tile = 2048, 1, 1024
-    silu, mul = _silu_mul(size, cols, tile, bound_values={"valid": None})
+    silu, mul = fusable.silu_mul(
+        size, tile, num_aie_columns=cols, bound_values={"valid": None}
+    )
     img = Image(
-        _silu_mul_recording("perstep_bound_valid", silu, mul),
+        fusable.silu_mul_recording("perstep_bound_valid", silu, mul),
         PerStep(),
-        fusions=(_fuse(0, "y", "a"),),
+        fusions=(fusable.stream(0, "y", "a"),),
     )
     img.compile()
     run = img.get_callable()
@@ -211,12 +165,14 @@ def test_gemv_to_elementwiseadd_fused_matches_reference_and_unfused(npu2):
     """
 
     def build(name, fusions):
-        gemv, add = _gemv_add()
-        img = Image(_gemv_add_recording(name, gemv, add), PerStep(), fusions=fusions)
+        gemv, add = fusable.gemv_add(2048, 2048)
+        img = Image(
+            fusable.gemv_add_recording(name, gemv, add), PerStep(), fusions=fusions
+        )
         img.compile()
         return img.get_callable(), gemv, add
 
-    fused_run, gemv, add = build("gemv_add_fused", (_fuse(0, "C", "b"),))
+    fused_run, gemv, add = build("gemv_add_fused", (fusable.stream(0, "C", "b"),))
     plain_run, _, _ = build("gemv_add_plain", ())
 
     A = vectors(gemv).inputs["A"]
@@ -247,14 +203,16 @@ def test_three_step_fusion_matches_reference_and_unfused(npu2):
     """
 
     def build(name, fusions):
-        gemv, silu, mul = _gemv_silu_mul()
+        gemv, silu, mul = fusable.gemv_silu_mul(2048, 1, 2048)
         img = Image(
-            _gemv_silu_mul_recording(name, gemv, silu, mul), PerStep(), fusions=fusions
+            fusable.gemv_silu_mul_recording(name, gemv, silu, mul),
+            PerStep(),
+            fusions=fusions,
         )
         img.compile()
         return img.get_callable(), gemv, silu, mul
 
-    fused_run, gemv, silu, mul = build("three_step_fused", (_three_step_fusion(),))
+    fused_run, gemv, silu, mul = build("three_step_fused", (fusable.three_step(),))
     plain_run, _, _, _ = build("three_step_plain", ())
 
     A = vectors(gemv).inputs["A"]
@@ -434,11 +392,11 @@ def test_small_graph_compiled_per_step_with_a_named_fusion_is_bit_equal():
 
 
 def test_silu_mul_fusion_builds_an_xclbin_per_fused_step_on_npu1(npu1):
-    silu, mul = _silu_mul(2048, 1, 1024)
+    silu, mul = fusable.silu_mul(2048, 1024, num_aie_columns=1)
     img = Image(
-        _silu_mul_recording("npu1_silu_mul", silu, mul),
+        fusable.silu_mul_recording("npu1_silu_mul", silu, mul),
         PerStep(),
-        fusions=(_fuse(0, "y", "a"),),
+        fusions=(fusable.stream(0, "y", "a"),),
     )
     img.compile()
     # One Design record per member (as a full ELF's fusion reports), both
@@ -448,14 +406,14 @@ def test_silu_mul_fusion_builds_an_xclbin_per_fused_step_on_npu1(npu1):
 
 
 def test_an_operator_fused_once_and_called_alone_is_labelled_per_step(npu1):
-    silu, mul = _silu_mul(2048, 1, 1024)
+    silu, mul = fusable.silu_mul(2048, 1024, num_aie_columns=1)
     steps = sequences.steps(
         (silu, "x", "mid"), (mul, "mid", "up", "out"), (silu, "out", "again")
     )
     img = Image(
         Recording.of_steps("npu1_relabel", steps, ["x", "up"], ["again"]),
         PerStep(),
-        fusions=(_fuse(0, "y", "a"),),
+        fusions=(fusable.stream(0, "y", "a"),),
     )
     img.compile()
     first, second, alone = (s.design for s in img.artifacts.steps)
@@ -463,14 +421,14 @@ def test_an_operator_fused_once_and_called_alone_is_labelled_per_step(npu1):
 
 
 def test_an_operator_fused_once_and_called_alone_records_its_own_xclbin(npu1):
-    silu, mul = _silu_mul(2048, 1, 1024)
+    silu, mul = fusable.silu_mul(2048, 1024, num_aie_columns=1)
     steps = sequences.steps(
         (silu, "x", "mid"), (mul, "mid", "up", "out"), (silu, "out", "again")
     )
     img = Image(
         Recording.of_steps("npu1_own_link", steps, ["x", "up"], ["again"]),
         PerStep(),
-        fusions=(_fuse(0, "y", "a"),),
+        fusions=(fusable.stream(0, "y", "a"),),
     )
     img.compile()
     recorded = {d.operators: (d.image, d.insts) for d in img.artifacts.designs}
@@ -483,15 +441,21 @@ def test_an_operator_fused_once_and_called_alone_records_its_own_xclbin(npu1):
 
 
 def test_gemv_fusions_build_an_xclbin_per_fused_step_on_npu1(npu1):
-    def build(fused_steps, recording_fn, ops_fn):
-        img = Image(
-            recording_fn("npu1_gemv", *ops_fn()), PerStep(), fusions=fused_steps
-        )
+    def build(fused_steps, recording_fn, ops):
+        img = Image(recording_fn("npu1_gemv", *ops), PerStep(), fusions=fused_steps)
         img.compile()
         return img
 
-    build((_fuse(0, "C", "b"),), _gemv_add_recording, _gemv_add)
-    build((_three_step_fusion(),), _gemv_silu_mul_recording, _gemv_silu_mul)
+    build(
+        (fusable.stream(0, "C", "b"),),
+        fusable.gemv_add_recording,
+        fusable.gemv_add(2048, 2048),
+    )
+    build(
+        (fusable.three_step(),),
+        fusable.gemv_silu_mul_recording,
+        fusable.gemv_silu_mul(2048, 1, 2048),
+    )
 
 
 # ---------------------------------------------------------------------------

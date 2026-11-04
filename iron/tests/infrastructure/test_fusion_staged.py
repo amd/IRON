@@ -6,7 +6,6 @@
 No toolchain and no NPU above the "On the device" line.
 """
 
-import multiprocessing
 import re
 import statistics
 from pathlib import Path
@@ -35,7 +34,7 @@ from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
-from iron.tests.support import sequences
+from iron.tests.support import hang, sequences
 from iron.tests.support.llama_model import llama_1b
 from iron.tune.measure import Timing, time_interleaved
 
@@ -870,39 +869,31 @@ def test_bounded_staged_pair_matches_across_per_call_counts():
         assert verdict, f"n={n}: {verdict.detail}"
 
 
-def _run_mlp(packaging_name: str, results) -> None:
-    """Run the MLP window fused and apart, in a child process.
-
-    Its outputs, or the error, on ``results``.
-    """
-    try:
-        aie_utils.ensure_current_device()
-        packaging = {"full_elf": FullELF, "per_step": PerStep}[packaging_name]
-        outs = []
-        for fusions in ((_mlp_fusion(),), ()):
-            gate, up, silu, mul = _mlp()
-            image = Image(
-                _mlp_recording("mlp_device", gate, up, silu, mul),
-                packaging(),
-                fusions=fusions,
-            )
-            image.compile()
-            run = image.get_callable()
-            x = vectors(gate).inputs["B"]
-            # The profile may code A: each buffer holds the form its GEMV reads.
-            inputs = {
-                "Wg": gate.resolved().A.device_form(vectors(gate, seed=3).inputs["A"]),
-                "Wu": up.resolved().A.device_form(vectors(up, seed=5).inputs["A"]),
-                "x": x,
-            }
-            outs.append(_dispatch(run, inputs, {"out": 8192})["out"])
-        results.put(outs)
-    except Exception as e:  # the parent reports it
-        results.put(repr(e))
+def _run_mlp(packaging_name: str) -> list:
+    """Return the MLP window's output fused, then apart."""
+    packaging = {"full_elf": FullELF, "per_step": PerStep}[packaging_name]
+    outs = []
+    for fusions in ((_mlp_fusion(),), ()):
+        gate, up, silu, mul = _mlp()
+        image = Image(
+            _mlp_recording("mlp_device", gate, up, silu, mul),
+            packaging(),
+            fusions=fusions,
+        )
+        image.compile()
+        run = image.get_callable()
+        x = vectors(gate).inputs["B"]
+        # The profile may code A: each buffer holds the form its GEMV reads.
+        inputs = {
+            "Wg": gate.resolved().A.device_form(vectors(gate, seed=3).inputs["A"]),
+            "Wu": up.resolved().A.device_form(vectors(up, seed=5).inputs["A"]),
+            "x": x,
+        }
+        outs.append(_dispatch(run, inputs, {"out": 8192})["out"])
+    return outs
 
 
-# Ample for two compiles and two dispatches; a hang fails the test instead of
-# wedging the run.
+# Ample for two compiles and two dispatches.
 _MLP_TIMEOUT_S = 900
 
 
@@ -915,17 +906,7 @@ def test_mlp_window_matches_reference_and_unfused(packaging):
     held to numpy and bit-equal to the steps apart, run in a child process a hang cannot
     outlive.
     """
-    context = multiprocessing.get_context("spawn")
-    results = context.Queue()
-    child = context.Process(target=_run_mlp, args=(packaging, results))
-    child.start()
-    child.join(_MLP_TIMEOUT_S)
-    if child.is_alive():
-        child.kill()
-        pytest.fail(f"the MLP window did not finish in {_MLP_TIMEOUT_S} s: a hang")
-    got = results.get(timeout=10)
-    assert not isinstance(got, str), got
-    fused, apart = got
+    fused, apart = hang.bounded(_MLP_TIMEOUT_S, _run_mlp, packaging)
     gate, up, silu, mul = (op.resolved() for op in _mlp())
     x = vectors(gate).inputs["B"]
     ref = np.asarray(

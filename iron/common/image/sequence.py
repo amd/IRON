@@ -97,19 +97,9 @@ class Image:
                     raise ValueError(f"step {s} is in two fusions")
             claimed |= set(fusion.steps)
             if fusion.kind is FusionKind.PACK:
-                uses = []
-                for i in fusion.steps:
-                    step = self.steps[i]
-                    declared = list(zip(step.buffers, step.op.buffers))
-                    uses.append(
-                        (
-                            i,
-                            {ref.root for ref, b in declared if b.fills},
-                            {ref.root for ref, b in declared if b.drains},
-                        )
-                    )
+                uses = [(i, *self.steps[i].roots()) for i in fusion.steps]
                 for (i, ri, wi), (k, rk, wk) in itertools.combinations(uses, 2):
-                    if wi & (rk | wk) or wk & ri:
+                    if set(wi) & {*rk, *wk} or set(wk) & set(ri):
                         raise ValueError(
                             f"pack {fusion.steps}: step {i} and step {k} are not "
                             f"independent, so issuing them concurrently is a hazard"
@@ -199,24 +189,15 @@ class Image:
         A part of a buffer is its use. A fusion whose members run at once (any kind but a
         merge) is one use, so no member's buffer shares bytes with another's.
         """
-        together = {
-            f.steps[0]: f.steps for f in self.fusions if f.kind is not FusionKind.MERGE
-        }
+        together = [f for f in self.fusions if f.kind is not FusionKind.MERGE]
         uses = []
-        i = 0
-        while i < len(self.steps):
-            members = together.get(i, (i,))
+        for i, fusion in Fusion.dispatches(together, len(self.steps)):
             reads, writes = [], []
-            for s in (self.steps[j] for j in members):
-                for ref, b in zip(s.buffers, s.op.buffers):
-                    if ref.root not in roots:
-                        continue
-                    if b.fills:
-                        reads.append(ref.root)
-                    if b.drains:
-                        writes.append(ref.root)
+            for j in (i,) if fusion is None else fusion.steps:
+                step_reads, step_writes = self.steps[j].roots()
+                reads += [r for r in step_reads if r in roots]
+                writes += [w for w in step_writes if w in roots]
             uses.append((reads, writes))
-            i = members[-1] + 1
         return uses
 
     def _place_in_arena(self, uses, sizes: Mapping[str, int]) -> dict[str, Allocation]:

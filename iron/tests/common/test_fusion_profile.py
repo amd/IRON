@@ -27,24 +27,19 @@ from iron.operators.gemv import GEMV
 from iron.operators.relu import ReLU
 from iron.operators.silu import SiLU
 from iron.operators.tanh import Tanh
+from iron.tests.support import fusable, llama_model
 from iron.tests.support.graphs import Chain as ChainGraph
-from iron.tests.support.llama_model import small
 
 pytestmark = pytest.mark.usefixtures("npu2")
+
+# A fixture is found by its name in the test module.
+llama_recordings = llama_model.llama_recordings
 
 LLAMA_NPU2_PROFILE = Path(__file__).resolve().parents[2] / (
     "applications/llama/profiles/npu2.json"
 )
 
 W = np.zeros(2048, bfloat16)
-
-
-def _fuse(producer: int, output: str, input: str) -> Fusion:
-    return Fusion(
-        FusionKind.STREAM,
-        (producer, producer + 1),
-        (Edge(producer, output, producer + 1, input),),
-    )
 
 
 def _fused_graph(profile=None):
@@ -200,7 +195,7 @@ def test_a_loaded_profiles_fusion_is_live_in_a_compiled_graph(tmp_path):
     version = _fused_graph(Profile.load(path)).compile(
         full_elf=True, check=False, x=(2048,)
     )
-    assert version.sequence.fusions == (_fuse(0, "y", "a"),)
+    assert version.sequence.fusions == (fusable.stream(0, "y", "a"),)
 
 
 def test_a_profile_with_a_copy_fusion_round_trips():
@@ -398,13 +393,6 @@ def test_a_fusion_entrys_versions_round_trip_through_json(tmp_path):
 # --------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def llama_recordings():
-    model = small()
-    decode_shapes, prompt_shapes = model.shapes()
-    return model.record(**decode_shapes), model.record(**prompt_shapes)
-
-
 def test_candidates_finds_silu_mul_and_decodes_gemv_add_residuals(llama_recordings):
     """Decode finds SiLU -> ElementwiseMul and GEMV.C -> ElementwiseAdd.b; the prompt chunk not the latter.
 
@@ -497,7 +485,7 @@ def test_a_reader_flips_only_where_its_root_is_a_hand_off(twice):
 
 def test_matching_tile_sizes_admit_the_edge():
     recording = _fused_graph().record(x=(2048,))
-    assert candidates(recording) == (_fuse(0, "y", "a"),)
+    assert candidates(recording) == (fusable.stream(0, "y", "a"),)
 
 
 def test_candidates_includes_overlapping_sub_runs_of_a_longer_admissible_run():
@@ -508,10 +496,10 @@ def test_candidates_includes_overlapping_sub_runs_of_a_longer_admissible_run():
     found = candidates(recording)
     pairs = tuple(f for f in found if len(f.steps) == 2)
     assert pairs == (
-        _fuse(0, "y", "x"),
-        _fuse(1, "y", "a"),
-        _fuse(2, "y", "a"),
-        _fuse(3, "y", "x"),
+        fusable.stream(0, "y", "x"),
+        fusable.stream(1, "y", "a"),
+        fusable.stream(2, "y", "a"),
+        fusable.stream(3, "y", "x"),
     )
     assert len(found) == 10  # every contiguous window of 2..5 of 5 steps
     whole = next(f for f in found if f.steps == (0, 1, 2, 3, 4))
@@ -541,7 +529,10 @@ def test_fusions_picks_one_of_two_overlapping_candidates_first_in_step_order():
     # Every pair is named, but step 1 (silu) is both the first pair's
     # consumer and the second's producer: the first in step order wins, and
     # the steps it uses are no longer available to a later candidate.
-    assert fusions(recording, p) == (_fuse(0, "y", "x"), _fuse(2, "y", "a"))
+    assert fusions(recording, p) == (
+        fusable.stream(0, "y", "x"),
+        fusable.stream(2, "y", "a"),
+    )
 
 
 def test_fusions_falls_back_to_the_second_edge_when_only_it_is_named():
@@ -549,7 +540,7 @@ def test_fusions_falls_back_to_the_second_edge_when_only_it_is_named():
     recording = ChainGraph(size=2048, tile=2048, columns=1).record(a=(2048,), b=(2048,))
     pairs = [f for f in candidates(recording) if len(f.steps) == 2]
     first, second = pairs[:2]
-    assert (first, second) == (_fuse(0, "y", "x"), _fuse(1, "y", "a"))
+    assert (first, second) == (fusable.stream(0, "y", "x"), fusable.stream(1, "y", "a"))
 
     both = Profile()
     both.add_fusion(
@@ -649,7 +640,7 @@ def test_compile_passes_full_elf_fusions_to_the_image():
     version = _fused_graph(_fusion_profile()).compile(
         full_elf=True, check=False, x=(2048,)
     )
-    assert version.sequence.fusions == (_fuse(0, "y", "a"),)
+    assert version.sequence.fusions == (fusable.stream(0, "y", "a"),)
 
 
 def test_compile_applies_a_fusions_own_tunables_to_its_steps():
@@ -726,7 +717,7 @@ def test_compile_withholds_fusions_under_check_but_not_a_step_per_xclbin():
         full_elf=False, check=False, x=(2048,)
     )
     assert per_step.plan.full_elf is False
-    assert per_step.sequence.fusions == (_fuse(0, "y", "a"),)
+    assert per_step.sequence.fusions == (fusable.stream(0, "y", "a"),)
 
 
 def test_a_profile_with_no_fusion_entries_compiles_unaffected():

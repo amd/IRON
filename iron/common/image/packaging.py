@@ -141,7 +141,8 @@ def plan(
     commands: list[int] = []
     n = len(recording.steps)
     hosted = {s.at for s in recording.host if 0 < s.at < n}
-    inside = {i for f in fusions for i in range(f.steps[0] + 1, f.steps[-1] + 1)}
+    starts = [i for i, _ in Fusion.dispatches(fusions, n)]
+    inside = set(range(n)) - set(starts)
     if hosted & inside:
         raise ValueError(
             f"{recording.name}: a host step runs within a fusion, before steps "
@@ -149,7 +150,6 @@ def plan(
         )
     if full_elf and (recording.inputs or recording.host):
         per_step = step_words or [frozenset()] * n
-        starts = [i for i in range(n) if i not in inside]
         held: frozenset[str] = frozenset()
         split = []
         for i, end in zip(starts, [*starts[1:], n]):

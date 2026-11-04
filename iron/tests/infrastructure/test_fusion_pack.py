@@ -8,7 +8,6 @@ steps sharing a configuration, run back to back with no edge). No toolchain and 
 below ``# On the device``'s line, as ``test_fusion.py``'s own.
 """
 
-import multiprocessing
 import re
 import statistics
 from pathlib import Path
@@ -33,11 +32,14 @@ from iron.common.testing import vectors
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
-from iron.tests.support import sequences
-from iron.tests.support.llama_model import llama_1b, small
+from iron.tests.support import fusable, hang, llama_model, sequences
+from iron.tests.support.llama_model import llama_1b
 from iron.tune.measure import Timing, time_interleaved
 
 pytestmark = pytest.mark.usefixtures("npu2")
+
+# A fixture is found by its name in the test module.
+llama_recordings = llama_model.llama_recordings
 
 LLAMA_NPU2_PROFILE = Profile.load(
     Path(__file__).resolve().parents[2] / "applications/llama/profiles/npu2.json"
@@ -292,17 +294,6 @@ def test_merge_of_a_short_decode_run_is_one_device_configuration():
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def llama_recordings():
-    model = small()
-    decode_shapes, prompt_shapes = model.shapes()
-    return model.record(**decode_shapes), model.record(**prompt_shapes)
-
-
-def _kinds(recording, fusion) -> tuple[str, ...]:
-    return tuple(type(recording.steps[i].op.resolved()).__name__ for i in fusion.steps)
-
-
 def test_pack_candidates_on_small_llama(llama_recordings):
     """Decode's q/k/v GEMVs and the prompt chunk's same projections pack.
 
@@ -317,7 +308,7 @@ def test_pack_candidates_on_small_llama(llama_recordings):
         packs = candidates(recording, (FusionKind.PACK,))
         assert len(packs) == 11
         triples = [f for f in packs if len(f.steps) == 3]
-        assert all(_kinds(recording, f) == (projection,) * 3 for f in triples)
+        assert all(fusable.kinds(recording, f) == (projection,) * 3 for f in triples)
         # SMALL's two layers, one q/k/v pack each.
         assert len(triples) == 2
 
@@ -391,7 +382,7 @@ def test_pack_candidates_on_llama_1b_header():
         packs = candidates(recording, (FusionKind.PACK,))
         assert len(packs) == 6
         assert any(
-            len(f.steps) == 3 and _kinds(recording, f) == (projection,) * 3
+            len(f.steps) == 3 and fusable.kinds(recording, f) == (projection,) * 3
             for f in packs
         )
 
@@ -523,40 +514,26 @@ def test_merge_of_a_short_decode_run_matches_reference_and_unfused(record_proper
     record_property("Unfused median us", statistics.median(unfused_stats.samples_us))
 
 
-def _run_adds(results) -> None:
-    """Run the three adds packed and apart, in a child process.
-
-    Their outputs, or the error, on ``results``.
-    """
-    try:
-        aie_utils.ensure_current_device()
-        outs = []
-        for fusions in ((Fusion(FusionKind.PACK, (0, 1, 2)),), ()):
-            adds = _adds()
-            image = Image(
-                _adds_recording("pack_adds", adds), FullELF(), fusions=fusions
-            )
-            image.compile()
-            run = image.get_callable()
-            for i, add in enumerate(adds):
-                drawn = vectors(add, seed=10 + i).inputs
-                for side in "ab":
-                    run.get_buffer(BufferRef(f"{side}{i}")).numpy_view()[:] = drawn[
-                        side
-                    ]
-            run()
-            outs.append(
-                [
-                    run.get_buffer(BufferRef(f"y{i}")).numpy()[:2048].copy()
-                    for i in range(3)
-                ]
-            )
-        results.put(outs)
-    except Exception as e:  # the parent reports it
-        results.put(repr(e))
+def _run_adds() -> list:
+    """Return the three adds' outputs packed, then apart."""
+    outs = []
+    for fusions in ((Fusion(FusionKind.PACK, (0, 1, 2)),), ()):
+        adds = _adds()
+        image = Image(_adds_recording("pack_adds", adds), FullELF(), fusions=fusions)
+        image.compile()
+        run = image.get_callable()
+        for i, add in enumerate(adds):
+            drawn = vectors(add, seed=10 + i).inputs
+            for side in "ab":
+                run.get_buffer(BufferRef(f"{side}{i}")).numpy_view()[:] = drawn[side]
+        run()
+        outs.append(
+            [run.get_buffer(BufferRef(f"y{i}")).numpy()[:2048].copy() for i in range(3)]
+        )
+    return outs
 
 
-# Two compiles and two dispatches; a hang fails the test instead of wedging the run.
+# Two compiles and two dispatches.
 _ADDS_TIMEOUT_S = 600
 
 
@@ -566,17 +543,7 @@ def test_pack_of_three_steps_of_one_design_matches_reference_and_unfused():
 
     In a child process a hang cannot outlive.
     """
-    context = multiprocessing.get_context("spawn")
-    results = context.Queue()
-    child = context.Process(target=_run_adds, args=(results,))
-    child.start()
-    child.join(_ADDS_TIMEOUT_S)
-    if child.is_alive():
-        child.kill()
-        pytest.fail(f"the pack did not finish in {_ADDS_TIMEOUT_S} s: a hang")
-    got = results.get(timeout=10)
-    assert not isinstance(got, str), got
-    packed, apart = got
+    packed, apart = hang.bounded(_ADDS_TIMEOUT_S, _run_adds)
     for i, add in enumerate(_adds()):
         drawn = vectors(add, seed=10 + i).inputs
         ref = np.asarray(add.reference(drawn["a"], drawn["b"])).reshape(-1)

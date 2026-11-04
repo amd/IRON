@@ -567,13 +567,7 @@ class Graph:
             else contextlib.nullcontext()
         ):
             recording, chosen, fused, packing = self._planned(full_elf, check, shapes)
-            logger.info(
-                "%s",
-                "\n".join(
-                    [chosen.report(self.name)]
-                    + [f"  {line}" for line in recording.coded_report()]
-                ),
-            )
+            logger.info("%s", recording.report(chosen, self.name))
             emit, sized = self._emit(recording, chosen, feeds)
             version = CompiledGraph(
                 recording,
@@ -907,10 +901,7 @@ class CompiledGraph:
             f"{h.name}={h.shape} {bfp.dtype_name(h.dtype)}"
             for h in self.recording.inputs
         )
-        report = "\n".join(
-            [self.plan.report(f"{self.recording.name}({inputs})")]
-            + [f"  {line}" for line in self.recording.coded_report()]
-        )
+        report = self.recording.report(self.plan, f"{self.recording.name}({inputs})")
         if self.artifacts.directory is None:
             return report
         return f"{report}\n  built in {self.artifacts.directory}"

@@ -18,16 +18,8 @@ from collections.abc import Sequence
 from ..declare.operator import Operator, Unresolvable
 from ..declare.profile import Profile
 from ..image.step import Edge, Fusion, FusionKind
+from .fusion import named
 from .record import Recording, Step
-
-
-def _excluded(recording: Recording) -> set[str]:
-    return (
-        {h.name for h in recording.outputs}
-        | set(recording.feedback)
-        | set(recording.pinned)
-        | set(recording.residents)
-    )
 
 
 def _admits(producer: Operator, consumer: Operator, at: int) -> Operator | None:
@@ -45,46 +37,25 @@ def _admits(producer: Operator, consumer: Operator, at: int) -> Operator | None:
     return fused
 
 
-def _bounds_match(a: Operator, b: Operator) -> bool:
-    """Whether ``a`` and ``b`` are bound to the same per-call extent, or neither is bound at all.
-
-    A fold then walks the same tiles this call, a prompt chunk's row count included
-    (``bound_extents``, each operator's own per-call ``Binding`` already carries).
-    """
-    return set(a.bound_extents.values()) == set(b.bound_extents.values())
-
-
 def _buffer_adjacent(recording: Recording) -> dict[int, tuple[str, str]]:
     """Index ``i``'s (producer's output operand name, consumer's input operand name) where step ``i``'s one output is read only by step ``i + 1``.
 
     Never again, is not a graph output, feedback, pinned or resident buffer, and names
     its whole buffer; no host step runs between the two; step ``i + 1`` has one output, and its matching input, and every
     other input it fills, do too, of the tile's element count and dtype; and the two
-    operators are bound to the same per-call extent, or neither is (``_bounds_match``)
+    operators are bound to the same per-call extent, or neither is (``bound_extents``)
     -- a prompt chunk's own row count folds, its buffers walking it alike. Independent
     of any fold already taken: the buffer graph these read is the recording's own,
     unaffected by ``Operator.fold`` replacing an operator.
     """
-    excluded = _excluded(recording)
-    readers: dict[str, list[int]] = {}
-    writers: dict[str, list[int]] = {}
-    for i, step in enumerate(recording.steps):
-        for buf, ref in zip(step.op.buffers, step.refs()):
-            if buf.fills:
-                readers.setdefault(ref.root, []).append(i)
-            if buf.drains:
-                writers.setdefault(ref.root, []).append(i)
-    for host_step in recording.host:
-        for h in host_step.reads:
-            readers.setdefault(h.ref().root, []).append(-1)
-        for h in host_step.writes:
-            writers.setdefault(h.ref().root, []).append(-1)
-
-    host_at = {s.at for s in recording.host}
+    excluded = recording.held
+    readers, writers = recording.users()
     found: dict[int, tuple[str, str]] = {}
     for i in range(len(recording.steps) - 1):
         step, nxt = recording.steps[i], recording.steps[i + 1]
-        if i + 1 in host_at or not _bounds_match(step.op, nxt.op):
+        if recording.crosses_host(i, i + 1) or set(
+            step.op.bound_extents.values()
+        ) != set(nxt.op.bound_extents.values()):
             continue
         # Handle-level shapes, not the (possibly unresolved) Operand's: a
         # Select()-shaped operand (ProjectionGEMM's B) needs its dtype
@@ -184,35 +155,13 @@ def fold_candidates(recording: Recording) -> tuple[Fusion, ...]:
 
 
 def chosen_folds(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
-    """Return the ``fold_candidates(recording)`` that ``profile`` names.
+    """Return the ``fold_candidates(recording)`` that ``profile`` names, a step in at most one (``fusion.named``).
 
-    Named by ``Profile.fused``, in ``recording.version``, so a fold entry scoped to
-    another version never takes here; a step in at most one: first in step order wins, as ``Graph.compile`` picks among a
-    graph's other fusion kinds (``fusion.fusions``).
+    Named in ``recording.version``, so a fold entry scoped to another version never
+    takes here; first in step order wins, as ``Graph.compile`` picks among a graph's
+    other fusion kinds (``fusion.fusions``).
     """
-    found: list[Fusion] = []
-    taken: set[int] = set()
-    version = recording.version
-    for fusion in fold_candidates(recording):
-        if taken & set(fusion.steps):
-            continue
-        steps = [recording.steps[i].op.resolved() for i in fusion.steps]
-        local = {step: i for i, step in enumerate(fusion.steps)}
-        edges = tuple(
-            (local[e.producer], e.output, local[e.consumer], e.input)
-            for e in fusion.edges
-        )
-        if not profile.fused(fusion.kind, steps, edges, version):
-            continue
-        found.append(fusion)
-        taken.update(fusion.steps)
-    return tuple(found)
-
-
-def _handle_at(step: Step, name: str) -> tuple[int, object]:
-    """Return the index into ``step.slots`` and the handle there, the operand declared ``name``'s."""
-    i = next(k for k, b in enumerate(step.op.buffers) if b.name == name)
-    return i, step.slots[i]
+    return named(recording, profile, fold_candidates(recording))
 
 
 def apply_folds(recording: Recording, folds: Sequence[Fusion]) -> Recording:
@@ -236,7 +185,7 @@ def apply_folds(recording: Recording, folds: Sequence[Fusion]) -> Recording:
             if s in taken:
                 raise ValueError(f"step {s} is folded twice")
             taken[s] = fusion
-        if any(fusion.steps[0] < h.at <= fusion.steps[-1] for h in recording.host):
+        if recording.crosses_host(fusion.steps[0], fusion.steps[-1]):
             raise ValueError(f"{fusion} folds across a host step")
     steps: list[Step | None] = list(recording.steps)
     replaced: dict[int, list[Operator]] = {}
@@ -257,7 +206,9 @@ def apply_folds(recording: Recording, folds: Sequence[Fusion]) -> Recording:
                 raise ValueError(f"{fusion} no longer admits: {current!r} refuses it")
             current = fused
             (result_name,) = (b.name for b in nxt.op.buffers if b.drains)
-            _, result = _handle_at(nxt, result_name)
+            result = next(
+                h for b, h in zip(nxt.op.buffers, nxt.slots) if b.name == result_name
+            )
             extra = [
                 h
                 for b, h in zip(nxt.op.buffers, nxt.slots)

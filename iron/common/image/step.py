@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import hashlib
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 
@@ -117,6 +118,56 @@ class Fusion:
                 )
             fed.add((edge.consumer, edge.input))
 
+    @property
+    def local_edges(self) -> tuple[tuple[int, str, int, str], ...]:
+        """Each edge as ``(producer, output, consumer, input)``, its steps by their place in ``steps``."""
+        return tuple(
+            (
+                self.steps.index(e.producer),
+                e.output,
+                self.steps.index(e.consumer),
+                e.input,
+            )
+            for e in self.edges
+        )
+
+    @staticmethod
+    def dispatches(
+        fusions: Sequence[Fusion], n: int
+    ) -> Iterator[tuple[int, Fusion | None]]:
+        """Each dispatch of ``n`` steps run with ``fusions``: its first step, and its fusion or None for a step alone."""
+        starts = {fusion.steps[0]: fusion for fusion in fusions}
+        i = 0
+        while i < n:
+            fusion = starts.get(i)
+            yield i, fusion
+            i = i + 1 if fusion is None else fusion.steps[-1] + 1
+
+    def host_refs(self, steps: Sequence[SequenceStep]) -> tuple[BufferRef, ...]:
+        """Its members' buffers in ``steps`` the host sees, in member order: all but those an edge feeds on-chip."""
+        elided = {(e.producer, e.output) for e in self.edges} | {
+            (e.consumer, e.input) for e in self.edges
+        }
+        return tuple(
+            ref
+            for j in self.steps
+            for ref, b in zip(steps[j].buffers, steps[j].op.buffers)
+            if (j, b.name) not in elided
+        )
+
+    def name(self, designs: Sequence[str]) -> str:
+        """Return this fusion's device symbol, ``designs`` its members' design names.
+
+        Content-named, so one hits the cache across processes, and distinct from any
+        member's own. Wiring is spelled by each member's place in the fusion, not in the
+        sequence, so one recurring down a model shares a symbol.
+        """
+        wiring = ",".join(f"{p}:{o}>{c}:{i}" for p, o, c, i in self.local_edges)
+        digest = hashlib.sha256(
+            f"{self.kind.value}[{'|'.join(designs)}]({wiring})".encode()
+        ).hexdigest()[:8]
+        return f"fusion{len(designs)}_{digest}"
+
 
 @dataclass(frozen=True)
 class SequenceStep:
@@ -124,3 +175,14 @@ class SequenceStep:
 
     op: Operator
     buffers: tuple[BufferRef, ...]
+
+    def roots(self) -> tuple[list[str], list[str]]:
+        """Return the buffer roots this step fills and those it drains, a root once per buffer naming it."""
+        reads: list[str] = []
+        writes: list[str] = []
+        for ref, b in zip(self.buffers, self.op.buffers):
+            if b.fills:
+                reads.append(ref.root)
+            if b.drains:
+                writes.append(ref.root)
+        return reads, writes
