@@ -62,7 +62,11 @@ def test_validate_battery_on_small_llama():
 
         stock_live = validate.verify_live("stock", stock)
         candidate_live = validate.verify_live("candidate", candidate)
-        assert validate.changed_versions(stock_live, candidate_live) == ["decode"]
+        # The prompt chunk feeds decode's words, so its image follows decode's.
+        assert validate.changed_versions(stock_live, candidate_live) == [
+            "decode",
+            "prompt",
+        ]
         assert candidate_live["decode"]["n_fusions"] == 2
         assert candidate_live["prompt"]["n_fusions"] == 0
 
