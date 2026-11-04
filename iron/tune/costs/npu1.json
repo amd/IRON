@@ -1,0 +1,61 @@
+{
+ "terms": {
+  "switches": 51.53316059826473,
+  "switch_cores": 45.382875324040334,
+  "packed_steps": 13.713792133073564,
+  "dispatches": 103.81723054968188
+ },
+ "prior": {
+  "switches": 74.70310937500003,
+  "switch_cores": 52.5739140625,
+  "packed_steps": 0.0,
+  "dispatches": 123.0
+ },
+ "samples": [
+  {
+   "change": {
+    "switches": -48.0,
+    "switch_cores": 16.0,
+    "packed_steps": 130.0,
+    "dispatches": -64.0
+   },
+   "extra_us": -2837.647260416532
+  },
+  {
+   "change": {
+    "switches": -50.0,
+    "switch_cores": 12.0,
+    "packed_steps": 132.0,
+    "dispatches": -66.0
+   },
+   "extra_us": -2877.928093750106
+  },
+  {
+   "change": {
+    "switches": -147.0,
+    "switch_cores": -394.0,
+    "packed_steps": 260.0,
+    "dispatches": -179.0
+   },
+   "extra_us": -39195.00276041667
+  },
+  {
+   "change": {
+    "switches": -254.0,
+    "switch_cores": -674.0,
+    "packed_steps": 451.0,
+    "dispatches": -310.0
+   },
+   "extra_us": -67057.66850000003
+  },
+  {
+   "change": {
+    "switches": -254.0,
+    "switch_cores": -674.0,
+    "packed_steps": 451.0,
+    "dispatches": -310.0
+   },
+   "extra_us": -66065.10566666666
+  }
+ ]
+}
