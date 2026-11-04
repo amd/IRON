@@ -23,14 +23,15 @@ from iron.tests.support.librispeech import utterance
 
 WEIGHTS = weights_dir("gemma-4-e2b-it") / "model.safetensors"
 
-pytestmark = pytest.mark.supported_devices("npu2")
+pytestmark = pytest.mark.supported_devices("npu1", "npu2")
 
 # The prompt and the decode steps after it, each judged.
 STEPS = 8
 
 # The bounds on each case's KL(float32 transformers || device) over its steps,
 # twice the worst measured on npu2 (10-23): mean 0.0053 and max 0.042, both
-# stop_sign's; the others' means 0.00005 to 0.0024.
+# stop_sign's; the others' means 0.00005 to 0.0024. npu1's worst (11-03) is
+# within them: mean 0.0038 and max 0.020, both cats'.
 MAX_KL = {"Mean": 0.01, "Max": 0.08}
 
 # Each case's question, COCO photo and LibriSpeech utterance, a chat turn

@@ -87,4 +87,4 @@ at 4096 measured KL 0.0046, its deepest prompt chunk 1.7e-10, and its
 whole-context prompt's time to first token 43.9 s. `TestEachStep`'s own
 accuracy case needs its golden recorded in a torch-enabled, no-device
 process before it can run there. The towers and `Gemma4Multimodal` are
-tested on NPU2 only.
+tested on both NPUs.
