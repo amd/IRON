@@ -541,6 +541,27 @@ def test_fusions_falls_back_to_the_second_edge_when_only_it_is_named():
     assert fusions(recording, second_only) == (second,)
 
 
+def test_an_earlier_pack_wins_over_a_later_stream():
+    class PackThenStream(iron.Graph):
+        def body(self, a, b):
+            shape = dict(tile_size=2048, num_aie_columns=1)
+            first = SiLU.step(a, **shape)
+            second = SiLU.step(b, **shape)
+            return first, ElementwiseMul.step(second, W, **shape)
+
+    recording = PackThenStream().record(a=(2048,), b=(2048,))
+    p = Profile()
+    p.add_fusion(
+        FusionKind.STREAM,
+        [(SiLU, dict(size=2048)), (ElementwiseMul, dict(size=2048))],
+        [(0, "y", 1, "a")],
+    )
+    p.add_fusion(
+        FusionKind.PACK, [(SiLU, dict(size=2048)), (SiLU, dict(size=2048))], []
+    )
+    assert fusions(recording, p) == (Fusion(FusionKind.PACK, (0, 1)),)
+
+
 def _silu_edges(recording):
     """Return ``recording``'s SiLU -> ElementwiseMul candidates.
 

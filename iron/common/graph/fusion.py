@@ -306,12 +306,14 @@ _EVERY_KIND = (
 def fusions(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
     """``candidates(recording, kinds)`` of every kind that ``profile`` names (``Profile.fused``), a step in at most one fusion.
 
-    First in step order wins.
+    First in step order wins: the earliest first step, at a tie a stream or staged run
+    before a pack, then the shorter.
     """
     found: list[Fusion] = []
     taken: set[int] = set()
     version = recording.version
-    for fusion in candidates(recording, _EVERY_KIND):
+    ordered = sorted(candidates(recording, _EVERY_KIND), key=lambda f: f.steps[0])
+    for fusion in ordered:
         if taken & set(fusion.steps):
             continue
         steps = [recording.steps[i].op.resolved() for i in fusion.steps]
