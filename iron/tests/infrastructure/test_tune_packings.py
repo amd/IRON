@@ -21,6 +21,7 @@ from iron.common.declare.profile import PackingEntry
 from iron.common.graph.compiled import apply_profile
 from iron.common.graph.packing import apply as apply_packings
 from iron.common.graph.record import Recording
+from iron.common.image.compose import Packing
 from iron.common.image.step import FusionKind
 from iron.lm.generation import Sampler
 from iron.lm.tune import calls
@@ -353,6 +354,29 @@ def test_a_packing_names_no_dimension_a_hosts_context_sizes(npu2, tmp_path):
         _, packing = apply_packings(m.record(**m.shapes()[0]), profile, [], npu2)
         sizes.append([len(g) for g in packing.groups])
     assert sizes[0] == sizes[1] and sizes[0], sizes
+
+
+def test_a_pack_no_placer_places_runs_unpacked(npu2, caplog):
+    """Every decode design of the small model in one group places under neither placer: it is not packed, and a warning says why."""
+    model = small()
+    decode, _ = calls(model, 0, 0, 256, 1, Sampler(0.7, 50), small(max_seq_len=512))
+    packer = Packer(
+        decode,
+        npu2,
+        full_elf=True,
+        timing=Timing(rounds=2, calls=5),
+        repeats=5,
+        cache=None,
+        fit_cache=None,
+        log=lambda _: None,
+        lock=False,
+        model=CostModel(),
+    )
+    profile = iron.Profile()
+    profile.add_packing(packer.members({k: {} for k in packer.shapes}))
+    _, packing = apply_packings(model.record(**model.shapes()[0]), profile, [], npu2)
+    assert packing == Packing()
+    assert "does not place, so it is not packed" in caplog.text
 
 
 def test_writes_a_fixed_offset_apart_at_a_per_call_row_are_one_shape(npu2):

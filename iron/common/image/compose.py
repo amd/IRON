@@ -41,7 +41,7 @@ SHIM_ADDRESS_ALIGNMENT = 4
 # stateful transform, since allocate alone on unsplit fifos checks nothing.
 _FIT_PIPELINE = (
     "builtin.module("
-    "aie.device(aie-place-tiles),"
+    "aie.device(aie-place-tiles{{placer={placer}}}),"
     "aie-lower-scratchpad-parameters,"
     "aie.device("
     "aie-objectFifo-stateful-transform,"
@@ -53,6 +53,9 @@ _FIT_PIPELINE = (
     "aie-create-pathfinder-flows"
     "))"
 )
+
+
+SEQUENTIAL, ANNEALED = "sequential_placer", "sa_placer"
 
 
 class CoResidenceError(ValueError):
@@ -67,6 +70,9 @@ class Packing:
     """
 
     groups: tuple[tuple[str, ...], ...] = ()
+    # Designs whose device routes only as the annealing placer places it; out
+    # of the repr, so an image without one keeps its cache key.
+    annealed: tuple[str, ...] = dataclasses.field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         seen: set[str] = set()
@@ -109,7 +115,13 @@ class Packing:
             touched = [d for d in devices if d & mates]
             union = mates.union(*touched)
             devices = [d for d in devices if not d & mates] + [union]
-        return Packing(tuple(tuple(sorted(g, key=order.index)) for g in devices))
+        return dataclasses.replace(
+            self, groups=tuple(tuple(sorted(g, key=order.index)) for g in devices)
+        )
+
+    def annealed_devices(self) -> set[str]:
+        """Return the device symbols the annealing placer places before the image is built."""
+        return {self.device_of(d) for d in self.annealed}
 
     @staticmethod
     def device_name(group: Sequence[str]) -> str:
@@ -136,8 +148,9 @@ def unvalued(designs: Mapping[str, OperatorDesign]) -> None:
 # pyright's stub does not see through: every ir.<X> below is suppressed for it.
 def places(
     module: ir.Module,
+    placer: str = SEQUENTIAL,
 ) -> str | None:
-    """Return ``None`` if ``module``'s devices place and allocate, else the diagnostic."""
+    """Return ``None`` if ``module``'s devices place, allocate and route under ``placer``, else the diagnostic."""
     diagnostics: list[str] = []
 
     def collect(
@@ -152,7 +165,9 @@ def places(
     # MLIR's generated ir.pyi types the handler as object.
     assert isinstance(handler, ir.DiagnosticHandler)
     try:
-        PassManager.parse(_FIT_PIPELINE, module.context).run(module.operation)
+        PassManager.parse(_FIT_PIPELINE.format(placer=placer), module.context).run(
+            module.operation
+        )
     except ir.MLIRError as e:
         return "\n".join(diagnostics) or str(e)
     finally:
@@ -201,8 +216,9 @@ def fits(
     designs: Mapping[str, OperatorDesign],
     words: Mapping[str, str] | None = None,
     fusion: Fusion | None = None,
+    placer: str = SEQUENTIAL,
 ) -> str | None:
-    """``None`` if ``designs``, by device name, place and allocate.
+    """``None`` if ``designs``, by device name, place, allocate and route under ``placer``.
 
     Else the diagnostic; ``words`` maps a design symbol to the scratchpad word it
     shares. Given ``fusion``, ``designs`` are its members in step order, built fused
@@ -234,7 +250,7 @@ def fits(
         ir.MLIRError,
     ) as e:
         return str(e)
-    return places(module)
+    return places(module, placer)
 
 
 class Composition:
@@ -319,6 +335,7 @@ class Composition:
             self.packing,
             # Absent when unsplit, so every one-command image keeps its key.
             *([self.commands] if self.commands else []),
+            *([self.packing.annealed] if self.packing.annealed else []),
             *(["expands"] if self.expands else []),
         )
         h.update(repr(state).encode())
@@ -446,6 +463,16 @@ class Composition:
             entry=entries[0],
             expand_load_pdis=self.expands or None,
         ).resolve_program()
+        # aiecc places the rest with its default placer; these route only so.
+        annealed = packing.annealed_devices()
+        place = PassManager.parse(
+            f"aie.device(aie-place-tiles{{placer={ANNEALED}}})", module.context
+        )
+        for op in module.body.operations:
+            if "sym_name" in op.attributes and (
+                ir.StringAttr(op.attributes["sym_name"]).value in annealed
+            ):
+                place.run(op.operation)
         return str(module)
 
     # The device configuration every full ELF's commands run on.

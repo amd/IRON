@@ -249,11 +249,14 @@ def test_a_profile_without_packings_changes_nothing(npu2):
     assert packed is recording and packing == Packing()
 
 
-@pytest.mark.parametrize("cores_per_block,packs", [(None, False), (3, True)])
-def test_a_packing_whose_designs_no_longer_route_is_not_packed(
-    cores_per_block, packs, npu2, caplog
+@pytest.mark.parametrize("cores_per_block,annealed", [(None, True), (3, False)])
+def test_a_pack_only_the_annealing_placer_routes_is_placed_by_it(
+    cores_per_block, annealed, npu2
 ):
-    """A pack tuned around composed attention routes; at split decode's 8 lanes it does not, and runs unpacked."""
+    """The default placer routes this pack around composed attention, not around split decode's 8 lanes, which the annealing placer routes.
+
+    Its device leaves the composition placed, so aiecc's default placer keeps it.
+    """
     recording = Attend().record(
         q=(1, 12, 128),
         kv=(8192, 4, 2, 128),
@@ -271,6 +274,11 @@ def test_a_packing_whose_designs_no_longer_route_is_not_packed(
         (GEMV, {"M": 512}, {"num_aie_columns": 4, "num_channels": 2}),
         (Copy, {}, {"num_channels": 2}),
     )
-    _, packing = apply_packings(recording, profile, (), npu2)
-    assert bool(packing.groups) is packs
-    assert ("does not place" in caplog.text) is not packs
+    packed, packing = apply_packings(recording, profile, (), npu2)
+    (group,) = packing.groups
+    assert bool(packing.annealed) is annealed
+    seq = Image(packed, FullELF(packing=packing))
+    seq._prepare()
+    device = Packing.device_name(list(group))
+    body = Composition(seq).text().split(f"@{device} {{", 1)[1].split("\n  }\n", 1)[0]
+    assert ("logical_tile" in body) is not annealed

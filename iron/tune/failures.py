@@ -34,7 +34,7 @@ from pathlib import Path
 import aie.utils.config as aie_config
 from aie.utils.compile import NPU_CACHE_HOME
 
-from iron.common.image.compose import _FIT_PIPELINE
+from iron.common.image.compose import _FIT_PIPELINE, SEQUENTIAL
 
 from .measure import write
 
@@ -98,7 +98,7 @@ def place(module: str) -> tuple[str, str | None]:
         done = subprocess.run(
             [
                 str(Path(aie_config.aiecc_path()).with_name("aie-opt")),
-                f"--pass-pipeline={_FIT_PIPELINE}",
+                f"--pass-pipeline={_FIT_PIPELINE.format(placer=SEQUENTIAL)}",
                 f.name,
                 "-o",
                 "/dev/null",
