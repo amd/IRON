@@ -58,8 +58,11 @@ Time to first token and tokens per second are recorded to CI
 ([performance checks](https://amd.github.io/IRON/performance-checks/)).
 
 On NPU1 the each-step tests (`TestEachStep`) and `long_context`'s run
-nightly, with an empty `profiles/npu1.json` (every operator's device
-defaults). Measured on Phoenix, `TestEachStep`'s KL over 20 teacher-forced
+nightly, with the tuned `profiles/npu1.json` (coded decode GEMVs and
+GEMV, SelectiveScan, MHA, Copy and elementwise settings), which
+`iron.lm.validate` found bit-identical to every operator's device defaults
+over a 3261-token prompt and 32 decode steps. Measured on Phoenix with
+those defaults, `TestEachStep`'s KL over 20 teacher-forced
 steps is mean 0.0021, max 0.0089, two of twenty top-1 draws off;
 `long_context`'s deepest decode step at 4096 measured KL 0.0046 and its
 deepest prompt chunk 5.3e-6.
