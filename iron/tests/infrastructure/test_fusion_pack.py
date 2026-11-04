@@ -25,8 +25,8 @@ from iron.common.graph.compiled import apply_profile
 from iron.common.graph.fusion import candidates
 from iron.common.graph.packing import HOST_BUFFERS, merges
 from iron.common.graph.record import Recording
-from iron.common.image.compose import Composition, CoResidenceError, fits, places
-from iron.common.image.link import FullELF
+from iron.common.image.compose import Composition, fits, places
+from iron.common.image.link import FullELF, PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind
 from iron.common.testing import vectors
@@ -142,20 +142,19 @@ def test_merge_fusion_takes_no_edges():
         Fusion(FusionKind.MERGE, (0, 1), (Edge(0, "y", 1, "a"),))
 
 
-def test_composition_refuses_a_dependent_pack():
+@pytest.mark.parametrize("packaging", [FullELF, PerStep])
+def test_an_image_refuses_a_dependent_pack(packaging):
     """GEMV.C -> ElementwiseAdd.b through host memory is a stream candidate.
 
-    Not an independent one; packing the same two steps anyway is a hazard Composition
-    refuses rather than silently racing.
+    Not an independent one; packing the same two steps anyway is a hazard every
+    packaging refuses rather than silently racing.
     """
     gemv = GEMV(M=2048, K=2048, tile_size_input=4, tile_size_output=256)
     add = ElementwiseAdd(size=2048, tile_size=256)
     steps = sequences.steps((gemv, "A", "B", "mid"), (add, "r", "mid", "out"))
     recording = Recording.of_steps("dep_pack", steps, ["A", "B", "r"], ["out"])
-    image = Image(recording, FullELF(), fusions=(Fusion(FusionKind.PACK, (0, 1)),))
-    image._prepare()
-    with pytest.raises(CoResidenceError, match="not independent"):
-        Composition(image).text()
+    with pytest.raises(ValueError, match="not independent"):
+        Image(recording, packaging(), fusions=(Fusion(FusionKind.PACK, (0, 1)),))
 
 
 def test_pack_refuses_when_columns_cannot_co_reside():

@@ -118,32 +118,6 @@ class Packing:
         return f"pack{len(group)}_{digest}"
 
 
-def independent(seq, fusion: Fusion) -> None:
-    """Raise ``CoResidenceError`` where ``fusion`` (a pack) joins two steps of ``seq`` that are not independent.
-
-    One drains a buffer root another fills or drains too, a hazard were they issued
-    concurrently.
-    """
-    reads: dict[int, set[str]] = {}
-    writes: dict[int, set[str]] = {}
-    for j in fusion.steps:
-        step = seq.steps[j]
-        r, w = set(), set()
-        for ref, b in zip(step.buffers, step.op.buffers):
-            if b.fills:
-                r.add(ref.root)
-            if b.drains:
-                w.add(ref.root)
-        reads[j], writes[j] = r, w
-    for a, i in enumerate(fusion.steps):
-        for k in fusion.steps[a + 1 :]:
-            if writes[i] & (reads[k] | writes[k]) or writes[k] & reads[i]:
-                raise CoResidenceError(
-                    f"pack {fusion.steps}: step {i} and step {k} are not "
-                    f"independent, so issuing them concurrently is a hazard"
-                )
-
-
 def unvalued(designs: Mapping[str, OperatorDesign]) -> None:
     """Raise ``CoResidenceError`` where one of ``designs`` is built for an xclbin.
 
@@ -299,8 +273,6 @@ class Composition:
             if fusion is None:
                 steps.append((own[design_of[id(s.op)]].name, s.buffers))
                 continue
-            if fusion.kind is FusionKind.PACK:
-                independent(seq, fusion)
             member_designs = tuple(
                 own[design_of[id(seq.steps[j].op)]] for j in fusion.steps
             )

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 from collections.abc import Hashable, Mapping, Sequence
 from typing import TYPE_CHECKING
@@ -75,7 +76,8 @@ class Image:
         """Each ``Fusion``'s steps are real, consecutive steps, none in two fusions, and each of its edges names a real hand-off.
 
         The producer's drained output and the consumer's filled input, both the whole of
-        one buffer.
+        one buffer. A pack's steps are independent: none drains a buffer root another
+        fills or drains, a hazard were they issued concurrently.
 
         Raises:
             ValueError: Any of the above does not hold.
@@ -94,6 +96,24 @@ class Image:
                 if s in claimed:
                     raise ValueError(f"step {s} is in two fusions")
             claimed |= set(fusion.steps)
+            if fusion.kind is FusionKind.PACK:
+                uses = []
+                for i in fusion.steps:
+                    step = self.steps[i]
+                    declared = list(zip(step.buffers, step.op.buffers))
+                    uses.append(
+                        (
+                            i,
+                            {ref.root for ref, b in declared if b.fills},
+                            {ref.root for ref, b in declared if b.drains},
+                        )
+                    )
+                for (i, ri, wi), (k, rk, wk) in itertools.combinations(uses, 2):
+                    if wi & (rk | wk) or wk & ri:
+                        raise ValueError(
+                            f"pack {fusion.steps}: step {i} and step {k} are not "
+                            f"independent, so issuing them concurrently is a hazard"
+                        )
             for edge in fusion.edges:
                 producer, consumer = (
                     self.steps[edge.producer],
