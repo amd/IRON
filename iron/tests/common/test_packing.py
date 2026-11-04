@@ -24,6 +24,7 @@ from iron.common.image.step import Edge, Fusion, FusionKind
 from iron.operators.copy import Copy
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
+from iron.operators.mha import MHA
 from iron.operators.silu import SiLU
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -57,6 +58,14 @@ class Gated(iron.Graph):
         if extra is None:
             return y
         return y, Copy.step(extra)
+
+
+class Attend(iron.Graph):
+    """Granite 4.0-H 1B's decode pack: one query's attention, two GEMVs and a copy."""
+
+    def body(self, q, kv, w, v, x, c):
+        o = MHA.step(q, KV=kv, heads_interleaved=True)
+        return o, GEMV.step(v, GEMV.step(w, x)), Copy.step(c)
 
 
 def _packed(*members):
@@ -238,3 +247,30 @@ def test_a_profile_without_packings_changes_nothing(npu2):
     recording = _recording()
     packed, packing = apply_packings(recording, Profile(), (), npu2)
     assert packed is recording and packing == Packing()
+
+
+@pytest.mark.parametrize("cores_per_block,packs", [(None, False), (3, True)])
+def test_a_packing_whose_designs_no_longer_route_is_not_packed(
+    cores_per_block, packs, npu2, caplog
+):
+    """A pack tuned around composed attention routes; at split decode's 8 lanes it does not, and runs unpacked."""
+    recording = Attend().record(
+        q=(1, 12, 128),
+        kv=(8192, 4, 2, 128),
+        w=(1536, 1536),
+        v=(512, 1536),
+        x=(1536,),
+        c=(512,),
+    )
+    attention = {"num_pipelines": 4}
+    if cores_per_block is not None:
+        attention["cores_per_block"] = cores_per_block
+    profile = _packed(
+        (MHA, {}, attention),
+        (GEMV, {"M": 1536}, {"num_aie_columns": 4, "num_channels": 2}),
+        (GEMV, {"M": 512}, {"num_aie_columns": 4, "num_channels": 2}),
+        (Copy, {}, {"num_channels": 2}),
+    )
+    _, packing = apply_packings(recording, profile, (), npu2)
+    assert bool(packing.groups) is packs
+    assert ("does not place" in caplog.text) is not packs

@@ -11,6 +11,7 @@ dispatches once (``merges``).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -20,6 +21,11 @@ from ..image.compose import Packing, fits
 from ..image.step import Fusion, FusionKind
 from .fusion_tunables import rebuild
 from .record import Recording
+
+logger = logging.getLogger(__name__)
+
+# Each packed group's fits() verdict, by its designs' identities.
+_placed: dict[tuple[str, ...], str | None] = {}
 
 #: Host buffers one xclbin kernel takes at most (aiecc's ``kMaxHostBOs``).
 HOST_BUFFERS = 16
@@ -34,7 +40,9 @@ def apply(
     designs, one group per entry that names two or more of them. Where several entries
     name a step's shape, the one naming most of the recording's shapes takes it, the
     earlier on a tie: the grouping found for this graph, not another model's that shares
-    one of its shapes.
+    one of its shapes. A group whose designs no longer place and route together (an
+    operator's mapping changed since the profile was tuned) is not packed, with a
+    warning naming why.
     """
     inside = {i for f in fused for i in f.steps}
     version = recording.version
@@ -56,11 +64,28 @@ def apply(
         if given:
             tunables[i] = given
     recording = rebuild(recording, tunables, dev)
-    groups: dict[int, dict[str, None]] = {}
+    groups: dict[int, dict[str, OperatorDesign]] = {}
     for i, entry in members.items():
-        name = OperatorDesign(recording.steps[i].op.resolved(dev)).name
-        groups.setdefault(entry, {})[name] = None
-    return recording, Packing(tuple(tuple(g) for g in groups.values() if len(g) > 1))
+        design = OperatorDesign(recording.steps[i].op.resolved(dev))
+        groups.setdefault(entry, {})[design.name] = design
+    packed = []
+    for entry, group in groups.items():
+        if len(group) < 2:
+            continue
+        key = tuple(d.identity for d in group.values())
+        if key not in _placed:
+            _placed[key] = fits(group)
+        if _placed[key] is not None:
+            logger.warning(
+                "%s: packing %d (%s) does not place, so it is not packed: %s",
+                recording.name,
+                entry,
+                ", ".join(group),
+                _placed[key],
+            )
+            continue
+        packed.append(tuple(group))
+    return recording, Packing(tuple(packed))
 
 
 def merges(

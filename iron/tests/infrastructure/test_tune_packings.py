@@ -346,7 +346,8 @@ def test_a_packing_names_no_dimension_a_hosts_context_sizes(npu2, tmp_path):
     members = packer.members({k: {} for k in packer.shapes})
     assert not any("kv_len" in dims for cls, dims, _ in members if cls is MHA)
     profile = iron.Profile()
-    profile.add_packing(members)
+    # The context-sized designs alone: every decode design together does not place.
+    profile.add_packing([m for m in members if m[0] in (MHA, Copy)])
     sizes = []
     for m in (model, sibling):
         _, packing = apply_packings(m.record(**m.shapes()[0]), profile, [], npu2)
