@@ -1073,6 +1073,20 @@ def test_an_optional_input_gives_a_version_without_it():
     np.testing.assert_array_equal(g.reference(x, r=3), table[3] + x)
 
 
+class _Offset(iron.Graph):
+    """``x`` plus an array the body makes, as long as ``x``."""
+
+    def body(self, x):
+        return ElementwiseAdd.step(x, np.ones(x.shape, bfloat16))
+
+
+def test_held_bytes_keeps_each_version_s_own_weights_apart():
+    """Each version's body-made weight is its own resident, whatever id a freed one's had."""
+    sizes = [256 * k for k in range(1, 17)]
+    held = _Offset().held_bytes([{"x": (n,)} for n in sizes])
+    assert held >= sum(2 * n for n in sizes)
+
+
 class _Held(iron.Graph):
     """A checkpoint-held table gathered, sliced and transposed in the body."""
 

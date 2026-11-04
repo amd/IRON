@@ -621,6 +621,8 @@ class Graph:
         """
         arena = ArenaPlan(ALIGNMENT)
         held = 0
+        # The arena keys a resident by id(array): a freed version's ids may recur.
+        recordings = []
         with (
             aie_utils.set_current_device(dev)
             if dev is not None
@@ -628,6 +630,7 @@ class Graph:
         ):
             for shapes in versions:
                 recording, chosen, fused, packing = self._planned(None, False, shapes)
+                recordings.append(recording)
                 held += unbuilt_image(
                     recording, chosen, arena=arena, fusions=fused, packing=packing
                 ).held_bytes()
