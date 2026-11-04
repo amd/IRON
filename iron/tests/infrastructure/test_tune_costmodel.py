@@ -41,7 +41,8 @@ def test_a_model_round_trips_through_its_file(tmp_path):
     model.save("npu2", tmp_path)
     loaded = CostModel.load("npu2", tmp_path)
     assert loaded == model
-    assert CostModel.load("npu1", tmp_path) is None
+    assert not (SEEDS / "npu3.json").exists()
+    assert CostModel.load("npu3", tmp_path) is None
 
 
 def test_a_refit_is_kept_in_the_cache_and_the_packaged_seed_is_untouched(tmp_path):
