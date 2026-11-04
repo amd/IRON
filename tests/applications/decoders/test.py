@@ -59,7 +59,6 @@ def decoder(load):
 MAX_KL = {"Mean": 0.03, "P90": 0.08, "Max": 0.2}
 
 
-@pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 # On npu2 this form checks npu1's path; npu2's own figures are its full ELF's.
 @pytest.mark.tracked_on("npu1")
@@ -87,16 +86,27 @@ class TestEachStep:
             pytest.param(1, 1, id="short-1", marks=pytest.mark.bench),
         ],
     )
+    @pytest.mark.extensive
     def test_gemma4_each_step(self, decoder, prompt_idx, num_tokens, record_property):
         model, prompts = decoder
         check_generation(model, prompts[prompt_idx], num_tokens, record=record_property)
 
+    @pytest.mark.extensive
     @pytest.mark.bench
     def test_gemma4_each_step_accuracy(self, decoder, record_property):
         check_accuracy(decoder[0], MAX_KL, record=record_property)
 
+    @pytest.mark.extensive
     def test_gemma4_each_step_determinism(self, decoder, record_property):
         check_determinism(decoder[0], record=record_property)
+
+    # Decode's speed per PR on npu1: 20 steps after a 1024-character prompt,
+    # their logits held to the golden's rows as the accuracy test holds them.
+    @pytest.mark.supported_devices("npu1")
+    @pytest.mark.bench
+    def test_gemma4_each_step_decode(self, decoder, record_property):
+        check_generation(decoder[0], 1024, 20, record=record_property)
+        check_accuracy(decoder[0], MAX_KL, 20, 1024, record=record_property)
 
 
 @pytest.mark.bench

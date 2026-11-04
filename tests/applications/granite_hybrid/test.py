@@ -71,7 +71,6 @@ GENERATION = pytest.mark.parametrize(
 )
 
 
-@pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 # On npu2 this form checks npu1's path; npu2's own figures are its full ELF's.
 @pytest.mark.tracked_on("npu1")
@@ -91,18 +90,29 @@ class TestEachStep:
         if aie_utils.DefaultNPURuntime is not None:
             aie_utils.DefaultNPURuntime.cleanup()
 
+    @pytest.mark.extensive
     @GENERATION
     def test_granite_4_0_h_1b_each_step(
         self, model, prompt_len, num_tokens, record_property
     ):
         check_generation(model, prompt_len, num_tokens, record=record_property)
 
+    @pytest.mark.extensive
     @pytest.mark.bench
     def test_granite_4_0_h_1b_each_step_accuracy(self, model, record_property):
         check_accuracy(model, MAX_KL, 20, 512, record=record_property)
 
+    @pytest.mark.extensive
     def test_granite_4_0_h_1b_each_step_determinism(self, model, record_property):
         check_determinism(model, 4, 3, 128, record=record_property)
+
+    # Decode's speed per PR on npu1: 20 steps after a 512-character prompt,
+    # their logits held to the golden's rows as the accuracy test holds them.
+    @pytest.mark.supported_devices("npu1")
+    @pytest.mark.bench
+    def test_granite_4_0_h_1b_each_step_decode(self, model, record_property):
+        check_generation(model, 512, 20, record=record_property)
+        check_accuracy(model, MAX_KL, 20, 512, record=record_property)
 
 
 @GENERATION
