@@ -37,7 +37,7 @@ def admits(
     key = (producer_design.identity, output, consumer_design.identity, input_)
     if key in _built:
         return _built[key]
-    _built[key] = None
+    found = None
     for kind in (FusionKind.STREAM, FusionKind.STAGED):
         try:
             producer_array = BuiltArray(producer_design)
@@ -49,9 +49,10 @@ def admits(
             )
         except ValueError:
             continue
-        _built[key] = kind
+        found = kind
         break
-    return _built[key]
+    _built[key] = found
+    return found
 
 
 def _hand_offs(

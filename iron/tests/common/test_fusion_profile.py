@@ -16,7 +16,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Profile, Scratchpad
 from iron.common.graph.compiled import _words
-from iron.common.graph.fusion import candidates, fusions
+from iron.common.graph.fusion import admits, candidates, fusions
 from iron.common.graph.packing import apply as apply_packings
 from iron.common.image.step import Edge, Fusion, FusionKind
 from iron.operators.copy import Copy
@@ -460,6 +460,14 @@ def test_mismatched_tile_sizes_stage_the_edge():
     assert candidates(recording) == (
         Fusion(FusionKind.STAGED, (0, 1), (Edge(0, "y", 1, "a"),)),
     )
+
+
+def test_an_edge_that_raises_raises_again_rather_than_caching_no_fusion():
+    silu = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved()
+    mul = ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved()
+    for _ in range(2):
+        with pytest.raises(KeyError, match="nonexistent"):
+            admits(silu, "y", mul, "nonexistent")
 
 
 def test_matching_tile_sizes_admit_the_edge():
