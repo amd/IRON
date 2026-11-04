@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from math import prod
 from typing import Any, cast
 
@@ -60,6 +60,7 @@ class OperatorRuntime(Runtime):
         self.buffers = [b for b in built.objects if isinstance(b, Buffer)]
         self._tensors: dict[str, Any] = {}
         self._queues: dict[str, list[Task]] = {}
+        self._deferred: list[Task] = []
         self.group: TaskGroup | None = None
         # Raises if any stream of a built array is unbound. A stream kept
         # on-chip has no host end.
@@ -131,10 +132,22 @@ class OperatorRuntime(Runtime):
                 value.ssa = arg
 
     def await_queues(self) -> None:
-        """Await every managed transfer still in flight."""
+        """Await every managed transfer still in flight, and every await a fused sequence deferred."""
         for queue in self._queues.values():
             for task in queue:
                 task.await_()
+        for task in self._deferred:
+            task.await_()
+        self._deferred = []
+
+    def await_tasks(self, tasks: Iterable[Task | None]) -> None:
+        """Await a sequence's own ``tasks`` (a None emitted nothing), in a fused sequence once every operator in it has issued."""
+        issued = [t for t in tasks if t is not None]
+        if self.group is not None:
+            self._deferred += issued
+            return
+        for task in issued:
+            task.await_()
 
     def resolve(self, loc=None, ip=None, *, device=None, **options) -> None:
         self.declare(device)

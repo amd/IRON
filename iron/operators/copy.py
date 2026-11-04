@@ -274,8 +274,7 @@ class Gather(Operator):
                 pushes[k].sync()
             for task in pending[k]:
                 task.free()
-        for task in drained:
-            task.await_()
+        rt.await_tasks(drained)
 
     def lane_transfers(self, operand):
         """``y``'s lanes, a feed's own run of batches.
@@ -1039,8 +1038,7 @@ class Copy(Operator):
                 )
                 if last[c] == i:
                     tokens.append(task)
-            for task in tokens:
-                task.await_()
+            rt.await_tasks(tokens)
             return
 
         ins = self._taps(self.src, self.src_bound, self.x)

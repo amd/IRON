@@ -214,6 +214,19 @@ def test_pack_of_independent_gemvs_is_one_device_configuration():
     ), "a pack sharing no design with its unfused baseline should drop one aie.device"
 
 
+def test_a_pack_issues_every_member_before_awaiting_any():
+    """GEMV's sequence awaits its own drains; packed, those awaits follow every member's transfers."""
+    q, k, v = _qkv()
+    image = Image(
+        _qkv_recording("pack_order", q, k, v), FullELF(), fusions=(_qkv_pack(),)
+    )
+    image._prepare()
+    lines = Composition(image).text().splitlines()
+    starts = [n for n, line in enumerate(lines) if "aiex.dma_start_task" in line]
+    awaits = [n for n, line in enumerate(lines) if "aiex.dma_await_task" in line]
+    assert starts and awaits and max(starts) < min(awaits)
+
+
 def _adds():
     """Three ElementwiseAdds of one design, one column each."""
     return [

@@ -852,9 +852,7 @@ class GEMV(Operator):
                         source=self.finish0,
                         managed=False,
                     )
-        for task in drains:
-            if task is not None:
-                task.await_()
+        rt.await_tasks(drains)
 
     def ops(self) -> int:
         total = 2 * self.M * self.K * (self.num_batches or 1)
