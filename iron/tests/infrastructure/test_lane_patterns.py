@@ -8,6 +8,7 @@ host access order it describes must equal, element for element, what the generat
 module's shim tasks actually move. Device-free: ``generated_sequence`` only emits MLIR.
 """
 
+from collections.abc import Iterator
 from math import prod
 
 import aie.utils as aie_utils
@@ -32,36 +33,69 @@ NPU2 = DEVICES["npu2"]()
 NPU1 = DEVICES["npu1"]()
 
 
-def _lane_order(op, name: str) -> dict[int, np.ndarray]:
+def _lane_order(op, name: str) -> dict[int, list[TensorAccessPattern]]:
     """Per logical lane (in the order ``build()`` bound them).
 
-    The flat elements the generated module's shim tasks move for buffer ``name``, in
+    The patterns the generated module's shim tasks move buffer ``name`` by, in
     emission order.
     """
     _, tasks = generated_sequence(op, full_elf=False)
     idx = [b.name for b in op.buffers].index(name)
     operand = getattr(op, name)
-    elements = prod(operand.shape)
-    lane_names: list[str] = []
-    by_lane: dict[str, list] = {}
+    by_lane: dict[str, list[TensorAccessPattern]] = {}
     for t in tasks:
         if t.arg != idx:
             continue
-        if t.lane not in by_lane:
-            by_lane[t.lane] = []
-            lane_names.append(t.lane)
-        by_lane[t.lane].append(t)
-    out = {}
-    for lane, lane_name in enumerate(lane_names):
-        pieces = []
-        for t in by_lane[lane_name]:
-            sizes = [int(s) for s in t.sizes.split(",")]
-            strides = [int(s) for s in t.strides.split(",")]
-            offset = t.offset if isinstance(t.offset, int) else 0
-            tap = TensorAccessPattern(operand.shape, offset, sizes, strides)
-            pieces.append(tap.gather(np.arange(elements, dtype=np.int32)))
-        out[lane] = np.concatenate(pieces)
-    return out
+        sizes = [int(s) for s in t.sizes.split(",")]
+        strides = [int(s) for s in t.strides.split(",")]
+        offset = t.offset if isinstance(t.offset, int) else 0
+        by_lane.setdefault(t.lane, []).append(
+            TensorAccessPattern(operand.shape, offset, sizes, strides)
+        )
+    return dict(enumerate(by_lane.values()))
+
+
+def _slices(tap: TensorAccessPattern) -> Iterator[TensorAccessPattern]:
+    """``tap`` in turn as patterns of 16M elements at most, outermost dimensions first."""
+    if prod(tap.sizes) <= 1 << 24 or len(tap.sizes) == 1:
+        yield tap
+        return
+    for i in range(tap.sizes[0]):
+        yield from _slices(
+            TensorAccessPattern(
+                tap.tensor_dims,
+                tap.offset + i * tap.strides[0],
+                tap.sizes[1:],
+                tap.strides[1:],
+            )
+        )
+
+
+def _same_elements(
+    a: list[TensorAccessPattern], b: list[TensorAccessPattern], index: np.ndarray
+) -> bool:
+    """Whether ``a``'s patterns in turn move the same elements as ``b``'s.
+
+    Compared a slice at a time (``_slices``): a lane re-streaming its keys every
+    round moves many times its operand, which whole would take gigabytes.
+    """
+    pieces = [
+        (t.gather(index) for tap in taps for t in _slices(tap)) for taps in (a, b)
+    ]
+    left = [np.empty(0, index.dtype), np.empty(0, index.dtype)]
+    while True:
+        for k in (0, 1):
+            while not len(left[k]):
+                piece = next(pieces[k], None)
+                if piece is None:
+                    break
+                left[k] = piece
+        n = min(len(left[0]), len(left[1]))
+        if not n:
+            return not len(left[0]) and not len(left[1])
+        if not np.array_equal(left[0][:n], left[1][:n]):
+            return False
+        left = [left[0][n:], left[1][n:]]
 
 
 def _assert_described_and_faithful(op, name: str) -> None:
@@ -76,14 +110,23 @@ def _assert_described_and_faithful(op, name: str) -> None:
     assert sorted(predicted) == sorted(
         truth
     ), f"{type(op).__name__}.{name}: lane sets differ"
-    elements = prod(operand.shape)
+    index = np.arange(prod(operand.shape), dtype=np.int32)
     for lane in sorted(truth):
-        got = np.concatenate(
-            [t.gather(np.arange(elements, dtype=np.int32)) for t in predicted[lane]]
-        )
-        assert np.array_equal(
-            got, truth[lane]
+        assert _same_elements(
+            predicted[lane], truth[lane], index
         ), f"{type(op).__name__}.{name} lane {lane}"
+
+
+def test_lanes_compare_by_their_elements_in_order_whatever_their_pieces():
+    """The same elements cut at other piece boundaries match; reordered, missing or extra pieces do not."""
+    shape = (4, 8)
+    index = np.arange(prod(shape), dtype=np.int32)
+    rows = [TensorAccessPattern(shape, 8 * r, [8], [1]) for r in range(4)]
+    halves = [TensorAccessPattern(shape, 16 * h, [2, 8], [8, 1]) for h in range(2)]
+    assert _same_elements(rows, halves, index)
+    assert not _same_elements(rows[::-1], halves, index)
+    assert not _same_elements(rows[:3], halves, index)
+    assert not _same_elements(rows + rows[:1], halves, index)
 
 
 @pytest.mark.parametrize("case", GEMM.test.resolve(GEMM, NPU2), ids=lambda c: c.label)
