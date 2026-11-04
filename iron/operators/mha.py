@@ -711,11 +711,13 @@ class MHA(Operator):
                     f"MHA: a lane's passes take {self.lane_heads} of the "
                     f"{self.num_KV_heads} KV heads each"
                 )
-            if lanes != 2 * self.num_pipelines or self.kv_len % (lanes * self.B_kv):
+            if lanes != self.column_cores * self.num_pipelines or self.kv_len % (
+                lanes * self.B_kv
+            ):
                 raise ValueError(
-                    f"MHA: one query split over keys takes two KV lanes a column "
-                    f"({lanes} for {self.num_pipelines}), kv_len ({self.kv_len}) whole "
-                    f"rounds of a {self.B_kv}-key block on each"
+                    f"MHA: one query split over keys takes {self.column_cores} KV "
+                    f"lanes a column ({lanes} for {self.num_pipelines}), kv_len "
+                    f"({self.kv_len}) whole rounds of a {self.B_kv}-key block on each"
                 )
             return
         if self.fused:
@@ -1043,9 +1045,10 @@ class MHA(Operator):
         return dev.default_core_stack_bytes + data + frame
 
     def split_mapping(self, dev: Device) -> dict:
-        """``resolve_fused``'s tunables for one query: a core a KV lane, two a column, each over every ``kv_lanes``-th key block from its own.
+        """``resolve_fused``'s tunables for one query: a core a KV lane, each over every ``kv_lanes``-th key block from its own.
 
-        A core merges their partials.
+        Two lanes a column up to 8 lanes, else one, which leaves a shim
+        channel a column to the decode packing. A core merges their partials.
 
         Raises:
             Unresolvable: No key block for ``d`` dividing ``kv_len`` in whole
@@ -1059,7 +1062,9 @@ class MHA(Operator):
         heads = 2 if self.d == 64 and g > 1 and not G % 2 else 1
         B_kv = self.FUSED_KEY_BLOCKS.get(self.d)
         B_kv = None if B_kv is None else B_kv // heads
-        lanes = 2 * self.num_pipelines
+        widest = max(self.PACKED_PIPELINES)
+        column_cores = 2 if 2 * self.num_pipelines <= widest else 1
+        lanes = column_cores * self.num_pipelines
         if B_kv is None or self.kv_len % (lanes * B_kv):
             raise Unresolvable(
                 f"MHA: one query split over keys takes d of "
@@ -1097,7 +1102,7 @@ class MHA(Operator):
             q_shims=1,
             join_rows=8,
             kv_lanes=lanes,
-            column_cores=2,
+            column_cores=column_cores,
             split=True,
             lane_heads=heads,
             query_heads=self.num_heads,

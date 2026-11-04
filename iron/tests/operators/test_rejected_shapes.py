@@ -368,16 +368,11 @@ def test_mha_of_one_query_that_does_not_pack_is_refused(kwargs, why, npu2):
             ),
             "no soft cap or relative band",
         ),
-        (dict(num_heads=32, num_KV_heads=8, seq_len=1, kv_len=2048), "joins 8"),
     ],
-    ids=["soft_cap", "sixteen_lanes"],
+    ids=["soft_cap"],
 )
 def test_mha_one_core_a_block_past_aie2p_is_refused(kwargs, why, npu2):
-    """AIE2P's fused block caps no score and adds no band.
-
-    Sixteen split-decode lanes' partials join eight to a memtile, which has
-    six inputs.
-    """
+    """AIE2P's fused block caps no score and adds no band."""
     with pytest.raises(Unresolvable, match=why):
         MHA(
             **{"num_pipelines": 8, **kwargs},
