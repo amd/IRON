@@ -62,6 +62,16 @@ def toolchain() -> str:
     return h.hexdigest()[:16]
 
 
+def device_timeout(e: Exception) -> bool:
+    """Whether ``e`` is the driver ending a command it timed out: a hang, not a build or placement failure.
+
+    ``ERT_CMD_STATE_TIMEOUT``, or ``ERT_CMD_STATE_ABORT`` where the driver's recovery
+    aborts it (amdxdna 2.27). Another setting of the same group may share it, so a
+    caller refuses the group outright rather than trying one.
+    """
+    return any(s in str(e) for s in ("ERT_CMD_STATE_TIMEOUT", "ERT_CMD_STATE_ABORT"))
+
+
 def first_error(diagnostic: str) -> str:
     """``diagnostic``'s first line naming a failure.
 

@@ -38,6 +38,7 @@ from iron.common.image.compose import Packing, fits
 from iron.common.image.step import Fusion
 from iron.operators.gemm import GEMM
 
+from .failures import Kind, Ledger, device_timeout, first_error
 from .measure import (
     CONTEXTS,
     Cache,
@@ -461,6 +462,7 @@ def time_shape(
     core_mhz: float | None = None,
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
+    ledger: Ledger | None = None,
 ) -> list[Trial]:
     """Each setting of ``shape`` timed, the recorded one first.
 
@@ -469,7 +471,8 @@ def time_shape(
     local best. A setting whose ``least_us`` at ``cycles`` and ``core_mhz``
     is no faster than the fastest taken so far is not timed. None where its operators
     share no setting (each held to its own pinned ones): it stays as recorded. Each
-    dispatch is under ``lock`` where given.
+    dispatch is under ``lock`` where given; a batch that hangs the device is refused,
+    and recorded in ``ledger`` where given.
     """
     found = settings(shape.members[0][0], dev, shape.pinned)
     for op, _, _ in shape.members[1:]:
@@ -528,7 +531,17 @@ def time_shape(
         if skipped := sum(1 for s in batch if slower(s) and _frozen(s) not in tried):
             log(f"    {skipped} slower by their kernel alone, not timed")
         trials, recorded_us = _time(
-            shape, todo, full_elf, timing, repeats, cache, remeasure, log, lock
+            shape,
+            todo,
+            full_elf,
+            timing,
+            repeats,
+            cache,
+            remeasure,
+            log,
+            lock,
+            dev,
+            ledger,
         )
         for s, t in zip(todo, trials):
             tried[_frozen(s)] = t
@@ -582,12 +595,62 @@ def _time(
     remeasure: bool,
     log: Callable[[str], None],
     lock: NpuLock | None,
+    dev: Device,
+    ledger: Ledger | None,
 ) -> tuple[list[Trial], float]:
     """``found``'s settings timed and judged, and the recorded one's weighted step time.
 
     Timed and judged at each point of each of ``shape``'s operators, the
-    recorded one first; one that does not build is refused.
+    recorded one first; one that does not build is refused, and every one where the
+    batch hangs the device, recorded in ``ledger`` where given.
     """
+    try:
+        return _time_batch(
+            shape, found, full_elf, timing, repeats, cache, remeasure, log, lock
+        )
+    except Exception as e:
+        if not device_timeout(e):
+            raise
+        return refused_hang(e, shape, found, dev, ledger, log), 0.0
+
+
+def refused_hang(
+    e: Exception,
+    shape: Shape,
+    found: list[dict[str, Any]],
+    dev: Device,
+    ledger: Ledger | None,
+    log: Callable[[str], None],
+) -> list[Trial]:
+    """Return ``found``'s trials once their batch hung the device (``e``): every setting but the recorded one refused.
+
+    Which one hung is unknown, so none is taken. Logged, and recorded in ``ledger``
+    where given.
+    """
+    log(f"    refused, {Kind.HANG.value}: {first_error(str(e))}")
+    if ledger is not None:
+        batch = json.dumps(found[1:], default=str)
+        ledger.record(
+            Kind.HANG, dev.name, str(e), f"autotune {shape}, a batch of {batch}"
+        )
+    return [
+        Trial(s, 0.0, 0.0, None if i == 0 else Kind.HANG.value)
+        for i, s in enumerate(found)
+    ]
+
+
+def _time_batch(
+    shape: Shape,
+    found: list[dict[str, Any]],
+    full_elf: bool,
+    timing: Timing,
+    repeats: int,
+    cache: Cache | None,
+    remeasure: bool,
+    log: Callable[[str], None],
+    lock: NpuLock | None,
+) -> tuple[list[Trial], float]:
+    """``_time`` where the device completes every command."""
     recorded_us = 0.0
     deltas = [0.0] * len(found)
     variances: list[float | None] = [0.0] * len(found)
@@ -730,6 +793,7 @@ def autotune(
     shares: Mapping[Hashable, float] | None = None,
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
+    ledger: Ledger | None = None,
 ) -> Profile:
     """Return ``profile`` with an entry for each shape of ``calls`` (``shapes``) naming the fastest setting taken (``time_shape``).
 
@@ -756,6 +820,7 @@ def autotune(
         shares: Each shape's largest share of a version's time, by
             ``Shape.key`` (``Survey.shares``).
         lock: Held around each measurement; none taken where None.
+        ledger: Where a batch that hangs the device is recorded, or None.
     """
     found = shapes(calls, dev)
     if shares is not None:
@@ -786,6 +851,7 @@ def autotune(
             core_mhz=core_mhz,
             log=log,
             lock=lock,
+            ledger=ledger,
         )
         if not tried:
             continue

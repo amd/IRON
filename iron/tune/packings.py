@@ -53,12 +53,11 @@ from .autotune import (
     time_shape,
 )
 from .costmodel import FEATURES, CostModel
-from .failures import Kind, Ledger, first_error
+from .failures import Kind, Ledger, device_timeout, first_error
 from .fold import fold_profile
 from .fusions import (
     Compared,
     NotBitIdentical,
-    _device_timeout,
     design_cores,
     group_fit_verdict,
     refuse_group,
@@ -473,6 +472,7 @@ class Packer:
                 core_mhz=self.core_mhz,
                 log=self.log,
                 lock=self.lock,
+                ledger=self.ledger,
             )
             for t in sorted((t for t in tried if t.gains), key=lambda t: t.delta_us):
                 trial = {**current, key: {**setting, **t.tunables}}
@@ -1212,7 +1212,7 @@ def _refusal(
 
     Logged, and recorded in ``ledger``, where given, with ``profile`` saved as ``stem``.
     """
-    if _device_timeout(e):
+    if device_timeout(e):
         kind = Kind.HANG
     elif isinstance(e, NotBitIdentical):
         kind = Kind.MISMATCH

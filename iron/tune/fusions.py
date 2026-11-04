@@ -65,7 +65,7 @@ from .autotune import (
     line,
     settings,
 )
-from .failures import Kind, Ledger, first_error, place
+from .failures import Kind, Ledger, device_timeout, first_error, place
 from .measure import (
     Budget,
     Cache,
@@ -423,15 +423,6 @@ def _fit_record(
     return text, fit_cache / key
 
 
-def _device_timeout(e: Exception) -> bool:
-    """Whether ``e`` is the driver's own command timeout (``ert_cmd_state.ERT_CMD_STATE_TIMEOUT``, ``iron.common.image.callable`` ``.wait``'s).
-
-    Not a build or placement failure: a hang, which another setting of the same group
-    may share, so a caller refuses the group outright rather than trying one.
-    """
-    return "ERT_CMD_STATE_TIMEOUT" in str(e)
-
-
 def _group_key(group: FusionGroup) -> str:
     """Return ``group``'s content-hash identity in a progress file.
 
@@ -565,7 +556,7 @@ def narrow_group(
                 lock=lock,
             )
         except (ValueError, RuntimeError, ir.MLIRError) as e:
-            if _device_timeout(e):
+            if device_timeout(e):
                 return Trial({}, 0.0, None, refused=f"hung on the device: {e}"), None
             log(f"  {group}: does not build at its own width: {e}")
         else:
@@ -591,7 +582,7 @@ def narrow_group(
                 None,
             )
         except (ValueError, RuntimeError, ir.MLIRError) as e:
-            if _device_timeout(e):
+            if device_timeout(e):
                 return Trial({}, 0.0, None, refused=f"hung on the device: {e}"), None
             log(f"  {group}: does not build at its own (fitting) width: {e}")
     # By each member's settings: an edge's combinations are timed as they are found.
@@ -616,7 +607,7 @@ def narrow_group(
                 lock=lock,
             )
         except (ValueError, RuntimeError, ir.MLIRError) as e:
-            if _device_timeout(e):
+            if device_timeout(e):
                 raise
             # fits() places each design alone; narrowed together they may
             # still not build (a feed's lanes, say).
@@ -676,7 +667,7 @@ def narrow_group(
             if trial is not None and (best is None or trial.delta_us < best.delta_us):
                 best, best_combo = trial, combo
     except (RuntimeError, ir.MLIRError) as e:
-        if not _device_timeout(e):
+        if not device_timeout(e):
             raise
         return Trial({}, 0.0, None, refused=f"hung on the device: {e}"), None
     if best is None:
@@ -1091,7 +1082,7 @@ def confirm_fusions(
                 log(f"  {recording.name}: not confirmed, its timing was refused: {e}")
                 break
             except (RuntimeError, ir.MLIRError) as e:
-                if not _device_timeout(e):
+                if not device_timeout(e):
                     raise
                 # A hang is a property of this version running at all,
                 # which dropping only one of several active groups may not

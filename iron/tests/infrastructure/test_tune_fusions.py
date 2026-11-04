@@ -44,7 +44,6 @@ from iron.tune.fusions import (
     FusionGroup,
     _bound_points,
     _checkpoint,
-    _device_timeout,
     _dominates,
     _fed_widths,
     _gather_table_rows,
@@ -545,23 +544,8 @@ def test_price_fusions_keeps_the_packings_its_fusions_are_judged_with():
 
 
 # ---------------------------------------------------------------------------
-# A device command timeout refuses a group outright, never retried; and
 # price_fusions checkpoints its decisions so far as it goes
 # ---------------------------------------------------------------------------
-
-
-def test_device_timeout_recognizes_the_drivers_own_error():
-    hung = RuntimeError(
-        "fuse_rewritten1: the run ended in ert_cmd_state.ERT_CMD_STATE_TIMEOUT"
-    )
-    assert _device_timeout(hung)
-
-
-def test_device_timeout_is_false_for_an_ordinary_build_failure():
-    assert not _device_timeout(ValueError("GEMV: B is fed 1 lane(s), but ..."))
-    assert not _device_timeout(
-        RuntimeError("[aiecc] Compilation failed with exit code 1")
-    )
 
 
 def test_checkpoint_writes_the_fusions_taken_so_far(tmp_path):

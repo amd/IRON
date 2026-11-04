@@ -287,6 +287,7 @@ def tune(
                     cycles=cycles,
                     core_mhz=core_mhz,
                     shares=fresh,
+                    ledger=Ledger() if args.record_failures else None,
                     **_timing(args),
                 )
                 searched |= fresh.keys()
@@ -603,6 +604,7 @@ def main() -> None:
         full_elf=dev.can_dispatch_full_elf,
         cycles=kernel_cycles(dev),
         core_mhz=aie_utils.DefaultNPURuntime.core_mhz,
+        ledger=Ledger() if args.record_failures else None,
         **_timing(args),
     )
     for t in sorted(tried, key=lambda t: t.delta_us):
