@@ -125,10 +125,10 @@ class Timed:
 
     The graph's per-call values, and what any buffer whose contents a step's time
     follows holds, by graph buffer name. ``points`` are the values its calls run at,
-    where they differ from call to call: an operator whose work they change is timed at
-    each (``op_points``). ``varying`` is, by ``Shape.key`` of a resolved operator, the
-    dimensions a host sizes (a model's fitted context), which a profile naming the shape
-    leaves out. ``versions`` is every version of the graph (``Recording.version``), a
+    where they differ from call to call, shortest first: an operator whose work they
+    change is timed at each (``op_points``). ``varying`` is, by ``Shape.key`` of a
+    resolved operator, the dimensions a host sizes (a model's fitted context), which a
+    profile naming the shape leaves out. ``versions`` is every version of the graph (``Recording.version``), a
     tune's calls or not; empty where only the recording's own is known.
     """
 
@@ -167,6 +167,24 @@ class Timed:
         """
         recording, fused, packing = apply_profile(self.recording, profile, dev)
         return dataclasses.replace(self, recording=recording), fused, packing
+
+    def shortest(self) -> Timed:
+        """Return this call at its first point alone, weighing all of it.
+
+        Where an end-to-end check decides: a packing's or a fold's gain is a fixed cost
+        per call, which the shortest point shows as well as every point does.
+        """
+        first = [Point(1.0, self.points[0].values)] if self.points else []
+        return dataclasses.replace(self, points=first)
+
+    def timed_points(self) -> list[tuple[float, dict[str, int]]]:
+        """Return where the whole call is timed, as ``(weight, values)`` pairs.
+
+        Each point's values over the call's own; with no points, the call's own.
+        """
+        return [(p.weight, {**self.values, **p.values}) for p in self.points] or [
+            (1.0, dict(self.values))
+        ]
 
     def op_points(self, op: Operator) -> list[tuple[float, dict[str, int]]]:
         """Return where ``op`` is timed, as ``(weight, values)`` pairs.

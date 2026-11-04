@@ -24,10 +24,12 @@ import argparse
 import dataclasses
 import functools
 import json
+import math
 from collections.abc import Callable, Hashable, Sequence
 from pathlib import Path
 
 import aie.utils as aie_utils
+from aie.utils.benchmark import other_npu_users
 
 from iron import operators
 from iron.common.declare import Profile
@@ -35,6 +37,7 @@ from iron.common.image.packaging import require_device
 
 from .autotune import (
     SHAPE_SHARE,
+    Point,
     Shape,
     Timed,
     autotune,
@@ -46,11 +49,18 @@ from .autotune import (
 from .costmodel import CostModel
 from .failures import Ledger
 from .fusions import price_fusions
-from .measure import Budget, Cache, NpuLock, Timing, pmode, switch_cost
+from .measure import Budget, Cache, NpuLock, Timing, measure, pmode, switch_cost
 from .packings import price_folds_before_packing, price_packings
 from .plan import coded_seed, searches
-from .survey import Survey, step_times, survey
+from .survey import Survey, step_points, step_times, survey
 from .verify import Phases, entries, verify, write_report
+
+# Where amdxdna keeps its parameters, its command timeout among them.
+WATCHDOG = Path("/sys/module/amdxdna/parameters")
+
+# The watchdog must allow this many times the longest command a tune times at
+# the starting profile: a narrowed setting runs slower.
+WATCHDOG_HEADROOM = 2.0
 
 
 def parser(description: str) -> argparse.ArgumentParser:
@@ -67,6 +77,14 @@ def parser(description: str) -> argparse.ArgumentParser:
         f"{Timing.cutoff})",
     )
     p.add_argument("--settle", type=int, default=Timing.settle)
+    p.add_argument(
+        "--first-cutoff",
+        type=float,
+        default=Timing.first_cutoff,
+        help="a setting whose step takes this many times the fastest's in the "
+        f"first round, the fastest at least {Timing.first_floor_us:.0f} us, is "
+        f"timed no further; inf times it on (default: {Timing.first_cutoff})",
+    )
     p.add_argument(
         "--repeats",
         type=int,
@@ -140,7 +158,9 @@ def parser(description: str) -> argparse.ArgumentParser:
 
 def _timing(args: argparse.Namespace) -> dict:
     return dict(
-        timing=Timing(args.rounds, args.calls, args.settle, args.cutoff),
+        timing=Timing(
+            args.rounds, args.calls, args.settle, args.cutoff, args.first_cutoff
+        ),
         repeats=args.repeats,
         cache=Cache.here(),
         remeasure=args.remeasure,
@@ -165,10 +185,10 @@ def tune(
     (``price_folds_before_packing``); ``--fusions-only`` skips the first search and
     ``--packings-only`` the first two. What the search finds goes to
     ``<device>.found.json`` as it goes; what is saved is what ``verify`` keeps of it
-    against the seed (at each call's first point) and then the starting profile (at
+    against the seed (at each call's shortest point) and then the starting profile (at
     every point), once it passes ``validate`` where given, reported beside it (``write_report``) with each phase's seconds and each
     version's gain on the phase before (``Phases``, and the seed's check, at each
-    call's first point; the final ``verify`` at every point). Timed as ``args`` says;
+    call's shortest point; the final ``verify`` at every point). Timed as ``args`` says;
     return its path.
 
     Args:
@@ -189,25 +209,35 @@ def tune(
     path.parent.mkdir(parents=True, exist_ok=True)
     full_elf = dev.can_dispatch_full_elf
     log = functools.partial(print, flush=True)
+    preflight(
+        record,
+        start,
+        dev,
+        timing=_timing(args)["timing"],
+        repeats=args.repeats,
+        cache=Cache.here(),
+        log=log,
+        lock=args.npu_lock,
+    )
     budget = Budget(args.budget, log)
     lock = args.npu_lock
     cycles = kernel_cycles(dev)
     core_mhz = aie_utils.DefaultNPURuntime.core_mhz
     model = _cost_model(args, dev)
+    # Every end-to-end check's figures by pair of builds and point: the search's,
+    # the phases' and the final verify's, so a pair is timed once a point.
     memo: dict = {}
-    # A phase is checked at each call's first (shortest) point, the final verify at
-    # every point: a deep context's call takes seconds before attention is tuned.
-    shallow: dict = {}
+    # A phase is checked at each call's shortest point, the final verify at every
+    # point: a deep context's call takes seconds before attention is tuned.
 
     def first_point(profile: Profile) -> list[Timed]:
-        return [dataclasses.replace(c, points=c.points[:1]) for c in record(profile)]
+        return [c.shortest() for c in record(profile)]
 
-    with Phases(first_point, dev, start, log=log, lock=lock, memo=shallow) as phases:
+    checks_at = dict(log=log, lock=lock, memo=memo, cap_s=budget.check_s)
+    with Phases(first_point, dev, start, **checks_at) as phases:
         seed = coded_seed(record, dev, start, log=log)
         if entries(seed) != entries(start):
-            seed, _ = verify(
-                first_point, dev, start, seed, log=log, lock=lock, memo=shallow
-            )
+            seed, _ = verify(first_point, dev, start, seed, **checks_at)
             seed.save(found_path)
             print(f"wrote {found_path}, the seed")
         phases.end("seed", seed)
@@ -290,6 +320,7 @@ def tune(
                 model,
                 folds=plan["folds"].runs,
                 budget=budget,
+                memo=memo,
             )
             phases.end(
                 "folds and packing" if plan["folds"].runs else "packing", profile
@@ -308,6 +339,7 @@ def tune(
                 full_elf=full_elf,
                 checkpoint=path.with_suffix(".progress.json"),
                 max_price=args.max_price,
+                budget=budget,
                 **_timing(args),
             )
             if priced is None:
@@ -321,12 +353,8 @@ def tune(
             log("checking the search against its seed")
             # At each call's shortest point, as a phase: the final verify, against the
             # starting profile, times every point.
-            profile, _ = verify(
-                first_point, dev, seed, profile, log=log, lock=lock, memo=shallow
-            )
-        kept, checks = verify(
-            record, dev, start, profile, log=log, lock=lock, memo=memo
-        )
+            profile, _ = verify(first_point, dev, seed, profile, **checks_at)
+        kept, checks = verify(record, dev, start, profile, **checks_at)
         phases.end("verify", kept)
         battery = (
             {}
@@ -352,6 +380,93 @@ def tune(
     )
     print(f"wrote {path} and its report")
     return path
+
+
+def watchdog_s(directory: Path = WATCHDOG) -> float | None:
+    """Return the driver's command timeout in ``directory``, seconds; None where it is not readable.
+
+    amdxdna's ``tdr_timeout_ms`` on newer drivers, ``timeout_in_sec`` on older.
+    """
+    for name, seconds in (("tdr_timeout_ms", 1e-3), ("timeout_in_sec", 1.0)):
+        try:
+            return int((directory / name).read_text()) * seconds
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def preflight(
+    record: Callable[[Profile], Sequence[Timed]],
+    profile: Profile,
+    dev,
+    *,
+    timing: Timing,
+    repeats: int,
+    cache: Cache | None,
+    log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
+    watchdog: Path = WATCHDOG,
+) -> None:
+    """Refuse, before any search, a tune this host cannot finish.
+
+    The calls must record under ``profile`` (a model sizes them to hold two builds
+    in memory, and raises where even one prompt chunk does not fit), the NPU must be
+    idle (``other_npu_users``), and the driver's watchdog (``watchdog_s``)
+    must allow ``WATCHDOG_HEADROOM`` times the longest command a call issues at its
+    last point: on a full ELF the whole call, else its longest step, each step's
+    standalone time (``measure``, cached for the tune).
+
+    Raises:
+        SystemExit: Naming what to change.
+    """
+    try:
+        calls = record(profile)
+    except ValueError as e:
+        raise SystemExit(
+            f"pre-flight: the calls, sized to hold the two builds a tune checks, do "
+            f"not record on this host: {e}"
+        ) from e
+    held = other_npu_users()
+    if held:
+        raise SystemExit(
+            f"pre-flight: pid {sorted(held)} holds the NPU; tune with it otherwise idle"
+        )
+    full_elf = dev.can_dispatch_full_elf
+    longest_us = 0.0
+    for call in calls:
+        last = [Point(1.0, call.points[-1].values)] if call.points else []
+        at = dataclasses.replace(call, points=last)
+        steps = [
+            measure(
+                [op],
+                full_elf=full_elf,
+                timing=timing,
+                repeats=repeats,
+                values=values,
+                inputs=inputs,
+                cache=cache,
+                log=log,
+                lock=lock,
+            )[0].t_step_us
+            for op, points, inputs in step_points(at, profile, dev)
+            for _, values in points
+        ]
+        longest_us = max(longest_us, sum(steps) if full_elf else max(steps))
+    limit = watchdog_s(watchdog)
+    longest = (
+        f"the longest command this tune issues takes about {longest_us / 1e6:.2f} s"
+    )
+    if limit is None:
+        log(f"pre-flight: {watchdog} holds no readable watchdog; {longest}")
+        return
+    if limit < WATCHDOG_HEADROOM * longest_us / 1e6:
+        raise SystemExit(
+            f"pre-flight: the driver's watchdog is {limit:g} s and {longest}, "
+            f"under {WATCHDOG_HEADROOM:g}x it; raise it (as root: echo "
+            f"{math.ceil(WATCHDOG_HEADROOM * longest_us / 1e3)} > "
+            f"{watchdog / 'tdr_timeout_ms'}, or timeout_in_sec on an older driver)"
+        )
+    log(f"pre-flight: watchdog {limit:g} s; {longest}")
 
 
 def _surveys(
@@ -411,11 +526,13 @@ def _save_packings(
     model: CostModel,
     folds: bool = True,
     budget: Budget | None = None,
+    memo: dict | None = None,
 ) -> Profile:
     """``profile`` with the packings ``price_packings`` finds within ``budget``.
 
     And with ``folds`` the folds ``price_folds_before_packing`` keeps, written to
-    ``path`` with ``model`` as it refits it.
+    ``path`` with ``model`` as it refits it; its end-to-end checks read and add to
+    ``memo``.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -441,6 +558,7 @@ def _save_packings(
         log=functools.partial(print, flush=True),
         lock=args.npu_lock,
         budget=budget,
+        memo=memo,
     )
     print(f"wrote {model.save(dev.name)}")
     packed.save(path)

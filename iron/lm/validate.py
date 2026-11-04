@@ -23,7 +23,7 @@ import dataclasses
 import json
 import statistics
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -289,6 +289,26 @@ def build_variant(stock: Profile, tags) -> Profile:
     return profile
 
 
+def smallest_failing_prefix(
+    tags: Sequence, mismatch: list[int], trial: Callable[[list], list[int]]
+) -> tuple[list, list[int]]:
+    """Return the shortest prefix of ``tags`` whose variant mismatches, and the steps it mismatches at.
+
+    Halved between no tags (the stock profile, which matches) and all of them, which
+    mismatch at ``mismatch``; ``trial`` returns a prefix's mismatched steps, empty
+    where it matches.
+    """
+    lo, hi, best = 0, len(tags), (list(tags), mismatch)
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        found = trial(list(tags[:mid]))
+        if found:
+            hi, best = mid, (list(tags[:mid]), found)
+        else:
+            lo = mid
+    return best
+
+
 def bisect(
     model_class: type[CausalLM],
     checkpoint: Path,
@@ -334,25 +354,20 @@ def bisect(
         if not mismatch:
             continue
         print(f"[bisect] {label} alone mismatches at steps {mismatch}; halving")
-        lo, hi, best = 1, len(tags), tags
-        while hi - lo > 1:
-            mid = (lo + hi) // 2
-            trial_tags = tags[:mid]
-            profile_dir = out_dir / f"bisect-{label}-{mid}"
+
+        def trial(prefix: list, label: str = label) -> list[int]:
+            profile_dir = out_dir / f"bisect-{label}-{len(prefix)}"
             profile_dir.mkdir(parents=True, exist_ok=True)
-            build_variant(stock_profile, trial_tags).save(
-                profile_dir / f"{dev.name}.json"
-            )
+            build_variant(stock_profile, prefix).save(profile_dir / f"{dev.name}.json")
             variant = load_model(
                 model_class, checkpoint, max_seq_len, profile_dir, config, budget
             )
             assert isinstance(variant, CausalLM), "model_class is a CausalLM"
-            mismatch = bit_identity(stock, variant, tokens, decode_steps)
+            found = bit_identity(stock, variant, tokens, decode_steps)
             variant.release()
-            if mismatch:
-                hi, best = mid, trial_tags
-            else:
-                lo = mid
+            return found
+
+        best, mismatch = smallest_failing_prefix(tags, mismatch, trial)
         profile_dir = out_dir / f"bisect-{label}-minimal"
         profile_dir.mkdir(parents=True, exist_ok=True)
         build_variant(stock_profile, best).save(profile_dir / f"{dev.name}.json")

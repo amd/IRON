@@ -39,15 +39,17 @@ from iron.tests.support.graphs import Chain
 from iron.tests.support.llama_model import small
 from iron.tune.autotune import Point, Shape, Timed, settings, time_shape
 from iron.tune.costmodel import CostModel
+from iron.tune.failures import Kind, Ledger
 from iron.tune.fold import fold_profile
 from iron.tune.fusions import design_cores
-from iron.tune.measure import Budget, Cache, Timing, platform
+from iron.tune.measure import Budget, Cache, CpuWaitRefused, Timing, platform
 from iron.tune.packings import (
     Packer,
     _decide_fold,
     _end_to_end,
     _foreign,
     _narrow_for_rejected,
+    _refusal,
     _rejoin,
     _with_fusions,
     adjacent,
@@ -55,6 +57,7 @@ from iron.tune.packings import (
     widen_packings,
     width_tunables,
 )
+from iron.tune.verify import verify
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -154,6 +157,36 @@ def _packer(recording, dev, tmp_path, full_elf=True):
         lock=False,
         model=CostModel(),
     )
+
+
+def test_a_grouping_a_run_refused_is_refused_this_tune_alone(tmp_path, npu2):
+    """A timing refusal rules a grouping out of this tune's search, not every tune's fit cache."""
+    packer = _packer(Alternating().record(x=(SIZE,)), npu2, tmp_path)
+    group = {k: {} for k in packer.shapes}
+    assert packer.fits(group)
+    reason = f"{Kind.TIMING.value}: a callable's median call waited 900 us for a CPU"
+    packer.refused[frozenset(packer._distinct(group))] = reason
+    assert not packer.fits(group)
+    assert not any("refused" in f.read_text() for f in (tmp_path / "fit").iterdir())
+    fresh = _packer(Alternating().record(x=(SIZE,)), npu2, tmp_path)
+    assert fresh.fits({k: {} for k in fresh.shapes})
+
+
+def test_a_timing_refusal_is_its_own_kind_in_the_ledger(tmp_path, npu2):
+    logged = []
+    ledger = Ledger(tmp_path / "ledger")
+    kind = _refusal(
+        CpuWaitRefused("a callable's median call waited 900 us for a CPU"),
+        npu2,
+        iron.Profile(),
+        "Alternating packed",
+        "Alternating-0",
+        ledger,
+        logged.append,
+    )
+    assert kind is Kind.TIMING
+    [entry] = ledger.entries()
+    assert entry.kind == "timing refused" and "refused, timing refused" in logged[0]
 
 
 def test_width_tunables_are_the_ones_counting_columns_channels_or_cores():
@@ -738,26 +771,35 @@ def test_price_packings_skips_a_version_its_switches_cannot_pay(tmp_path):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_end_to_end_runs_a_call_at_each_of_its_points():
+def test_end_to_end_decides_at_the_shortest_point_and_verify_runs_every_point():
     """A point bounding past the graph's input is a call it refuses.
 
-    The end-to-end check runs the call at each of its points, not only at its own
-    values.
+    A search's end-to-end check runs the call at its shortest point alone, so it never
+    reaches the second; the final verify runs every point and does.
     """
     dev = aie_utils.ensure_current_device()
-    recording = BoundedReLUs().record(x=(SIZE,))
-    profile = iron.Profile()
+    narrowed = iron.Profile()
+    narrowed.add(ReLU, num_aie_columns=1)
     timing = Timing(rounds=1, calls=2)
-    own = Timed(recording, values=dict(n=SIZE))
-    delta, _ = _end_to_end(own, dev, profile, profile, timing, print, False)
+
+    def past(profile: Profile) -> list[Timed]:
+        graph = BoundedReLUs()
+        graph.profile = profile
+        points = [Point(0.5, dict(n=SIZE)), Point(0.5, dict(n=2 * SIZE))]
+        return [Timed(graph.record(x=(SIZE,)), values=dict(n=SIZE), points=points)]
+
+    [call] = past(narrowed)
+    delta, _ = _end_to_end(call, dev, Profile(), narrowed, timing, print, False)
     assert np.isfinite(delta)
-    past = Timed(
-        recording,
-        values=dict(n=SIZE),
-        points=[Point(0.5, dict(n=SIZE)), Point(0.5, dict(n=2 * SIZE))],
-    )
     with pytest.raises(IndexError):
-        _end_to_end(past, dev, profile, profile, timing, print, False)
+        verify(past, dev, Profile(), narrowed, timing=timing)
+
+
+def test_the_shortest_point_weighs_the_whole_call():
+    recording = BoundedReLUs().record(x=(SIZE,))
+    call = Timed(recording, points=[Point(0.25, dict(n=64)), Point(0.75, dict(n=SIZE))])
+    assert call.shortest().points == [Point(1.0, dict(n=64))]
+    assert Timed(recording).shortest().points == []
 
 
 @pytest.mark.supported_devices("npu1")
@@ -851,3 +893,40 @@ def test_price_packings_narrows_what_does_not_co_reside(tmp_path):
     np.testing.assert_allclose(
         np.asarray(packed(x)).astype(np.float32), reference, atol=2e-2
     )
+
+
+class Beside(iron.Graph):
+    """Two independent ReLUs, each on every column at two channels: packed, twice a shim's channels."""
+
+    def body(self, x, y):
+        return (
+            ReLU.step(x, num_aie_columns=8, num_channels=2),
+            ReLU.step(y, num_aie_columns=8, num_channels=2),
+        )
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_spent_budget_searches_no_further_past_a_refusal(tmp_path):
+    """Out of time, a version whose grouping a check refused is not grouped and checked again."""
+    dev = aie_utils.ensure_current_device()
+    report = platform()
+    cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    logged = []
+    budget = Budget(0, logged.append)
+    recording = Beside().record(x=(2**16,), y=(2**16,))
+    profile = price_packings(
+        [Timed(recording)],
+        dev,
+        iron.Profile(),
+        full_elf=True,
+        timing=Timing(rounds=2, calls=5),
+        repeats=5,
+        cache=cache,
+        fit_cache=tmp_path / "fit",
+        log=logged.append,
+        budget=budget,
+    )
+    print("\n".join(logged))
+    assert sum(": refused, " in line for line in logged) == 1, logged
+    assert f"{recording.name}: not searched again after 1 refusal(s)" in logged
+    assert not profile.packings()

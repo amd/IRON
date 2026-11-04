@@ -25,6 +25,7 @@ unfused, or fused differently, elsewhere is untouched.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import heapq
 import json
@@ -64,7 +65,10 @@ from .autotune import (
 )
 from .failures import Kind, Ledger, first_error, place
 from .measure import (
+    Budget,
     Cache,
+    CheckTooLong,
+    CpuWaitRefused,
     NpuLock,
     Spent,
     Timing,
@@ -819,6 +823,35 @@ def built(call: Timed, profile: Profile, dev) -> CompiledGraph:
     return out
 
 
+@dataclasses.dataclass
+class Compared:
+    """Two builds' figures at each point they were timed at, so a tune times a pair once a point.
+
+    Attributes:
+        points: Each point's delta and its standard error, unweighted, by the
+            point's values as sorted items.
+    """
+
+    points: dict[tuple, tuple[float, float | None]] = dataclasses.field(
+        default_factory=dict
+    )
+
+    def weighted(self, call: Timed) -> tuple[float, float | None] | None:
+        """Return ``call``'s delta over its points (``Timed.timed_points``) and its standard error; None where a point is not held."""
+        delta, variance = 0.0, 0.0
+        for weight, values in call.timed_points():
+            held = self.points.get(tuple(sorted(values.items())))
+            if held is None:
+                return None
+            delta += weight * held[0]
+            variance = (
+                None
+                if variance is None or held[1] is None
+                else variance + (weight * held[1]) ** 2
+            )
+        return delta, None if variance is None else math.sqrt(variance)
+
+
 def compare_graphs(
     call: Timed,
     before: CompiledGraph,
@@ -828,22 +861,29 @@ def compare_graphs(
     seed: int = 0,
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
+    known: Compared | None = None,
+    cap_s: float = math.inf,
 ) -> tuple[float, float | None]:
     """How much longer ``after`` takes than ``before``, two builds of ``call``'s recording.
 
     Run interleaved on the same seeded inputs and states at each of the call's points
-    (its own values where it has none), weighted, and that difference's standard error;
-    both are released after.
+    (``Timed.timed_points``), weighted, and that difference's standard error; both are
+    released after. A point ``known`` holds is checked bit-identical but not timed
+    again; one timed is added to it. Its timing takes at most ``cap_s``, each point
+    not yet timed an equal share of what is left (``sized``).
 
     Raises:
         NotBitIdentical: ``after``'s outputs, each within its bound (past it
             an operator may write whole tiles), are not bit-identical to
             ``before``'s at a point, the call's values or one of its bounds
             halved (``_bound_points``).
+        CheckTooLong: One call a round would take a point past its share of
+            ``cap_s``.
         RuntimeError: A device timeout propagates as it is raised.
         ValueError: ``before`` or ``after`` takes, returns or holds a handle
             the call's recording does not, by name, role, shape and dtype.
     """
+    known = Compared() if known is None else known
     begun = time.perf_counter()
     recording = call.recording
     rng = np.random.default_rng(seed)
@@ -882,14 +922,11 @@ def compare_graphs(
                 f"{recording.name}: {build} is not the call's build; each handle as "
                 f"(call's, {build}'s) (role, shape, dtype): {differ}"
             )
-    timed = [(p.weight, {**call.values, **p.values}) for p in call.points] or [
-        (1.0, dict(call.values))
-    ]
+    timed = call.timed_points()
     # A timed point right after it is staged: timing dispatches what was
     # staged last.
     staged = [(None, v) for v in _bound_points(recording, call.values)] + timed
-    delta = 0.0
-    variance: float | None = 0.0
+    untimed = sum(tuple(sorted(v.items())) not in known.points for _, v in timed)
     with lock or contextlib.nullcontext():
         try:
             for weight, values in staged:
@@ -909,25 +946,29 @@ def compare_graphs(
                         f"{recording.name}: not bit-identical to it as before at "
                         f"{values}"
                     )
-                if weight is None:
+                point = tuple(sorted(values.items()))
+                if weight is None or point in known.points:
                     continue
+                share_us = (cap_s - (time.perf_counter() - begun)) * 1e6 / untimed
+                untimed -= 1
                 runs = [before.callable, after.callable]
-                times = time_interleaved(runs, sized(timing, runs), log=log, lock=lock)
+                times = time_interleaved(
+                    runs, sized(timing, runs, share_us), log=log, lock=lock
+                )
                 paired = [
                     a - b for b, a in zip(times[0].samples_us, times[1].samples_us)
                 ]
-                delta += weight * statistics.median(paired)
-                noise = standard_error(paired)
-                variance = (
-                    None
-                    if variance is None or noise is None
-                    else variance + (weight * noise) ** 2
+                known.points[point] = (
+                    statistics.median(paired),
+                    standard_error(paired),
                 )
         finally:
             before.release()
             after.release()
             Spent.charge(timing_s=time.perf_counter() - begun)
-    return delta, None if variance is None else math.sqrt(variance)
+    found = known.weighted(call)
+    assert found is not None, "every point is timed above or was known"
+    return found
 
 
 def confirm_fusions(
@@ -944,6 +985,7 @@ def confirm_fusions(
     refused: dict[str, str] | None = None,
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
+    cap_s: float = math.inf,
 ) -> dict[FusionGroup, frozenset[Version]]:
     """Each of ``taken`` with the versions it runs in that gain from it beyond the noise.
 
@@ -951,7 +993,9 @@ def confirm_fusions(
     call; this times each recording's version with every group of ``taken`` it runs
     fused (``combos``' narrowing, where it has one, applied via
     ``iron.common.graph.fusion_tunables`` the way a shipped profile would) against the
-    same version unfused at its own, interleaved, and drops the smallest predicted gain
+    same version unfused at its own, interleaved at the call's shortest point
+    (``Timed.shortest``; the tune's final ``verify`` times every point), and drops the
+    smallest predicted gain
     (``priced``) among those active in a version that regresses, retrying it, until what
     is left gains or none is left to drop. A group no version keeps is left out.
 
@@ -971,6 +1015,8 @@ def confirm_fusions(
             this so the group is never retried past this run either.
         lock: Held from each version's first dispatch through releasing its
             graphs' contexts; none taken where None.
+        cap_s: The most each version's timing takes (``compare_graphs``); one
+            that would take longer is not confirmed.
 
     Raises:
         NotBitIdentical: A version's fused output is not bit-identical to
@@ -1012,14 +1058,18 @@ def confirm_fusions(
                 continue
             try:
                 delta, noise = compare_graphs(
-                    call,
+                    call.shortest(),
                     plain_cg,
                     fused_cg,
                     timing=timing,
                     seed=seed,
                     log=log,
                     lock=lock,
+                    cap_s=cap_s,
                 )
+            except (CpuWaitRefused, CheckTooLong) as e:
+                log(f"  {recording.name}: not confirmed, its timing was refused: {e}")
+                break
             except (RuntimeError, ir.MLIRError) as e:
                 if not _device_timeout(e):
                     raise
@@ -1095,6 +1145,7 @@ def price_fusions(
     kinds: Sequence[FusionKind] = tuple(FusionKind),
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
+    budget: Budget | None = None,
 ) -> Profile | None:
     """``profile`` with a fusion entry for each fusion ``calls``' graphs admit that gains beyond the noise.
 
@@ -1143,6 +1194,9 @@ def price_fusions(
             multi-hour sweep) until it gets a profile back, never holds the
             lock past one batch.
         lock: Held for each measurement's own lifetime; none taken where None.
+        budget: The tune's time: past the first group, one not yet priced
+            once it ends is left unpriced, so not taken; each confirming
+            check's timing takes at most ``budget.check_s``.
 
     Returns:
         The profile, or None where ``max_price`` left groups unpriced.
@@ -1182,7 +1236,11 @@ def price_fusions(
         else (unpriced[:max_price], unpriced[max_price:])
     )
 
-    for group in found_now:
+    budget = Budget() if budget is None else budget
+    for n, group in enumerate(found_now):
+        if n and budget.ends("the fusion search"):
+            log(f"{len(found_now) - n} group(s) left unpriced: the budget ended")
+            break
         trial, combo = narrow_group(
             group,
             dev,
@@ -1263,6 +1321,7 @@ def price_fusions(
             refused=refused,
             log=log,
             lock=lock,
+            cap_s=budget.check_s,
         )
         if refused_path is not None:
             _save_by_group(refused, refused_path)

@@ -4,7 +4,8 @@
 """What went wrong while tuning, kept so a later toolchain can be checked against it.
 
 A ``Ledger`` holds one entry per failure signature: its kind (a compiler
-crash, a build failure, a version not bit-identical, a device hang), the
+crash, a build failure, a version not bit-identical, a device hang, a timing
+the CPU-wait guard refused on every try), the
 device, the toolchain that first hit it, the diagnostic and a repro (the
 composed MLIR module, gzipped, where one exists), and whether it is still
 open. ``python -m iron.tune.failures`` lists the entries; ``--recheck``
@@ -15,8 +16,10 @@ those that now pass as fixed by it.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import datetime
+import fcntl
 import functools
 import gzip
 import hashlib
@@ -24,6 +27,7 @@ import json
 import re
 import subprocess
 import tempfile
+from collections.abc import Iterator
 from enum import Enum
 from pathlib import Path
 
@@ -31,6 +35,8 @@ import aie.utils.config as aie_config
 from aie.utils.compile import NPU_CACHE_HOME
 
 from iron.common.image.compose import _FIT_PIPELINE
+
+from .measure import write
 
 # Per machine, beside the cost cache.
 LEDGER = Path(NPU_CACHE_HOME) / "iron" / "tuner-failures"
@@ -43,6 +49,7 @@ class Kind(Enum):
     BUILD = "build failure"
     MISMATCH = "not bit-identical"
     HANG = "device hang"
+    TIMING = "timing refused"
 
 
 @functools.cache
@@ -136,10 +143,17 @@ class Ledger:
             Entry(**json.loads(line)) for line in self.path.read_text().splitlines()
         ]
 
-    def _write(self, entries: list[Entry]) -> None:
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Hold the ledger against another process's read-modify-write while entered."""
         self.directory.mkdir(parents=True, exist_ok=True)
+        with open(self.directory / "ledger.lock", "a+") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            yield
+
+    def _write(self, entries: list[Entry]) -> None:
         text = "".join(json.dumps(dataclasses.asdict(e)) + "\n" for e in entries)
-        self.path.write_text(text)
+        write(self.path, text)
 
     def record(
         self,
@@ -150,52 +164,53 @@ class Ledger:
         module: str | None = None,
     ) -> Entry:
         """Return the entry for this failure, added if its signature is new; a fixed one seen again is reopened."""
-        entries = self.entries()
         sig = signature(kind, diagnostic)
-        for entry in entries:
-            if entry.signature == sig and entry.device == device:
-                if entry.status != "open":
-                    entry.status, entry.fixed_by = "open", None
-                    self._write(entries)
-                return entry
-        repro = None
-        if module is not None:
-            data = gzip.compress(module.encode())
-            repro = hashlib.sha256(data).hexdigest()[:16] + ".mlir.gz"
-            self.directory.mkdir(parents=True, exist_ok=True)
-            (self.directory / repro).write_bytes(data)
-        entry = Entry(
-            signature=sig,
-            kind=kind.value,
-            device=device,
-            toolchain=toolchain(),
-            first_seen=datetime.date.today().isoformat(),
-            context=context,
-            diagnostic=diagnostic[-2000:],
-            repro=repro,
-        )
-        entries.append(entry)
-        self._write(entries)
-        return entry
+        with self._locked():
+            entries = self.entries()
+            for entry in entries:
+                if entry.signature == sig and entry.device == device:
+                    if entry.status != "open":
+                        entry.status, entry.fixed_by = "open", None
+                        self._write(entries)
+                    return entry
+            repro = None
+            if module is not None:
+                data = gzip.compress(module.encode())
+                repro = hashlib.sha256(data).hexdigest()[:16] + ".mlir.gz"
+                (self.directory / repro).write_bytes(data)
+            entry = Entry(
+                signature=sig,
+                kind=kind.value,
+                device=device,
+                toolchain=toolchain(),
+                first_seen=datetime.date.today().isoformat(),
+                context=context,
+                diagnostic=diagnostic[-2000:],
+                repro=repro,
+            )
+            entries.append(entry)
+            self._write(entries)
+            return entry
 
     def recheck(self) -> list[tuple[Entry, str]]:
         """Place each open compiler-side entry's repro again with the current toolchain; one that now places or is refused cleanly is marked fixed by it.
 
         Returns each rechecked entry and its outcome.
         """
-        entries = self.entries()
         out = []
-        for entry in entries:
-            if entry.status != "open" or entry.repro is None:
-                continue
-            if entry.kind not in (Kind.CRASH.value, Kind.BUILD.value):
-                continue
-            path = self.directory / entry.repro
-            verdict, _ = place(gzip.decompress(path.read_bytes()).decode())
-            if verdict != "crash" and entry.kind == Kind.CRASH.value:
-                entry.status, entry.fixed_by = "fixed", toolchain()
-            out.append((entry, verdict))
-        self._write(entries)
+        with self._locked():
+            entries = self.entries()
+            for entry in entries:
+                if entry.status != "open" or entry.repro is None:
+                    continue
+                if entry.kind not in (Kind.CRASH.value, Kind.BUILD.value):
+                    continue
+                path = self.directory / entry.repro
+                verdict, _ = place(gzip.decompress(path.read_bytes()).decode())
+                if verdict != "crash" and entry.kind == Kind.CRASH.value:
+                    entry.status, entry.fixed_by = "fixed", toolchain()
+                out.append((entry, verdict))
+            self._write(entries)
         return out
 
 

@@ -41,7 +41,7 @@ from aie.iron.algorithms.kernel_design import KernelDesign
 from aie.iron.device import Device
 from aie.iron.kernel import ExternalFunction
 from aie.utils import bfp
-from aie.utils.benchmark import Stats, run_interleaved
+from aie.utils.benchmark import Stats, cpu_wait_us, run_interleaved
 from aie.utils.compile import NPU_CACHE_HOME
 
 from iron.common.declare import Operand, Operator
@@ -63,13 +63,29 @@ class Timing:
 
     Where the runs are settings of one design, a setting whose runs take
     more than ``cutoff`` times the fastest setting's once ``settle`` rounds
-    are in is timed no further, its figure those rounds'.
+    are in is timed no further, its figure those rounds'. Before that, one
+    whose step takes more than ``first_cutoff`` times the fastest step in the
+    first round stops there, where that fastest step takes at least
+    ``first_floor_us``: a few-microsecond step's first round is too noisy.
     """
 
     rounds: int = 8
     calls: int = 50
     settle: int = 2
     cutoff: float = 1.5
+    first_cutoff: float = 2.0
+    first_floor_us: float = 100.0
+
+    def first_round_stops(self, steps_us: Sequence[float]) -> set[int]:
+        """Return the indices of ``steps_us`` (each setting's step in the first round, the default first) timed no further."""
+        fastest = min(steps_us)
+        if self.rounds < 2 or fastest < self.first_floor_us:
+            return set()
+        return {
+            i
+            for i, step in enumerate(steps_us)
+            if i and step > self.first_cutoff * fastest
+        }
 
 
 @dataclasses.dataclass
@@ -102,6 +118,10 @@ SPENT: contextvars.ContextVar[Spent | None] = contextvars.ContextVar(
 #: (its verify times a 2048-token prompt chunk at every context point).
 RESERVE_SHARE = 0.4
 
+#: The share of a tune's budget one end-to-end check's timing may take: the reserve
+#: holds the final verify's check of each of a decoder's two versions.
+CHECK_SHARE = 0.2
+
 
 class Budget:
     """A tune's wall-clock seconds, ``RESERVE_SHARE`` of them kept back to finish it.
@@ -117,6 +137,11 @@ class Budget:
         self.seconds, self.log = seconds, log
         self.began = time.perf_counter()
         self.stopped: list[str] = []
+
+    @property
+    def check_s(self) -> float:
+        """The seconds one end-to-end check's timing may take: ``CHECK_SHARE`` of the budget, unbounded without one."""
+        return math.inf if self.seconds is None else CHECK_SHARE * self.seconds
 
     def ends(self, search: str) -> bool:
         """Whether ``search`` stops here, the time left under the reserve; logged once a search."""
@@ -499,18 +524,50 @@ def prebuild(
     return out
 
 
-def sized(timing: Timing, runs: Sequence[Callable[[], object]]) -> Timing:
+class CheckTooLong(RuntimeError):
+    """``sized``: one call a round would still take a timing past its cap.
+
+    The check's length, not either build's: a caller tells it apart by type.
+    """
+
+
+def sized(
+    timing: Timing, runs: Sequence[Callable[[], object]], cap_us: float = math.inf
+) -> Timing:
     """Return ``timing`` with a round of ``runs`` about ``ROUND_US`` long, each at least ``MIN_CALLS`` calls.
 
     A round of long steps (a prompt chunk's, hundreds of ms) runs fewer calls, its
-    median no noisier for it. Each of ``runs`` is called once, to time it.
+    median no noisier for it; fewer still, down to one, where the timing would take
+    past ``cap_us``. Each of ``runs`` is called once, to time it.
+
+    Raises:
+        CheckTooLong: One call a round would take past ``cap_us``.
     """
     begun = time.perf_counter()
     for run in runs:
         run()
     round_us = (time.perf_counter() - begun) * 1e6
     calls = max(MIN_CALLS, min(timing.calls, int(ROUND_US / round_us)))
-    return dataclasses.replace(timing, calls=calls)
+    # run_interleaved calls each run twice before it times them.
+    fits = int((cap_us / round_us - 2) / timing.rounds) if cap_us < math.inf else calls
+    if fits < 1:
+        raise CheckTooLong(
+            f"{timing.rounds} rounds of one call take about "
+            f"{(timing.rounds + 2) * round_us / 1e6:.0f} s, past {cap_us / 1e6:.0f} s"
+        )
+    return dataclasses.replace(timing, calls=min(calls, fits))
+
+
+# Tries a timing gets past run_interleaved's CPU-wait guard: a busy moment on
+# the host passes, a design never causes it.
+CPU_WAIT_TRIES = 3
+
+
+class CpuWaitRefused(RuntimeError):
+    """``time_interleaved``: the CPU-wait guard refused every try.
+
+    The host's state, not the design's: a caller tells it apart by type.
+    """
 
 
 def time_interleaved(
@@ -526,22 +583,44 @@ def time_interleaved(
     Each call's figure the time the image itself took, which its
     ``KernelResult`` carries: mlir-aie's ``run_interleaved``, whose arguments
     and errors these are, its CPU-wait guard scaled to the most dispatches a call
-    of ``runs`` issues. Dispatches under ``lock`` where given.
+    of ``runs`` issues. The timing thread's CPU wait over it is logged. Dispatches
+    under ``lock`` where given.
+
+    Raises:
+        CpuWaitRefused: The guard refused it ``CPU_WAIT_TRIES`` times.
     """
-    with lock or contextlib.nullcontext():
-        return run_interleaved(
-            list(runs),
-            rounds=timing.rounds,
-            calls=timing.calls,
-            settle=timing.settle,
-            cutoff=timing.cutoff,
-            groups=list(groups) or None,
-            fastest_us=fastest,
-            completion_cores=True,
-            max_cpu_wait_us=max(run.cpu_wait_cap_us() for run in runs),
-            idle=True,
-            log=log,
-        )
+    cap = max(run.cpu_wait_cap_us() for run in runs)
+    refusals: list[str] = []
+    while len(refusals) < CPU_WAIT_TRIES:
+        began = cpu_wait_us()
+        try:
+            with lock or contextlib.nullcontext():
+                stats = run_interleaved(
+                    list(runs),
+                    rounds=timing.rounds,
+                    calls=timing.calls,
+                    settle=timing.settle,
+                    cutoff=timing.cutoff,
+                    groups=list(groups) or None,
+                    fastest_us=fastest,
+                    completion_cores=True,
+                    max_cpu_wait_us=cap,
+                    idle=True,
+                    log=log,
+                )
+        except RuntimeError as e:
+            if "for a CPU" not in str(e):
+                raise
+            refusals.append(str(e))
+            log(f"    {e} (cap {cap:.0f} us); try {len(refusals)} of {CPU_WAIT_TRIES}")
+            continue
+        ended = cpu_wait_us()
+        if began is not None and ended is not None:
+            log(
+                f"    CPU wait {ended - began:.0f} us in all; guard {cap:.0f} us a call"
+            )
+        return stats
+    raise CpuWaitRefused("; ".join(refusals))
 
 
 # The device contexts the driver holds at once; each run timed keeps one.
@@ -985,21 +1064,49 @@ def measure(
             outputs = [run.digest() for run in short]
             batch_timing = sized(timing, [r.callable for r in short + long])
             # The default is timed in full; the others stop once far behind.
-            groups = [None if i == 0 else i for i in built] * 2
-            times = time_interleaved(
+            groups = [None if i == 0 else i for i in built]
+            n = len(built)
+            first = time_interleaved(
                 [r.callable for r in short + long],
-                batch_timing,
-                groups,
+                dataclasses.replace(batch_timing, rounds=1),
+                groups * 2,
                 fastest,
                 log,
                 lock,
             )
+            stops = batch_timing.first_round_stops(
+                [
+                    (first[n + j].samples_us[0] - first[j].samples_us[0])
+                    / (repeats - 1)
+                    for j in range(n)
+                ]
+            )
+            if stops:
+                log(f"    {len(stops)} setting(s) stopped after one round")
+            live = [j for j in range(n) if j not in stops]
+            times = [list(f.samples_us) for f in first]
+            if batch_timing.rounds > 1:
+                rest = time_interleaved(
+                    [short[j].callable for j in live]
+                    + [long[j].callable for j in live],
+                    dataclasses.replace(
+                        batch_timing,
+                        rounds=batch_timing.rounds - 1,
+                        settle=max(1, batch_timing.settle - 1),
+                    ),
+                    [groups[j] for j in live] * 2,
+                    fastest,
+                    log,
+                    lock,
+                )
+                for k, j in enumerate(live):
+                    times[j] += rest[k].samples_us
+                    times[n + j] += rest[len(live) + k].samples_us
             run = uuid.uuid4().hex
-            n = len(built)
             steps = [
                 tuple(
                     (many - one) / (repeats - 1)
-                    for one, many in zip(times[j].samples_us, times[n + j].samples_us)
+                    for one, many in zip(times[j], times[n + j])
                 )
                 for j in range(n)
             ]
@@ -1016,7 +1123,7 @@ def measure(
                 if cache is not None:
                     assert keys is not None, "built above whenever cache is not None"
                     cache.put(keys[i], out[i], ops[i].resolved())
-            fastest = min(fastest, *(times[n + j].median_us for j in range(n)))
+            fastest = min(fastest, *(statistics.median(times[n + j]) for j in range(n)))
             # A probe holds its context while it lives; the next batch needs them.
             del short, long
         timed = time.perf_counter() - begun - building

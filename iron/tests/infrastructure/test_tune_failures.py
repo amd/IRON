@@ -7,6 +7,9 @@ One entry per signature, reopened when seen again, and rechecked with the curren
 toolchain. Device-free: placing runs aie-opt alone.
 """
 
+import subprocess
+import sys
+
 import pytest
 
 from iron.common.design import OperatorDesign
@@ -66,3 +69,21 @@ def test_recheck_marks_a_crash_the_current_toolchain_no_longer_hits_fixed(
     [(entry, verdict)] = ledger.recheck()
     assert verdict != "crash"
     assert entry.status == "fixed" and entry.fixed_by is not None
+
+
+def test_processes_recording_at_once_lose_no_entry(tmp_path):
+    """Eight tunes on one machine each record failures of their own into its ledger at once."""
+    script = (
+        "import string, sys\n"
+        "from pathlib import Path\n"
+        "from iron.tune.failures import Kind, Ledger\n"
+        "ledger, worker = Ledger(Path(sys.argv[1])), sys.argv[2]\n"
+        "for letter in string.ascii_lowercase:\n"
+        "    ledger.record(Kind.BUILD, 'npu2', f'error: {worker} {letter}', 'x')\n"
+    )
+    workers = [
+        subprocess.Popen([sys.executable, "-c", script, str(tmp_path), w])
+        for w in ("alpha", "beta", "gamma", "delta", "eps", "zeta", "eta", "theta")
+    ]
+    assert all(w.wait() == 0 for w in workers)
+    assert len(Ledger(tmp_path).entries()) == 8 * 26

@@ -28,6 +28,7 @@ from __future__ import annotations
 import collections
 import dataclasses
 import itertools
+import math
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -55,15 +56,23 @@ from .costmodel import FEATURES, CostModel
 from .failures import Kind, Ledger, first_error
 from .fold import fold_profile
 from .fusions import (
+    Compared,
     NotBitIdentical,
     _device_timeout,
-    built,
-    compare_graphs,
     design_cores,
     group_fit_verdict,
     refuse_group,
 )
-from .measure import Budget, Cache, NpuLock, Timing, measure
+from .measure import (
+    Budget,
+    Cache,
+    CheckTooLong,
+    CpuWaitRefused,
+    NpuLock,
+    Timing,
+    measure,
+)
+from .verify import compared
 
 # A version is searched only where its switches cost at least this share of
 # its steps' own time: packing removes switches, and narrowing slows steps.
@@ -122,8 +131,11 @@ class Packer:
         cycles: Mapping[str, int] | None = None,
         core_mhz: float | None = None,
         budget: Budget | None = None,
+        refused: dict[frozenset, str] | None = None,
     ):
         self.call, self.dev, self.full_elf = call, dev, full_elf
+        # Groupings a run refused this tune, by their distinct arrays.
+        self.refused = {} if refused is None else refused
         self.budget = Budget() if budget is None else budget
         self.timing, self.repeats, self.cache = timing, repeats, cache
         self.fit_cache, self.log, self.lock = fit_cache, log, lock
@@ -169,7 +181,8 @@ class Packer:
             )
             counted[1] += 1
             self.order.append(unit)
-        self._costs: dict[tuple, float] = {}
+        # A unit's time at a setting: weighted over the call's points, and at its shortest.
+        self._costs: dict[tuple, tuple[float, float]] = {}
         self._cores: dict[Any, int] = {}
         self._options: dict[Any, list[Setting]] = {}
 
@@ -222,10 +235,13 @@ class Packer:
         return out
 
     def fits(self, group: Group) -> bool:
-        """Whether ``group``'s distinct arrays place in one device."""
+        """Whether ``group``'s distinct arrays place in one device, and no run this tune refused them."""
+        distinct = self._distinct(group)
+        if frozenset(distinct) in self.refused:
+            return False
         return (
             group_fit_verdict(
-                list(self._distinct(group).values()), self.fit_cache, ledger=self.ledger
+                list(distinct.values()), self.fit_cache, ledger=self.ledger
             )
             is None
         )
@@ -269,12 +285,13 @@ class Packer:
         self._options[key] = found
         return found
 
-    def cost(self, key, setting: Mapping[str, Any]) -> float:
+    def cost(self, key, setting: Mapping[str, Any], shortest: bool = False) -> float:
         """Return the unit ``key``'s steps' time at ``setting``, summed.
 
-        Each shape weighted over its points (``Timed.op_points``); infinite where it
-        does not build there. Timing one setting times every width option of the unit
-        not yet timed beside it, in one ``measure`` batch.
+        Each shape weighted over its points (``Timed.op_points``), or at the call's
+        shortest point alone where ``shortest``; infinite where it does not build
+        there. Timing one setting times every width option of the unit not yet timed
+        beside it, in one ``measure`` batch.
         """
         frozen = (key, tuple(sorted(setting.items())))
         if frozen not in self._costs:
@@ -284,13 +301,14 @@ class Packer:
                 if o != setting and (key, tuple(sorted(o.items()))) not in self._costs
             ]
             self._price(key, pending)
-        return self._costs[frozen]
+        return self._costs[frozen][shortest]
 
     def _price(self, key, pending: Sequence[Setting]) -> None:
         """Time unit ``key`` at each of ``pending``, one ``measure`` batch per shape and point, into ``_costs``."""
         if not pending:
             return
         totals = [0.0] * len(pending)
+        firsts = [0.0] * len(pending)
         for op, count in self.shapes[key].values():
             variants: list[Operator] = [op]
             index: list[int | None] = []
@@ -304,7 +322,7 @@ class Packer:
                     index.append(None)
                     continue
                 index.append(len(variants) - 1)
-            for weight, values in self.call.op_points(op):
+            for p, (weight, values) in enumerate(self.call.op_points(op)):
                 m = measure(
                     variants,
                     full_elf=self.full_elf,
@@ -318,15 +336,17 @@ class Packer:
                 )
                 for n, i in enumerate(index):
                     if i is None or i not in m:
-                        totals[n] = float("inf")
-                    else:
-                        totals[n] += weight * count * m[i].t_step_us
-        for setting, total in zip(pending, totals):
-            self._costs[(key, tuple(sorted(setting.items())))] = total
+                        totals[n] = firsts[n] = float("inf")
+                        continue
+                    totals[n] += weight * count * m[i].t_step_us
+                    if p == 0:
+                        firsts[n] += count * m[i].t_step_us
+        for setting, total, first in zip(pending, totals, firsts):
+            self._costs[(key, tuple(sorted(setting.items())))] = (total, first)
 
-    def steps(self, groups: Sequence[Group]) -> float:
-        """Every unit's steps' time at its setting under ``groups``, summed."""
-        return sum(self.cost(k, s) for g in groups for k, s in g.items())
+    def steps(self, groups: Sequence[Group], shortest: bool = False) -> float:
+        """Every unit's steps' time at its setting under ``groups``, summed (``cost``'s ``shortest``)."""
+        return sum(self.cost(k, s, shortest) for g in groups for k, s in g.items())
 
     def features(self, groups: Sequence[Group]) -> dict[str, float]:
         """Return what ``groups`` cost beyond their steps' own times depends on (``costmodel.FEATURES``).
@@ -610,6 +630,8 @@ def price_packings(
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
     budget: Budget | None = None,
+    refused: dict[frozenset, str] | None = None,
+    memo: dict[tuple[Hashable, Hashable], Compared] | None = None,
 ) -> Profile:
     """``profile`` with a packing entry for each group of arrays a version gains from sharing one device configuration (``Packer``).
 
@@ -623,8 +645,8 @@ def price_packings(
     versions not searched) is kept as it is. A version whose every switch, priced by
     ``model``, costs under ``MIN_SWITCH_SHARE`` of its steps' own time is not searched.
 
-    A grouping whose version does not build, hangs or is not bit-identical
-    is refused (``refuse_group``) and the version searched again without it,
+    A grouping whose version does not build, hangs, is not bit-identical or
+    cannot be timed is refused and the version searched again without it,
     until one is kept or none packs; a version ``profile`` itself does not build
     is not searched. Each is recorded in ``ledger`` where one is given.
 
@@ -653,8 +675,17 @@ def price_packings(
         progress: Called after each version's search with the profile found
             so far and ``model``, so a caller keeps what earlier versions
             found should a later one fail.
+        refused: Each grouping a run refused this tune (a hang, a mismatch or
+            a timing), by its distinct arrays, read and added to; one that
+            does not build is kept under ``fit_cache`` (``refuse_group``)
+            for every tune.
+        memo: Each pair of builds' end-to-end figures by point, read and
+            added to (``verify.compared``); each check's timing takes at most
+            ``budget.check_s``.
     """
     model = CostModel() if model is None else model
+    refused = {} if refused is None else refused
+    memo = {} if memo is None else memo
     packings = profile.packings()
     every = frozenset(c.recording.version for c in calls).union(
         *(c.versions for c in calls)
@@ -701,6 +732,7 @@ def price_packings(
             cycles=cycles,
             core_mhz=core_mhz,
             budget=budget,
+            refused=refused,
         )
         alone = [{k: {}} for k in packer.shapes]
         for k in packer.shapes:
@@ -714,6 +746,9 @@ def price_packings(
             continue
         # Each refusal rules its groups out of the next search, so this ends.
         for attempt in itertools.count():
+            if attempt and budget.ends(f"{recording.name}'s packing search"):
+                log(f"{recording.name}: not searched again after {attempt} refusal(s)")
+                break
             groups = packer.group()
             packed = [g for g in groups if sum(len(packer.shapes[k]) for k in g) > 1]
             if not packed:
@@ -726,13 +761,37 @@ def price_packings(
             trial = _profile(profile, [*others, *entries])
             try:
                 delta, noise = _end_to_end(
-                    call, dev, unpacked, trial, confirm_timing, log, lock
+                    call,
+                    dev,
+                    unpacked,
+                    trial,
+                    confirm_timing,
+                    log,
+                    lock,
+                    memo,
+                    budget.check_s,
                 )
                 gain, gain_noise = (
-                    _end_to_end(call, dev, current, trial, confirm_timing, log, lock)
+                    _end_to_end(
+                        call,
+                        dev,
+                        current,
+                        trial,
+                        confirm_timing,
+                        log,
+                        lock,
+                        memo,
+                        budget.check_s,
+                    )
                     if held
                     else (delta, noise)
                 )
+            except CheckTooLong as e:
+                # Every grouping of this version is checked as long: none is.
+                log(
+                    f"{recording.name}: not searched further, its check is too long: {e}"
+                )
+                break
             except (ValueError, RuntimeError, ir.MLIRError) as e:
                 kind = _refusal(
                     e,
@@ -744,15 +803,17 @@ def price_packings(
                     log,
                 )
                 for g in packed:
-                    refuse_group(
-                        list(packer._distinct(g).values()),
-                        f"{kind.value}: {first_error(str(e))}",
-                        fit_cache,
-                    )
+                    reason = f"{kind.value}: {first_error(str(e))}"
+                    distinct = packer._distinct(g)
+                    if kind is Kind.BUILD:
+                        refuse_group(list(distinct.values()), reason, fit_cache)
+                    else:
+                        refused[frozenset(distinct)] = reason
                 continue
-            estimate = packer.objective(groups) - packer.objective(alone)
-            steps = packer.steps(groups) - packer.steps(alone)
+            # As timed end to end: at the call's shortest point.
+            steps = packer.steps(groups, True) - packer.steps(alone, True)
             before, after = packer.features(alone), packer.features(groups)
+            estimate = steps + model.predict(after) - model.predict(before)
             model.add({f: after[f] - before[f] for f in FEATURES}, delta - steps)
             noise_s = "?" if noise is None else f"{noise:.1f}"
             log(
@@ -783,6 +844,8 @@ def price_packings(
         log=log,
         lock=lock,
         ledger=ledger,
+        memo=memo,
+        cap_s=budget.check_s,
     )
 
 
@@ -877,6 +940,7 @@ def price_folds_before_packing(
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
     budget: Budget | None = None,
+    memo: dict[tuple[Hashable, Hashable], Compared] | None = None,
 ) -> Profile:
     """Return ``profile`` with the folds its arrays admit, packed.
 
@@ -897,6 +961,8 @@ def price_folds_before_packing(
     still takes any a hand-written profile names, unscoped).
     """
     with_folds = fold_profile(profile, calls)
+    refused: dict[frozenset, str] = {}
+    memo = {} if memo is None else memo
 
     def plain() -> Profile:
         return price_packings(
@@ -917,6 +983,8 @@ def price_folds_before_packing(
             log=log,
             lock=lock,
             budget=budget,
+            refused=refused,
+            memo=memo,
         )
 
     if with_folds.fusions() == profile.fusions():
@@ -943,6 +1011,8 @@ def price_folds_before_packing(
         log=log,
         lock=lock,
         budget=budget,
+        refused=refused,
+        memo=memo,
     )
     fusions = packed_and_folded.fusions()
     rejected = []
@@ -950,7 +1020,15 @@ def price_folds_before_packing(
         candidate = _with_fusions(packed_and_folded, fusions)
         try:
             delta, noise = _end_to_end(
-                call, dev, profile, candidate, confirm_timing, log, lock
+                call,
+                dev,
+                profile,
+                candidate,
+                confirm_timing,
+                log,
+                lock,
+                memo,
+                math.inf if budget is None else budget.check_s,
             )
         except (ValueError, RuntimeError, ir.MLIRError) as e:
             _refusal(
@@ -997,6 +1075,8 @@ def price_folds_before_packing(
         log=log,
         lock=lock,
         budget=budget,
+        refused=refused,
+        memo=memo,
     )
     return _rejoin(folded, unfolded, {c.recording.version for c in rejected})
 
@@ -1029,6 +1109,8 @@ def widen_packings(
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
     ledger: Ledger | None = None,
+    memo: dict[tuple[Hashable, Hashable], Compared] | None = None,
+    cap_s: float = math.inf,
 ) -> Profile:
     """``profile`` with each packing entry that names its versions applying also in each version of ``calls`` it matches but does not name.
 
@@ -1037,7 +1119,8 @@ def widen_packings(
     (recorded in ``ledger`` where one is given), it keeps to the versions it names. A
     version's arrays are another's at other extents, so a grouping that pays where
     switches dominate can slow a version whose arrays' own time does. One end-to-end
-    check per version the entries match.
+    check per version the entries match (``_end_to_end``, through ``memo``, its timing
+    at most ``cap_s``).
     """
     entries = profile.packings()
     for call in calls:
@@ -1068,6 +1151,8 @@ def widen_packings(
                 timing,
                 log,
                 lock,
+                memo,
+                cap_s,
             )
         except (ValueError, RuntimeError, ir.MLIRError) as e:
             _refusal(
@@ -1128,15 +1213,18 @@ def _refusal(
     ledger: Ledger | None,
     log: Callable[[str], None],
 ) -> Kind:
-    """Return the kind of ``e``, ``what`` under ``profile`` failing to build, run or match.
+    """Return the kind of ``e``, ``what`` under ``profile`` failing to build, run, match or be timed.
 
     Logged, and recorded in ``ledger``, where given, with ``profile`` saved as ``stem``.
     """
-    kind = (
-        Kind.HANG
-        if _device_timeout(e)
-        else Kind.MISMATCH if isinstance(e, NotBitIdentical) else Kind.BUILD
-    )
+    if _device_timeout(e):
+        kind = Kind.HANG
+    elif isinstance(e, NotBitIdentical):
+        kind = Kind.MISMATCH
+    elif isinstance(e, (CpuWaitRefused, CheckTooLong)):
+        kind = Kind.TIMING
+    else:
+        kind = Kind.BUILD
     log(f"{what}: refused, {kind.value}: {first_error(str(e))}")
     if ledger is not None:
         saved = ledger.directory / "profiles"
@@ -1154,16 +1242,26 @@ def _end_to_end(
     timing: Timing,
     log: Callable[[str], None],
     lock: NpuLock | None,
+    memo: dict[tuple[Hashable, Hashable], Compared] | None = None,
+    cap_s: float = math.inf,
 ) -> tuple[float, float | None]:
-    """Return ``call``'s version built under ``after`` against it under ``before`` (``compare_graphs``), each packaged as ``dev`` does.
+    """Return ``call``'s version built under ``after`` against it under ``before`` (``compared``), each packaged as ``dev`` does.
 
-    A full ELF where it dispatches one, else an xclbin per step.
+    At its shortest point alone (``Timed.shortest``); the tune's final ``verify`` times
+    every point. A full ELF where it dispatches one, else an xclbin per step. No gain
+    where the two build one image.
     """
-    return compare_graphs(
-        call,
-        built(call, before, dev),
-        built(call, after, dev),
+    shortest = call.shortest()
+    found = compared(
+        shortest,
+        shortest,
+        dev,
+        before,
+        after,
         timing=timing,
         log=log,
         lock=lock,
+        memo=memo,
+        cap_s=cap_s,
     )
+    return (0.0, None) if found is None else found

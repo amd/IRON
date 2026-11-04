@@ -7,10 +7,11 @@ No NPU above ``# On the device``.
 """
 
 import aie.utils as aie_utils
+import numpy as np
 import pytest
 
 import iron
-from iron import Profile
+from iron import Profile, Scratchpad
 from iron.common.declare.profile import PackingEntry
 from iron.common.graph.fold import fold_candidates
 from iron.common.image.step import FusionKind
@@ -19,7 +20,7 @@ from iron.operators.relu import ReLU
 from iron.operators.silu import SiLU
 from iron.operators.tanh import Tanh
 from iron.tests.support.llama_model import small
-from iron.tune.autotune import Timed
+from iron.tune.autotune import Point, Timed
 from iron.tune.measure import SPENT, Timing, measure
 from iron.tune.verify import (
     Check,
@@ -43,6 +44,20 @@ class Chain(iron.Graph):
 
     def body(self, x):
         return Tanh.step(ReLU.step(x))
+
+
+class Bounded(iron.Graph):
+    """ReLU over a call's first ``n`` elements."""
+
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        return ReLU.step(x[:n])
+
+
+def bounded(profile: Profile) -> list[Timed]:
+    graph = Bounded()
+    graph.profile = profile
+    points = [Point(0.5, dict(n=SMALL)), Point(0.5, dict(n=LARGE))]
+    return [Timed(graph.record(x=(LARGE,)), values=dict(n=LARGE), points=points)]
 
 
 def recorded(profile: Profile) -> list[Timed]:
@@ -201,3 +216,41 @@ def test_a_phase_charges_its_own_timing_and_checks_its_profile_against_the_last(
     [check] = searched.checks
     assert check.gains, check
     assert unchanged.checks == () and (unchanged.build_s, unchanged.timing_s) == (0, 0)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_the_final_verify_times_only_the_points_the_search_did_not():
+    """A pair checked at its shortest point is timed at the other alone when verified at both.
+
+    The shortest point's figure is the one the first check found, and the verdict is
+    each point's weighed.
+    """
+    dev = aie_utils.ensure_current_device()
+    base = Profile()
+    base.add(ReLU, size=LARGE, num_aie_columns=1)
+    wider = Profile()
+    wider.add(ReLU, size=LARGE, num_aie_columns=8)
+    memo: dict = {}
+    timing = Timing(rounds=3, calls=10)
+
+    def shortest(profile: Profile) -> list[Timed]:
+        return [c.shortest() for c in bounded(profile)]
+
+    verify(shortest, dev, base, wider, timing=timing, memo=memo)
+    [known] = memo.values()
+    [(point, first)] = known.points.items()
+    assert point == (("n", SMALL),)
+    logged: list[str] = []
+    kept, checks = verify(
+        bounded, dev, base, wider, timing=timing, memo=memo, log=logged.append
+    )
+    assert known.points[point] is first and len(known.points) == 2
+    assert sum("CPU wait" in line for line in logged) == 1, logged
+    [check] = checks.values()
+    assert check.delta_us == pytest.approx(
+        0.5 * first[0] + 0.5 * known.points[(("n", LARGE),)][0]
+    )
+    assert check.gains, check
+    assert [(c.__name__, d, t) for c, d, t in kept] == [
+        ("ReLU", {"size": LARGE}, {"num_aie_columns": 8})
+    ]

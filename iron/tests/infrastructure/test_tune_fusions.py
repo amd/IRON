@@ -63,6 +63,7 @@ from iron.tune.fusions import (
     select_rewrites,
 )
 from iron.tune.measure import (
+    Budget,
     Cache,
     Standalone,
     Timing,
@@ -929,6 +930,34 @@ class BoundedChain(iron.Graph):
 
 
 @pytest.mark.supported_devices("npu2")
+def test_confirm_fusions_decides_at_the_shortest_point():
+    """A second point bounding past the graph's input is a call it refuses.
+
+    Confirming runs the call at its shortest point alone, so it never reaches it.
+    """
+    dev = aie_utils.ensure_current_device()
+    call = Timed(
+        BoundedChain().record(x=(4096,)),
+        values=dict(n=4096),
+        points=[Point(0.5, dict(n=4096)), Point(0.5, dict(n=8192))],
+    )
+    [group] = fusion_groups([call], dev, kinds=(FusionKind.STREAM,))
+    logged = []
+    confirm_fusions(
+        [call],
+        dev,
+        [group],
+        {group: Trial({}, -1e6, 1.0)},
+        Profile(),
+        {group: None},
+        full_elf=True,
+        timing=Timing(rounds=2, calls=3),
+        log=logged.append,
+    )
+    assert any("end to end" in line for line in logged), logged
+
+
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("full_elf", [True, False])
 def test_a_narrowed_packing_holds_bit_identical_at_partial_bounds(full_elf):
     """A packing narrowing two bounded steps, against them unpacked at the full bound and at half of it.
@@ -1250,3 +1279,28 @@ def test_a_stream_window_is_bounded_by_the_array_not_a_count():
     recording = LongChain().record(x=(2048,))
     found = candidates(recording, (FusionKind.STREAM,))
     assert max(len(f.steps) for f in found) == len(recording.steps) == 10
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_spent_budget_prices_one_fusion_and_takes_none_unpriced(tmp_path):
+    """Out of time, the first group is priced and the rest are left out, not priced in batches."""
+    dev = aie_utils.ensure_current_device()
+    call = Timed(ChainGraph(2048, 256, columns=1).record(a=(2048,), b=(2048,)))
+    found = fusion_groups([call], dev, kinds=(FusionKind.STREAM,))
+    assert len(found) > 1
+    logged = []
+    profile = price_fusions(
+        [call],
+        dev,
+        Profile(),
+        full_elf=True,
+        timing=Timing(rounds=2, calls=5),
+        confirm=False,
+        fit_cache=tmp_path / "fit",
+        kinds=(FusionKind.STREAM,),
+        log=logged.append,
+        budget=Budget(0, logged.append),
+    )
+    assert profile is not None
+    assert f"{len(found) - 1} group(s) left unpriced: the budget ended" in logged
+    assert len(profile.fusions()) <= 1

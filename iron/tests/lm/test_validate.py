@@ -233,3 +233,26 @@ def test_changed_versions_ignores_a_version_packed_as_stock_packs_it():
     stock_live = {"decode": _live("a", packed_groups=[15])}
     candidate_live = {"decode": _live("a", packed_groups=[15])}
     assert validate.changed_versions(stock_live, candidate_live) == []
+
+
+def test_a_bisection_finds_a_lone_first_entry_and_reports_its_own_mismatch():
+    """The first entry alone mismatches, at a step of its own: the bisection keeps one entry, not two."""
+    tags = list("abcdefgh")
+    tried = []
+
+    def first(prefix: list) -> list[int]:
+        tried.append(len(prefix))
+        return [len(prefix)] if "a" in prefix else []
+
+    assert validate.smallest_failing_prefix(tags, [9], first) == (["a"], [1])
+    assert 1 in tried
+
+
+def test_a_bisection_reports_the_mismatch_of_the_prefix_it_keeps():
+    """The fourth entry mismatches: the last prefix tried matches, so its (empty) mismatch is not the one reported."""
+
+    def fourth(prefix: list) -> list[int]:
+        return [len(prefix)] if "d" in prefix else []
+
+    best, mismatch = validate.smallest_failing_prefix(list("abcdefgh"), [9], fourth)
+    assert best == list("abcd") and mismatch == [4]

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import time
 from collections.abc import Callable, Hashable, Sequence
 from pathlib import Path
@@ -28,8 +29,8 @@ from iron.common.graph.record import Recording
 from iron.common.image.step import FusionKind
 
 from .autotune import CONFIDENCE, Timed, _identity
-from .fusions import built, compare_graphs
-from .measure import SPENT, NpuLock, Spent, Timing
+from .fusions import Compared, built, compare_graphs
+from .measure import SPENT, CheckTooLong, CpuWaitRefused, NpuLock, Spent, Timing
 
 
 @dataclasses.dataclass(frozen=True)
@@ -145,6 +146,60 @@ def narrowed(
     return out
 
 
+def compared(
+    old: Timed,
+    new: Timed,
+    dev: Device,
+    before: Profile,
+    after: Profile,
+    *,
+    timing: Timing = Timing(rounds=3, calls=10),
+    log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
+    memo: dict[tuple[Hashable, Hashable], Compared] | None = None,
+    cap_s: float = math.inf,
+) -> tuple[float, float | None] | None:
+    """``new``'s version under ``after`` against ``old``'s under ``before`` (``compare_graphs`` at ``old``'s points), each packaged as ``dev`` does.
+
+    Its delta and that delta's standard error, or None where the two build one image
+    (``fingerprint``). Read from ``memo``, by the two builds' fingerprints, where it
+    holds every point; else built and timed at the points it does not hold, which are
+    added to it.
+
+    Args:
+        old: The call as ``before`` records it.
+        new: The call as ``after`` records it.
+        dev: The device the version runs on.
+        before: The profile it is checked against.
+        after: The profile checked.
+        timing: How it is timed end to end.
+        log: Where its timing is logged.
+        lock: Held around the check; none taken where None.
+        memo: Each pair of builds' figures by point, read and added to, so a
+            pair is timed once a point per tune.
+        cap_s: The most its timing takes (``compare_graphs``).
+    """
+    memo = {} if memo is None else memo
+    pair = (fingerprint(old, before, dev), fingerprint(new, after, dev))
+    if pair[0] == pair[1]:
+        return None
+    known = memo.setdefault(pair, Compared())
+    found = known.weighted(old)
+    if found is not None:
+        log(f"{old.recording.name}: as timed before")
+        return found
+    return compare_graphs(
+        old,
+        built(old, before, dev),
+        built(new, after, dev),
+        timing=timing,
+        log=log,
+        lock=lock,
+        known=known,
+        cap_s=cap_s,
+    )
+
+
 def checked(
     record: Callable[[Profile], Sequence[Timed]],
     dev: Device,
@@ -154,9 +209,13 @@ def checked(
     timing: Timing = Timing(rounds=3, calls=10),
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
-    memo: dict[tuple[Hashable, Hashable], Check] | None = None,
+    memo: dict[tuple[Hashable, Hashable], Compared] | None = None,
+    cap_s: float = math.inf,
 ) -> dict[Version, Check]:
-    """Each version ``candidate`` builds differently from ``base``, timed end to end against it.
+    """Each version ``candidate`` builds differently from ``base``, timed end to end against it (``compared``).
+
+    One whose timing is refused (``CheckTooLong``, ``CpuWaitRefused``) counts as no
+    gain.
 
     Args:
         dev: The device the versions run on.
@@ -166,36 +225,40 @@ def checked(
         log: Where each version's check is logged.
         lock: Held around each check; none taken where None.
         record: The calls, recorded under a profile.
-        memo: Checks by the two builds' fingerprints, read and added to, so a
-            pair of builds is timed once per tune.
+        memo: Each pair of builds' figures by point (``compared``).
+        cap_s: The most each check's timing takes.
     """
-    memo = {} if memo is None else memo
     old = {c.recording.version: c for c in record(base)}
     checks: dict[Version, Check] = {}
     for call in record(candidate):
         version = call.recording.version
-        pair = (fingerprint(old[version], base, dev), fingerprint(call, candidate, dev))
-        if pair[0] == pair[1]:
-            continue
-        if pair in memo:
-            check = checks[version] = memo[pair]
-            log(f"verify {check.name}: as checked before, {check.delta_us:+.1f} us")
-            continue
-        delta, noise = compare_graphs(
-            old[version],
-            built(old[version], base, dev),
-            built(call, candidate, dev),
-            timing=timing,
-            log=log,
-            lock=lock,
-        )
         inputs = ", ".join(f"{n}{list(s)}" for n, s, _ in version) or "no inputs"
-        check = checks[version] = memo[pair] = Check(
-            f"{call.recording.name} ({inputs})", delta, noise
-        )
-        noise_s = "?" if noise is None else f"{noise:.1f}"
+        name = f"{call.recording.name} ({inputs})"
+        try:
+            found = compared(
+                old[version],
+                call,
+                dev,
+                base,
+                candidate,
+                timing=timing,
+                log=log,
+                lock=lock,
+                memo=memo,
+                cap_s=cap_s,
+            )
+        except (CheckTooLong, CpuWaitRefused) as e:
+            log(f"verify {name}: not timed, no gain: {e}")
+            checks[version] = Check(name, 0.0, None)
+            continue
+        if found is None:
+            continue
+        check = checks[version] = Check(name, *found)
+        noise_s = "?" if check.noise_us is None else f"{check.noise_us:.1f}"
         verdict = "gains" if check.gains else "no gain"
-        log(f"verify {check.name}: {delta:+.1f} ± {noise_s} us end to end, {verdict}")
+        log(
+            f"verify {name}: {check.delta_us:+.1f} ± {noise_s} us end to end, {verdict}"
+        )
     return checks
 
 
@@ -208,7 +271,8 @@ def verify(
     timing: Timing = Timing(rounds=3, calls=10),
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
-    memo: dict[tuple[Hashable, Hashable], Check] | None = None,
+    memo: dict[tuple[Hashable, Hashable], Compared] | None = None,
+    cap_s: float = math.inf,
 ) -> tuple[Profile, dict[Version, Check]]:
     """``candidate`` where each version it builds differently from ``base`` gains on it end to end beyond the noise.
 
@@ -220,9 +284,17 @@ def verify(
     checks: dict[Version, Check] = {}
     while True:
         last, checks = checks, checked(
-            record, dev, base, chosen, timing=timing, log=log, lock=lock, memo=memo
+            record,
+            dev,
+            base,
+            chosen,
+            timing=timing,
+            log=log,
+            lock=lock,
+            memo=memo,
+            cap_s=cap_s,
         )
-        fresh = {v for v, c in checks.items() if not c.gains and last.get(v) is not c}
+        fresh = {v for v, c in checks.items() if not c.gains and last.get(v) != c}
         if not fresh:
             return chosen, checks
         if fresh <= losers:
@@ -271,10 +343,11 @@ class Phases:
         *,
         log: Callable[[str], None] = print,
         lock: NpuLock | None = None,
-        memo: dict[tuple[Hashable, Hashable], Check] | None = None,
+        memo: dict[tuple[Hashable, Hashable], Compared] | None = None,
+        cap_s: float = math.inf,
     ):
         self.record, self.dev, self.profile = record, dev, profile
-        self.log, self.lock = log, lock
+        self.log, self.lock, self.cap_s = log, lock, cap_s
         self.memo = {} if memo is None else memo
         self.done: list[Phase] = []
         self.spent = Spent()
@@ -304,6 +377,7 @@ class Phases:
                 log=self.log,
                 lock=self.lock,
                 memo=self.memo,
+                cap_s=self.cap_s,
             )
         finally:
             SPENT.reset(token)
