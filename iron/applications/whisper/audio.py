@@ -1,15 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Whisper audio loading and the NumPy reference for its NPU log-Mel frontend."""
+"""Whisper audio loading."""
 
-import json
 import wave
 from pathlib import Path
 
 import numpy as np
-
-from iron.lm.blocks import filterbank
 
 SAMPLE_RATE = 16000
 N_FFT = 400
@@ -17,47 +14,6 @@ HOP_LENGTH = 160
 N_MELS = 80
 N_SAMPLES = 30 * SAMPLE_RATE
 FRAMES = N_SAMPLES // HOP_LENGTH
-
-
-def slaney_filterbank(
-    fft: int = N_FFT, mels: int = N_MELS, sample_rate: int = SAMPLE_RATE
-) -> np.ndarray:
-    """Compute the ``(fft // 2 + 1, mels)`` Slaney-normalized mel filterbank in float32."""
-    return filterbank(fft, mels, sample_rate, sample_rate / 2, scale="slaney").astype(
-        np.float32
-    )
-
-
-def mel_filters(
-    directory: str | Path | None = None,
-    fft: int = N_FFT,
-    mels: int = N_MELS,
-    sample_rate: int = SAMPLE_RATE,
-) -> np.ndarray:
-    """Return the ``(fft // 2 + 1, mels)`` float32 mel filterbank.
-
-    Loads the exact ``mel_filters`` matrix from ``preprocessor_config.json``
-    in ``directory`` when present, otherwise computes the Slaney filterbank.
-    """
-    bins = fft // 2 + 1
-    if directory is not None:
-        path = Path(directory)
-        if path.is_file():
-            path = path.parent
-        config_path = path / "preprocessor_config.json"
-        if config_path.exists():
-            data = json.loads(config_path.read_text(encoding="utf-8"))
-            if "mel_filters" in data:
-                filters = np.asarray(data["mel_filters"], dtype=np.float32)
-                if filters.shape == (mels, bins):
-                    filters = np.ascontiguousarray(filters.T)
-                if filters.shape != (bins, mels):
-                    raise ValueError(
-                        f"Unexpected Whisper mel_filters shape {filters.shape}, "
-                        f"expected {(bins, mels)}"
-                    )
-                return filters
-    return slaney_filterbank(fft, mels, sample_rate)
 
 
 def load_wav(path: str | Path) -> np.ndarray:
@@ -83,68 +39,3 @@ def load_wav(path: str | Path) -> np.ndarray:
             f"{path}: expected 16 kHz mono, got shape {samples.shape} at {rate} Hz"
         )
     return np.asarray(samples, dtype=np.float32)
-
-
-def _stft_log_mel(waveform: np.ndarray, filters: np.ndarray) -> np.ndarray:
-    """Compute Whisper log-Mel features ``(num_frames, mels)`` float32 from padded samples."""
-    pad = N_FFT // 2
-    padded = np.pad(waveform, (pad, pad), mode="reflect")
-    windows = np.lib.stride_tricks.sliding_window_view(padded, N_FFT)[::HOP_LENGTH][:-1]
-    hann = (
-        0.5 - 0.5 * np.cos(2.0 * np.pi * np.arange(N_FFT, dtype=np.float64) / N_FFT)
-    ).astype(np.float32)
-    spectrum = np.fft.rfft(windows * hann, n=N_FFT, axis=-1)
-    magnitudes = (spectrum.real.astype(np.float32) ** 2) + (
-        spectrum.imag.astype(np.float32) ** 2
-    )
-    mel = magnitudes @ filters
-    log_spec = np.log10(np.maximum(mel, 1e-10))
-    log_spec = np.maximum(log_spec, log_spec.max() - 8.0)
-    return ((log_spec + 4.0) / 4.0).astype(np.float32)
-
-
-def log_mel_spectrogram(
-    waveform: np.ndarray,
-    filters: np.ndarray | None = None,
-    *,
-    frames: int = FRAMES,
-    n_samples: int = N_SAMPLES,
-) -> np.ndarray:
-    """Compute Whisper log-Mel features ``(frames, mels)`` float32 for one 30 s window.
-
-    Pads or crops ``waveform`` to ``n_samples`` before the centered STFT so
-    boundary frames see the canonical 30 s analysis window.
-    """
-    samples = np.asarray(waveform, dtype=np.float32).reshape(-1)
-    padded = np.zeros(n_samples, dtype=np.float32)
-    held = min(samples.size, n_samples)
-    padded[:held] = samples[:held]
-    if filters is None:
-        filters = slaney_filterbank()
-    features = _stft_log_mel(padded, filters)
-    if features.shape[0] < frames:
-        raise ValueError(
-            f"STFT produced {features.shape[0]} frames, fewer than {frames}"
-        )
-    return np.ascontiguousarray(features[:frames])
-
-
-def log_mel_spectrogram_long(
-    waveform: np.ndarray,
-    filters: np.ndarray | None = None,
-    *,
-    n_samples: int = N_SAMPLES,
-) -> tuple[np.ndarray, int]:
-    """Compute Whisper log-Mel features of a full recording for long-form decoding.
-
-    Appends ``n_samples`` (30 s) of silence and normalizes over the whole
-    recording, matching OpenAI Whisper's ``transcribe``. Returns
-    ``(features, content_frames)`` where ``features`` is ``(total_frames, mels)``
-    float32 and ``content_frames`` is the frame count before the trailing silence.
-    """
-    samples = np.asarray(waveform, dtype=np.float32).reshape(-1)
-    padded = np.pad(samples, (0, n_samples))
-    if filters is None:
-        filters = slaney_filterbank()
-    features = _stft_log_mel(padded, filters)
-    return np.ascontiguousarray(features), samples.size // HOP_LENGTH

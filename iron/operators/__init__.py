@@ -17,6 +17,7 @@ from .gemv import GEMV
 from .layer_norm import LayerNorm
 from .limbs import Limbs
 from .log import Log
+from .log10_clamp import Log10Clamp
 from .magnitude import Magnitude
 from .merge import Merge
 from .mha import MHA
@@ -26,7 +27,6 @@ from .resample.op import PatchPositions, Resample, ResampleTaps
 from .rms_norm import RMSNorm
 from .rope import RoPE
 from .sample import Sample
-from .scale_shift import ScaleShift
 from .selective_scan import SelectiveScan
 from .sigmoid import Sigmoid
 from .silu import SiLU
@@ -49,6 +49,7 @@ __all__ = [
     "LayerNorm",
     "Limbs",
     "Log",
+    "Log10Clamp",
     "MHA",
     "Magnitude",
     "Merge",
@@ -62,7 +63,6 @@ __all__ = [
     "RowwiseAdd",
     "RowwiseMul",
     "Sample",
-    "ScaleShift",
     "SelectiveScan",
     "SiLU",
     "Sigmoid",

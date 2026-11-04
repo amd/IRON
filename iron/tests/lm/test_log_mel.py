@@ -13,7 +13,6 @@ import numpy as np
 import pytest
 
 from iron.lm import LogMel
-from iron.lm.blocks import filterbank
 from iron.tests.support.log_mel import EVERY, Extractor
 
 FRAMES = 3072
@@ -65,7 +64,9 @@ def test_log_mel(log_mel, frames, golden, record_property):
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("silent", [False, True])
 def test_whisper_log_mel(silent, record_property):
-    """Check centered Whisper frames, Slaney triangles and the global dynamic floor."""
+    """Check the fused Whisper frontend against Hugging Face's feature extractor."""
+    from transformers import WhisperFeatureExtractor
+
     frames = 64
     graph = LogMel(
         frame=400,
@@ -73,25 +74,30 @@ def test_whisper_log_mel(silent, record_property):
         mels=80,
         mel_scale="slaney",
         mel_floor=1e-10,
-        whisper=True,
+        power=2,
+        decades=8,
+        shift=4,
+        scale=0.25,
     )
-    n = (frames - 1) * graph.hop + graph.span
-    wave = np.zeros(n, np.float32)
+    wave = np.zeros(frames * graph.hop, np.float32)
     if not silent:
-        t = np.arange(n) / 16000
+        t = np.arange(wave.size) / 16000
         wave[:] = 0.2 * np.sin(2 * np.pi * 440 * t)
-        wave[: n // 3] *= 0.001
-    net = graph.compile(wave=((n,), np.float32))
+        wave[: wave.size // 3] *= 0.001
+    padded = np.pad(wave, (graph.frame // 2, graph.frame // 2), mode="reflect")
+    net = graph.compile(wave=((padded.size,), np.float32))
     try:
-        got = net(wave, frames=frames).numpy().reshape(frames, 80).astype(np.float32)
+        got = net(padded, frames=frames).numpy().reshape(frames, 80).astype(np.float32)
     finally:
         net.release()
-    windows = np.lib.stride_tricks.sliding_window_view(wave, 400)[::160][:frames]
-    dft = np.fft.rfft(windows * np.hanning(401)[:-1], axis=-1)
-    energy = np.abs(dft) ** 2 @ filterbank(400, 80, 16000, 8000, scale="slaney")
-    log = np.log10(np.maximum(energy, 1e-10))
-    want = (np.maximum(log, log.max() - 8) + 4) / 4
+    extracted = WhisperFeatureExtractor()(
+        wave,
+        sampling_rate=16000,
+        padding="do_not_pad",
+        truncation=False,
+        return_tensors="np",
+    )
+    want = extracted.input_features[0].T[:frames].astype(np.float32)
     error = float(np.max(np.abs(got - want)))
     record_property("MaxAbsError", error)
-    # log_f32 rounds to bf16 before the separately rounded scale and shift.
     assert error <= 0.03, error

@@ -21,10 +21,11 @@ arena:
   to 51,968 rows across 8 lanes) and `Sample`.
 
 The shared `iron.lm.blocks.LogMel` runs the windowed DFT, power spectrum,
-Slaney Mel projection, log, global maximum, dynamic clamp and scale/shift
-on the NPU. Only sample padding/reflection and WAV decoding stay on the
-host. Long-form normalization uses the complete recording plus 30 seconds
-of silence, before slicing its decoder windows.
+Slaney Mel projection, and fused log10/clamp/affine normalization on the NPU.
+The fused kernel reduces Mel energies in float32 and rounds the normalized
+features once to `bfloat16`. Only sample padding/reflection and WAV decoding
+stay on the host. Long-form normalization uses the complete recording plus
+30 seconds of silence, before slicing its decoder windows.
 
 Token selection also runs on the NPU. The host writes one small Sample
 draw row per step: history-dependent suppression ranges and the
@@ -43,9 +44,10 @@ so the next window does not duplicate it.
 
 - `model.py`: `WhisperConfig`, `WhisperEncoder`, `WhisperDecoder`,
   `Whisper`, `TokenPolicy` and the CLI
-- `audio.py`: 16 kHz mono WAV loading and the NumPy log-Mel reference
+- `audio.py`: 16 kHz mono WAV loading
 - `hugging_face.py`: Hugging Face's `WhisperForConditionalGeneration` in
-  float32, used only when recording goldens or running `--check-reference`
+  float32 and `WhisperFeatureExtractor`, used only when recording goldens or
+  running `--check-reference`
 - `profiles/`: per-device operator tunables (`npu1.json`, `npu2.json`)
 
 ## Weights and tokenizer
@@ -77,12 +79,12 @@ absolute error and `0.00208` NRMSE against its NumPy reference. `LayerNorm`
 `bfloat16` ULP on `npu1`). All projections and attention matmuls run at
 `Precision.HIGHEST`.
 
-The revised NPU log-Mel and Sample path was measured on Phoenix (`npu1`),
-with the complete `whisper-small` checkpoint and five local LibriSpeech
-clips. Mel error is maximum absolute error against the NumPy reference;
-short-window encoder and token comparisons use the Hugging Face float32
-reference. Long-form word/timestamp comparisons are per window; each
-timestamp tick is 0.02 s:
+The following Phoenix measurements were collected before the fused
+`log10_clamp_f32` frontend change and are historical only; they are not
+validation evidence for the current frontend. The frontend and end-to-end
+accuracy must be remeasured against `WhisperFeatureExtractor` on this branch.
+Long-form word/timestamp comparisons were per window; each timestamp tick is
+0.02 s:
 
 | Clip | Audio | Windows | Mel max error | Encoder NRMSE / cosine | HF comparison | WER | Total time |
 | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |
@@ -92,11 +94,11 @@ timestamp tick is 0.02 s:
 | `422-122949-0013` | 32.6 s | 2 | 0.00970 | — | words exact; timestamp deltas `4, 0` ticks | 6.0% | 89.4 s |
 | 96 s LibriSpeech clip | 97.0 s | 4 | 0.00940 | — | words exact; timestamp deltas `5, 0, 1, 0` ticks | 2.3% | 323.7 s |
 
-These are full-checkpoint Phoenix measurements of the revised NPU frontend
-and token-selection path, not the earlier host-preprocessing baseline. The
-table was collected before the final unfinished-segment trimming correction.
+These are full-checkpoint Phoenix measurements of the earlier NPU frontend
+and token-selection path, not the current fused frontend.
 
-After that correction, all eight fixed-input Phoenix device tests passed,
+After that correction, all eight fixed-input Phoenix device tests passed on
+the earlier implementation,
 including the 35 s two-window utterance `4507-16021-0047`: its per-window
 text and timestamps matched the float32 reference, with zero timestamp
 delta. Teacher-forced decoding over the short and medium clips had zero
@@ -105,36 +107,10 @@ top-1 mismatches, mean KL at most `0.000213`, and maximum KL at most
 The 2 s short-clip encoder/decoder window measured 4.48 s Latency
 (excluding frontend extraction, compilation and weight loading).
 
-### Chained-xclbin diagnostic
-
-The original Windows prototype timed out on the first two designs of a
-ten-design encoder chain. That used an older runtime and is not evidence
-of an eight-kernel hardware limit. A checkpoint-free reconstruction using
-the current APIs is available from the repository root:
-
-```bash
-python -m utils.probe_xclbin_chain --kernels-per-image 10 --output chain-ten.json
-python -m utils.probe_xclbin_chain --kernels-per-image 8 --output chain-eight.json
-```
-
-Source XRT as described in the installation guide, and run only one NPU
-process at a time. The probe builds five GEMMs, LayerNorm, Softmax, GELU
-and two additions at the encoder's 1536/768/3072 dimensions. It records
-kernel names, image/instruction paths, dispatch failures and reference
-comparisons as JSON, returning a nonzero exit status for a failure.
-`--compile-only` builds without dispatching; the rows, width and hidden
-dimensions can be reduced to multiples of 256 for a quicker smoke check.
-
-On Phoenix with `mlir-aie` `1.4.5.dev119`, all ten full-size designs passed
-in a single image, both with an explicit ten-kernel batch and the wheel's
-default batch size of 32. The historical timeout was **not reproduced**
-on this stack. The script is a current-API reconstruction, not the original
-obsolete-API probe, and no Linux or NPU2 result is claimed.
-
 ## Testing
 
 ```bash
-pytest tests/applications/whisper/reference/   # device-free toy graph vs Hugging Face
+pytest tests/applications/whisper/reference/   # device-free toy graph
 pytest tests/applications/whisper/             # hardware tests on NPU1 and NPU2
 ```
 

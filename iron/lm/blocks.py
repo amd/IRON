@@ -25,16 +25,15 @@ from iron.common.graph import Handle
 from iron.common.graph.compiled import walk
 from iron.common.image.packaging import require_device
 from iron.operators.axpy import AXPY
-from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs, stacked
 from iron.operators.log import Log
+from iron.operators.log10_clamp import Log10Clamp
 from iron.operators.magnitude import Magnitude
 from iron.operators.mha import MHA
 from iron.operators.reduce_max import ReduceMax
 from iron.operators.resample.op import SIDE, PatchPositions, Resample, ResampleTaps
-from iron.operators.scale_shift import ScaleShift
 
 
 def filterbank(
@@ -88,15 +87,18 @@ class LogMel(iron.Graph):
         max_hz: float = 8000.0,
         mel_floor: float = 1e-3,
         mel_scale: Literal["htk", "slaney"] = "htk",
-        whisper: bool = False,
+        power: int = 1,
+        decades: float | None = None,
+        shift: float = 0.0,
+        scale: float = 1.0,
     ):
         if fft < frame:
             raise ValueError(
                 f"LogMel: an rfft of {fft} points is shorter than a frame of {frame}"
             )
         self.frame, self.hop, self.fft, self.mels = frame, hop, fft, mels
-        self.mel_floor = mel_floor
-        self.whisper = whisper
+        self.mel_floor, self.power = mel_floor, power
+        self.decades, self.shift, self.scale = decades, shift, scale
         # The samples a frame is read as: six limb planes of them are the
         # rfft GEMM's K, whole 64s; the rfft's rows past the frame are zero.
         self.span = -(-frame // 32) * 32
@@ -136,17 +138,20 @@ class LogMel(iron.Graph):
         exact = dict(tile_m=32, output_dtype=np.float32, precision=Precision.HIGHEST)
         spectrum = GEMM.step(Limbs.step(a), self.dft, **exact)
         energy = GEMM.step(
-            Limbs.step(Magnitude.step(spectrum, power=2 if self.whisper else 1)),
+            Limbs.step(Magnitude.step(spectrum, power=self.power)),
             self.filterbank,
             **exact,
         )
-        if self.whisper:
-            log = Log.step(energy, offset=self.mel_floor)
-            maximum = ReduceMax.step(log.reshape(math.prod(log.shape)))
-            clipped = Clamp.step(
-                log, floor=maximum, dynamic_low=True, low_offset=-8 * math.log(10)
-            )
-            normalized = ScaleShift.step(clipped, scale=1 / (4 * math.log(10)), shift=1)
+        if self.decades is not None:
+            maximum = ReduceMax.step(energy.reshape(math.prod(energy.shape)))
+            normalized = Log10Clamp.step(
+                energy.reshape(math.prod(energy.shape)),
+                maximum,
+                mel_floor=self.mel_floor,
+                decades=self.decades,
+                shift=self.shift,
+                scale=self.scale,
+            ).reshape(*energy.shape)
             valid = normalized[:, : self.mels]
             return (
                 Copy.step(valid, features) if features is not None else Copy.step(valid)

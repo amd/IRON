@@ -27,15 +27,20 @@ def hook():
 
 @pytest.mark.parametrize("directory_urls", [True, False])
 @pytest.mark.parametrize("quote", ['"', "'"])
-def test_root_page_html_image_uses_site_asset(hook, directory_urls, quote, monkeypatch):
-    docs = str(ROOT / "docs")
+def test_html_image_uses_site_asset(hook, directory_urls, quote, tmp_path):
+    docs_path = tmp_path / "docs"
+    image_path = docs_path / "assets" / "images" / "XDNA2.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"real image")
+    source_path = docs_path / "agents.md"
+    source_path.write_text("real documentation", encoding="utf-8")
+    docs = str(docs_path)
     image = File("assets/images/XDNA2.png", docs, "/tmp/site", directory_urls)
     source = File("agents.md", docs, "/tmp/site", directory_urls)
-    # Model resolved symlink targets even in a checkout without symlink privileges.
-    monkeypatch.setattr(image, "abs_src_path", str(ROOT / "images" / "XDNA2.png"))
-    monkeypatch.setattr(source, "abs_src_path", str(ROOT / "AGENTS.md"))
     page = SimpleNamespace(file=source, url=source.url)
-    markdown = f'<img alt="IRON Logo" src={quote}./images/XDNA2.png?raw=1#logo{quote}>'
+    markdown = (
+        f'<img alt="IRON Logo" src={quote}./assets/images/XDNA2.png?raw=1#logo{quote}>'
+    )
 
     rendered = hook.on_page_markdown(
         markdown, page, {"docs_dir": docs}, Files([source, image])

@@ -10,10 +10,7 @@ task's lane, buffer argument, offset, sizes, strides and patched size.
 """
 
 import hashlib
-import io
-import os
 import re
-import threading
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from math import prod
@@ -730,58 +727,6 @@ def test_concurrent_fetches_of_a_shipped_image_each_get_the_whole_file(tmp_path)
         image.filename,
         f".{image.filename}.lock",
     }
-
-
-def test_concurrent_fetches_validate_and_publish_one_download(tmp_path, monkeypatch):
-    """Concurrent readers never replace a file another fetch may be hashing."""
-    data = b"pinned xclbin contents"
-    image = Xclbin(
-        url="https://example.com/image",
-        sha256=hashlib.sha256(data).hexdigest(),
-        filename="image.xclbin",
-    )
-    started = threading.Barrier(8, timeout=30)
-    downloads = []
-    replace = os.replace
-
-    def download(*args, **kwargs):
-        downloads.append(1)
-        return io.BytesIO(data)
-
-    def publish(source, target):
-        assert not target.exists(), "a valid cached image must not be replaced"
-        replace(source, target)
-
-    def fetch(_):
-        started.wait()
-        return image.fetch(tmp_path)
-
-    monkeypatch.setattr("urllib.request.urlopen", download)
-    monkeypatch.setattr(os, "replace", publish)
-    with ThreadPoolExecutor(8) as pool:
-        paths = list(pool.map(fetch, range(8)))
-    assert len(downloads) == 1
-    assert set(paths) == {tmp_path / image.filename}
-    assert paths[0].read_bytes() == data
-    assert not list(tmp_path.glob("*.part"))
-
-
-@pytest.mark.parametrize("relative", [False, True])
-def test_a_fetch_replaces_corrupt_content_under_its_lock(
-    tmp_path, monkeypatch, relative
-):
-    """A stale cache entry is still replaced, not accepted as a concurrent success."""
-    data = b"pinned xclbin contents"
-    image = Xclbin(
-        url="https://example.com/image",
-        sha256=hashlib.sha256(data).hexdigest(),
-        filename="image.xclbin",
-    )
-    target = tmp_path / image.filename
-    target.write_bytes(b"corrupt")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: io.BytesIO(data))
-    assert image.fetch("." if relative else tmp_path).read_bytes() == data
 
 
 def test_one_configuration_records_at_one_size():

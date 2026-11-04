@@ -10,22 +10,14 @@ Face's, and both step-by-step decoding from an empty cache and prompt
 prefill + decoding match Hugging Face's forward logits.
 """
 
+import json
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from aie.iron.kernels.sample import apply_ranges_ref
 
-from iron.applications.whisper.audio import (
-    log_mel_spectrogram,
-    log_mel_spectrogram_long,
-    slaney_filterbank,
-)
 from iron.applications.whisper.model import (
-    EOS,
-    FIRST_NON_TEXT_SPECIAL,
-    MAX_INITIAL_TIMESTAMP,
-    TIMESTAMP_BEGIN,
     TokenPolicy,
     Whisper,
     WhisperConfig,
@@ -63,6 +55,13 @@ TOY = WhisperConfig(
     eos_token_id=1000,
     pad_token_id=1000,
     decoder_start_token_id=1001,
+    start_of_transcript_token_id=1001,
+    english_token_id=None,
+    transcribe_token_id=1002,
+    no_timestamps_token_id=1003,
+    first_non_text_special_token_id=1004,
+    timestamp_begin_token_id=1005,
+    max_initial_timestamp_index=5,
     suppress_tokens=(1, 2),
     begin_suppress_tokens=(220, 1000),
 )
@@ -205,6 +204,56 @@ def test_every_step_of_every_version_resolves(npu1, npu2):
                 step.op.resolved(dev)
 
 
+def test_default_config_uses_generation_and_tokenizer_ids(tmp_path):
+    """Resolve special IDs from checkpoint metadata, including shifted vocabularies."""
+    data = TOY.to_json()
+    (tmp_path / "config.json").write_text(json.dumps(data), encoding="utf-8")
+    (tmp_path / "generation_config.json").write_text(
+        json.dumps(
+            {
+                "eos_token_id": 1000,
+                "decoder_start_token_id": 1001,
+                "suppress_tokens": [1, 2],
+                "begin_suppress_tokens": [220, 1000],
+                "max_initial_timestamp_index": 7,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "tokenizer.json").write_text(
+        json.dumps(
+            {
+                "added_tokens": [
+                    {"id": 1000, "content": "<|endoftext|>"},
+                    {"id": 1001, "content": "<|startoftranscript|>"},
+                    {"id": 1002, "content": "<|en|>"},
+                    {"id": 1003, "content": "<|transcribe|>"},
+                    {"id": 1004, "content": "<|notimestamps|>"},
+                    {"id": 1005, "content": "<|0.00|>"},
+                    {"id": 1006, "content": "<|translate|>"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = Whisper.default_config(tmp_path)
+    policy = TokenPolicy(config)
+    assert policy.prompt == (1001, 1002, 1003, 1004)
+    assert config.timestamp_begin_token_id == 1005
+    assert config.first_non_text_special_token_id == 1003
+    assert config.max_initial_timestamp_index == 7
+    assert config.suppress_tokens == (1, 2)
+
+    tokens = json.loads((tmp_path / "tokenizer.json").read_text(encoding="utf-8"))
+    tokens["added_tokens"] = [
+        item for item in tokens["added_tokens"] if item["content"] != "<|transcribe|>"
+    ]
+    (tmp_path / "tokenizer.json").write_text(json.dumps(tokens), encoding="utf-8")
+    with pytest.raises(ValueError, match="required token <\\|transcribe\\|>"):
+        Whisper.default_config(tmp_path)
+
+
 def test_whisper_small_decoder_profile_resolves(npu1, npu2):
     """Resolve real-width decode and prefill projections, not just toy profiles."""
     config = WhisperConfig(num_hidden_layers=1, encoder_layers=1)
@@ -231,7 +280,8 @@ def test_decode_window_keeps_only_completed_speech_when_rewinding(
     """Trim the unfinished suffix only when a completed segment advances seek."""
 
     def stamps(items):
-        return [TIMESTAMP_BEGIN + t if t < 10 else t for t in items]
+        timestamp = WhisperConfig().timestamp_begin_token_id
+        return [timestamp + t if t < 10 else t for t in items]
 
     backend = SimpleNamespace(window=lambda *_: (stamps(tokens), None))
     mel = np.zeros((32, 80), np.float32)
@@ -246,8 +296,19 @@ def test_long_form_does_not_duplicate_unfinished_speech():
     """Decode unfinished text again without retaining its first partial copy."""
     responses = iter(
         [
-            [TIMESTAMP_BEGIN, 10, TIMESTAMP_BEGIN + 4, TIMESTAMP_BEGIN + 4, 20],
-            [TIMESTAMP_BEGIN, 20, TIMESTAMP_BEGIN + 4, EOS],
+            [
+                WhisperConfig().timestamp_begin_token_id,
+                10,
+                WhisperConfig().timestamp_begin_token_id + 4,
+                WhisperConfig().timestamp_begin_token_id + 4,
+                20,
+            ],
+            [
+                WhisperConfig().timestamp_begin_token_id,
+                20,
+                WhisperConfig().timestamp_begin_token_id + 4,
+                WhisperConfig().eos_token_id,
+            ],
         ]
     )
     backend = SimpleNamespace(window=lambda *_: (next(responses), None))
@@ -259,7 +320,12 @@ def test_long_form_does_not_duplicate_unfinished_speech():
         frames=16,
     )
     assert [w["seek"] for w in windows] == [0, 8]
-    assert [t for w in windows for t in w["tokens"] if t < EOS] == [10, 20]
+    assert [
+        t
+        for w in windows
+        for t in w["tokens"]
+        if t < WhisperConfig().eos_token_id
+    ] == [10, 20]
 
 
 def test_decode_from_an_empty_cache_matches_the_prompt_and_hugging_face(cpu):
@@ -281,35 +347,46 @@ def test_decode_from_an_empty_cache_matches_the_prompt_and_hugging_face(cpu):
         assert_close(logits, want, f"step {step}")
 
 
-def test_audio_spectrogram_and_token_policy():
-    """Check pure-NumPy log-Mel extraction, timestamp rules and WER helpers."""
-    t = np.linspace(0.0, 1.0, 16000, endpoint=False, dtype=np.float32)
-    wave = 0.2 * np.sin(2.0 * np.pi * 440.0 * t)
-    filters = slaney_filterbank()
-    mel = log_mel_spectrogram(wave, filters, frames=128, n_samples=128 * 160)
-    assert mel.shape == (128, 80) and np.isfinite(mel).all()
-    mel_long, content = log_mel_spectrogram_long(wave, filters, n_samples=128 * 160)
-    assert content == 100 and mel_long.shape == (228, 80)
-
+def test_token_policy_and_wer_helpers():
+    """Check timestamp rules and WER helpers against checkpoint-derived IDs."""
     cfg = WhisperConfig()
     no_ts = TokenPolicy(cfg, timestamps=False)
     logits = np.zeros(cfg.vocab_size, dtype=np.float32)
     filtered = apply_ranges_ref(logits, no_ts.ranges([]))
-    assert np.all(np.isneginf(filtered[FIRST_NON_TEXT_SPECIAL:]))
-    assert np.isneginf(filtered[EOS])
+    assert np.all(np.isneginf(filtered[cfg.first_non_text_special_token_id :]))
+    assert np.isneginf(filtered[cfg.eos_token_id])
 
     with_ts = TokenPolicy(cfg, timestamps=True)
     first_step = apply_ranges_ref(logits, with_ts.ranges([]))
-    assert np.all(np.isneginf(first_step[:TIMESTAMP_BEGIN]))
+    assert np.all(np.isneginf(first_step[: cfg.timestamp_begin_token_id]))
     assert np.all(
-        np.isneginf(first_step[TIMESTAMP_BEGIN + MAX_INITIAL_TIMESTAMP + 1 :])
+        np.isneginf(
+            first_step[
+                cfg.timestamp_begin_token_id + cfg.max_initial_timestamp_index + 1 :
+            ]
+        )
     )
-    second_step = apply_ranges_ref(logits, with_ts.ranges([TIMESTAMP_BEGIN]))
-    assert np.all(np.isneginf(second_step[TIMESTAMP_BEGIN:]))
+    second_step = apply_ranges_ref(
+        logits, with_ts.ranges([cfg.timestamp_begin_token_id])
+    )
+    assert np.all(np.isneginf(second_step[cfg.timestamp_begin_token_id :]))
 
     assert word_error_rate("Mr. Quilter is here.", "mister quilter is here") == 0.0
     ok, diff = windows_match(
-        [TIMESTAMP_BEGIN, 10, 20, TIMESTAMP_BEGIN + 50, EOS],
-        [TIMESTAMP_BEGIN, 10, 20, TIMESTAMP_BEGIN + 52, EOS],
+        [
+            cfg.timestamp_begin_token_id,
+            10,
+            20,
+            cfg.timestamp_begin_token_id + 50,
+            cfg.eos_token_id,
+        ],
+        [
+            cfg.timestamp_begin_token_id,
+            10,
+            20,
+            cfg.timestamp_begin_token_id + 52,
+            cfg.eos_token_id,
+        ],
+        cfg,
     )
     assert ok and diff == 2

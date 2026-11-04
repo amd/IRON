@@ -21,11 +21,10 @@ import numpy as np
 import pytest
 
 from iron.applications.whisper.audio import (
-    log_mel_spectrogram,
-    log_mel_spectrogram_long,
+    HOP_LENGTH,
+    N_SAMPLES,
 )
 from iron.applications.whisper.model import (
-    PROMPT,
     TIMESTAMP_TOLERANCE,
     TokenPolicy,
     Whisper,
@@ -67,6 +66,33 @@ CLIPS = {
 def clip(name: str) -> np.ndarray:
     """Return the LibriSpeech utterance ``CLIPS[name]`` at 16 kHz mono."""
     return utterance(CLIPS[name])
+
+
+@pytest.fixture(scope="module")
+def feature_extractor():
+    """Load the checkpoint's independent Hugging Face Whisper feature extractor."""
+    from transformers import WhisperFeatureExtractor
+
+    return WhisperFeatureExtractor.from_pretrained(DIRECTORY)
+
+
+def hf_mel(feature_extractor, waveform: np.ndarray, *, long_form: bool = False):
+    """Extract Whisper features independently of the NPU frontend."""
+    samples = np.asarray(waveform, dtype=np.float32)
+    if long_form:
+        samples = np.pad(samples, (0, N_SAMPLES))
+        extracted = feature_extractor(
+            samples,
+            sampling_rate=16000,
+            padding="do_not_pad",
+            truncation=False,
+            return_tensors="np",
+        )
+    else:
+        extracted = feature_extractor(
+            samples, sampling_rate=16000, return_tensors="np"
+        )
+    return np.asarray(extracted.input_features[0].T, dtype=np.float32)
 
 
 @pytest.fixture(scope="module")
@@ -115,16 +141,17 @@ def reference(request):
 
 
 @pytest.mark.bench
-def test_whisper_short(model, reference, record_property):
+def test_whisper_short(model, reference, feature_extractor, record_property):
     """Encode and decode a short clip on the NPU (runs on every PR)."""
-    want_mel = log_mel_spectrogram(
-        clip("short"), model.filters(), frames=model.config.frames
-    )
-    mel, _ = model.log_mel(clip("short"))
-    assert np.max(np.abs(mel - want_mel)) <= 0.03
+    wave = clip("short")
+    want_mel = hf_mel(feature_extractor, wave)
+    mel, _ = model.log_mel(wave)
+    mel_error = float(np.max(np.abs(mel - want_mel)))
+    record_property("MelMaxAbsError", mel_error)
+    assert mel_error <= 0.03, mel_error
     policy = TokenPolicy(model.config, timestamps=False)
     t0 = time.perf_counter()
-    tokens, got_enc = model.window(mel, list(PROMPT), policy)
+    tokens, got_enc = model.window(mel, policy=policy)
     elapsed = time.perf_counter() - t0
     record_property("Latency", elapsed * 1e6)
     want_enc = reference("encoder short", want_mel, lambda hf, audio: hf.encode(audio))
@@ -139,17 +166,21 @@ def test_whisper_short(model, reference, record_property):
         "window short",
         want_mel,
         lambda hf, audio: np.asarray(
-            hf.window(audio, list(PROMPT), policy)[0], np.int32
+            hf.window(audio, list(policy.prompt), policy)[0], np.int32
         ),
     )
+    if tokens and tokens[-1] == policy.eos:
+        tokens = tokens[:-1]
     assert tokens == want_tokens.astype(np.int32).tolist()
 
 
 @pytest.mark.extensive
 @pytest.mark.parametrize("name", ["short", "medium", "passage"])
-def test_whisper_encoder_accuracy(model, reference, name, record_property):
+def test_whisper_encoder_accuracy(
+    model, reference, feature_extractor, name, record_property
+):
     """Check the NPU encoder's hidden states against float32 Hugging Face."""
-    mel = log_mel_spectrogram(clip(name), model.filters(), frames=model.config.frames)
+    mel = hf_mel(feature_extractor, clip(name))
     got = model.encode(mel)
     want = reference(f"encoder {name}", mel, lambda hf, audio: hf.encode(audio))
     check_embedding(
@@ -163,10 +194,12 @@ def test_whisper_encoder_accuracy(model, reference, name, record_property):
 
 @pytest.mark.extensive
 @pytest.mark.parametrize("name", ["short", "medium"])
-def test_whisper_decoder_accuracy(model, reference, name, record_property):
+def test_whisper_decoder_accuracy(
+    model, reference, feature_extractor, name, record_property
+):
     """Check teacher-forced decoder logits against float32 Hugging Face."""
-    mel = log_mel_spectrogram(clip(name), model.filters(), frames=model.config.frames)
-    tokens: list[int] = list(PROMPT)
+    mel = hf_mel(feature_extractor, clip(name))
+    tokens: list[int] = list(TokenPolicy(model.config).prompt)
     results = []
     for step in range(STEPS):
         want = reference(
@@ -186,18 +219,19 @@ def test_whisper_decoder_accuracy(model, reference, name, record_property):
 
 
 @pytest.mark.extensive
-def test_whisper_determinism(model, record_property):
+def test_whisper_determinism(model, feature_extractor, record_property):
     """Alternating calls over two clips produce bit-identical encoder outputs and logits."""
     mels = [
-        log_mel_spectrogram(clip(n), model.filters(), frames=model.config.frames)
+        hf_mel(feature_extractor, clip(n))
         for n in ("short", "medium")
     ]
-    first = [(model.encode(m).copy(), model.logits(list(PROMPT)).copy()) for m in mels]
+    prompt = list(TokenPolicy(model.config).prompt)
+    first = [(model.encode(m).copy(), model.logits(prompt).copy()) for m in mels]
     differing = 0
     for _ in range(2):
         for (want_enc, want_logits), m in zip(first, mels):
             got_enc = model.encode(m)
-            got_logits = model.logits(list(PROMPT))
+            got_logits = model.logits(prompt)
             if not (
                 np.array_equal(got_enc, want_enc)
                 and np.array_equal(got_logits, want_logits)
@@ -208,11 +242,16 @@ def test_whisper_determinism(model, record_property):
 
 
 @pytest.mark.extensive
-def test_whisper_long_form(model, reference, record_property):
+def test_whisper_long_form(model, reference, feature_extractor, record_property):
     """Check multi-window timestamped long-form transcription on a 35 s clip."""
     res = model.transcribe(clip("long"), long_form=True)
     assert res["long_form"] and len(res["windows"]) >= 2
-    mel, content_frames = log_mel_spectrogram_long(clip("long"), model.filters())
+    wave = clip("long")
+    mel = hf_mel(feature_extractor, wave, long_form=True)
+    content_frames = wave.size // HOP_LENGTH
+    mel_error = float(np.max(np.abs(res["mel"] - mel)))
+    record_property("MelMaxAbsError", mel_error)
+    assert mel_error <= 0.03, mel_error
     policy = TokenPolicy(model.config, timestamps=True)
     worst = 0
     for i, w in enumerate(res["windows"]):
@@ -230,7 +269,10 @@ def test_whisper_long_form(model, reference, record_property):
         # Golden stores every result as float32, including recorded token IDs.
         expected_tokens = expected.astype(np.int32).tolist()
         ok, diff = windows_match(
-            w["tokens"], expected_tokens, tokenizer=model.tokenizer
+            w["tokens"],
+            expected_tokens,
+            model.config,
+            tokenizer=model.tokenizer,
         )
         assert ok, f"window {i} (seek {seek}): {w['tokens']} != {expected_tokens}"
         if diff is not None:

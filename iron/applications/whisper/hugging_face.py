@@ -8,15 +8,15 @@ recorded from. Needs torch and transformers only when recording or
 running ``--check-reference``.
 """
 
-# torch, transformers and safetensors: only recording imports them.
+# torch, transformers and safetensors: optional, only reference paths import them.
 # pyright: reportMissingImports=false
 
 import copy
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
-from transformers import WhisperTimeStampLogitsProcessor
+from transformers import WhisperFeatureExtractor
 
 from iron.lm.golden import HuggingFace
 
@@ -25,6 +25,40 @@ class HuggingFaceWhisper(HuggingFace):
     """transformers' ``WhisperForConditionalGeneration`` in float32."""
 
     model_class = "WhisperForConditionalGeneration"
+
+    def __init__(self, model, feature_extractor=None):
+        super().__init__(model)
+        self.feature_extractor = feature_extractor
+
+    @classmethod
+    def load(cls, directory):
+        """Load the float32 model and its independent audio feature extractor."""
+        import transformers
+
+        model = getattr(transformers, cls.model_class).from_pretrained(
+            directory, dtype=torch.float32
+        )
+        return cls(model, WhisperFeatureExtractor.from_pretrained(directory))
+
+    def features(self, waveform: np.ndarray, *, long_form: bool = False) -> np.ndarray:
+        """Extract HF Whisper log-Mel features ``(frames, mels)`` from raw audio."""
+        if self.feature_extractor is None:
+            raise RuntimeError("HuggingFaceWhisper.features requires a loaded checkpoint")
+        samples = np.asarray(waveform, dtype=np.float32).reshape(-1)
+        if long_form:
+            samples = np.pad(samples, (0, 30 * 16000))
+            extracted = self.feature_extractor(
+                samples,
+                sampling_rate=16000,
+                padding="do_not_pad",
+                truncation=False,
+                return_tensors="np",
+            )
+        else:
+            extracted = self.feature_extractor(
+                samples, sampling_rate=16000, return_tensors="np"
+            )
+        return np.asarray(extracted.input_features[0].T, dtype=np.float32)
 
     def encode(self, mel: np.ndarray) -> np.ndarray:
         """Return the float32 encoder hidden state ``(frames // 2, hidden_size)`` for ``mel``.
@@ -60,44 +94,28 @@ class HuggingFaceWhisper(HuggingFace):
     def window(
         self, mel: np.ndarray, prompt: list[int], policy
     ) -> tuple[list[int], np.ndarray]:
-        """Greedy-decode one 30 s window ``mel`` ``(frames, mels)`` under ``policy``."""
+        """Return HF's generated continuation for one window using its own processors."""
         features = np.ascontiguousarray(np.asarray(mel, dtype=np.float32).T)[None]
-        timestamp_rules = None
-        if policy.timestamps:
-            config = copy.deepcopy(self.model.generation_config)
-            config.no_timestamps_token_id = 50363
-            config.max_initial_timestamp_index = 50
-            timestamp_rules = WhisperTimeStampLogitsProcessor(
-                config, begin_index=len(prompt)
-            )
+        config = copy.deepcopy(self.model.generation_config)
+        config.eos_token_id = policy.eos
+        config.decoder_start_token_id = policy.prompt[0]
+        config.no_timestamps_token_id = policy.config.no_timestamps_token_id
+        config.max_initial_timestamp_index = policy.max_initial_timestamp
+        config.suppress_tokens = policy.suppress
+        config.begin_suppress_tokens = policy.begin_suppress
+        config.forced_decoder_ids = None
+        if hasattr(config, "language"):
+            config.language = None
+        if hasattr(config, "task"):
+            config.task = None
         with torch.no_grad():
-            encoder_out = self.model.model.encoder(torch.from_numpy(features))
-            hidden = encoder_out.last_hidden_state
-            past = None
-            ids = list(prompt)
-            generated: list[int] = []
-            while True:
-                out = self.model(
-                    encoder_outputs=(hidden,),
-                    decoder_input_ids=torch.tensor([ids], dtype=torch.long),
-                    past_key_values=past,
-                    use_cache=True,
-                )
-                past = out.past_key_values
-                scores = out.logits[:, -1].clone()
-                scores[:, policy.suppress] = -torch.inf
-                for lo, hi in policy.ranges(generated):
-                    scores[:, lo:hi] = -torch.inf
-                if timestamp_rules is not None:
-                    scores = timestamp_rules(
-                        cast(
-                            torch.LongTensor,
-                            torch.tensor([prompt + generated], dtype=torch.long),
-                        ),
-                        scores,
-                    )
-                token = int(scores.argmax())
-                generated.append(token)
-                if token == policy.eos or len(generated) >= policy.max_new_tokens:
-                    return generated, hidden[0].numpy()
-                ids = [token]
+            output = self.model.generate(
+                input_features=torch.from_numpy(features),
+                decoder_input_ids=torch.tensor([prompt], dtype=torch.long),
+                generation_config=config,
+                max_new_tokens=policy.max_new_tokens,
+                do_sample=False,
+                return_timestamps=policy.timestamps,
+            )
+            hidden = self.model.model.encoder(torch.from_numpy(features))
+        return output[0].tolist(), hidden.last_hidden_state[0].numpy()

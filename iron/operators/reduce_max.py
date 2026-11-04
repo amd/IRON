@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A streaming maximum over an array, using mlir-aie's tile reduction."""
+"""A streaming float32 maximum over an array, using mlir-aie's tile reduction."""
 
 import numpy as np
 from aie.dialects import arith
@@ -10,7 +10,6 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import reduce_max
 from aie.utils.compile.jit.params import divisors, param, per_call, tunable
 from aie.utils.verify import Tolerance
-from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp
 from iron.common.testing import Case, Testing
@@ -25,7 +24,7 @@ def _tiles(op) -> int:
 
 
 class ReduceMax(Operator):
-    """Reduce bf16 elements to their maximum, repeated to fill one DMA word."""
+    """Reduce float32 elements to their maximum."""
 
     size: int = param()
     tile_size: int = tunable(
@@ -34,16 +33,10 @@ class ReduceMax(Operator):
     )
     valid = per_call(bounds=size)
     count = per_call(derive=_tiles)
-    x = In(size, obj_shape=(tile_size,), depth=1)
-    y = Out(2, obj_shape=(2,), depth=1)
+    x = In(size, dtype=np.float32, obj_shape=(tile_size,), depth=1)
+    y = Out(1, dtype=np.float32, obj_shape=(1,), depth=1)
 
-    test = Testing(
-        [
-            Case(dict(size=2048, tile_size=1024), lower=True),
-            Case(dict(size=1 << 20, tile_size=1024), bench=True),
-        ],
-        draw=lambda op: dict(centered=(op.x,)),
-    )
+    test = Testing([Case(dict(size=2048, tile_size=1024), lower=True)])
 
     def compatible(self) -> None:
         if self.size % self.tile_size or self.tile_size % 32:
@@ -52,10 +45,10 @@ class ReduceMax(Operator):
             )
 
     def build(self) -> Built:
-        kernel = reduce_max(self.tile_size, dtype=bfloat16)
+        kernel = reduce_max(self.tile_size, dtype=np.float32)
         source = ObjectFifo(self.x.obj_type, depth=1)
         result = ObjectFifo(self.y.obj_type, depth=1)
-        partial = Buffer(np.ndarray[(2,), np.dtype[bfloat16]])
+        partial = Buffer(np.ndarray[(1,), np.dtype[np.float32]])
         rtp = Rtp([self.count])
 
         def core(src, dst, scratch, kernel, rtp):
@@ -68,7 +61,6 @@ class ReduceMax(Operator):
                 kernel(x, scratch, self.tile_size)
                 out[0] = arith.maximumf(out[0], scratch[0])
                 src.release(1)
-            out[1] = out[0]
             dst.release(1)
 
         self.x.bind(source.prod())
@@ -78,7 +70,7 @@ class ReduceMax(Operator):
         )
 
     def reference(self, x):
-        return np.full(2, np.max(x), dtype=bfloat16)
+        return np.array([np.max(x)], dtype=np.float32)
 
     def tolerance(self):
         return Tolerance.exact(note="maximum selects an input element without rounding")

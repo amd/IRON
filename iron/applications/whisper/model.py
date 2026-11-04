@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import re
 import time
 from pathlib import Path
@@ -64,18 +65,11 @@ from .audio import (
     N_SAMPLES,
     SAMPLE_RATE,
     load_wav,
-    mel_filters,
 )
 
 PROFILES = Path(__file__).with_name("profiles")
 
-# <|startoftranscript|> <|en|> <|transcribe|> <|notimestamps|>
-PROMPT = (50258, 50259, 50359, 50363)
-TIMESTAMP_PROMPT = PROMPT[:3]
-EOS = 50257
-FIRST_NON_TEXT_SPECIAL = 50358
-# <|0.00|>; each following token adds 0.02 s (two 10 ms Mel frames).
-TIMESTAMP_BEGIN = 50364
+# Each timestamp token adds 0.02 s (two 10 ms Mel frames).
 TIMESTAMP_SECONDS = 0.02
 HOP_SECONDS = HOP_LENGTH / SAMPLE_RATE
 INPUT_STRIDE = 2
@@ -139,6 +133,13 @@ class WhisperConfig(DecoderConfig):
     begin_suppress_tokens: tuple[int, ...] = dataclasses.field(
         default=(220, 50257), metadata={"convert": tuple}
     )
+    start_of_transcript_token_id: int = 50258
+    english_token_id: int | None = 50259
+    transcribe_token_id: int = 50359
+    no_timestamps_token_id: int = 50363
+    first_non_text_special_token_id: int = 50358
+    timestamp_begin_token_id: int = 50364
+    max_initial_timestamp_index: int = MAX_INITIAL_TIMESTAMP
 
     @property
     def frames(self) -> int:
@@ -193,9 +194,14 @@ class TokenPolicy:
         timestamps: bool = False,
         max_new_tokens: int = MAX_NEW_TOKENS,
     ):
+        self.config = config
         self.suppress = list(config.suppress_tokens)
         self.begin_suppress = list(config.begin_suppress_tokens)
         self.eos = config.eos_token_id
+        self.first_non_text_special = config.first_non_text_special_token_id
+        self.timestamp_begin = config.timestamp_begin_token_id
+        self.max_initial_timestamp = config.max_initial_timestamp_index
+        self.prompt = prompt_tokens(config, timestamps=timestamps)
         self.timestamps = timestamps
         self.max_new_tokens = max_new_tokens
 
@@ -207,26 +213,29 @@ class TokenPolicy:
         if not generated and self.begin_suppress:
             ranges.extend((t, t + 1) for t in self.begin_suppress)
         if not self.timestamps:
-            return [*ranges, (FIRST_NON_TEXT_SPECIAL, self.vocab)]
+            return [*ranges, (self.first_non_text_special, self.vocab)]
 
-        ranges.append((FIRST_NON_TEXT_SPECIAL, TIMESTAMP_BEGIN))
-        last = len(generated) >= 1 and generated[-1] >= TIMESTAMP_BEGIN
-        penultimate = len(generated) < 2 or generated[-2] >= TIMESTAMP_BEGIN
+        ranges.append((self.first_non_text_special, self.timestamp_begin))
+        last = len(generated) >= 1 and generated[-1] >= self.timestamp_begin
+        penultimate = len(generated) < 2 or generated[-2] >= self.timestamp_begin
         if last:
             if penultimate:
-                ranges.append((TIMESTAMP_BEGIN, self.vocab))
+                ranges.append((self.timestamp_begin, self.vocab))
             else:
                 ranges.append((0, self.eos))
 
-        stamps = [t for t in generated if t >= TIMESTAMP_BEGIN]
+        stamps = [t for t in generated if t >= self.timestamp_begin]
         if stamps:
             floor = stamps[-1] if last and not penultimate else stamps[-1] + 1
-            ranges.append((TIMESTAMP_BEGIN, floor))
+            ranges.append((self.timestamp_begin, floor))
         if not generated:
             ranges.extend(
                 [
-                    (0, TIMESTAMP_BEGIN),
-                    (TIMESTAMP_BEGIN + MAX_INITIAL_TIMESTAMP + 1, self.vocab),
+                    (0, self.timestamp_begin),
+                    (
+                        self.timestamp_begin + self.max_initial_timestamp + 1,
+                        self.vocab,
+                    ),
                 ]
             )
         return ranges
@@ -237,9 +246,22 @@ class TokenPolicy:
             [
                 sample.draw_row(0.0, 1, 0),
                 sample.range_words(self.ranges(generated), MAX_RANGES),
-                sample.split_word(TIMESTAMP_BEGIN if self.timestamps else self.vocab),
+                sample.split_word(
+                    self.timestamp_begin if self.timestamps else self.vocab
+                ),
             ]
         ).reshape(1, -1)
+
+
+def prompt_tokens(config: WhisperConfig, *, timestamps: bool = False) -> tuple[int, ...]:
+    """Build the default English transcription prompt from checkpoint token IDs."""
+    prompt = [config.start_of_transcript_token_id]
+    if config.english_token_id is not None:
+        prompt.append(config.english_token_id)
+    prompt.append(config.transcribe_token_id)
+    if not timestamps:
+        prompt.append(config.no_timestamps_token_id)
+    return tuple(prompt)
 
 
 class WhisperNoCache(NoCache):
@@ -301,7 +323,7 @@ class WhisperCrossAttention(WhisperAttention):
         Copy.step(v.reshape(S, G, D), self.values)
 
     def body(  # pyright: ignore[reportIncompatibleMethodOverride]
-        self, x: Handle
+        self, x: Handle, call: Call
     ) -> Handle:
         """Attend ``x``'s queries over the encoder's fixed source positions."""
         n, H, D = x.shape[0], self.heads, self.head_dim
@@ -318,7 +340,7 @@ class WhisperCrossAttention(WhisperAttention):
             q.reshape(n, H, D),
             self.keys,
             self.values,
-            kv_seq_len=self.source_positions,
+            kv_valid=call.position * 0 + self.source_positions,
             heads_interleaved=True,
             kv_interleaved=True,
             causal=False,
@@ -431,7 +453,7 @@ class WhisperDecoderLayer(DecoderLayer):
         x = residual_add(
             x, self.mix(self.input_layernorm(x), call), self.residual_multiplier
         )
-        h = self.encoder_attn(self.encoder_attn_layer_norm(x))
+        h = self.encoder_attn(self.encoder_attn_layer_norm(x), call)
         x = residual_add(x, h, self.residual_multiplier)
         h = self.mlp(self.post_attention_layernorm(x))
         return residual_add(x, h, self.residual_multiplier)
@@ -527,6 +549,7 @@ class Whisper(Model):
     @property
     def hugging_face(self):
         """Return ``HuggingFaceWhisper`` for golden recording and reference checks."""
+        # Keep optional torch/transformers dependencies out of NPU-only inference.
         from .hugging_face import HuggingFaceWhisper
 
         return HuggingFaceWhisper
@@ -535,6 +558,91 @@ class Whisper(Model):
     def fit(cls, config, weights_path, budget: int | None = None):
         """Return ``config`` at its fixed ``max_target_positions`` context."""
         return config
+
+    @classmethod
+    def default_config(cls, weights_path) -> WhisperConfig:
+        """Return ``WhisperConfig`` from model, generation and tokenizer metadata."""
+        path = Path(weights_path)
+        directory = path if path.is_dir() else path.parent
+        config = WhisperConfig.from_checkpoint(weights_path)
+        tokenizer_path = directory / "tokenizer.json"
+        if not tokenizer_path.exists():
+            raise FileNotFoundError(
+                f"Whisper checkpoint has no tokenizer metadata: {tokenizer_path}"
+            )
+        tokenizer = json.loads(tokenizer_path.read_text(encoding="utf-8"))
+        tokens = {
+            entry["content"]: int(entry["id"])
+            for entry in tokenizer.get("added_tokens", [])
+            if isinstance(entry.get("content"), str) and "id" in entry
+        }
+
+        def required_token(name: str) -> int:
+            if name not in tokens:
+                raise ValueError(f"{tokenizer_path} lacks required token {name}")
+            return tokens[name]
+
+        generation_path = directory / "generation_config.json"
+        generation = (
+            json.loads(generation_path.read_text(encoding="utf-8"))
+            if generation_path.exists()
+            else {}
+        )
+        eos = generation.get("eos_token_id", config.eos_token_id)
+        if isinstance(eos, list):
+            if len(eos) != 1:
+                raise ValueError("Whisper requires exactly one eos_token_id")
+            eos = eos[0]
+        start = required_token("<|startoftranscript|>")
+        timestamp = required_token("<|0.00|>")
+        task_ids = [
+            tokens[name]
+            for name in (
+                "<|translate|>",
+                "<|transcribe|>",
+                "<|startoflm|>",
+                "<|notimestamps|>",
+                "<|0.00|>",
+            )
+            if name in tokens
+        ]
+        values = dict(
+            eos_token_id=int(eos),
+            decoder_start_token_id=int(
+                generation.get("decoder_start_token_id", config.decoder_start_token_id)
+            ),
+            suppress_tokens=tuple(
+                generation.get("suppress_tokens", config.suppress_tokens)
+            ),
+            begin_suppress_tokens=tuple(
+                generation.get("begin_suppress_tokens", config.begin_suppress_tokens)
+            ),
+            start_of_transcript_token_id=start,
+            english_token_id=tokens.get("<|en|>"),
+            transcribe_token_id=required_token("<|transcribe|>"),
+            no_timestamps_token_id=required_token("<|notimestamps|>"),
+            first_non_text_special_token_id=min(task_ids),
+            timestamp_begin_token_id=timestamp,
+            max_initial_timestamp_index=int(
+                generation.get(
+                    "max_initial_timestamp_index", config.max_initial_timestamp_index
+                )
+            ),
+        )
+        if values["decoder_start_token_id"] != start:
+            raise ValueError(
+                "Whisper decoder_start_token_id does not match "
+                "<|startoftranscript|> in tokenizer.json"
+            )
+        if values["eos_token_id"] != tokens.get("<|endoftext|>"):
+            raise ValueError(
+                "Whisper eos_token_id does not match <|endoftext|> in tokenizer.json"
+            )
+        if any(not 0 <= token < config.vocab_size for token in task_ids):
+            raise ValueError(
+                f"Whisper token metadata exceeds vocab_size={config.vocab_size}"
+            )
+        return dataclasses.replace(config, **values)
 
     def body(
         self,
@@ -583,11 +691,10 @@ class Whisper(Model):
         self._frontends.clear()
         super().release()
 
-    def encode(self, mel: np.ndarray) -> np.ndarray:
+    def encode(self, mel: np.ndarray, *, readback: bool = True) -> np.ndarray | None:
         """Run the audio encoder on ``mel`` ``(frames, num_mel_bins)`` and populate cross-attention K/V.
 
-        Returns:
-            ``(max_source_positions, hidden_size)`` float32 encoder hidden states.
+        Set ``readback=False`` when only the on-device cross-attention state is used.
         """
         c = self.config
         buf = self.encoder.inputs(mel)
@@ -604,6 +711,8 @@ class Whisper(Model):
             out, _ = self(None, buf, **defaults)
         self._last_mel = np.array(mel, copy=True)
         self.decoder.forget(0)
+        if not readback:
+            return None
         arr = np.asarray(out.numpy()).reshape(c.source_pad, c.hidden_size)
         return arr[: c.max_source_positions].astype(np.float32)
 
@@ -618,12 +727,16 @@ class Whisper(Model):
     def window(
         self,
         mel: np.ndarray,
-        prompt: list[int] | tuple[int, ...] = PROMPT,
+        prompt: list[int] | tuple[int, ...] | None = None,
         policy: TokenPolicy | None = None,
-    ) -> tuple[list[int], np.ndarray]:
+        *,
+        readback: bool = True,
+    ) -> tuple[list[int], np.ndarray | None]:
         """Encode one 30 s ``mel`` window and greedy-decode tokens under ``policy``."""
         if policy is None:
             policy = TokenPolicy(self.config, timestamps=False)
+        if prompt is None:
+            prompt = policy.prompt
         if not (0 < len(prompt) <= self.config.prefill_chunk) or not (
             0 < policy.max_new_tokens <= self.config.max_seq_len - len(prompt) + 1
         ):
@@ -632,7 +745,7 @@ class Whisper(Model):
             )
         if self.decoder.decode_step is None:
             raise RuntimeError("Whisper.window: load_versions() first")
-        encoder_out = self.encode(mel)
+        encoder_out = self.encode(mel, readback=readback)
         generated: list[int] = []
         while True:
             self.decoder.decode_step.write(self.decoder.rules, policy.row(generated))
@@ -654,15 +767,6 @@ class Whisper(Model):
             if token == policy.eos or len(generated) >= policy.max_new_tokens:
                 return generated, encoder_out
 
-    def filters(self) -> np.ndarray:
-        """Return the checkpoint's Mel filterbank, or the Slaney filterbank."""
-        directory = (
-            None if self.checkpoint is None else Path(self.checkpoint.path).parent
-        )
-        return mel_filters(
-            directory, mels=self.config.num_mel_bins, sample_rate=SAMPLE_RATE
-        )
-
     def log_mel(
         self, waveform: np.ndarray, *, long_form: bool = False
     ) -> tuple[np.ndarray, int]:
@@ -675,19 +779,23 @@ class Whisper(Model):
             samples = np.pad(samples[:N_SAMPLES], (0, max(0, N_SAMPLES - samples.size)))
         frames = samples.size // HOP_LENGTH
         capacity = -(-frames // 64) * 64
-        graph = LogMel(
-            frame=N_FFT,
-            fft=N_FFT,
-            mels=self.config.num_mel_bins,
-            mel_floor=1e-10,
-            mel_scale="slaney",
-            whisper=True,
-        )
-        length = (capacity - 1) * HOP_LENGTH + graph.span
+        span = -(-N_FFT // 32) * 32
+        length = (capacity - 1) * HOP_LENGTH + span
         padded = np.pad(samples, (N_FFT // 2, N_FFT // 2), mode="reflect")
         wave = np.zeros(length, np.float32)
         wave[: min(length, padded.size)] = padded[:length]
         if capacity not in self._frontends:
+            graph = LogMel(
+                frame=N_FFT,
+                fft=N_FFT,
+                mels=self.config.num_mel_bins,
+                mel_floor=1e-10,
+                mel_scale="slaney",
+                power=2,
+                decades=8,
+                shift=4,
+                scale=0.25,
+            )
             self._frontends[capacity] = graph.compile(wave=((length,), np.float32))
         # A reduction tile is eight padded Mel rows. Long-form's trailing
         # silence makes rounding to that tile harmless; a 30 s window is exact.
@@ -700,6 +808,7 @@ class Whisper(Model):
         waveform: np.ndarray,
         *,
         long_form: bool = False,
+        return_encoder: bool = False,
     ) -> dict[str, Any]:
         """Transcribe 16 kHz mono ``waveform`` on the NPU (single window or long-form)."""
         samples = np.asarray(waveform, dtype=np.float32).reshape(-1)
@@ -708,8 +817,13 @@ class Whisper(Model):
         mel, content_frames = self.log_mel(samples, long_form=use_long)
         if not use_long:
             policy = TokenPolicy(self.config, timestamps=False)
-            tokens, encoder_out = self.window(mel, list(PROMPT), policy)
-            result = dict(encoder_out=encoder_out, segments=[])
+            tokens, encoder_out = self.window(
+                mel, policy=policy, readback=return_encoder
+            )
+            result: dict[str, Any] = dict(segments=[])
+            if return_encoder:
+                assert encoder_out is not None
+                result["encoder_out"] = encoder_out
         else:
             policy = TokenPolicy(self.config, timestamps=True)
             windows = transcribe_long(self, mel, content_frames, policy)
@@ -718,12 +832,12 @@ class Whisper(Model):
                 content_frames=content_frames,
                 windows=windows,
                 segments=(
-                    segments_of(windows, self.tokenizer)
+                    segments_of(windows, self.tokenizer, self.config)
                     if self.tokenizer is not None
                     else []
                 ),
             )
-        text_ids = [t for t in tokens if t < EOS]
+        text_ids = [t for t in tokens if t < self.config.eos_token_id]
         text = (
             self.tokenizer.decode(text_ids).strip()
             if self.tokenizer is not None
@@ -754,12 +868,15 @@ def decode_window(
     size = min(frames, content_frames - seek)
     segment = np.zeros((frames, mel.shape[1]), dtype=np.float32)
     segment[:size] = mel[seek : seek + size]
-    tokens, _ = backend.window(segment, list(TIMESTAMP_PROMPT), policy)
+    if isinstance(backend, Whisper):
+        tokens, _ = backend.window(segment, policy=policy, readback=False)
+    else:
+        tokens, _ = backend.window(segment, policy.prompt, policy)
     text_end = [t for t in tokens if t != policy.eos]
-    is_stamp = [t >= TIMESTAMP_BEGIN for t in text_end]
+    is_stamp = [t >= policy.timestamp_begin for t in text_end]
     pairs = [i + 1 for i in range(len(is_stamp) - 1) if is_stamp[i] and is_stamp[i + 1]]
     if pairs and is_stamp[-2:] != [False, True]:
-        advance = (text_end[pairs[-1] - 1] - TIMESTAMP_BEGIN) * INPUT_STRIDE
+        advance = (text_end[pairs[-1] - 1] - policy.timestamp_begin) * INPUT_STRIDE
         if advance > 0:
             return advance, text_end[: pairs[-1]]
     return size, tokens
@@ -787,17 +904,19 @@ def transcribe_long(
 def windows_match(
     actual: list[int],
     expected: list[int],
+    config: WhisperConfig,
     tokenizer=None,
     tolerance: int = TIMESTAMP_TOLERANCE,
 ) -> tuple[bool, int | None]:
     """Check whether ``actual`` and ``expected`` have matching words and timestamps within ``tolerance``."""
-    actual_stamps = [t - TIMESTAMP_BEGIN for t in actual if t >= TIMESTAMP_BEGIN]
-    expected_stamps = [t - TIMESTAMP_BEGIN for t in expected if t >= TIMESTAMP_BEGIN]
+    timestamp = config.timestamp_begin_token_id
+    actual_stamps = [t - timestamp for t in actual if t >= timestamp]
+    expected_stamps = [t - timestamp for t in expected if t >= timestamp]
     if len(actual_stamps) != len(expected_stamps):
         return False, None
     worst = max((abs(a - e) for a, e in zip(actual_stamps, expected_stamps)), default=0)
-    actual_text = [t for t in actual if t < EOS]
-    expected_text = [t for t in expected if t < EOS]
+    actual_text = [t for t in actual if t < config.eos_token_id]
+    expected_text = [t for t in expected if t < config.eos_token_id]
     if tokenizer is not None:
         words_ok = normalize_words(tokenizer.decode(actual_text)) == normalize_words(
             tokenizer.decode(expected_text)
@@ -810,17 +929,18 @@ def windows_match(
 
 
 def segments_of(
-    windows: list[dict[str, Any]], tokenizer
+    windows: list[dict[str, Any]], tokenizer, config: WhisperConfig
 ) -> list[tuple[float, float | None, str]]:
     """Return ``(start_s, end_s, text)`` for each timestamp-delimited segment."""
     result: list[tuple[float, float | None, str]] = []
+    timestamp, eos = config.timestamp_begin_token_id, config.eos_token_id
     for window in windows:
         offset = window["seek"] * HOP_SECONDS
         start: float | None = None
         text: list[int] = []
         for token in window["tokens"]:
-            if token >= TIMESTAMP_BEGIN:
-                time_s = offset + (token - TIMESTAMP_BEGIN) * TIMESTAMP_SECONDS
+            if token >= timestamp:
+                time_s = offset + (token - timestamp) * TIMESTAMP_SECONDS
                 if start is None:
                     start = time_s
                 elif text:
@@ -828,7 +948,7 @@ def segments_of(
                     start, text = time_s, []
                 else:
                     start = time_s
-            elif token < EOS:
+            elif token < eos:
                 text.append(token)
         if text:
             result.append((start or offset, None, tokenizer.decode(text).strip()))
@@ -903,7 +1023,11 @@ def main(argv=None) -> None:
     model = Whisper.load(args.path, full_elf=args.full_elf)
     try:
         t0 = time.perf_counter()
-        result = model.transcribe(waveform, long_form=args.long_form)
+        result = model.transcribe(
+            waveform,
+            long_form=args.long_form,
+            return_encoder=args.check_reference,
+        )
         elapsed = time.perf_counter() - t0
         for start_s, end_s, seg_text in result["segments"]:
             end = "   ?  " if end_s is None else f"{end_s:6.2f}"
@@ -921,11 +1045,21 @@ def main(argv=None) -> None:
 
             assert model.checkpoint is not None
             hf = HuggingFaceWhisper.load(Path(model.checkpoint.path).parent)
+            reference_mel = hf.features(waveform, long_form=result["long_form"])
+            mel_error = float(np.max(np.abs(result["mel"] - reference_mel)))
+            print(f"Log-Mel max absolute error vs HF extractor: {mel_error:.5f}")
+            if mel_error > 0.03:
+                raise SystemExit("FAILED: NPU log-Mel differs from HF extractor")
             if not result["long_form"]:
                 policy = TokenPolicy(model.config, timestamps=False)
-                ref_tokens, ref_enc = hf.window(result["mel"], list(PROMPT), policy)
+                ref_tokens, ref_enc = hf.window(
+                    reference_mel, list(policy.prompt), policy
+                )
                 enc_err = nrmse(result["encoder_out"], ref_enc)
-                match = result["tokens"] == ref_tokens
+                actual_tokens = result["tokens"]
+                if actual_tokens and actual_tokens[-1] == policy.eos:
+                    actual_tokens = actual_tokens[:-1]
+                match = actual_tokens == ref_tokens
                 print(f"Encoder NRMSE vs FP32: {100.0 * enc_err:.3f}%")
                 print(f"Exact CPU FP32 token match: {match}")
                 if not match:
@@ -936,14 +1070,17 @@ def main(argv=None) -> None:
                 for w in result["windows"]:
                     _, expected = decode_window(
                         hf,
-                        result["mel"],
+                        reference_mel,
                         w["seek"],
                         result["content_frames"],
                         policy,
                         frames=model.config.frames,
                     )
                     ok, _ = windows_match(
-                        w["tokens"], expected, tokenizer=model.tokenizer
+                        w["tokens"],
+                        expected,
+                        model.config,
+                        tokenizer=model.tokenizer,
                     )
                     match = match and ok
                 print(
