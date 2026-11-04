@@ -61,6 +61,7 @@ from iron.operators.sample import Sample
 from .audio import (
     FRAMES,
     HOP_LENGTH,
+    MEL_MAX_ABS_ERROR,
     N_FFT,
     N_SAMPLES,
     SAMPLE_RATE,
@@ -253,7 +254,9 @@ class TokenPolicy:
         ).reshape(1, -1)
 
 
-def prompt_tokens(config: WhisperConfig, *, timestamps: bool = False) -> tuple[int, ...]:
+def prompt_tokens(
+    config: WhisperConfig, *, timestamps: bool = False
+) -> tuple[int, ...]:
     """Build the default English transcription prompt from checkpoint token IDs."""
     prompt = [config.start_of_transcript_token_id]
     if config.english_token_id is not None:
@@ -1048,7 +1051,7 @@ def main(argv=None) -> None:
             reference_mel = hf.features(waveform, long_form=result["long_form"])
             mel_error = float(np.max(np.abs(result["mel"] - reference_mel)))
             print(f"Log-Mel max absolute error vs HF extractor: {mel_error:.5f}")
-            if mel_error > 0.03:
+            if mel_error > MEL_MAX_ABS_ERROR:
                 raise SystemExit("FAILED: NPU log-Mel differs from HF extractor")
             if not result["long_form"]:
                 policy = TokenPolicy(model.config, timestamps=False)

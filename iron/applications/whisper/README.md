@@ -33,7 +33,13 @@ timestamp/text split. Static scattered suppression tokens are a resident
 negative-infinity bias. Sample applies the forced-timestamp probability
 rule and returns the selected token; transcription does not read back the
 vocabulary-sized logits. `Whisper.logits` retains full readback for
-teacher-forced accuracy checks.
+teacher-forced accuracy checks. The pinned Sample kernel accepts per-draw
+ranges, not token-history state, so timestamp-rule history is still prepared
+on the host. The static suppression bias also remains separate from
+`lm_head`: the same decoder versions return unmodified logits for diagnostics
+and feed the sampler, so folding the bias into the head would change those
+logits. Fusing it without that behavior change requires a sampling-specific
+head path or a Sample-kernel extension.
 
 Audio up to 30 s is transcribed in one window without timestamps. Audio
 longer than 30 s (or with `--long-form`) runs OpenAI Whisper's sequential
@@ -81,8 +87,8 @@ absolute error and `0.00208` NRMSE against its NumPy reference. `LayerNorm`
 
 The following Phoenix measurements were collected before the fused
 `log10_clamp_f32` frontend change and are historical only; they are not
-validation evidence for the current frontend. The frontend and end-to-end
-accuracy must be remeasured against `WhisperFeatureExtractor` on this branch.
+validation evidence for the current frontend. Current-branch measurements
+against `WhisperFeatureExtractor` are reported below.
 Long-form word/timestamp comparisons were per window; each timestamp tick is
 0.02 s:
 
@@ -97,15 +103,23 @@ Long-form word/timestamp comparisons were per window; each timestamp tick is
 These are full-checkpoint Phoenix measurements of the earlier NPU frontend
 and token-selection path, not the current fused frontend.
 
-After that correction, all eight fixed-input Phoenix device tests passed on
-the earlier implementation,
-including the 35 s two-window utterance `4507-16021-0047`: its per-window
-text and timestamps matched the float32 reference, with zero timestamp
-delta. Teacher-forced decoding over the short and medium clips had zero
-top-1 mismatches, mean KL at most `0.000213`, and maximum KL at most
-`0.000724`. Alternating pretrained-weight calls were bit-identical.
-The 2 s short-clip encoder/decoder window measured 4.48 s Latency
-(excluding frontend extraction, compilation and weight loading).
+With the current fused frontend and one-call Hugging Face window reference,
+both 64-frame Phoenix frontend probes pass the `0.008` maximum-absolute-error
+bound: silence is exact and the non-silent probe measures `0.00390`. The
+current fixed-input Whisper application suite passes all eight tests on
+Phoenix, including the 35 s two-window utterance `4507-16021-0047`; its
+independently generated Hugging Face per-window words and timestamps match
+with zero tick difference. The long-form Mel error is `0.003906`, and the
+short application clip measures `0.003890`. Teacher-forced decoding over
+the short and medium clips has zero top-1 mismatches, mean KL at most
+`0.000187`, and maximum KL at most `0.00103`. Alternating pretrained-weight
+calls are bit-identical.
+
+The 5.86 s real Phoenix probe
+(`whisper-test-librispeech.wav`) passes `--check-reference`: Mel max error
+`0.00390`, encoder NRMSE `3.621%`, and exact HF token match. This CLI check
+uses the checkpoint's independent Hugging Face feature extractor and
+generation path, not IRON's audio frontend or timestamp-rule implementation.
 
 ## Testing
 

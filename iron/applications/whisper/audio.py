@@ -14,6 +14,8 @@ HOP_LENGTH = 160
 N_MELS = 80
 N_SAMPLES = 30 * SAMPLE_RATE
 FRAMES = N_SAMPLES // HOP_LENGTH
+# Allow roughly one bf16 ULP near unit-magnitude normalized features.
+MEL_MAX_ABS_ERROR = 0.008
 
 
 def load_wav(path: str | Path) -> np.ndarray:

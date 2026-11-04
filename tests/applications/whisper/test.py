@@ -22,6 +22,7 @@ import pytest
 
 from iron.applications.whisper.audio import (
     HOP_LENGTH,
+    MEL_MAX_ABS_ERROR,
     N_SAMPLES,
 )
 from iron.applications.whisper.model import (
@@ -89,9 +90,7 @@ def hf_mel(feature_extractor, waveform: np.ndarray, *, long_form: bool = False):
             return_tensors="np",
         )
     else:
-        extracted = feature_extractor(
-            samples, sampling_rate=16000, return_tensors="np"
-        )
+        extracted = feature_extractor(samples, sampling_rate=16000, return_tensors="np")
     return np.asarray(extracted.input_features[0].T, dtype=np.float32)
 
 
@@ -148,7 +147,7 @@ def test_whisper_short(model, reference, feature_extractor, record_property):
     mel, _ = model.log_mel(wave)
     mel_error = float(np.max(np.abs(mel - want_mel)))
     record_property("MelMaxAbsError", mel_error)
-    assert mel_error <= 0.03, mel_error
+    assert mel_error <= MEL_MAX_ABS_ERROR, mel_error
     policy = TokenPolicy(model.config, timestamps=False)
     t0 = time.perf_counter()
     tokens, got_enc = model.window(mel, policy=policy)
@@ -163,7 +162,7 @@ def test_whisper_short(model, reference, feature_extractor, record_property):
         record=record_property,
     )
     want_tokens = reference(
-        "window short",
+        "window single-call no-eos short",
         want_mel,
         lambda hf, audio: np.asarray(
             hf.window(audio, list(policy.prompt), policy)[0], np.int32
@@ -221,10 +220,7 @@ def test_whisper_decoder_accuracy(
 @pytest.mark.extensive
 def test_whisper_determinism(model, feature_extractor, record_property):
     """Alternating calls over two clips produce bit-identical encoder outputs and logits."""
-    mels = [
-        hf_mel(feature_extractor, clip(n))
-        for n in ("short", "medium")
-    ]
+    mels = [hf_mel(feature_extractor, clip(n)) for n in ("short", "medium")]
     prompt = list(TokenPolicy(model.config).prompt)
     first = [(model.encode(m).copy(), model.logits(prompt).copy()) for m in mels]
     differing = 0
@@ -251,13 +247,13 @@ def test_whisper_long_form(model, reference, feature_extractor, record_property)
     content_frames = wave.size // HOP_LENGTH
     mel_error = float(np.max(np.abs(res["mel"] - mel)))
     record_property("MelMaxAbsError", mel_error)
-    assert mel_error <= 0.03, mel_error
+    assert mel_error <= MEL_MAX_ABS_ERROR, mel_error
     policy = TokenPolicy(model.config, timestamps=True)
     worst = 0
     for i, w in enumerate(res["windows"]):
         seek = int(w["seek"])
         expected = reference(
-            f"long_window {i} {seek}",
+            f"long_window_single_call {i} {seek}",
             mel,
             lambda hf, audio, s=seek: np.asarray(
                 decode_window(

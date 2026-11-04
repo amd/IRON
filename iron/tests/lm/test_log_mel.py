@@ -12,6 +12,7 @@ import time
 import numpy as np
 import pytest
 
+from iron.applications.whisper.audio import MEL_MAX_ABS_ERROR
 from iron.lm import LogMel
 from iron.tests.support.log_mel import EVERY, Extractor
 
@@ -100,4 +101,4 @@ def test_whisper_log_mel(silent, record_property):
     want = extracted.input_features[0].T[:frames].astype(np.float32)
     error = float(np.max(np.abs(got - want)))
     record_property("MaxAbsError", error)
-    assert error <= 0.03, error
+    assert error <= MEL_MAX_ABS_ERROR, error

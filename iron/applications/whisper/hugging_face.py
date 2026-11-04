@@ -43,7 +43,9 @@ class HuggingFaceWhisper(HuggingFace):
     def features(self, waveform: np.ndarray, *, long_form: bool = False) -> np.ndarray:
         """Extract HF Whisper log-Mel features ``(frames, mels)`` from raw audio."""
         if self.feature_extractor is None:
-            raise RuntimeError("HuggingFaceWhisper.features requires a loaded checkpoint")
+            raise RuntimeError(
+                "HuggingFaceWhisper.features requires a loaded checkpoint"
+            )
         samples = np.asarray(waveform, dtype=np.float32).reshape(-1)
         if long_form:
             samples = np.pad(samples, (0, 30 * 16000))
@@ -116,6 +118,14 @@ class HuggingFaceWhisper(HuggingFace):
                 max_new_tokens=policy.max_new_tokens,
                 do_sample=False,
                 return_timestamps=policy.timestamps,
+                force_unique_generate_call=True,
+                return_dict_in_generate=True,
             )
             hidden = self.model.model.encoder(torch.from_numpy(features))
-        return output[0].tolist(), hidden.last_hidden_state[0].numpy()
+        tokens = output.sequences[0, len(prompt) :].tolist()
+        if tokens and tokens[-1] == policy.eos:
+            tokens.pop()
+        return (
+            tokens,
+            hidden.last_hidden_state[0].numpy(),
+        )
