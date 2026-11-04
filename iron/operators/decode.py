@@ -33,9 +33,14 @@ class Decode(Operator):
     M: int = param()
     K: int = param()
     num_aie_columns: int = tunable(domain=widths)
-    # Rows a call: more amortize a row's loop entry, two of each tile per
-    # core must fit beside the stack.
-    rows: int = tunable(domain=lambda op, dev, t: divisors(t, of=op.M, span=3))
+    # Rows a call: more amortize a row's loop entry.
+    rows: int = tunable(
+        domain=lambda op, dev, t: tuple(
+            r
+            for r in divisors(t, of=op.M, span=3)
+            if op.held(dev, r) <= dev.core_memory_bytes
+        )
+    )
 
     A = In(
         M,
@@ -54,8 +59,25 @@ class Decode(Operator):
                 f"Decode: K ({self.K}) must be a multiple of 64, the coded unit"
             )
 
+    def held(self, dev, rows: int) -> int:
+        """Return a core's L1 bytes at `rows` rows a call: A's and out's tiles at their depths, and the stack."""
+        a = rows * self.A.shape[-1] * np.dtype(self.A.dtype).itemsize
+        out = rows * self.K * np.dtype(self.out.dtype).itemsize
+        return self.A.depth * a + self.out.depth * out + dev.default_core_stack_bytes
+
     def resolve(self, dev):
-        rows = self.rows or 1
+        rows = self.rows or (
+            1
+            if dev is None
+            else next(
+                (
+                    r
+                    for r in divisors(1, of=self.M, span=3)
+                    if self.held(dev, r) <= dev.core_memory_bytes
+                ),
+                1,
+            )
+        )
         cols = self.resolve_columns(
             dev, self.num_aie_columns, fits=lambda c: self.M % (c * rows) == 0
         )
@@ -67,6 +89,13 @@ class Decode(Operator):
             raise ValueError(
                 f"Decode: M ({self.M}) must divide into {self.num_aie_columns} "
                 f"columns of {self.rows}-row tiles"
+            )
+        dev = self.dev
+        if dev is not None and self.held(dev, self.rows) > dev.core_memory_bytes:
+            raise ValueError(
+                f"Decode: {self.rows} rows of K ({self.K}) need "
+                f"{self.held(dev, self.rows)} bytes of a core's "
+                f"{dev.core_memory_bytes}"
             )
 
     def build(self) -> Built:

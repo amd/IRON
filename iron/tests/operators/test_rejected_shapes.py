@@ -191,6 +191,15 @@ def test_a_tile_past_what_one_core_holds_is_refused_not_split(npu2):
     assert RMSNorm(rows=2, tile_size=8192).resolved(npu2).tile_size == 8192
 
 
+def test_a_decode_whose_tiles_overflow_a_core_is_refused(npu2):
+    """Four 8192-wide rows are 64 KiB of output alone; resolution takes rows that fit."""
+    with pytest.raises(ValueError, match="bytes of a core's 65536"):
+        Decode(M=64, K=8192, rows=4, num_aie_columns=8).resolved(npu2)
+    op = Decode(M=64, K=8192).resolved(npu2)
+    assert op.held(npu2, op.rows) <= npu2.core_memory_bytes
+    assert op.rows == 1
+
+
 def test_a_streamed_softmax_past_aie2s_program_memory_is_refused(npu1):
     """48 streamed rows a core fit AIE2P's program memory and overflow AIE2's."""
     with pytest.raises(ValueError, match="at most 40 rows on aie2, not 48"):
