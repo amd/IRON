@@ -19,8 +19,6 @@ from aie.dialects import arith
 from aie.dialects._aie_enum_gen import AIETileType
 from aie.dialects.aie import DMAChannelDir
 from aie.dialects.aiex import _as_i32
-from aie.extras import types as T
-from aie.extras.dialects.arith import constant
 from aie.helpers.npdtypes import np_ndarray_type_get_shape
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
@@ -37,7 +35,7 @@ from aie.iron import (
     Worker,
     require,
 )
-from aie.iron.controlflow import else_, if_, range_
+from aie.iron.controlflow import if_, range_
 from aie.iron.dataflow import (
     ObjectFifoHandle,
     Packet,
@@ -101,8 +99,6 @@ MIN_BF16_PAD = 32
 PROJ_MEMS = ("proj_gather_0", "proj_x", "proj_gather_1", "proj_weight")
 
 _CORE, _MEM, _SHIM = AIETileType.CoreTile, AIETileType.MemTile, AIETileType.ShimNOCTile
-# The tile type of each stage. The placer chooses every tile, and keeps two
-# cores that share a buffer next to each other.
 STAGES = {
     "attn_qk": _CORE,
     "attn_kv": _CORE,
@@ -449,7 +445,6 @@ class _Array:
     rtps: dict[tuple[str, str], Buffer] = field(default_factory=dict, init=False)
     sync_locks: dict[str, Lock] = field(default_factory=dict, init=False)
     t: dict[str, Tile] = field(init=False)
-    host_fifos: dict[str, ObjectFifo] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         self.t = {stage: Tile(tile_type=at) for stage, at in STAGES.items()}
@@ -481,28 +476,15 @@ class _Array:
         self.shim_fifos.update(
             zip(("move_k", "move_v", "move_k_swa", "move_v_swa"), kv_prods)
         )
-        for name, ty, shim, channel in (
-            (
-                "send_rms",
-                self.kernels["rms_residual"].arg_types()[1],
-                "x_shim",
-                1,
-            ),
-            ("send_x_rope", self.kernels["rope"].arg_types()[2], "x_shim", 1),
-            (
-                "send_rms_rope",
-                self.kernels["swa_rope"].arg_types()[2],
-                "x_shim",
-                1,
-            ),
-        ):
-            self.host_input(name, ty, shim, channel)
-        self.host_input(
-            "pli_rope_rms",
-            self.kernels["proj_layer_embedding"].arg_types()[0],
-            "pl_shim_0",
-            0,
-        )
+        self.host_fifos = {
+            name: self.host_input(name, self.kernels[kernel].arg_types()[arg], shim, ch)
+            for name, kernel, arg, shim, ch in (
+                ("send_rms", "rms_residual", 1, "x_shim", 1),
+                ("send_x_rope", "rope", 2, "x_shim", 1),
+                ("send_rms_rope", "swa_rope", 2, "x_shim", 1),
+                ("pli_rope_rms", "proj_layer_embedding", 0, "pl_shim_0", 0),
+            )
+        }
         self.proj_weights = {}
         for group, mem in enumerate(PROJ_MEMS):
             for half in (0, 1):
@@ -685,11 +667,7 @@ class _Array:
         return locks
 
     def manual_pool(self, tile, buffers, obj_type, drain=False):
-        """Create an ObjectFifoPool over ``buffers`` driven by a manual BD chain.
-
-        The core reaches the objects through the pool's handle. ``drain``
-        gives the core the filling end and the BD chain the draining one.
-        """
+        """Wrap manual DMA buffers; drain=True makes the core the producer."""
         if isinstance(buffers, Buffer):
             buffers = [buffers]
         stem = buffers[0].name
@@ -726,15 +704,12 @@ class _Array:
 
     def host_input(self, name, obj_type, shim, channel):
         """Return a host-fed FIFO, sharing the shim channel through packets."""
-        if name in self.host_fifos:
-            return self.host_fifos[name]
         fifo = ObjectFifo(
             obj_type,
             name=name,
             depth=1,
             transport=Transport.dma(packet=Packet()),
         )
-        self.host_fifos[name] = fifo
         self.shim_fifos[name] = fifo.prod(tile=self.t[shim], port=Port.dma(channel))
         return fifo
 
@@ -748,11 +723,11 @@ class _Array:
         begin = self.entry("rms_residual", "rms_begin")
         middle = self.entry("rms_residual", "rms_middle")
         finish = self.entry("rms_residual", "rms_finish")
-        x_ty, w_ty, state_ty, y_ty = begin.arg_types()
+        x_ty, _, state_ty, y_ty = begin.arg_types()
         xs = [Buffer(type=x_ty, tile=tile, name=f"rms_x_{i}") for i in range(2)]
         x_pool = self.manual_pool(tile, xs, x_ty)
         (segment,) = x_pool.segments
-        w = self.host_input("send_rms", w_ty, "x_shim", 1)
+        w = self.host_fifos["send_rms"]
         state = Buffer(type=state_ty, tile=tile, name="rms_state")
         y = Buffer(type=y_ty, tile=tile, name="rms_y")
         out = ObjectFifo(
@@ -849,14 +824,14 @@ class _Array:
         rope_q = self.entry(name, "rope_q")
         rope_k = self.entry(name, "rope_k")
         rope_v = self.entry(name, "rope_v")
-        _, qkv_ty, rope_ty, _ = rope_q.arg_types()
+        _, qkv_ty, _, _ = rope_q.arg_types()
         n_q, n_kv = self.g.num_attn_heads, self.g.num_kv_heads
 
         n = self.label(rope_tile)
         qkv_0 = Buffer(type=qkv_ty, name=f"qkv_buffer_0_{n}", tile=rope_tile)
         qkv_1 = Buffer(type=qkv_ty, name=f"qkv_buffer_1_{n}", tile=rope_tile)
         rope_name = "send_x_rope" if name == "rope" else "send_rms_rope"
-        rope_buf = self.host_input(rope_name, rope_ty, "x_shim", 1)
+        rope_buf = self.host_fifos[rope_name]
         skip_kv = self.rtp_buffer(rope_tile, rtp_key)
         qkv_pool = self.manual_pool(rope_tile, [qkv_0, qkv_1], qkv_ty)
         (qkv_seg,) = qkv_pool.segments
@@ -869,8 +844,7 @@ class _Array:
                 qkv_h.release(1)
             # The layer reuses another layer's KV cache when skip_kv is set, so k
             # and v stay behind.
-            zero = constant(0, type=T.i32())
-            with if_(arith.cmpi(arith.CmpIPredicate.eq, skip[0], zero)):
+            with if_(skip[0] == 0):
                 kk = kv_h.acquire(1)
                 for i in range_(n_kv):
                     rk(kk, qkv_h.acquire(1), rope, i)
@@ -923,9 +897,9 @@ class _Array:
         zero = self.entry("bf16_proj_zero", "bf16_proj_zero")
         mvm = self.entry("proj_layer_embedding_mvm", "proj_layer_embedding_mvm")
         store = self.entry("proj_layer_embedding_store", "proj_layer_embedding_store")
-        input_ty, proj_ty, _ = finish.arg_types()
+        _, proj_ty, _ = finish.arg_types()
         acc_ty = mvm.arg_types()[2]
-        inputs = self.host_input("pli_rope_rms", input_ty, "pl_shim_0", 0)
+        inputs = self.host_fifos["pli_rope_rms"]
         projected = Buffer(type=proj_ty, tile=tile, name="pli_projected")
         acc = Buffer(type=acc_ty, tile=tile, name="pli_acc")
 
@@ -968,12 +942,7 @@ class _Array:
         )
 
     def pl_gate(self, gle_tile, x, w_fifo, y_fifo):
-        """Per-layer-input gate.
-
-        x is the RMS tile's output ObjectFifo, shared with this core. The
-        weights arrive through w_fifo on S2MM 1. y leaves through y_fifo on MM2S
-        1, into the back of the up projection's input object.
-        """
+        """Project and activate the RMS output into the per-layer-input gate."""
         D, PLI_D = self.g.model_dim, self.g.pli_d
         gle_name = self.label(gle_tile)
         gle_begin = self.entry("gate_layer_embedding", "gate_layer_embedding_begin")
@@ -1037,12 +1006,7 @@ class _Array:
         )
 
     def pl_up(self, plu_tile, x_fifo, w_fifo, y_fifo):
-        """Per-layer-input up projection.
-
-        x arrives through x_fifo on S2MM 0, the weights through w_fifo on S2MM 1.
-        The layer output leaves through y_fifo on MM2S 0, which the sequence
-        drains.
-        """
+        """Apply the per-layer-input up projection and final residual."""
         D, PLI_D = self.g.model_dim, self.g.pli_d
         plu_name = self.label(plu_tile)
         plu_begin = self.entry("per_layer_up", "per_layer_up_begin")
@@ -1104,11 +1068,7 @@ class _Array:
         )
 
     def glu(self, glu_tile):
-        """GLU.
-
-        gate and up arrive on S2MM 0. The activations leave on MM2S 0 with a
-        packet header to the projection engine.
-        """
+        """Apply GLU and repeat its output for the down projection."""
         (sync,) = self.add_locks(glu_tile, [0])
         self.sync_locks[self.label(glu_tile)] = sync
         glu_name = self.label(glu_tile)
@@ -1137,12 +1097,8 @@ class _Array:
 
         def glu_body(hid, x_h, y_h, skip, chunk, emit):
             sync.acquire(1)
-            # A layer that reuses another's KV cache runs a double-wide MLP.
-            zero = constant(0, type=T.i32())
-            with if_(arith.cmpi(arith.CmpIPredicate.eq, skip[0], zero)) as skip_if:
-                sweep(hid, x_h, y_h, chunk, emit, chunks)
-            with else_(skip_if):
-                sweep(hid, x_h, y_h, chunk, emit, 2 * chunks)
+            n = arith.select(skip[0] != 0, _as_i32(2 * chunks), _as_i32(chunks))
+            sweep(hid, x_h, y_h, chunk, emit, n)
 
         self.workers.append(
             Worker(
@@ -1175,11 +1131,7 @@ class _Array:
         )
 
     def proj_core(self, group, j, peer, *, send):
-        """Stream one projection core's blocks; pair row blocks at the sender.
-
-        The other core produces a shared-memory FIFO. Only the sender owns
-        the packet output pool, so its DMA needs one ordinary lock pair.
-        """
+        """Stream projection blocks and pair their output rows at the sender."""
         g, tile = self.g, self.t[f"proj_{group}_{j}"]
         n = self.label(tile)
         accumulate = self.entry("proj_main", "proj_accumulate")
@@ -1365,14 +1317,9 @@ class _Array:
     def attn_kv(
         self, kv_tile, name, rtp_key, dh, of_s, v_fifo, two_kv_heads, handshake
     ):
-        """Build an attention kv core.
+        """Accumulate attention values and emit the normalized projection input.
 
-        The core takes the scores from of_s and v from v_fifo on S2MM 1. It sends o to the
-        projection engine on MM2S 0. It reads its RTPs only once it holds
-        ``handshake``, a lock beside the shared scores on this tile.
-
-        A round of the two-KV-head kernels covers one KV head. A round of the
-        other kernels covers every KV head.
+        Wait for the QK handshake before reading RTPs.
         """
         g = self.g
         D = g.model_dim
@@ -1389,7 +1336,6 @@ class _Array:
         y_ty, l_ty = k_finish.arg_types()
         L = self.rtp_buffer(kv_tile, rtp_key)
         y = Buffer(type=y_ty, name=f"y_{n}", tile=kv_tile)
-        # The down projection reads o o_repeats times a dispatch.
         lbuf = Buffer(type=l_ty, name=f"l_{n}", tile=kv_tile)
 
         def output(y, scales, out_h, finish, emit):
@@ -1462,12 +1408,7 @@ class _Array:
     def attn_qk(
         self, qk_tile, name, rtp_key, dh, of_s, q_fifo, k_fifo, two_kv_heads, handshake
     ):
-        """Build an attention qk core.
-
-        The core takes q from q_fifo and k from k_fifo on S2MM 1. It sends the
-        scores to of_s.
-        It releases ``handshake`` once it has read its RTPs.
-        """
+        """Compute attention scores and signal KV after acquiring the query."""
         n = self.label(qk_tile)
         # Every qk kernel names its entry points attn_qk_*.
         k_begin = self.entry(name, "attn_qk_begin")

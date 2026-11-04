@@ -10,8 +10,7 @@ Ported from the `layer` overlay of [FastFlowLM](https://github.com/ROCm/FastFlow
 The design uses Workers and ObjectFifos for scheduling, weight distribution,
 projection-input merging and shared-memory handoffs. Kernels contain only
 compute steps. The projection-output gather still uses manual DMA chains and
-packet routes, with ObjectFifoPool handles at the cores. See
-[`porting.md`](../../../../porting.md) for the compiler stack and remaining work.
+packet routes, with ObjectFifoPool handles at the cores.
 
 The operator runs one Gemma 4 decoder layer for one token on the whole NPU2
 array. It reproduces FastFlowLM's fused decode layer and its runtime sequence.
