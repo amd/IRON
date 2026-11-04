@@ -267,7 +267,8 @@ class PerStep:
     def __init__(self, check: bool = False):
         self.check = check
         self.image: Path | None = None
-        # By operator identity, for record(): a unique design's own Link.
+        # By operator identity, for record(): a unique design's own Link, the
+        # fused one only where every use of it is fused.
         self.links: dict[int, Link] = {}
         # By step index, for PerStepCallable: the same operator identity can
         # be a fusion's member at one step and its own design at another, so
@@ -393,11 +394,10 @@ class PerStep:
             )
             self.step_links[i] = base
             for j in fusion.steps:
-                # Shares the fused xclbin (kernel, design, configuration);
-                # each member keeps its own name to report, as a full ELF's
-                # fusion members each keep theirs.
-                self.links[id(seq.steps[j].op)] = replace(
-                    base, name=seq.steps[j].op.name
+                # A member with a plain use too keeps that link; one only
+                # fused reports the fused xclbin under its own name.
+                self.links.setdefault(
+                    id(seq.steps[j].op), replace(base, name=seq.steps[j].op.name)
                 )
         last = (
             built[-1][1] if built else list(self.links.values())[-1].kernel.xclbin_path

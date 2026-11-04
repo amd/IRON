@@ -462,6 +462,26 @@ def test_an_operator_fused_once_and_called_alone_is_labelled_per_step(npu1):
     assert first == second and first.split("+")[0] == alone and "+" not in alone
 
 
+def test_an_operator_fused_once_and_called_alone_records_its_own_xclbin(npu1):
+    silu, mul = _silu_mul(2048, 1, 1024)
+    steps = sequences.steps(
+        (silu, "x", "mid"), (mul, "mid", "up", "out"), (silu, "out", "again")
+    )
+    img = Image(
+        Recording.of_steps("npu1_own_link", steps, ["x", "up"], ["again"]),
+        PerStep(),
+        fusions=(_fuse(0, "y", "a"),),
+    )
+    img.compile()
+    recorded = {d.operators: (d.image, d.insts) for d in img.artifacts.designs}
+    fused, alone = (
+        (Path(link.kernel.xclbin_path), link.design.get_cache_entry().insts)
+        for link in (img.packaging.step_links[i] for i in (0, 2))
+    )
+    assert fused != alone
+    assert recorded[(silu.name,)] == alone and recorded[(mul.name,)] == fused
+
+
 def test_gemv_fusions_build_an_xclbin_per_fused_step_on_npu1(npu1):
     def build(fused_steps, recording_fn, ops_fn):
         img = Image(
