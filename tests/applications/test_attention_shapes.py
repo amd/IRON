@@ -18,7 +18,8 @@ from iron.applications.granite import Granite
 from iron.applications.granite_hybrid import GraniteHybrid
 from iron.applications.llama import Llama
 from iron.common.graph.compiled import apply_profile
-from iron.lm.testing import weights_dir
+from iron.lm.checkpoint import weights_file
+from iron.lm.testing import require, weights_dir
 from iron.operators.mha import MHA
 
 # Each decoder's checkpoint, and its (decode step, d) shapes the fused path
@@ -33,14 +34,17 @@ DECODERS = [
     ),
 ]
 
+# No device is used, but the npu2 runner is the one staging these checkpoints.
+pytestmark = pytest.mark.supported_devices("npu2")
+
 
 @pytest.mark.parametrize("cls,checkpoint,composed", DECODERS)
 def test_each_attention_shape_is_fused_unless_listed(cls, checkpoint, composed, npu2):
     """Prompt chunks take float32 scores one core a query block; decode steps split over keys."""
+    directory = weights_dir(checkpoint)
+    require(directory / "config.json", weights_file(directory))
     with aie_utils.set_current_device(npu2):
-        model = cls.from_checkpoint(
-            weights_dir(checkpoint), random_weights=0, max_seq_len=8192
-        )
+        model = cls.from_checkpoint(directory, random_weights=0, max_seq_len=8192)
         profile = Profile.load(model.profile / "npu2.json")
         missed = set()
         for shape in model.shapes():
