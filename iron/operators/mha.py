@@ -396,8 +396,9 @@ class MHA(Operator):
     pv_width: int = tunable(repr=False, init=False)
     # The cores a query block's key blocks take: 3, today's pipeline of a
     # QK^T, a softmax and a P*V core; 1, mha.cc's attend_block on every core
-    # of the columns placed (AIE2, over a paired KV).
-    cores_per_block: int = tunable(default=3, domain=(1, 3))
+    # of the columns placed (over a paired KV). Unset, resolve() takes 1 on
+    # AIE2P where it resolves, else 3.
+    cores_per_block: int = tunable(domain=(1, 3))
     fused: bool = tunable(repr=False, init=False)
     # Fused, the cores a column holds, each a query block of a round.
     column_cores: int = tunable(repr=False, init=False)
@@ -802,6 +803,15 @@ class MHA(Operator):
             )
         if self.cores_per_block == 1:
             return self.resolve_fused(dev)
+        if (
+            self.cores_per_block is None
+            and dev is not None
+            and dev.arch is AIEArch.AIE2p
+        ):
+            try:
+                return self.resolve_fused(dev)
+            except Unresolvable:
+                pass
         if (
             self.f32_scores
             or self.soft_cap is not None
