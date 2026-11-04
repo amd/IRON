@@ -24,6 +24,7 @@ with the toolchain and no device compiles ahead of time and hands the
 image on.
 """
 
+import copy
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +40,7 @@ from iron.common.image.link import FullELF
 from iron.common.image.sequence import Image
 from iron.operators import ElementwiseAdd
 from iron.operators.gemm import GEMM
+from iron.operators.mha import MHA
 from iron.tests.support import sequences
 from iron.tests.support.llama_model import llama_1b, small
 from iron.tests.support.tools import DEVICES, requires, swiglu
@@ -114,6 +116,28 @@ def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():
     with pytest.raises(IndexError, match=r"token is -1, outside"):
         version(*tensors, **{**values, "token": -1})
     assert version._callable is None
+
+
+def test_a_split_decode_attention_builds_with_its_values_in_the_table():
+    """One query split over keys reads its lanes' blocks, not ``kv_blocks``.
+
+    The Emit sizes only the words the image reads.
+    """
+    model = small(max_seq_len=256)
+    model.profile = copy.deepcopy(model.profile)
+    model.profile.add(
+        MHA,
+        num_heads=16,
+        num_KV_heads=4,
+        d=64,
+        seq_pad=1,
+        num_pipelines=4,
+        cores_per_block=1,
+    )
+    version = build_elf(model, **model.shapes()[0])
+    mhas = [op.resolved() for op in version.recording.operators if isinstance(op, MHA)]
+    assert mhas and all(op.split for op in mhas)
+    _assert_values_in_table(version)
 
 
 def test_a_scratch_arena_past_a_bank_links_as_its_banks():

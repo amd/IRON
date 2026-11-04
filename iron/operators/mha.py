@@ -497,7 +497,10 @@ class MHA(Operator):
     q_blocks_valid = per_call(
         derive=lambda op: ceildiv(op.q_tokens, op.positions * op.streams)
     )
-    kv_blocks = per_call(derive=lambda op: ceildiv(op.kv_tokens, op.B_kv))
+    # Fused reads kv_blocks_<g> or lane_blocks instead: 0 keeps it off the call's words.
+    kv_blocks = per_call(
+        derive=lambda op: 0 if op.fused else ceildiv(op.kv_tokens, op.B_kv)
+    )
     ROUND_GROUPS: ClassVar[int] = 4
     # Fused, the key blocks each group of rounds streams, kv_blocks_<g>: up to
     # its last valid query, so a round's stream ends near its own.
