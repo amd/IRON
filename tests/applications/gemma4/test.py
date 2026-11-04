@@ -12,6 +12,8 @@ one compile serving them all: the prompt's next-token distribution
 and ``STEPS - 1`` teacher-forced decode steps'.
 """
 
+import time
+
 import numpy as np
 import pytest
 
@@ -103,3 +105,28 @@ def test_gemma4_multimodal_accuracy(model, reference, case, record_property):
     record_property("Top1Mismatches", sum(not top1 for _, top1 in results))
     for stat, bound in MAX_KL.items():
         assert stats[stat] <= bound, f"{stat.lower()} KL {stats[stat]} > {bound}"
+
+
+@pytest.mark.extensive
+@pytest.mark.bench
+@pytest.mark.parametrize("case", ["cats", "medium_clip"])
+def test_gemma4_multimodal_speed(model, reference, case, record_property):
+    """Time a case's towers alone, then a generation through them; its prompt's logits held to the golden."""
+    tokens, raw, media = inputs(model.config, model.tokenizer, case)
+    logits = model.logits(tokens, raw)
+    kl, _ = divergence(reference.logits(tokens, *media), logits)
+    assert kl <= MAX_KL["Max"], f"KL {kl} > {MAX_KL['Max']}"
+    # A text-only place drops the towers' last inputs, so the next runs them.
+    plain = model.tokenizer("Hello.")
+    seconds = []
+    for _ in range(3):
+        model.place(plain, {})
+        began = time.perf_counter()
+        model.place(tokens, raw)
+        seconds.append(time.perf_counter() - began)
+    record_property("Latency", float(np.median(seconds)) * 1e6)
+    model.place(plain, {})
+    drawn = model.generate(tokens, 32, raw=raw)
+    record_property("TTFT", model.stats.ttft)
+    record_property("TPS", model.stats.tokens_per_s)
+    assert drawn[0] == int(logits.argmax())
