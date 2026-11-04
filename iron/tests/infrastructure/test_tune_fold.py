@@ -28,8 +28,7 @@ def _kinds(recording, fusion) -> tuple[str, ...]:
 def decode():
     """Llama 3.2 1B's real decode step, device-free.
 
-    Bound for every test in this module (``npu2`` is function-scoped, so a module-scoped
-    fixture binds its own device rather than taking it).
+    Module-scoped so it binds its own device, since ``npu2`` is function-scoped.
     """
     with aie_utils.set_current_device(NPU2()):
         model = llama_1b(num_hidden_layers=16)
@@ -38,14 +37,7 @@ def decode():
 
 
 def test_array_scoping_drops_o_proj_and_keeps_down_proj_and_silu(decode):
-    """``fold_candidates`` finds 48.
-
-    O_proj's and down_proj's own residual add (32, one ``GEMV`` each), and SwiGLU's gate
-    (16, ``SiLU``). o_proj shares its ``GEMV M=2048 K=2048`` array with q_proj, which
-    never folds (nothing follows it but RoPE); down_proj's own ``GEMV M=2048 K=8192`` is
-    not shared with anything, and every one of SiLU's 16 calls folds alike, so only
-    those 32 survive scoping.
-    """
+    """o_proj shares its ``GEMV`` array with q_proj and is scoped out; down_proj's and SiLU's own arrays are not shared and survive."""
     every = fold_candidates(decode)
     assert len(every) == 48
 
@@ -61,12 +53,7 @@ def test_array_scoping_drops_o_proj_and_keeps_down_proj_and_silu(decode):
 
 
 def test_q_and_o_still_share_one_array_after_the_scoped_folds_apply(decode):
-    """Scoping exists so folding never costs an array split.
-
-    After ``propose_folds``'s own candidates apply, q_proj and o_proj (``GEMV M=2048
-    K=2048``) are still one array, exactly as unfolded
-    (``iron.tests.lm.test_modules.test_a_decode_steps_q_and_o_share_one_array``).
-    """
+    """Scoping exists so folding never costs an array split: after ``propose_folds``'s candidates apply, q_proj and o_proj are still one array."""
     proposed = propose_folds(decode)
     assert len(proposed) == 32
 
@@ -83,10 +70,7 @@ def test_q_and_o_still_share_one_array_after_the_scoped_folds_apply(decode):
 
 
 def test_propose_folds_excludes_the_fragmenting_candidate(decode):
-    """``propose_folds`` on the unscoped candidates never proposes o_proj's own residual add.
-
-    Every candidate it returns is one ``array_scoped_fold_ candidates`` also returns.
-    """
+    """``propose_folds`` never proposes o_proj's own residual add; every candidate it returns is one ``array_scoped_fold_candidates`` also returns."""
     proposed = set(propose_folds(decode))
     scoped = set(array_scoped_fold_candidates(decode))
     assert proposed <= scoped
@@ -96,11 +80,9 @@ def test_propose_folds_excludes_the_fragmenting_candidate(decode):
 
 
 def test_fold_profile_writes_down_projs_add_and_silus_mul_by_shape(decode):
-    """``fold_profile`` adds one fold entry a layer-specific ``down_proj`` GEMV matches (``K=8192``).
+    """``fold_profile`` adds a fold entry for down_proj's ``GEMV`` and one for ``SiLU``, scoped to ``decode``'s version; ``base``'s entries are untouched.
 
-    None a ``q_proj``/``o_proj`` one (``K=2048``) matches, and one for ``SiLU``, each
-    scoped to the one version it was found in (``decode``'s own); it leaves ``base``'s
-    own entries alone.
+    Not one for q_proj/o_proj's ``GEMV`` (``K=2048``), which scoping excludes.
     """
     base = Profile()
     base.add(GEMV, M=2048, K=2048, tile_size_input=4, tile_size_output=256)

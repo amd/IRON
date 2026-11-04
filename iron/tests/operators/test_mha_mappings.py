@@ -3,10 +3,7 @@
 
 """MHA's mappings, one core a query block and today's three, are one result at equal B_kv, on a device.
 
-Each runs the same inputs, and their outputs are compared bit for bit:
-mha.cc's attend_block is matmul_bf16_bf16_wrapper, partial_softmax and
-matmul_PV in one, and a row's keys go by in the same order whatever its
-query block.
+Each runs the same inputs, and their outputs are compared bit for bit.
 """
 
 from math import prod

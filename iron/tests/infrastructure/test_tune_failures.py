@@ -3,8 +3,7 @@
 
 """The ledger of what tuning hit (``iron.tune.failures``).
 
-One entry per signature, reopened when seen again, and rechecked with the current
-toolchain. Device-free: placing runs aie-opt alone.
+One entry per signature, reopened when seen again, and rechecked with the current toolchain.
 """
 
 import subprocess

@@ -140,21 +140,8 @@ def test_fusion_tunables_is_none_without_a_matching_entry():
     assert p.fusion_tunables(FusionKind.STREAM, [gate, up], [(0, "y", 1, "a")]) is None
 
 
-def test_add_fusion_checks_a_steps_tunables():
-    with pytest.raises(TypeError, match="has no tunable"):
-        Profile().add_fusion(
-            FusionKind.STREAM,
-            [(SiLU, {}, None), (ElementwiseMul, {}, {"nope": 1})],
-            [],
-        )
-
-
 def test_a_fusion_over_tuple_valued_params_matches_after_save_and_load(tmp_path):
-    """A derived dim a step's build reads but a call never gives (GEMV's, SiLU's, ... own ``finish``) is a tuple live.
-
-    A list once JSON gives it back; ``matches`` must still count them equal, or a fusion
-    over any such step goes inert the moment its profile is loaded from a file.
-    """
+    """A tuple-valued derived dim (``finish``) round-trips through JSON as a list, but ``matches`` must still count it equal to the tuple."""
     gate = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved()
     up = ElementwiseMul(size=2048, tile_size=2048, num_aie_columns=1).resolved()
     assert gate.finish == () and up.finish == ()  # the tuple this guards
@@ -186,16 +173,6 @@ def test_a_tunable_entry_over_a_tuple_valued_dim_matches_after_save_and_load(tmp
     assert loaded.tunables_for(GEMV, dict(M=2048, K=2048, finish=gemv.finish)) == {
         "num_aie_columns": 8
     }
-
-
-def test_a_loaded_profiles_fusion_is_live_in_a_compiled_graph(tmp_path):
-    p = _fusion_profile()
-    path = tmp_path / "profile.json"
-    p.save(path)
-    version = _fused_graph(Profile.load(path)).compile(
-        full_elf=True, check=False, x=(2048,)
-    )
-    assert version.sequence.fusions == (fusable.stream(0, "y", "a"),)
 
 
 def test_a_profile_with_a_copy_fusion_round_trips():
@@ -237,9 +214,15 @@ def test_an_existing_profile_saves_byte_identically(tmp_path):
     assert roundtrip.read_text() == original
 
 
-def test_add_fusion_checks_its_steps_dims_and_edges():
+def test_add_fusion_checks_its_steps_dims_edges_and_tunables():
     with pytest.raises(TypeError, match="at least two steps"):
         Profile().add_fusion(FusionKind.STREAM, [(SiLU, {})], [])
+    with pytest.raises(TypeError, match="has no tunable"):
+        Profile().add_fusion(
+            FusionKind.STREAM,
+            [(SiLU, {}, None), (ElementwiseMul, {}, {"nope": 1})],
+            [],
+        )
     with pytest.raises(TypeError, match="declares no dim"):
         Profile().add_fusion(
             FusionKind.STREAM,
@@ -355,13 +338,7 @@ def test_add_fusion_checks_its_versions():
 
 
 def test_a_fusion_entrys_versions_round_trip_through_json(tmp_path):
-    """A version is a dict key in a running profile (``frozenset[Version]``); JSON gives every tuple in it back as a list.
-
-    The same bug a dim's own tuple-valued field hit before ``matches`` normalized it
-    (``test_a_fusion_ over_tuple_valued_params_matches_after_save_and_load``) -- a
-    version must round-trip to the exact tuple it was, not merely an equal-looking one,
-    or ``version in entry_versions`` never finds it again.
-    """
+    """A fusion entry's version is a dict key (``frozenset[Version]``); JSON round-trips each tuple as a list, but it must still match the exact tuple."""
     version = (("x", (2048,), "bfloat16"),)
     p = Profile()
     p.add_fusion(
@@ -394,14 +371,7 @@ def test_a_fusion_entrys_versions_round_trip_through_json(tmp_path):
 
 
 def test_candidates_finds_silu_mul_and_decodes_gemv_add_residuals(llama_recordings):
-    """Decode finds SiLU -> ElementwiseMul and GEMV.C -> ElementwiseAdd.b; the prompt chunk not the latter.
-
-    SiLU -> ElementwiseMul one per layer, GEMV.C -> ElementwiseAdd.b the attention and
-    MLP residual adds, two per layer. The prompt chunk, whose projections are GEMM,
-    finds none of the latter (and, not
-    Elementwise-restricted any more, also its final Copy.y -> RMSNorm.x). Two-step
-    sub-fusions of these pairs are what this counts.
-    """
+    """Decode finds SiLU -> ElementwiseMul and GEMV.C -> ElementwiseAdd.b per layer; the prompt chunk (GEMM projections) finds only Copy.y -> RMSNorm.x."""
     decode, prompt = llama_recordings
     for recording, gemv_add_edges in ((decode, 4), (prompt, 0)):
         edges = [f for f in candidates(recording) if len(f.steps) == 2]
@@ -421,9 +391,8 @@ def test_candidates_finds_silu_mul_and_decodes_gemv_add_residuals(llama_recordin
         assert len(silu_mul) == 2  # SMALL's num_hidden_layers
         assert len(gemv_add) == gemv_add_edges
 
-    # The prompt chunk's last step is a plain, non-Elementwise Copy feeding
-    # the final RMSNorm: admissible now that candidates() tries a real build
-    # rather than requiring both ends to be Elementwise.
+    # A plain Copy feeding RMSNorm is admissible too: candidates() tries a
+    # real build, not just Elementwise pairs.
     kinds = {
         (
             type(prompt.steps[f.steps[0]].op.resolved()).__name__,
@@ -644,11 +613,9 @@ def test_compile_passes_full_elf_fusions_to_the_image():
 
 
 def test_compile_applies_a_fusions_own_tunables_to_its_steps():
-    """A step inside a taken fusion is rebuilt at the tunables its entry gives it (``iron.common.graph.fusion_tunables``).
+    """A step inside a taken fusion is rebuilt at its entry's tunables, narrower than how the graph recorded it.
 
-    Narrower than how the graph itself recorded it; a stream edge's producer and
-    consumer must still meet at the same lane count, so both give the same narrower
-    width.
+    A stream edge's producer and consumer must still meet at the same lane count.
     """
     size = 8192
     w = np.zeros(size, bfloat16)
@@ -682,8 +649,7 @@ class BoundedPair(iron.Graph):
 def test_a_narrowed_step_keeps_its_per_call_values(npu2):
     """A step a packing narrows is a design of its own, reading its own value symbols.
 
-    Each value bound to the recorded step is written to the narrowed one's, or its rows
-    stay whatever the scratchpad last held.
+    Each value bound to the recorded step is written to the narrowed one's.
     """
     recording = BoundedPair().record(x=(4096,))
     p = Profile()

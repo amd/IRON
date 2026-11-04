@@ -3,21 +3,7 @@
 
 """GEMV's ``B`` fed on-chip from another operator's output.
 
-``feed_b=True`` (``iron/operators/gemv.py``) makes it a real stream of its own, every
-lane holding a ``.cons()`` of its single broadcast fifo, rather than riding a head tile
-on ``A``'s, so ``feed()`` applies to it like any other streamed input. ``feed_b``
-defaults to False (the head-tile layout, byte-identical to every pre-fusion catalog
-case) and costs a shim channel only where set, so every call below gives it explicitly.
-
-A fed ``B`` needs a source with exactly as many lanes as GEMV has cores,
-since every one of its dot products reads the whole vector, not a share
-of it: today that means one lane on both sides, which caps the producer
-and GEMV alike at ``num_aie_columns=1``. Broadcasting one producer lane to
-GEMV's several needs a source's underlying fifo, not just its bound
-handles, which ``Operand.feed()`` does not yet expose (a staged,
-memtile-gather kind of broadcast, not this change's scope); these two
-tests are the mechanism proven at the smallest config it is feasible, not
-Llama decode's own (column-parallel) tunables.
+``feed_b=True`` streams ``B`` through a broadcast fifo instead of a head tile, capping both sides at ``num_aie_columns=1``, the smallest feasible config.
 """
 
 import statistics
@@ -52,8 +38,7 @@ def _fuse(producer: int, output: str, consumer_input: str) -> Fusion:
 def test_rmsnorm_to_gemv_b_matches_reference_and_unfused(record_property):
     """RMSNorm(rows=1, weighted) -> GEMV(M=2048, K=2048).B, fed on-chip.
 
-    Holds to the operators' references fused and is bit-equal to the same two steps run
-    unfused; also times both, min and median over interleaved rounds.
+    Holds to the operators' references fused, bit-equal to the same steps unfused, and timed for both.
     """
     M = K = 2048
     rms = RMSNorm(rows=1, tile_size=K, weighted=True, num_aie_columns=1)
@@ -118,17 +103,9 @@ def test_rmsnorm_to_gemv_b_matches_reference_and_unfused(record_property):
 
 @pytest.mark.supported_devices("npu2")
 def test_elementwisemul_to_gemv_b_matches_reference_and_unfused(record_property):
-    """ElementwiseMul -> GEMV(M=2048).B, fed on-chip.
+    """ElementwiseMul -> GEMV(M=2048).B, fed on-chip; holds to the operators' references fused, bit-equal to the same steps unfused, and timed for both.
 
-    Holds to the operators' references fused and is bit-equal to the same two steps run
-    unfused; also times both, min and median over interleaved rounds.
-
-    Llama decode's down projection feeds GEMV.B from a 8192-element,
-    8-column ElementwiseMul; a column holds at most 4096 elements
-    (``Elementwise.tile_cap``), so even one producer lane already needs two
-    columns there, which a fed GEMV.B cannot yet take (see module
-    docstring). 4096 is the largest size one column holds, so the largest
-    this mechanism reaches today.
+    4096 is the largest ``Elementwise.tile_cap`` holds in one column, so the largest this mechanism reaches today.
     """
     M, K = 2048, 4096
     mul = ElementwiseMul(size=K, num_aie_columns=1, tile_size=K)

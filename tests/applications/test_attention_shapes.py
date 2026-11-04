@@ -3,10 +3,7 @@
 
 """Which of each shipped decoder's attention shapes take npu2's fused attention (device-free).
 
-Every MHA a decoder records at its prompt chunk and decode step, resolved for
-npu2 under its own profile: float32 scores one core a query block, or one
-query split over keys. The shapes that cannot are listed, so a new model or
-shape that misses the gain fails here.
+The shapes that cannot are listed, so a new model or shape that misses the gain fails here.
 """
 
 import aie.utils as aie_utils

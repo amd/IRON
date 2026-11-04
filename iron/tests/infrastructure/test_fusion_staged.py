@@ -51,11 +51,7 @@ def _staged(*edges: Edge) -> Fusion:
 
 
 def _add_norm(add_cols=8, norm_cols=4):
-    """Eight rows of 2048.
-
-    ElementwiseAdd's lanes a row each, RMSNorm's two (four lanes) or more, so each lane
-    of RMSNorm joins whole lanes of the add.
-    """
+    """Eight rows of 2048: ElementwiseAdd's lanes a row each, RMSNorm's two (four lanes) or more, so each RMSNorm lane joins whole add lanes."""
     add = ElementwiseAdd(size=8 * 2048, num_aie_columns=add_cols, tile_size=2048)
     norm = RMSNorm(rows=8, tile_size=2048, num_aie_columns=norm_cols)
     return add, norm
@@ -79,12 +75,7 @@ def _norm_mul_recording(name, norm, mul):
 
 
 def _mul_down(mul_cols=4):
-    """Llama decode's down_proj (M=2048, K=8192) streaming B, fed the gated product, ``mul_cols`` lanes.
-
-    Every GEMV core reads the whole vector, a gather of the product's lanes then a
-    broadcast. At eight lanes the product's two inputs and the projection's rows take 24
-    shim channels, past npu2's 16.
-    """
+    """Llama decode's down_proj (M=2048, K=8192) streaming B, fed the gated product, ``mul_cols`` lanes: every GEMV core reads the whole vector."""
     mul = ElementwiseMul(size=8192, num_aie_columns=mul_cols, tile_size=1024)
     down = GEMV(M=2048, K=8192, feed_b=True)
     return mul, down
@@ -96,10 +87,7 @@ def _mul_down_recording(name, mul, down):
 
 
 def _silu_down():
-    """down_proj fed from eight lanes of one input, which fit npu2's shim channels beside it.
-
-    A join of joins (four and four, then two).
-    """
+    """down_proj fed from eight lanes of one input: a join of joins (four and four, then two)."""
     silu = SiLU(size=8192, num_aie_columns=8, tile_size=1024)
     down = GEMV(M=2048, K=8192, feed_b=True)
     return silu, down
@@ -111,11 +99,7 @@ def _silu_down_recording(name, silu, down):
 
 
 def _norm_qkv(columns=(8, 4, 2)):
-    """Llama decode's q/k/v projections (M=2048/512/512, K=2048) streaming B, each fed the one normed row, ``columns`` wide.
-
-    At the profile's (8, 8, 8) their rows and the norm's input take 25 shim channels,
-    past npu2's 16 (packed apart, k and v share one array).
-    """
+    """Llama decode's q/k/v projections (M=2048/512/512, K=2048) streaming B, each fed the one normed row, ``columns`` wide."""
     qc, kc, vc = columns
     norm = RMSNorm(rows=1, tile_size=2048)
     q = GEMV(M=2048, K=2048, feed_b=True, num_aie_columns=qc)
@@ -163,10 +147,7 @@ def _silu_muls_fusion() -> Fusion:
 
 
 def _mlp():
-    """Llama 3.2 1B decode's gate and up projections (M=8192, K=2048) into SiLU and the multiply, at the profile's own tunables.
-
-    All 32 cores.
-    """
+    """Llama 3.2 1B decode's gate and up projections (M=8192, K=2048) into SiLU and the multiply, at the profile's own tunables, all 32 cores."""
     gate = LLAMA_NPU2_PROFILE.make(GEMV, M=8192, K=2048)
     up = LLAMA_NPU2_PROFILE.make(GEMV, M=8192, K=2048)
     silu = LLAMA_NPU2_PROFILE.make(SiLU, size=8192)
@@ -224,21 +205,14 @@ def test_one_lane_splits_into_four_slots_of_each_object():
 
 
 def test_a_gather_for_every_core_joins_all_lanes():
-    """GEMV's B is one lane of the whole vector.
-
-    The product's four lanes join into it, one round, every core then reading that one
-    fifo.
-    """
+    """GEMV's B is one lane of the whole vector: the product's four lanes join into it, every core reading that one fifo."""
     mul, down = _mul_down()
     plan = _plan(mul, "y", down, "B")
     assert plan.joins == [(list(range(4)), [2048] * 4)]
 
 
 def test_a_tile_mismatch_forwards_in_rounds():
-    """One lane each, SiLU's 1024-element objects into ElementwiseMul's 512.
-
-    A forward of one producer object a round, two consumer objects each.
-    """
+    """One lane each, SiLU's 1024-element objects into ElementwiseMul's 512: a forward of one producer object a round, two consumer objects each."""
     silu = SiLU(size=2048, num_aie_columns=1, tile_size=1024)
     mul = ElementwiseMul(size=2048, num_aie_columns=1, tile_size=512)
     plan = _plan(silu, "y", mul, "a")
@@ -246,11 +220,7 @@ def test_a_tile_mismatch_forwards_in_rounds():
 
 
 def test_eight_lanes_join_in_two_levels():
-    """Eight lanes into one.
-
-    A memtile takes six, so two join four each and a third joins their two outputs,
-    which places.
-    """
+    """Eight lanes into one: a memtile takes six, so two join four each and a third joins their two outputs."""
     add = ElementwiseAdd(size=2048, num_aie_columns=8, tile_size=256)
     norm = RMSNorm(rows=1, tile_size=2048)
     plan = _plan(add, "y", norm, "x")
@@ -269,10 +239,7 @@ def test_eight_lanes_join_in_two_levels():
 
 
 def test_a_round_past_a_memtile_is_refused():
-    """One lane of a 2 MiB buffer joins two contiguous halves whole.
-
-    One round is the whole buffer, past a memtile's 512 KiB.
-    """
+    """One lane of a 2 MiB buffer joins two contiguous halves whole: one round is the whole buffer, past a memtile's 512 KiB."""
     add = ElementwiseAdd(size=1 << 20, num_aie_columns=2, tile_size=2048)
     mul = ElementwiseMul(size=1 << 20, num_aie_columns=1, tile_size=2048)
     with pytest.raises(ValueError, match="past a memtile"):
@@ -280,10 +247,7 @@ def test_a_round_past_a_memtile_is_refused():
 
 
 def test_an_order_neither_a_join_nor_a_split_gives_is_refused():
-    """RMSNorm's two lanes of two rows each into four lanes of one row.
-
-    Each round (a row) feeds one lane of the four, not a slot of each.
-    """
+    """RMSNorm's two lanes of two rows each into four lanes of one row: each round (a row) feeds one lane of the four, not a slot of each."""
     norm = RMSNorm(rows=4, tile_size=2048, num_aie_columns=2)
     add = ElementwiseAdd(size=4 * 2048, num_aie_columns=4, tile_size=2048)
     with pytest.raises(ValueError, match="neither a join .* nor a split"):
@@ -291,11 +255,7 @@ def test_an_order_neither_a_join_nor_a_split_gives_is_refused():
 
 
 def _bounded(tile=4096):
-    """SiLU's eight lanes of 2048 into ElementwiseMul's four of ``tile``.
-
-    Both bounded by the graph's own per-call element count ``n``, as a prompt chunk's
-    rows are.
-    """
+    """SiLU's eight lanes of 2048 into ElementwiseMul's four of ``tile``, both bounded by the graph's own per-call element count ``n``."""
 
     class Staged(iron.Graph):
         def body(self, x, up, *, n: Scratchpad[np.int32]):
@@ -309,10 +269,7 @@ BOUNDED_SIZE = 8 * 16384
 
 
 def test_a_bound_moving_whole_rounds_alike_is_staged():
-    """Both sides move ceil(n / 16384) rounds of 16384 elements a call, each of Mul's 4096-element tiles two of SiLU's 2048 joined.
-
-    Every call is the same whole rounds on both sides, so the static link stays in step.
-    """
+    """Both sides move ceil(n / 16384) rounds of 16384 elements a call, so the static link stays in step."""
     recording = _bounded().record(x=(BOUNDED_SIZE,), up=(BOUNDED_SIZE,))
     silu, mul = (s.op.resolved() for s in recording.steps)
     plan = Staging(silu.y, mul.a)
@@ -321,10 +278,7 @@ def test_a_bound_moving_whole_rounds_alike_is_staged():
 
 
 def test_a_bound_moving_other_rounds_is_refused():
-    """Mul at 2048-element tiles moves rounds of 8192 a call against SiLU's 16384.
-
-    A call of 8192 would leave SiLU's link half a round short.
-    """
+    """Mul at 2048-element tiles moves rounds of 8192 a call against SiLU's 16384, which would leave SiLU's link half a round short."""
     recording = _bounded(2048).record(x=(BOUNDED_SIZE,), up=(BOUNDED_SIZE,))
     silu, mul = (s.op.resolved() for s in recording.steps)
     with pytest.raises(ValueError, match="not one graph value moving whole rounds"):
@@ -420,11 +374,7 @@ def test_a_stream_fusion_refuses_lanes_a_staged_one_takes():
 
 
 def test_fan_out_to_two_of_one_design_places_each_its_own_array():
-    """SiLU's output feeds two ElementwiseMuls of one design.
-
-    Each keeps an array of its own, its lanes another reader of SiLU's fifo, where an
-    unfused image would share one array between them.
-    """
+    """SiLU's output feeds two ElementwiseMuls of one design; each keeps an array of its own, where an unfused image would share one."""
     text = _composed(
         _silu_muls_recording("fan_out_struct", *_silu_muls()), (_silu_muls_fusion(),)
     )
@@ -467,21 +417,13 @@ def test_candidates_stage_an_edge_a_stream_refuses():
 
 
 def test_candidates_fan_out_to_every_reader():
-    """SiLU's output, read by both ElementwiseMuls, fans out to both.
-
-    And no window feeds one of them alone (the other would read a buffer no longer
-    written).
-    """
+    """SiLU's output, read by both ElementwiseMuls, fans out to both; no window feeds one of them alone."""
     recording = _silu_muls_recording("fan_out_candidates", *_silu_muls())
     assert candidates(recording) == (_silu_muls_fusion(),)
 
 
 def test_candidates_fan_out_into_b_a_flipped_flag_streams():
-    """q/k/v as recorded (``feed_b`` False) take B riding A, which no edge can feed; ``feed_b`` streams it.
-
-    So the fan-out is proposed with the steps as recorded, for a tuner to run at the
-    setting that builds.
-    """
+    """q/k/v as recorded (``feed_b`` False) take B riding A; the fan-out is still proposed, for a tuner to run at the setting that builds."""
     norm = RMSNorm(rows=1, tile_size=2048)
     q, k, v = (
         GEMV(M=m, K=2048, num_aie_columns=c) for m, c in ((2048, 8), (512, 4), (512, 2))
@@ -520,11 +462,7 @@ def test_profile_round_trips_staged_and_fan_out_entries(tmp_path):
 
 
 def test_llama_1b_decode_fuses_its_mlp_up_to_the_down_projection():
-    """Llama 1B's decode step (its shape, one layer).
-
-    The gate and up projections each feed SiLU and the multiply, a window whose edges
-    skip a step, each its own consumer's reader.
-    """
+    """Llama 1B's decode step (its shape, one layer): the gate and up projections each feed SiLU and the multiply, a window whose edges skip a step."""
     model = llama_1b(num_hidden_layers=1)
     decode = model.record(**model.shapes()[0])
     found = set()
@@ -545,11 +483,7 @@ def test_llama_1b_decode_fuses_its_mlp_up_to_the_down_projection():
 
 
 def test_a_fused_sequence_pushes_every_task_before_it_waits():
-    """The MLP window's one sequence (every member's, in one task group) issues every transfer before its first wait.
-
-    And no channel more than its task queue holds: no member's wait or full queue can
-    stop the instruction stream before a later member's inputs are queued.
-    """
+    """The MLP window's one sequence issues every transfer before its first wait, and no channel more than its task queue holds."""
     text = _composed(_mlp_recording("mlp_order", *_mlp()), (_mlp_fusion(),))
     (fused,) = re.findall(r"aie\.device\(npu2\) @(fusion\S+) \{", text)
     body = text[text.index(f"@{fused} {{") :]
@@ -717,11 +651,7 @@ def test_gather_broadcast_into_down_proj_matches_reference_and_unfused(
 def test_join_of_joins_into_down_proj_matches_reference_and_unfused(
     packaging, record_property
 ):
-    """(b) at eight producer lanes.
-
-    SiLU's lanes gathered, four and four then two, into the whole vector every core of
-    down_proj reads.
-    """
+    """(b) at eight producer lanes: SiLU's lanes gathered, four and four then two, into the whole vector every down_proj core reads."""
 
     def build(fusions):
         silu, down = _silu_down()
@@ -830,12 +760,7 @@ def test_fan_out_silu_into_two_muls_matches_reference_and_unfused():
 
 @pytest.mark.supported_devices("npu2")
 def test_bounded_staged_pair_matches_across_per_call_counts():
-    """The bounded join (SiLU's eight lanes into Mul's four).
-
-    Compiled once with a profile naming it and called at several counts, whole rounds
-    and not, each bit-equal to the same call unfused and to the graph's own reference
-    over the valid elements.
-    """
+    """The bounded join (SiLU's eight lanes into Mul's four), compiled once and called at several counts, whole rounds and not."""
     profile = Profile()
     profile.add_fusion(
         FusionKind.STAGED, [(SiLU, {}), (ElementwiseMul, {})], [(0, "y", 1, "a")]
@@ -900,12 +825,7 @@ _MLP_TIMEOUT_S = 900
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("packaging", ["full_elf", "per_step"])
 def test_mlp_window_matches_reference_and_unfused(packaging):
-    """Llama decode's gate/up projections.
-
-    SiLU and the multiply fused as one window (edges skipping a step, all 32 cores),
-    held to numpy and bit-equal to the steps apart, run in a child process a hang cannot
-    outlive.
-    """
+    """Llama decode's gate/up projections, SiLU and the multiply fused as one window, run in a child process a hang cannot outlive."""
     fused, apart = hang.bounded(_MLP_TIMEOUT_S, _run_mlp, packaging)
     gate, up, silu, mul = (op.resolved() for op in _mlp())
     x = vectors(gate).inputs["B"]

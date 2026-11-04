@@ -3,9 +3,7 @@
 
 """``iron.lm.validate``'s pure parts, device-free.
 
-Version labels, the live-fusion and live-packing accounting a report reads (a full ELF's
-and an xclbin per step's), the profile subsets a bisection trial builds, and
-``changed_versions``' assertion.
+Version labels, live-fusion and live-packing accounting, bisection's profile subsets, and ``changed_versions``.
 """
 
 import pytest
@@ -114,10 +112,10 @@ def test_verify_live_and_changed_versions_see_a_candidates_live_fusion():
     stock_model = small()
     entry = _silu_mul_entry(stock_model.record(**stock_model.shapes()[0]))
 
-    # A real candidate profile is stock's own tunables plus whatever changed
-    # (see test_validate_device.py): a profile holding the fusion alone would
-    # also lose SMALL's own tuned tile sizes, moving the prompt chunk, which
-    # the fusion never touches, off stock's build for that reason alone.
+    # A real candidate profile is stock's own tunables plus whatever changed: a
+    # profile holding the fusion alone would also lose SMALL's own tuned tile
+    # sizes, moving the prompt chunk, which the fusion never touches, off
+    # stock's build for that reason alone.
     candidate_profile = Profile()
     for cls, dims, tunables in stock_model.profile:
         candidate_profile.add(cls, **dims, **tunables)
@@ -225,11 +223,7 @@ def test_changed_versions_ignores_an_unchanged_candidate():
 
 
 def test_changed_versions_ignores_a_version_packed_as_stock_packs_it():
-    """Stock's own profile packs a version and the candidate leaves it as it was (one model's entries added beside another's).
-
-    The shared image is that version unchanged, not a candidate whose entries went
-    unapplied.
-    """
+    """Stock's own profile packs a version and the candidate leaves it as it was: the shared image is that version unchanged, not a candidate ignored."""
     stock_live = {"decode": _live("a", packed_groups=[15])}
     candidate_live = {"decode": _live("a", packed_groups=[15])}
     assert validate.changed_versions(stock_live, candidate_live) == []

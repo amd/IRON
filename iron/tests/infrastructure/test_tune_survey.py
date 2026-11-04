@@ -40,11 +40,7 @@ def decode_call() -> Timed:
 
 
 def given_times(call: Timed, dev) -> dict[str, float]:
-    """Each design's time.
-
-    A GEMV's weights at ``READ``, else 10 us a step (a GEMV of attention reads a cache,
-    no weight).
-    """
+    """Each design's time: a GEMV's weights at ``READ``, else 10 us a step."""
     recording, _, _ = apply_profile(call.recording, Profile(), dev)
     times: dict[str, float] = {}
     for step in recording.steps:
@@ -125,11 +121,7 @@ def test_a_read_bound_shape_is_worth_only_its_time_above_the_fastest_read():
 
 
 def test_a_tuned_attention_entry_applies_to_the_calls_it_was_tuned_for():
-    """The decode step's and the prompt chunk's MHA differ only in what their calls derive.
-
-    An entry without those would name both; one naming a derived dimension no call
-    gives (``packed``) would name neither. Each entry names what its calls gave.
-    """
+    """The decode step's and the prompt chunk's MHA differ only in what their calls derive; each entry names what its calls gave."""
     dev = aie_utils.ensure_current_device()
     model = small()
     model.profile = Profile()
@@ -178,11 +170,7 @@ def test_a_tuned_attention_entry_applies_to_the_calls_it_was_tuned_for():
 
 
 def test_a_packed_version_s_steps_are_timed_where_its_calls_run(npu2):
-    """A packing rebuilds its steps at its members' tunables; each is timed at its call's points.
-
-    Llama 3.2 3B's survey, from a profile already packed, asked the recorded call of
-    the rebuilt MHA, which binds nothing there (``KeyError: 'kv_valid'``).
-    """
+    """A packing rebuilds its steps at its members' tunables; each is timed at its call's points, not the recorded call's (``KeyError: 'kv_valid'``)."""
     model = small()
     decode, _ = calls(model, 0, 0, 256, 1, Sampler(0.7, 50), small(max_seq_len=512))
     assert decode.points

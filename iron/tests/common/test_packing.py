@@ -3,8 +3,7 @@
 
 """A profile's packing entries, device-free.
 
-Round trips, matching (in the graph versions an entry names), and a recording's packed
-designs composed into one device configuration.
+Round trips, matching, and a recording's packed designs composed into one device.
 """
 
 import re
@@ -49,8 +48,7 @@ class Copied(iron.Graph):
 class Gated(iron.Graph):
     """``ElementwiseMul(SiLU(x), UP)``, and given ``extra`` a copy of it too.
 
-    Two versions over the same SiLU and multiply arrays, as a decode step and a prompt
-    chunk share theirs.
+    Two versions over the same SiLU and multiply arrays, as a decode step and a prompt chunk share theirs.
     """
 
     def body(self, x, extra=None):
@@ -127,8 +125,7 @@ def test_packings_of_matches_by_class_and_dims(npu2):
 def test_a_shape_two_entries_name_goes_to_the_one_naming_more_of_the_graph(npu2):
     """Two models sharing a profile can name one shape (the same MLP width) in different entries.
 
-    The step joins the entry naming most of the recording's shapes, wherever it stands
-    in the profile, so another model's grouping does not split this one's.
+    The step joins the entry naming most of the recording's shapes, wherever it stands in the profile.
     """
     recording = Gated().record(x=(2048,))
     profile = Profile()
@@ -161,8 +158,7 @@ def test_a_recording_s_version_is_each_input_s_name_shape_and_dtype():
 def test_a_packing_applies_only_in_the_versions_it_names(npu2):
     """One graph's two versions run the same SiLU and multiply arrays.
 
-    An entry naming one version groups them there and leaves the other's steps as they
-    were.
+    An entry naming one version groups them there and leaves the other's steps as they were.
     """
     alone = Gated().record(x=(2048,))
     copying = Gated().record(x=(2048,), extra=(64,))
@@ -205,8 +201,7 @@ def test_apply_narrows_the_members_and_groups_their_designs(npu2):
 def test_apply_resolves_a_member_afresh_at_its_tunables(npu2):
     """A Copy's tile_size follows its channels.
 
-    Given two, a 64-element copy resolves 32-element tiles, not the 64 it resolved at
-    one.
+    Given two, a 64-element copy resolves 32-element tiles, not the 64 it resolved at one.
     """
     recording = Copied().record(x=(64,))
     assert recording.steps[0].op.resolved(npu2).tile_size == 64

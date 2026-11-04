@@ -3,12 +3,7 @@
 
 """GEMV streaming its weight as coded rows returns plain GEMV's bits, on a device.
 
-Each core decodes a coded tile into the rows plain A gives and runs the
-same matvec on them, so at equal tunables the two outputs are one bit
-pattern; a tolerance would hide a decode that lost a bit. Real Llama 3.2
-1B weights (skipped where absent) carry the exponent spread coding is
-built for; drawn rows carry the most exceptions a row holds. A graph whose
-weight holds a row past its capacity reads it plain and still matches.
+Each core decodes a coded tile into the rows plain A gives, so a tolerance would hide a decode that lost a bit.
 """
 
 import aie.utils as aie_utils
@@ -125,11 +120,7 @@ def test_a_graph_reading_a_weight_coded_returns_the_plain_bits(overflow):
     ids=["one-head-tile", "two-head-tiles"],
 )
 def test_every_call_of_one_loaded_coded_gemv_returns_the_plain_bits(M, K, tunables):
-    """An acquire or release a head tile leaves unmatched shows from the second call on.
-
-    50 calls of one loaded image, a new B each, every one checked against the plain
-    GEMV's.
-    """
+    """An acquire or release a head tile leaves unmatched shows from the second call on: 50 calls of one loaded image, each checked against plain GEMV's."""
     shape = dict(
         M=M, K=K, num_aie_columns=aie_utils.ensure_current_device().cols, **tunables
     )

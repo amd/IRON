@@ -63,11 +63,9 @@ MAX_KL = {"Mean": 0.03, "P90": 0.08, "Max": 0.2}
 # On npu2 this form checks npu1's path; npu2's own figures are its full ELF's.
 @pytest.mark.tracked_on("npu1")
 class TestEachStep:
-    """The form NPU1 runs: each step its own dispatch of one xclbin.
+    """The form NPU1 runs: each step its own dispatch of one xclbin, the host starting each on the token the last one drew.
 
-    The host starts each on the token the last one drew. Its model is
-    built and dropped with the class, first: after any other test it
-    would be held beside the module's full-ELF one.
+    Its model is built and dropped with the class, first, so it is never held beside the module's full-ELF one.
     """
 
     @pytest.fixture(scope="class")

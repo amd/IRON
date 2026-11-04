@@ -3,10 +3,8 @@
 
 """``iron.common.graph.fill.filled``'s ``"random"`` draw.
 
-A ``Clipped`` bound (``iron.applications.gemma4.audio``'s ``input_min``/``input_max``/
-``output_min``/``output_max``) is fixed rather than per-tensor, so linears sharing an
-input (``Clipped.same_input``) always agree and a min never exceeds its max, whichever
-seed or how many layers name one.
+A ``Clipped`` bound is fixed rather than per-tensor, so shared-input linears
+agree and a min never exceeds its max.
 """
 
 import math
@@ -42,11 +40,6 @@ def test_clip_bounds_of_linears_sharing_an_input_agree(seed):
     assert len(mins) == 1
     assert len(maxes) == 1
     assert next(iter(mins)) < next(iter(maxes))
-
-
-def test_clip_bound_never_inverts():
-    drawn = filled("random", _named("q_proj.input_min", "q_proj.input_max"), seed=0)
-    assert drawn["q_proj.input_min"] < drawn["q_proj.input_max"]
 
 
 def test_an_unrelated_scalar_still_draws_per_tensor():

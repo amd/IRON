@@ -283,11 +283,10 @@ def test_fit_reads_a_shallow_config_s_layers_alone(npu2):
 
 
 def test_fit_counts_a_per_step_images_own_scratch(npu1):
-    """On npu1 each version is an xclbin a step, and each holds a scratch pool beside the arena.
+    """On npu1 each version is an xclbin a step, each holding a scratch pool beside the arena.
 
-    A budget that holds only the decode version's pinned states at the native
-    context does not hold what the model holds there; at this small shape, not
-    even one prompt chunk's.
+    A budget that holds only the decode version's pinned states does not hold
+    what the model holds there.
     """
     config = dataclasses.replace(SMALL, max_seq_len=1024)
     path = checkpoint(config).path
