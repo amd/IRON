@@ -4,6 +4,6 @@ Benchmarks that moved by at least 5% and by more than 2x the spread the runs mea
 
 | Operator | Parametrization | Metric | Previous | Current | Change |
 |---|---|---|---|---|---|
-| `llama` | `llama_3.2_3b-prompt_13_tokens_1` | `TTFT` | 1.74 s | 1.91 s | 🔴 +9.76% |
-| `llama` | `llama_3.2_3b-prompt_13_tokens_40` | `TTFT` | 1.75 s | 1.42 s | 🟢 -18.56% |
+| `embedding_gemma2` | `long_document` | `Latency` | 1677906.07 µs | 1847325.78 µs | 🔴 +10.10% |
+| `llama` | `llama_3.2_3b-prompt_13_tokens_40` | `TTFT` | 1.42 s | 2.01 s | 🔴 +41.53% |
 
