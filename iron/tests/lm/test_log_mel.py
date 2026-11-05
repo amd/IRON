@@ -12,6 +12,7 @@ import time
 import numpy as np
 import pytest
 
+from iron.applications.whisper.audio import MEL_MAX_ABS_ERROR
 from iron.lm import LogMel
 from iron.tests.support.log_mel import EVERY, Extractor
 
@@ -59,3 +60,45 @@ def test_log_mel(log_mel, frames, golden, record_property):
         log_mel(wave, frames=frames)
         times.append(time.perf_counter() - start)
     record_property("Latency", min(times) * 1e6)
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize("silent", [False, True])
+def test_whisper_log_mel(silent, record_property):
+    """Check the fused Whisper frontend against Hugging Face's feature extractor."""
+    from transformers import WhisperFeatureExtractor
+
+    frames = 64
+    graph = LogMel(
+        frame=400,
+        fft=400,
+        mels=80,
+        mel_scale="slaney",
+        mel_floor=1e-10,
+        power=2,
+        decades=8,
+        shift=4,
+        scale=0.25,
+    )
+    wave = np.zeros(frames * graph.hop, np.float32)
+    if not silent:
+        t = np.arange(wave.size) / 16000
+        wave[:] = 0.2 * np.sin(2 * np.pi * 440 * t)
+        wave[: wave.size // 3] *= 0.001
+    padded = np.pad(wave, (graph.frame // 2, graph.frame // 2), mode="reflect")
+    net = graph.compile(wave=((padded.size,), np.float32))
+    try:
+        got = net(padded, frames=frames).numpy().reshape(frames, 80).astype(np.float32)
+    finally:
+        net.release()
+    extracted = WhisperFeatureExtractor()(
+        wave,
+        sampling_rate=16000,
+        padding="do_not_pad",
+        truncation=False,
+        return_tensors="np",
+    )
+    want = extracted.input_features[0].T[:frames].astype(np.float32)
+    error = float(np.max(np.abs(got - want)))
+    record_property("MaxAbsError", error)
+    assert error <= MEL_MAX_ABS_ERROR, error

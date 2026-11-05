@@ -17,9 +17,11 @@ from .gemv import GEMV
 from .layer_norm import LayerNorm
 from .limbs import Limbs
 from .log import Log
+from .log10_clamp import Log10Clamp
 from .magnitude import Magnitude
 from .merge import Merge
 from .mha import MHA
+from .reduce_max import ReduceMax
 from .relu import ReLU
 from .resample.op import PatchPositions, Resample, ResampleTaps
 from .rms_norm import RMSNorm
@@ -47,12 +49,14 @@ __all__ = [
     "LayerNorm",
     "Limbs",
     "Log",
+    "Log10Clamp",
     "MHA",
     "Magnitude",
     "Merge",
     "PatchPositions",
     "RMSNorm",
     "ReLU",
+    "ReduceMax",
     "Resample",
     "ResampleTaps",
     "RoPE",

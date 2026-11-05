@@ -8,6 +8,7 @@ A small Llama on drawn weights, loaded from a repository directory whose
 """
 
 import json
+import shutil
 
 import aie.utils as aie_utils
 import numpy as np
@@ -25,7 +26,7 @@ MAX_TOKENS = 12
 def _load(directory, eos=None) -> Llama:
     directory.mkdir()
     (directory / "config.json").write_text(json.dumps(SMALL.to_json()))
-    (directory / "model.safetensors").symlink_to(checkpoint(SMALL).path)
+    shutil.copyfile(checkpoint(SMALL).path, directory / "model.safetensors")
     if eos is not None:
         (directory / "generation_config.json").write_text(
             json.dumps({"eos_token_id": eos})
