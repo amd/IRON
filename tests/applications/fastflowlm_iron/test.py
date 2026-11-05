@@ -30,6 +30,7 @@ def installation():
     if build := os.environ.get("FLM_TEST_BUILD"):
         return Path(build)
     env = dict(os.environ, PATH=f"{Path(sys.executable).parent}:{os.environ['PATH']}")
+    env.pop("USER", None)  # Match the CI container's environment.
     subprocess.run(["make", "flm"], cwd=APP, env=env, check=True, timeout=1800)
     return APP / "build"
 
