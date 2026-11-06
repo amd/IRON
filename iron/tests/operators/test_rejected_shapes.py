@@ -233,12 +233,16 @@ def test_mha_whose_pipelines_do_not_fill_the_rows_is_refused(npu2):
         (dict(causal=False, window=0), r"window \(0\) must be positive"),
         (dict(scale=-1.0), "scale"),
         (dict(B_q=128), "divide 64"),
+        (dict(B_q=0), "positive"),
+        (dict(B_q=-64), "positive"),
     ],
     ids=[
         "head_not_whole_64",
         "empty_window",
         "negative_scale",
         "block_past_the_padding",
+        "zero_block",
+        "negative_block",
     ],
 )
 def test_mha_band_and_head_that_do_not_tile_are_refused(kwargs, why, npu2):
