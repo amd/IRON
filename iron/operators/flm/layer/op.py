@@ -18,7 +18,6 @@ from iron.operators.flm.layer.design import (
     LayerType,
     arg_sizes,
     decode_layer,
-    layer_kernels,
 )
 
 
@@ -83,7 +82,6 @@ class DecodeLayer(Operator):
             self.dev,
             self.geometry,
             self.layer_type,
-            kernels=layer_kernels(self.geometry),
         )
 
     def reference(self, x, proj, rms, rope_rms, kv, context_len, max_l):
