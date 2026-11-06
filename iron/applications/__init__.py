@@ -10,10 +10,6 @@ MODELS = {
         "iron.applications.embedding_gemma2",
         "EmbeddingGemma",
     ),
-    "embedding_gemma2_multimodal": (
-        "iron.applications.embedding_gemma2",
-        "Multimodal",
-    ),
     "gemma4": ("iron.applications.gemma4", "Gemma4"),
     "gemma4_multimodal": ("iron.applications.gemma4", "Gemma4Multimodal"),
     "llama": ("iron.applications.llama", "Llama"),

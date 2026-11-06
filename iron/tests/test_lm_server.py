@@ -36,11 +36,17 @@ def responses(data, word_sizes):
 def test_registry_contains_graph_models():
     assert set(MODELS) == {
         "embedding_gemma2",
-        "embedding_gemma2_multimodal",
         "gemma4",
         "gemma4_multimodal",
         "llama",
     }
+
+
+def test_unavailable_multimodal_model_is_rejected():
+    with pytest.raises(KeyError, match="embedding_gemma2_multimodal"):
+        lm_server.load_model(
+            {"model": "embedding_gemma2_multimodal", "model_path": "/unused"}
+        )
 
 
 def test_registry_resolves_model_class(monkeypatch):
@@ -216,17 +222,20 @@ def test_embedding_requires_loaded_model():
 
 
 @pytest.mark.parametrize("task", [None, "", "provider-task"])
-def test_embedding_task_passthrough_and_recovery(monkeypatch, task):
+@pytest.mark.parametrize(
+    "invalid_task", ["unknown", "x" * (1 << 20)], ids=["short", "oversized"]
+)
+def test_embedding_task_passthrough_and_recovery(monkeypatch, task, invalid_task):
     class Model:
         def embed(self, text, received_task, dimensions):
-            if received_task == "unknown":
-                raise ValueError("Unsupported task")
+            if received_task == invalid_task:
+                raise ValueError(f"Unsupported task: {received_task}")
             assert received_task == (task or "")
             return np.asarray([len(text)], dtype=np.float32)
 
     monkeypatch.setattr(lm_server, "load_model", lambda command: Model())
     commands = request({"command": "load_model", "model": "test", "model_path": "/m"})
-    for name in ("unknown", task):
+    for name in (invalid_task, task):
         header = {"command": "embed", "size": 5, "dimensions": 128}
         if name is not None:
             header["task"] = name
@@ -234,10 +243,8 @@ def test_embedding_task_passthrough_and_recovery(monkeypatch, task):
     output = io.BytesIO()
     lm_server.serve(io.BytesIO(commands), output)
     replies = responses(output.getvalue(), [4])
-    assert replies[1] == {
-        "ok": False,
-        "error": "Unsupported task",
-        "invalid_argument": True,
-    }
+    assert not replies[1]["ok"] and replies[1]["invalid_argument"]
+    assert replies[1]["error"].startswith("Unsupported task: ")
+    assert len(json.dumps(replies[1]).encode()) < 1 << 20  # C++ worker's header limit.
     assert replies[2] == {"ok": True, "count": 1}
     assert replies[3] == np.asarray([5], dtype=np.float32).tobytes()

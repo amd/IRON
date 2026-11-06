@@ -13,6 +13,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -31,8 +32,28 @@ def installation():
         return Path(build)
     env = dict(os.environ, PATH=f"{Path(sys.executable).parent}:{os.environ['PATH']}")
     env.pop("USER", None)  # Match the CI container's environment.
-    subprocess.run(["make", "flm"], cwd=APP, env=env, check=True, timeout=1800)
-    return APP / "build"
+    build = APP / "build"
+    build.mkdir(exist_ok=True)
+    subprocess.run(
+        ["flock", str(build / ".lock"), "make", "flm"],
+        cwd=APP,
+        env=env,
+        check=True,
+        timeout=1800,
+    )
+    return build
+
+
+def test_installation_serializes_builds(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLM_TEST_BUILD", raising=False)
+    monkeypatch.setattr(sys.modules[__name__], "APP", tmp_path)
+    # An exclusive directory stands in for Git/CMake's shared build state.
+    (tmp_path / "Makefile").write_text(
+        "flm:\n\tmkdir building\n\tsleep 0.1\n\trmdir building\n"
+    )
+    with ThreadPoolExecutor(2) as pool:
+        builds = list(pool.map(lambda _: installation.__wrapped__(), range(2)))
+    assert builds == [tmp_path / "build"] * 2
 
 
 def post(url, path, body):
@@ -133,7 +154,11 @@ def test_model(tmp_path, installation, tag, name):
                     post(
                         url,
                         "/v1/embeddings",
-                        {"model": tag, "input": texts[0], "task": "unknown"},
+                        {
+                            "model": tag,
+                            "input": texts[0],
+                            "task": "unknown" * (1 << 18),
+                        },
                     )
                 with error.value as response:
                     assert response.code == 400

@@ -126,7 +126,8 @@ def serve(input_stream, output_stream):
             else:
                 raise ValueError(f"unknown command: {name}")
         except Exception as error:
-            reply = {"ok": False, "error": str(error)}
+            # Keep even escaped diagnostics below the client's 1 MiB header limit.
+            reply = {"ok": False, "error": str(error)[:4096]}
             if command.get("command") == "embed" and isinstance(error, ValueError):
                 reply["invalid_argument"] = True
             send(output_stream, reply)
