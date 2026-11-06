@@ -100,7 +100,7 @@ The design expects these buffers, in this order. The operator's buffer sizes
 
 `reference.py` computes the same output in numpy from the five buffers. It
 models the kernels' rounding, accumulation order and lookup tables with
-`aie2p_math_emulation.py`. It returns x and the kv cache as the device leaves
+`aie.utils.aie2p_emulation`. It returns x and the kv cache as the device leaves
 them.
 
 ## Tests

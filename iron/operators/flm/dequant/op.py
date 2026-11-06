@@ -9,12 +9,12 @@ from aie.helpers.util import v8bfp16ebs8
 from aie.iron import In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.kernels import quant
 from aie.utils import bfp
+from aie.utils.aie2p_emulation import bf16_floor_bits
 from aie.utils.compile.jit.params import param, tunable, widths
 from aie.utils.verify import Tolerance
 
 from iron.common import Built, Operator, Unresolvable
 from iron.common.testing import Case, Testing
-from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor
 from iron.operators.flm.gemm.design import K_TILE as K_TILE_B
 from iron.operators.flm.gemm.design import N_TILE_DEFAULT as N_TILE
 
@@ -95,8 +95,8 @@ def _draw(op):
     rng = np.random.default_rng(0)
     n_blocks = op.K * op.N // (M_TILE * K_TILE)
     sm = (K_TILE // GROUP) * M_TILE
-    scales = f32_to_bf16_floor(rng.uniform(0.002, 0.05, (n_blocks, sm)))
-    mins = f32_to_bf16_floor(rng.uniform(-0.4, 0.4, (n_blocks, sm)))
+    scales = bf16_floor_bits(rng.uniform(0.002, 0.05, (n_blocks, sm)))
+    mins = bf16_floor_bits(rng.uniform(-0.4, 0.4, (n_blocks, sm)))
     codes = rng.integers(0, 256, (n_blocks, M_TILE * K_TILE // 2), dtype=np.uint8)
     qw = np.concatenate(
         [scales.view(np.uint8), mins.view(np.uint8), codes], axis=1

@@ -42,6 +42,9 @@ from aie.iron.dataflow import (
 )
 from aie.iron.device import Tile
 from aie.iron.kernels import (
+    BF16_PROJ_K,
+    BF16_PROJ_M,
+    DECODE_KEYS_PER_ROUND,
     FLM_GEMMA4_E2B_DECODE,
     FLM_GEMMA4_E4B_DECODE,
     FlmGemma4DecodeGeometry,
@@ -87,7 +90,7 @@ GEOMETRIES = (FLM_GEMMA4_E2B_DECODE, FLM_GEMMA4_E4B_DECODE)
 # One q4nx block in bf16 elements, the unit the weight buffers are typed in.
 W_BLOCK = q4nx.BLOCK_BYTES // 2
 # Keys per attention round.
-LK = 16
+LK = DECODE_KEYS_PER_ROUND
 # The padding in the engine's per-layer-input stream (gemma4e_npu_sequence.hpp).
 MIN_BF16_PAD = 32
 # The memtiles of the projection engine's four groups. Group i's memtile
@@ -856,8 +859,8 @@ class _Array:
                 w_h,
                 x,
                 acc,
-                g.pli_d // 32,
-                g.model_dim // 256,
+                g.pli_d // BF16_PROJ_M,
+                g.model_dim // BF16_PROJ_K,
                 2 * g.pli_d + g.model_dim + MIN_BF16_PAD,
                 0,
                 zero,
@@ -920,8 +923,8 @@ class _Array:
                 w_h,
                 y,
                 y_acc,
-                PLI_D // 32,
-                D // 256,
+                PLI_D // BF16_PROJ_M,
+                D // BF16_PROJ_K,
                 0,
                 D,
                 zero,
@@ -982,8 +985,8 @@ class _Array:
                 w_h,
                 x,
                 y_acc,
-                D // 32,
-                PLI_D // 256,
+                D // BF16_PROJ_M,
+                PLI_D // BF16_PROJ_K,
                 D + 32,
                 0,
                 zero,
