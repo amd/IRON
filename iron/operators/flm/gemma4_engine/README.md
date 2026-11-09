@@ -58,13 +58,12 @@ Run the steps below from this directory, `iron/operators/flm/gemma4_engine`.
    ```
 
 4. Serve the model on the IRON engine.
-   `--prefill-chunk-len 512` is required: the IRON operators are built for
-   prompt chunks of up to 512 tokens.
+   Prompt chunks up to 4096 tokens are supported.
 
    ```bash
    cd build/FastFlowLM/src
    LD_LIBRARY_PATH=../../engine/engines FLM_XCLBIN_PATH=../.. \
-       ../../stock/flm serve gemma4-it:e2b --prefill-chunk-len 512 --port 11434
+       ../../stock/flm serve gemma4-it:e2b --port 11434
    ```
 
    Send it a request from another terminal:
@@ -85,7 +84,7 @@ Run the steps below from this directory, `iron/operators/flm/gemma4_engine`.
    ```bash
    cd build/FastFlowLM/src
    LD_LIBRARY_PATH=../../engine/engines FLM_XCLBIN_PATH=../.. \
-       ../../stock/flm run gemma4-it:e2b --prefill-chunk-len 512
+       ../../stock/flm run gemma4-it:e2b
    ```
 
 The test serves a word problem and a 1259-token prompt on both engines. It
@@ -116,7 +115,7 @@ This example uses six operator classes from `iron/operators/flm/`:
 
 | Operator | Class | Abstraction level | Sequence | Engine hooks |
 |---|---|---|---|---|
-| [GEMM](../gemm) | `ProjectionGEMM` | high | static, one per (M, K, N) | `*_proj`, `pli_*_proj` |
+| [GEMM](../gemm) | `ProjectionGEMM` | high | dynamic: rows, one per (K, N, epilogue) | `*_proj`, `pli_*_proj` |
 | [Dequantization](../dequant) | `DequantBFP` | high | static, one per (K, N) | `dequant_*` |
 | [LM head](../lm_head) | `LMHead` | high | static | `lm_head` |
 | [Prefill attention](../prefill_attn) | `PrefillAttention`, `PrefillSlidingAttention` | low | dynamic: `L_begin`, `L_end`, `max_l` | `global_attn_core`, `swa_attn_core` |
@@ -188,7 +187,7 @@ and every vision and audio hook pass through to the engine's own dispatch.
   that the engine loads its xclbins from this directory.
 - `build/xclbins/Gemma4-E2B-IT-NPU2/iron/` holds the static instruction
   sequences and the repacked PLI weights. The file names carry the shape, for
-  example `gemm_M512_K1536_N2048.bin`.
+  example `dequant_K1536_N2048.bin`.
 - `build/gen/` holds the sequence generators of the dynamic operators. The
   engine build compiles them in.
 
