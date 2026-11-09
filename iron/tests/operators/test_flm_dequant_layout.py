@@ -12,8 +12,8 @@ validated against.
 import numpy as np
 import pytest
 from aie.utils import bfp
+from aie.utils.aie2p_emulation import round_bf16 as rb
 
-from iron.operators.flm.aie2p_math_emulation import rb
 from iron.operators.flm.dequant.op import (
     CORE_JOIN_OFFSETS,
     CT_K,

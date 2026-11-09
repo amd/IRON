@@ -374,6 +374,11 @@ class MHA(Operator):
             )
         if self.seq_len <= 0:
             raise ValueError(f"MHA: seq_len ({self.seq_len}) must be at least 1")
+        if self.B_q is not None and (self.B_q <= 0 or 64 % self.B_q):
+            raise ValueError(
+                f"MHA: B_q ({self.B_q}) must be positive and divide 64, "
+                "the block seq_pad is whole of"
+            )
         # Before resolve() sizes the cores, which builds each P*V share's kernel.
         if self.pv_cores is not None and (
             self.pv_cores not in (1, 2) or self.d % self.pv_cores
@@ -384,10 +389,6 @@ class MHA(Operator):
             )
 
     def compatible(self) -> None:
-        if 64 % self.B_q:
-            raise ValueError(
-                f"MHA: B_q ({self.B_q}) must divide 64, the block seq_pad is whole of"
-            )
         if self.pv_cores not in (1, 2) or self.pv_width * self.pv_cores != self.d:
             raise ValueError(
                 f"MHA: P*V takes one core or two, each a pv_width ({self.pv_width}) "
@@ -666,6 +667,7 @@ class MHA(Operator):
         )
 
         # Each stream is blocked as the product that reads or writes it takes it.
+        assert isinstance(matmul_QK, kernels.linalg.MatrixKernel)
         qk = matmul_QK.stream_dims
         pv = mm_stream_dims(
             B_q,

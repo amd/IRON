@@ -5,25 +5,27 @@
 
 Takes ``DecodeLayer``'s five buffers and returns x and the kv cache as
 the device leaves them, reproducing the kernels' rounding, accumulation
-order and lookup tables via ``aie2p_math_emulation`` (a product or
+order and lookup tables via ``aie.utils.aie2p_emulation`` (a product or
 inverse square root may still differ by one bf16 ulp near a boundary).
 """
 
 import numpy as np
-from aie.iron.kernels import bf16_exp_lut_ref
-from ml_dtypes import bfloat16
-
-from iron.operators.flm.aie2p_math_emulation import (
-    bfp16,
+from aie.iron.kernels import BF16_PROJ_K as BF16_K
+from aie.iron.kernels import BF16_PROJ_M as BF16_M
+from aie.iron.kernels import RMS_EPS, bf16_exp_lut_ref
+from aie.utils import bfp
+from aie.utils.aie2p_emulation import (
     f32,
     fast_rsqrt,
     fmul,
-    gelu_kernel,
-    inv_kernel,
-    rb,
-    to_bf16,
     tree_sum,
 )
+from aie.utils.aie2p_emulation import gelu_bf16 as gelu_kernel
+from aie.utils.aie2p_emulation import inv_bf16 as inv_kernel
+from aie.utils.aie2p_emulation import round_bf16 as rb
+from aie.utils.aie2p_emulation import round_bf16_bits as to_bf16
+from ml_dtypes import bfloat16
+
 from iron.operators.flm.layer.design import (
     LK,
     MIN_BF16_PAD,
@@ -39,10 +41,11 @@ from iron.operators.flm.q4nx import (
     unpack,
 )
 
-# The epsilon of aie_kernels/flm_gemma4/rms_norm.h.
-RMS_EPS = 1e-6
-# The block of a bf16 projection, from aie_kernels/flm_gemma4/decode_bf16_proj.h.
-BF16_M, BF16_K = 32, 256
+
+def bfp16(x, axis):
+    """Round eight-element blocks along ``axis`` to the attention kernels' BFP format."""
+    x = np.moveaxis(np.asarray(x, np.float32), axis, -1)
+    return np.moveaxis(bfp.quantize(x, rounding="floor").astype(np.float64), -1, axis)
 
 
 def proj_layout(g: LayerDims) -> dict[str, tuple[int, str, int, int]]:
@@ -317,11 +320,11 @@ def reference(
 
     # The per-layer input of this layer, from the token embedding:
     # bf16(norm(bf16(W_down emb) / sqrt(D)) + per-layer embedding) / sqrt(2).
-    pli = rb(bf("pli_down", emb) * rb(g.geometry.pli_input_scale, "rne"))
+    pli = rb(bf("pli_down", emb) * rb(g.geometry.pli_input_scale, "conv_even"))
     pli = rb(
         rms_norm(pli, vec(rr16, lay["pli_norm"], P)) + vec(rr16, lay["pli_embed"], P)
     )
-    pli = rb(pli * rb(g.geometry.pli_projection_scale, "rne"))
+    pli = rb(pli * rb(g.geometry.pli_projection_scale, "conv_even"))
     gate = gelu_kernel(bf("pli_gate", h2))
     up = bf("pli_up", rb(pli * gate))
     out = rb(rb(h2 + rms_norm(up, vec(rr16, lay["post_pli_norm"], D))) * layer_scale)
@@ -337,7 +340,7 @@ def pack_q4nx(codes, scales, mins):
     nb_r, nb_c = rows // M_TILE, cols // K_TILE
     sm = np.stack([scales, mins]).reshape(2, nb_r, M_TILE, nb_c, K_TILE // GROUP)
     sm = sm.transpose(1, 3, 0, 4, 2).reshape(nb_r, nb_c, _SM_BYTES // 2)
-    sm = to_bf16(sm, "rne").view(np.uint8).reshape(nb_r, nb_c, _SM_BYTES)
+    sm = to_bf16(sm, "conv_even").view(np.uint8).reshape(nb_r, nb_c, _SM_BYTES)
     c = (
         codes.reshape(nb_r, 2, 16, nb_c, K_TILE)
         .transpose(0, 3, 1, 4, 2)
@@ -352,7 +355,7 @@ def pack_bf16_blocked(w):
     """Return the proj bytes of a bf16 weight; the inverse of parse_bf16_blocked."""
     rows, cols = w.shape
     b = w.reshape(rows // BF16_M, BF16_M, cols // BF16_K, BF16_K).transpose(0, 2, 3, 1)
-    return to_bf16(b.reshape(-1), "rne").view(np.uint8)
+    return to_bf16(b.reshape(-1), "conv_even").view(np.uint8)
 
 
 def generate_inputs(g: LayerDims, context_len: int, max_l: int, seed: int = 0):
@@ -408,9 +411,13 @@ def generate_inputs(g: LayerDims, context_len: int, max_l: int, seed: int = 0):
     n = min(context_len + g.skip, rows)
     kv[0, :n] = rng.normal(0, 0.1, (n, dk))
     kv[1, :n] = rng.normal(0, 1, (n, dk))
-    x, rms, rr = to_bf16(x, "rne"), to_bf16(rms, "rne"), to_bf16(rr, "rne")
+    x, rms, rr = (
+        to_bf16(x, "conv_even"),
+        to_bf16(rms, "conv_even"),
+        to_bf16(rr, "conv_even"),
+    )
     _plant_needles(g, context_len, kv, _query(g, W, x, proj, rms, rr, lay), rng)
-    return x, proj, rms, rr, to_bf16(kv.reshape(-1), "rne")
+    return x, proj, rms, rr, to_bf16(kv.reshape(-1), "conv_even")
 
 
 def _query(g, W, x, proj, rms, rope_rms, lay):

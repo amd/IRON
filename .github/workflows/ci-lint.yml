@@ -67,9 +67,8 @@ jobs:
           # Only golden recording imports them; not IRON's requirements.
           pip install --index-url https://download.pytorch.org/whl/cpu torch==2.15.0
           pip install transformers==5.22.0
-          pip install --no-deps \
-            --find-links https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4 \
-            "$(grep '^mlir_aie==' requirements.txt)"
+          grep -E '^(--find-links |mlir_aie==)' requirements.txt > /tmp/mlir-aie-requirements.txt
+          pip install --no-deps -r /tmp/mlir-aie-requirements.txt
 
       - name: Check types
         run: pyright
