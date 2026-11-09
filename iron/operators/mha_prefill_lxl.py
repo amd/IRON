@@ -6,8 +6,8 @@
 GEMM, scale, causal mask, softmax and context GEMM remain separate stages.
 Unlike ``MHA``'s dataflow pipeline, their intermediate scores use NPU
 buffers in host memory, with no host synchronization between stages. Query
-blocks bound that scratch space to O(block_rows * seq_len), independent of
-the head count.
+blocks bound that scratch space to O(num_heads * block_rows * seq_len).
+Each stage processes all heads before the array is reconfigured.
 
 Both graphs use the usual ``record``, ``reference`` and ``compile`` API.
 ``compile(full_elf=True, queries=(H, S, d), keys=(G, S, d),
@@ -18,22 +18,24 @@ stage separately. Keys and values are shared by each group of query heads.
 import math
 
 import numpy as np
-from ml_dtypes import bfloat16
+from ml_dtypes import bfloat16, finfo
 
 from iron.common import Precision
 from iron.common.graph import Graph, param, state
 from iron.operators.copy import Copy
+from iron.operators.elementwise_mul import RowwiseMul
 from iron.operators.gemm import GEMM
 from iron.operators.rope import RoPE
 from iron.operators.softmax import Softmax
 
 
-def _gemm(a, b, *, b_col_maj=False):
+def _gemm(a, b, *out, b_col_maj=False):
     # A 64-wide context fits four columns of 16; wider products use the
     # device's full width. Float accumulation avoids rounding after each K tile.
     return GEMM.step(
         a,
         b,
+        *out,
         b_col_maj=b_col_maj,
         tile_m=16,
         tile_k=64,
@@ -74,12 +76,22 @@ class AttentionPrefillFused(Graph):
             seq_len,
         )
         self.causal_mask = causal_mask
-        self.block_rows = 256
-        # One small diagonal mask shared across every block and head.
+        self.block_rows = math.gcd(seq_len, 512)
+        self.scale = param(np.full((256,), 1 / math.sqrt(head_dim), dtype=bfloat16))
+        # One diagonal mask shared across query blocks. The
+        # accurate exp2 kernel splits log2(e) into signed limbs: -inf would
+        # produce inf - inf there, so use the same finite sentinel as its mask.
         self.mask = (
             param(
-                np.triu(
-                    np.full((self.block_rows, self.block_rows), -np.inf), k=1
+                np.broadcast_to(
+                    np.triu(
+                        np.full(
+                            (self.block_rows, self.block_rows),
+                            float(finfo(bfloat16).min),
+                        ),
+                        k=1,
+                    ),
+                    (num_heads, self.block_rows, self.block_rows),
                 ).astype(bfloat16)
             )
             if causal_mask
@@ -88,7 +100,7 @@ class AttentionPrefillFused(Graph):
         self.attn_context = state((num_heads, seq_len, head_dim))
         # Sliced intermediates are pinned by the graph allocator. Reuse one
         # state for the partial writes so each block does not pin its scores.
-        self.scores = state((self.block_rows * seq_len,))
+        self.scores = state((num_heads * self.block_rows * seq_len,))
 
     def body(self, queries, keys, values):
         h, g, s, d = self.num_heads, self.num_kv_groups, self.seq_len, self.head_dim
@@ -100,32 +112,43 @@ class AttentionPrefillFused(Graph):
             raise ValueError(
                 f"expected queries {(h, s, d)}, keys and values {(g, s, d)}"
             )
-        for head in range(h):
-            group = head // (h // g)
-            for start in range(0, s, self.block_rows):
-                stop = start + self.block_rows
-                # Causal blocks read only the prefix they can attend to. The
-                # triangular addend masks the future inside the last block.
-                end = stop if self.causal_mask else s
-                scores = _gemm(
-                    queries[head, start:stop], keys[group, :end], b_col_maj=True
+        for start in range(0, s, self.block_rows):
+            stop = start + self.block_rows
+            # Causal blocks read only the prefix they can attend to. The
+            # triangular addend masks the future inside the last block.
+            end = stop if self.causal_mask else s
+            scores = self.scores[: h * self.block_rows * end].reshape(
+                h, self.block_rows, end
+            )
+            for head in range(h):
+                group = head // (h // g)
+                _gemm(
+                    queries[head, start:stop],
+                    keys[group, :end],
+                    scores[head],
+                    b_col_maj=True,
                 )
-                scaled = self.scores[: self.block_rows * end].reshape(
-                    self.block_rows, end
-                )
-                # Scale in short rows: a scalar broadcast holds one constant
-                # row on each core, so a seq_len-wide row would exceed L1.
-                short_rows = scores.reshape(end, self.block_rows) / math.sqrt(d)
-                Copy.step(short_rows.reshape(self.block_rows, end), scaled)
-                scores = scaled
-                if self.causal_mask:
-                    diagonal = Copy.step(scores[:, start:stop])
-                    scores[:, start:stop] = diagonal + self.mask
-                # Four channels keep streamed softmax below its per-core row
-                # limit on both NPU1 and NPU2.
-                weights = Softmax.step(scores, num_channels=4)
-                self.attn_context[head, start:stop] = _gemm(
-                    weights, values[group, :end]
+            # Scale in short rows: a scalar broadcast holds one constant
+            # row on each core, so a seq_len-wide row would exceed L1.
+            short_rows = scores.reshape(h * self.block_rows * end // 256, 256)
+            RowwiseMul.step(short_rows, self.scale, short_rows)
+            if self.causal_mask:
+                diagonal = Copy.step(scores[:, :, start:stop])
+                scores[:, :, start:stop] = diagonal + self.mask
+            # A streamed softmax unrolls its rows on each core. Splitting at
+            # 256 rows fits four channels on both NPU1 and NPU2.
+            rows = h * self.block_rows
+            batch = rows if end <= 4096 else 256
+            flat = scores.reshape(rows, end)
+            for row in range(0, rows, batch):
+                part = flat[row : min(row + batch, rows)]
+                Softmax.step(part, part, num_channels=4, accurate_exp2=True)
+            for head in range(h):
+                group = head // (h // g)
+                _gemm(
+                    scores[head],
+                    values[group, :end],
+                    self.attn_context[head, start:stop],
                 )
         return Copy.step(self.attn_context)
 

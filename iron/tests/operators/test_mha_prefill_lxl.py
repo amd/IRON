@@ -5,12 +5,12 @@
 
 import numpy as np
 import pytest
+from aie.utils.benchmark import run_iters
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
 from iron.common.graph.compiled import _step_words
 from iron.common.image.packaging import plan
-from iron.common.testing import time_call
 from iron.operators.gemm import GEMM
 from iron.operators.mha_prefill_lxl import (
     AttentionPrefillFused,
@@ -55,7 +55,7 @@ def _rope(x, angles, heads):
     )
 
 
-def _case(projected, *, h=2, g=1, s=512, causal=True, seed=0):
+def _case(projected, *, h=2, g=1, s=1024, causal=True, seed=0):
     d, e = 64, 256
     rng = np.random.default_rng(seed)
     if not projected:
@@ -117,8 +117,8 @@ def test_long_rows_reuse_scratch_and_stream_softmax(npu2, s, causal):
         step.op.resolved(npu2) for step in rec.steps if isinstance(step.op, Softmax)
     ]
     assert softmax[-1].streamed and softmax[-1].cols == s
-    assert all(sm.rows // sm.cores <= 48 for sm in softmax)
-    assert rec.pinned["scores"] == 2 * op.block_rows * s
+    assert all(sm.rows // sm.cores <= 48 for sm in softmax if sm.streamed)
+    assert rec.pinned["scores"] == 2 * op.num_heads * op.block_rows * s
     # No block leaves a private, pinned score matrix behind. All other
     # pinned tensors are inputs, the output state or shared constants.
     assert set(rec.pinned) == {
@@ -130,7 +130,7 @@ def test_long_rows_reuse_scratch_and_stream_softmax(npu2, s, causal):
         *(handle.name for _, handle in rec.weights.values()),
     }
     if causal:
-        assert op.mask.shape == (op.block_rows, op.block_rows)
+        assert op.mask.shape == (op.num_heads, op.block_rows, op.block_rows)
     chosen = plan(npu2, rec, full_elf=True, step_words=_step_words(rec))
     assert not chosen.commands
 
@@ -209,14 +209,15 @@ def test_long_context_stages_lower(request, device, tmp_path):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.bench
+@pytest.mark.parametrize("causal", [False, True], ids=["unmasked", "causal"])
 @pytest.mark.parametrize("projected", [False, True], ids=["core", "projected"])
 @pytest.mark.parametrize(
     "full_elf",
     [False, pytest.param(True, marks=pytest.mark.supported_devices("npu2"))],
     ids=["separate", "single"],
 )
-def test_dispatch(projected, full_elf, record_property):
-    op, inputs, expected = _case(projected)
+def test_dispatch(projected, full_elf, causal, record_property):
+    op, inputs, expected = _case(projected, causal=causal)
     compiled = op.compile(full_elf=full_elf, **{n: a.shape for n, a in inputs.items()})
     try:
         actual = compiled(*inputs.values())
@@ -228,8 +229,14 @@ def test_dispatch(projected, full_elf, record_property):
         assert verdict, verdict
         # Reusing the scratch on another call must not retain the previous
         # head or block, nor stale host copies from the first dispatch.
-        _, again, expected_again = _case(projected, seed=1)
+        _, again, expected_again = _case(projected, causal=causal, seed=1)
         _check(compiled(*again.values()), expected_again)
-        time_call(compiled, *inputs.values(), record=record_property)
+        # Graph.__call__ returns tensors, whereas its loaded callable returns
+        # the dispatch timing. Per-step dispatch has no empty-command timing
+        # to subtract, so report submit-to-completion in both modes.
+        timing = run_iters(compiled.callable, warmup=3, iters=20).dispatch
+        assert timing is not None
+        record_property("Latency", timing.median_us)
+        record_property("Latency MAD", timing.mad_us)
     finally:
         op.release()

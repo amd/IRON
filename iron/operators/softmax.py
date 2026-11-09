@@ -31,11 +31,12 @@ _STREAMED_ROWS = 48
 
 
 def _kernel(op, n: int):
-    """Return the softmax factory over rows of ``n``, with Softmax ``op``'s float32 options.
-
-    Banded, or with a pre-cap addend.
-    """
-    options = dict(input_dtype=op.input_dtype, soft_cap=op.soft_cap)
+    """Return the softmax factory with ``op``'s accuracy and float32 options."""
+    options = dict(
+        input_dtype=op.input_dtype,
+        soft_cap=op.soft_cap,
+        accurate_exp2=op.accurate_exp2,
+    )
     if op.window is not None:
         return activation.softmax(n, window=op.window, period=op.period, **options)
     return activation.softmax(n, addend=op.has_addend, **options)
@@ -87,6 +88,10 @@ class Softmax(Operator):
         [
             Case(dict(rows=32, cols=1024, num_aie_columns=2, num_channels=2)),
             Case(
+                dict(rows=32, cols=1024, accurate_exp2=True, num_aie_columns=2),
+                lower=True,
+            ),
+            Case(
                 dict(rows=16, cols=4096, block=1024, num_aie_columns=2, num_channels=2),
                 lower=True,
             ),
@@ -124,6 +129,9 @@ class Softmax(Operator):
     )
     streamed: bool = tunable(domain=(False, True))
     input_dtype: Any = param(default=ml_dtypes.bfloat16, repr=False)
+    # Polynomial exp2 instead of the hardware/LUT approximation. Float32
+    # inputs always use it; for bf16 this also applies to the streamed passes.
+    accurate_exp2: bool = param(default=False, array=True)
     # Float input only, mlir-aie's softmax_f32_bf16: a pre-cap addend and
     # cap * tanh(x / cap).
     soft_cap: float | None = param(default=None, array=True)
