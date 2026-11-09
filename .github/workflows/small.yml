@@ -35,9 +35,8 @@ jobs:
         include:
           - {runner: phoenix, name: Phoenix}
           - {runner: krackan, name: Krackan}
-    # The fork-pr environment's required reviewers gate a fork's pull request
-    # before it reaches the NPU runners, which hold /srv's weights and the device.
-    environment: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'fork-pr' || '' }}
+    # A fork's pull request reaches these runners only once a maintainer approves
+    # the run (Settings > Actions: approval for all external contributors).
     runs-on: [self-hosted, "${{ matrix.runner }}"]
     steps:
       - name: Pull
