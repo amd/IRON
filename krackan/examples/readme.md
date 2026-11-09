@@ -1,7 +1,7 @@
 
 # IRON
 
-Tested on `2026_11_09_19_43_34` at commit `3c47c7a`.
+Tested on `2026_11_09_20_52_34` at commit `be6aae9`.
 
 <details>
 <summary>tests/applications/decoders</summary>
@@ -11,7 +11,7 @@ Tested on `2026_11_09_19_43_34` at commit `3c47c7a`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_generation[gemma4-short-1]</td><td>✅ 1/1</td><td>5.46</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_generation[gemma4-short-1]</td><td>✅ 1/1</td><td>5.47</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -83,7 +83,7 @@ Tested on `2026_11_09_19_43_34` at commit `3c47c7a`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_granite_4_2_3b[granite_4_2_3b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>1.42</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_granite_4_2_3b[granite_4_2_3b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>1.39</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -116,7 +116,7 @@ Tested on `2026_11_09_19_43_34` at commit `3c47c7a`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_granite_4_0_h_1b[granite_4_0_h_1b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>3.18</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_granite_4_0_h_1b[granite_4_0_h_1b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>3.19</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -158,8 +158,8 @@ Tested on `2026_11_09_19_43_34` at commit `3c47c7a`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_llama_3_2[llama_3.2_1b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.45</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_llama_3_2[llama_3.2_3b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.95</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_llama_3_2[llama_3.2_1b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.43</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_llama_3_2[llama_3.2_3b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.97</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
