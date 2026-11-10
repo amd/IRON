@@ -39,7 +39,7 @@ one `mha.cc` is compiled at (`d_head`, 64); the query block is stream-dse's
 choice from the blocks the kernel library compiles (`kernels/aie2p.toml`),
 or `query_block` pins it. Where each layer runs is stream-dse's.
 
-`d_head` must be 64 and `seq_len` a multiple of 64, at most 8192.
+`d_head` must be 64 and `seq_len` a multiple of 64.
 
 ## Installing
 

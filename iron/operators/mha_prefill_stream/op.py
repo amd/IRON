@@ -16,8 +16,6 @@ from iron.common.testing import Case, Testing
 SCORES, SOFTMAX, CONTEXT = "Attn_Scores", "Attn_Softmax", "Attn_Context"
 LAYERS = (SCORES, SOFTMAX, CONTEXT)
 RESULTS = {SCORES: "scores", SOFTMAX: "probs"}
-# The longest sequence the flash kernels' running state is checked to.
-MAX_SEQ_LEN = 8192
 
 
 class MHAPrefillStream(StreamOperator):
@@ -66,10 +64,10 @@ class MHAPrefillStream(StreamOperator):
                 f"MHAPrefillStream: d_head ({self.d_head}) must be the flash "
                 f"kernels' compiled block, {self.key_block}"
             )
-        if self.seq_len % self.key_block or self.seq_len > MAX_SEQ_LEN:
+        if self.seq_len % self.key_block:
             raise ValueError(
                 f"MHAPrefillStream: seq_len ({self.seq_len}) must be a multiple of "
-                f"{self.key_block} and at most {MAX_SEQ_LEN}"
+                f"{self.key_block}"
             )
         if self.query_block is not None and self.query_block not in self.query_blocks():
             raise ValueError(
