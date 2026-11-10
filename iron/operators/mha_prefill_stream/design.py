@@ -55,14 +55,15 @@ def mapping(query_block: int, key_block: int, d_head: int, causal: bool):
     """Return the kernel arguments and the one fused group, the search seeded at ``query_block``.
 
     ``causal`` is each layer's: the score GEMM skips the blocks past the
-    diagonal, and the flash kernels are built with the mask.
+    diagonal, and the flash kernels are built with the mask. The score GEMM
+    multiplies in bf16 (``Precision.HIGH``), as mha.cc's QK^T in IRON's MHA.
     """
 
     def gemm(m, k, n, **flags):
         return dict(m=m, k=k, n=n, layout="default", **flags)
 
     kernels = {
-        SCORES: gemm(query_block, d_head, key_block, causal=causal),
+        SCORES: gemm(query_block, d_head, key_block, causal=causal, precision="high"),
         SOFTMAX: dict(m=query_block, n=key_block, layout="contiguous", causal=causal),
         CONTEXT: gemm(query_block, key_block, d_head, flash=True, causal=causal),
     }

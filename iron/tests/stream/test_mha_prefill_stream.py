@@ -42,6 +42,15 @@ def test_every_layer_is_given_the_mask(causal):
     assert (built[SCORES].k, built[CONTEXT].n, built[CONTEXT].k) == (128, 128, 64)
 
 
+def test_the_score_gemm_multiplies_in_bf16_as_irons_mha_does():
+    """IRON's MHA builds QK^T without bfp16 multiplies; the score GEMM is the library's bf16 entry, built so."""
+    op = MHAPrefillStream(heads=2, seq_len=256, d_head=128)
+    ((kernels, _),) = op.candidates()
+    scores = AIE_KERNELS["gemm"](**kernels[SCORES], library=load_library("aie2p"))
+    assert scores.spec.symbol == "matmul_bf16_bf16_high"
+    assert scores.spec.options == {"bfp16": False}
+
+
 def test_a_head_matmul_pv_does_not_compile_is_refused():
     """mha.cc takes a head of a multiple of 16: 128 is one, 72 is not."""
     MHAPrefillStream(heads=2, seq_len=256, d_head=128).compatible()

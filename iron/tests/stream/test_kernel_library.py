@@ -41,9 +41,11 @@ def _measured_calls():
 @pytest.mark.parametrize("symbol, shape", _measured_calls())
 def test_every_measured_kernel_binds_to_an_mlir_aie_kernel(symbol, shape):
     spec = load_library("aie2p").spec(symbol)
-    binding = resolve({"binding": spec.binding, "args": {**shape, "npu": "npu2"}})
+    args = {**shape, **spec.options, "npu": "npu2"}
+    binding = resolve({"binding": spec.binding, "args": args})
     assert isinstance(binding, ExternalFunction)
-    assert binding.name.endswith(symbol)
+    # An entry is named after the symbol it binds, a build of it after the symbol too.
+    assert symbol.startswith(binding.name.split("_", 1)[1])
 
 
 def test_a_pinned_library_offers_one_query_block():

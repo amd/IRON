@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Each kernel's cycles per call, measured on npu2 (Strix, mlir-aie
-# 1.4.6.dev15): one core calling it on operands in its own memory. The rows
-# at head 128 or key block 32 come from a later session, in which the rows
-# before them measured 1.3 to 1.4 times their values here.
+# 1.4.6.dev15): one core calling it on operands in its own memory. The
+# attention kernels' rows (matmul_bf16_bf16_high, partial_softmax, matmul_PV)
+# come from one later session, in which matmul_bf16_bf16 32x64x64 measured 749.
 
 [family.matmul]
 ops_per_cycle = 151.0
@@ -26,23 +26,39 @@ cycles = [
     { m = 32, k = 64, n = 64, cycles = 759.0 },
     { m = 32, k = 32, n = 64, cycles = 542.0 },
     { m = 32, k = 64, n = 32, cycles = 408.0 },
-    { m = 64, k = 64, n = 32, cycles = 1142.0 },
-    { m = 32, k = 128, n = 64, cycles = 1670.0 },
-    { m = 64, k = 128, n = 64, cycles = 3401.0 },
-    { m = 32, k = 128, n = 32, cycles = 907.0 },
-    { m = 64, k = 128, n = 32, cycles = 1774.0 },
 ]
 per_op = { cycles = 1502.0, ops = 262144 }
+
+[kernel.matmul_bf16_bf16_high]
+family = "matmul"
+binding = "stream.compiler.kernels.mlir_aie:mm"
+options = { bfp16 = false }
+mac = { m = 4, k = 8, n = 8 }
+dims = [
+    { name = "k", divisor = 8 },
+    { name = "n", divisor = 16 },
+    { name = "m", divisor = 8 },
+]
+cycles = [
+    { m = 32, k = 64, n = 32, cycles = 2491.0 },
+    { m = 32, k = 64, n = 64, cycles = 4909.0 },
+    { m = 32, k = 128, n = 32, cycles = 4721.0 },
+    { m = 32, k = 128, n = 64, cycles = 9362.0 },
+    { m = 64, k = 64, n = 32, cycles = 4966.0 },
+    { m = 64, k = 64, n = 64, cycles = 9783.0 },
+    { m = 64, k = 128, n = 32, cycles = 9412.0 },
+    { m = 64, k = 128, n = 64, cycles = 18688.0 },
+]
 
 [kernel.partial_softmax]
 family = "vector"
 binding = "stream.compiler.kernels.mlir_aie:partial_softmax"
 dims = [{ name = "n", blocks = [32, 64] }, { name = "m", blocks = [32, 64] }]
 cycles = [
-    { m = 32, n = 64, cycles = 954.0 },
-    { m = 64, n = 64, cycles = 1707.0 },
-    { m = 32, n = 32, cycles = 939.0 },
-    { m = 64, n = 32, cycles = 1781.0 },
+    { m = 32, n = 32, cycles = 3949.0 },
+    { m = 32, n = 64, cycles = 5076.0 },
+    { m = 64, n = 32, cycles = 7612.0 },
+    { m = 64, n = 64, cycles = 9881.0 },
 ]
 
 [kernel.matmul_PV]
@@ -50,14 +66,14 @@ family = "matmul"
 binding = "stream.compiler.kernels.mlir_aie:matmul_pv"
 dims = [{ name = "k", blocks = [32, 64] }, { name = "n", divisor = 16 }, { name = "m", blocks = [32, 64] }]
 cycles = [
-    { m = 32, k = 64, n = 64, cycles = 3347.0 },
-    { m = 64, k = 64, n = 64, cycles = 6584.0 },
-    { m = 32, k = 64, n = 128, cycles = 8497.0 },
-    { m = 64, k = 64, n = 128, cycles = 16818.0 },
-    { m = 32, k = 32, n = 64, cycles = 4548.0 },
-    { m = 64, k = 32, n = 64, cycles = 8901.0 },
-    { m = 32, k = 32, n = 128, cycles = 7232.0 },
-    { m = 64, k = 32, n = 128, cycles = 14316.0 },
+    { m = 32, k = 32, n = 64, cycles = 4870.0 },
+    { m = 32, k = 32, n = 128, cycles = 9013.0 },
+    { m = 32, k = 64, n = 64, cycles = 8092.0 },
+    { m = 32, k = 64, n = 128, cycles = 13484.0 },
+    { m = 64, k = 32, n = 64, cycles = 9639.0 },
+    { m = 64, k = 32, n = 128, cycles = 17913.0 },
+    { m = 64, k = 64, n = 64, cycles = 14057.0 },
+    { m = 64, k = 64, n = 128, cycles = 26810.0 },
 ]
 
 [kernel.silu_bf16_size]

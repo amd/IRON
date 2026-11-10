@@ -36,6 +36,7 @@ BLOCK_INDEX = (0, 2, 0)
 # Each kernel's scalars, after its buffers, as stream-dse's codegen calls it.
 SCALARS: dict[str, Callable[[dict[str, int]], list[Any]]] = {
     "matmul_bf16_bf16": lambda s: [],
+    "matmul_bf16_bf16_high": lambda s: [],
     "silu_bf16_size": lambda s: [s["m"] * s["n"]],
     "eltwise_mul_bf16_vector_size": lambda s: [s["m"] * s["n"]],
     "partial_softmax": lambda s: [LOG2E, s["m"], s["n"], 3 * s["m"], s["n"]],
@@ -68,7 +69,9 @@ def _design(symbol: str, shape: tuple[tuple[str, int], ...], reps: int):
     assert dev is not None, "an operator's design is generated for the bound device"
     spec = load_library(resolve_target_arch(dev)).spec(symbol)
     with aie_utils.set_current_device(dev):
-        kernel = resolve({"binding": spec.binding, "args": {**dims, "npu": dev.name}})
+        kernel = resolve(
+            {"binding": spec.binding, "args": {**dims, **spec.options, "npu": dev.name}}
+        )
     rng = np.random.default_rng(0)
     buffers = []
     for t in kernel.arg_types():
