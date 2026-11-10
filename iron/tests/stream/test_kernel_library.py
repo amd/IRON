@@ -46,10 +46,15 @@ def test_every_measured_kernel_binds_to_an_mlir_aie_kernel(symbol, shape):
     assert binding.name.endswith(symbol)
 
 
-def test_a_pinned_library_offers_one_block():
+def test_a_pinned_library_offers_one_query_block():
+    """Only the query rows are pinned; the key block stays the solve's choice."""
     pinned = pinned_to_block("aie2p", 64)
     assert pinned.spec("partial_softmax").dim("m").blocks == (64,)
     assert blocks("aie2p", "partial_softmax", "m") == (32, 64)
+    for symbol, dim in (("partial_softmax", "n"), ("matmul_PV", "k")):
+        assert pinned.spec(symbol).dim(dim) == load_library("aie2p").spec(symbol).dim(
+            dim
+        )
     with pytest.raises(ValueError, match="not 16"):
         pinned_to_block("aie2p", 16)
 

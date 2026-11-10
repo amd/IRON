@@ -46,9 +46,10 @@ def load_library(arch: str):
 
 
 def pinned_to_block(arch: str, block: int):
-    """Return ``arch``'s library with every block list narrowed to ``block``.
+    """Return ``arch``'s library with every kernel's query rows, ``m``, narrowed to ``block``.
 
-    The solve then builds the one design of those it would choose between.
+    The solve then builds the one query block of those it would choose
+    between; the other blocks stay its choice.
 
     Raises:
         ValueError: A kernel is not compiled at ``block``.
@@ -58,11 +59,12 @@ def pinned_to_block(arch: str, block: int):
     for symbol, spec in source.kernels.items():
         dims = []
         for dim in spec.dims:
-            if dim.blocks and block not in dim.blocks:
+            pinned = dim.name == "m" and dim.blocks
+            if pinned and block not in dim.blocks:
                 raise ValueError(
                     f"{symbol} compiles {dim.name} for {dim.blocks}, not {block}"
                 )
-            dims.append(replace(dim, blocks=(block,)) if dim.blocks else dim)
+            dims.append(replace(dim, blocks=(block,)) if pinned else dim)
         kernels[symbol] = replace(spec, dims=tuple(dims))
     return replace(source, kernels=kernels)
 
