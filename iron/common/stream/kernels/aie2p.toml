@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Each kernel's cycles per call, measured on npu2 (Strix, mlir-aie
+# 1.4.6.dev15): one core calling it on operands in its own memory.
 
 [family.matmul]
 ops_per_cycle = 151.0
@@ -18,35 +20,40 @@ dims = [
     { name = "m", divisor = 16 },
 ]
 cycles = [
-    { m = 64, k = 64, n = 64, cycles = 1576.0 },
-    { m = 32, k = 64, n = 64, cycles = 832.0 },
-    { m = 32, k = 32, n = 64, cycles = 590.0 },
+    { m = 64, k = 64, n = 64, cycles = 1502.0 },
+    { m = 32, k = 64, n = 64, cycles = 759.0 },
+    { m = 32, k = 32, n = 64, cycles = 542.0 },
+    { m = 32, k = 64, n = 32, cycles = 408.0 },
 ]
-per_op = { cycles = 1576.0, ops = 262144 }
+per_op = { cycles = 1502.0, ops = 262144 }
 
 [kernel.partial_softmax]
 family = "vector"
 binding = "stream.compiler.kernels.mlir_aie:partial_softmax"
 dims = [{ name = "n", fixed = 64 }, { name = "m", blocks = [32, 64] }]
-cycles = [{ m = 32, n = 64, cycles = 1104.0 }, { m = 64, n = 64, cycles = 1848.0 }]
+cycles = [{ m = 32, n = 64, cycles = 954.0 }, { m = 64, n = 64, cycles = 1707.0 }]
 
 [kernel.matmul_PV]
 family = "matmul"
 binding = "stream.compiler.kernels.mlir_aie:matmul_pv"
 dims = [{ name = "k", fixed = 64 }, { name = "n", fixed = 64 }, { name = "m", blocks = [32, 64] }]
-cycles = [{ m = 32, k = 64, n = 64, cycles = 1476.0 }, { m = 64, k = 64, n = 64, cycles = 2678.0 }]
+cycles = [{ m = 32, k = 64, n = 64, cycles = 3347.0 }, { m = 64, k = 64, n = 64, cycles = 6584.0 }]
 
 [kernel.silu_bf16_size]
 family = "vector"
 binding = "stream.compiler.kernels.mlir_aie:silu"
 dims = [{ name = "n", runtime = true, keep_whole = true }, { name = "m", runtime = true }]
-cycles = [{ m = 1, n = 4096, cycles = 823.0 }, { m = 1, n = 8192, cycles = 1600.0 }]
+cycles = [
+    { m = 1, n = 2048, cycles = 1140.0 },
+    { m = 1, n = 4096, cycles = 2225.0 },
+    { m = 1, n = 8192, cycles = 4397.0 },
+]
 
 [kernel.eltwise_mul_bf16_vector_size]
 family = "vector"
 binding = "stream.compiler.kernels.mlir_aie:mul"
 dims = [{ name = "n", runtime = true, keep_whole = true }, { name = "m", runtime = true }]
-cycles = [{ m = 1, n = 4096, cycles = 610.0 }]
+cycles = [{ m = 1, n = 2048, cycles = 94.0 }, { m = 1, n = 4096, cycles = 153.0 }]
 
 [kernel.softmax_rows_bf16]
 family = "vector"
