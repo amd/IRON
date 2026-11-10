@@ -31,6 +31,7 @@ class MHAPrefillStream(StreamOperator):
         [
             Case(dict(heads=32, seq_len=256), bench=True),
             Case(dict(heads=32, seq_len=2048), extensive=True),
+            Case(dict(heads=32, seq_len=1024, d_head=128), extensive=True),
         ],
         draw=lambda op: dict(normal=(op.q, op.k_t, op.v), scale=op.d_head**-0.25),
     )
@@ -45,12 +46,11 @@ class MHAPrefillStream(StreamOperator):
     v = In(heads, seq_len, d_head, dtype=bfloat16)
     output = Out(heads, seq_len, d_head, dtype=bfloat16)
 
-    @property
-    def key_block(self) -> int:
-        """The key rows of one flash step, which mha.cc is compiled at."""
-        from iron.common.stream.kernel_library import fixed_dims
+    def key_blocks(self) -> tuple[int, ...]:
+        """Return the key blocks the flash kernels compile, finest first."""
+        from iron.common.stream.kernel_library import blocks
 
-        return fixed_dims(resolve_target_arch(self.dev), "matmul_PV")["k"]
+        return blocks(resolve_target_arch(self.dev), "matmul_PV", "k")
 
     def query_blocks(self) -> tuple[int, ...]:
         """Return the query blocks the flash kernels compile, finest first."""
@@ -59,15 +59,18 @@ class MHAPrefillStream(StreamOperator):
         return blocks(resolve_target_arch(self.dev), "partial_softmax", "m")
 
     def compatible(self) -> None:
-        if self.d_head != self.key_block:
+        from iron.common.stream.kernel_library import load_library
+
+        head = load_library(resolve_target_arch(self.dev)).spec("matmul_PV").dim("n")
+        if not head.accepts(self.d_head):
             raise ValueError(
-                f"MHAPrefillStream: d_head ({self.d_head}) must be the flash "
-                f"kernels' compiled block, {self.key_block}"
+                f"MHAPrefillStream: d_head ({self.d_head}) is not a head "
+                "matmul_PV compiles"
             )
-        if self.seq_len % self.key_block:
+        if self.seq_len % self.key_blocks()[-1]:
             raise ValueError(
                 f"MHAPrefillStream: seq_len ({self.seq_len}) must be a multiple of "
-                f"{self.key_block}"
+                f"{self.key_blocks()[-1]}"
             )
         if self.query_block is not None and self.query_block not in self.query_blocks():
             raise ValueError(
@@ -84,7 +87,7 @@ class MHAPrefillStream(StreamOperator):
         from .design import mapping
 
         seed = self.query_block or self.query_blocks()[0]
-        return [mapping(seed, self.key_block, self.d_head)]
+        return [mapping(seed, self.key_blocks()[-1], self.d_head)]
 
     def library(self):
         from iron.common.stream.kernel_library import pinned_to_block

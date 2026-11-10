@@ -67,12 +67,6 @@ def pinned_to_block(arch: str, block: int):
     return replace(source, kernels=kernels)
 
 
-def fixed_dims(arch: str, symbol: str) -> dict[str, int]:
-    """Return the dimensions ``symbol`` is compiled at and cannot vary, its ``-DDIM_*``."""
-    spec = load_library(arch).spec(symbol)
-    return {d.name: d.fixed for d in spec.dims if d.fixed is not None}
-
-
 def blocks(arch: str, symbol: str, dim: str) -> tuple[int, ...]:
     """Return the blocks ``symbol`` compiles ``dim`` for, finest first."""
     return tuple(sorted(load_library(arch).spec(symbol).dim(dim).blocks))

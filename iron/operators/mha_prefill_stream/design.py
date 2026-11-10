@@ -5,8 +5,8 @@
 
 The torch module the workload is exported from, one online-softmax step
 per key block, and its mapping: each layer's kernel arguments, the three
-layers fused into one group. Placement and the query block are
-stream-dse's; the mapping seeds the search at a block the kernels compile.
+layers fused into one group. Placement and the query and key blocks are
+stream-dse's; the mapping seeds the search at blocks the kernels compile.
 """
 
 # stream-dse, torch and onnxscript are requirements_stream.txt's.

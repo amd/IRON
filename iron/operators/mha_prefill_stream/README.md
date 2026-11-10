@@ -34,12 +34,13 @@ of its own that cuts the fused group.
 The workload is `design.FlashAttention`, a `torch.nn.Module` whose softmax is
 `iron_stream::partial_softmax` (`iron/common/stream/ops.py`), one online step
 over a key block that the exporter emits as a single node. The mapping gives
-each layer's kernel arguments and the one fused group. The key block is the
-one `mha.cc` is compiled at (`d_head`, 64); the query block is stream-dse's
-choice from the blocks the kernel library compiles (`kernels/aie2p.toml`),
-or `query_block` pins it. Where each layer runs is stream-dse's.
+each layer's kernel arguments and the one fused group. The query and key
+blocks are stream-dse's choice from the blocks the kernel library compiles
+(`kernels/aie2p.toml`; the key block apart from the head, `d_head`), or
+`query_block` pins the query block. Where each layer runs is stream-dse's.
 
-`d_head` must be 64 and `seq_len` a multiple of 64.
+`d_head` must be a head `matmul_PV` compiles (a multiple of 16; cycles are
+measured at 64 and 128) and `seq_len` a multiple of 64.
 
 ## Installing
 
