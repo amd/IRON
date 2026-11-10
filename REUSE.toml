@@ -12,6 +12,7 @@ SPDX-License-Identifier = "CC0-1.0"
 [[annotations]]
 path = [
     "iron/applications/**/profiles/*.json",
+    "iron/operators/profiles/**/*.json",
     "iron/applications/llama/costs_*.json",
     "iron/tests/support/*.json",
 ]

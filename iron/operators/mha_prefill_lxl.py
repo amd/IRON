@@ -16,31 +16,33 @@ stage separately. Keys and values are shared by each group of query heads.
 """
 
 import math
+from pathlib import Path
 
 import numpy as np
-from ml_dtypes import bfloat16, finfo
+from ml_dtypes import bfloat16
 
 from iron.common import Precision
 from iron.common.graph import Graph, param, state
 from iron.operators.copy import Copy
+from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import RowwiseMul
 from iron.operators.gemm import GEMM
 from iron.operators.rope import RoPE
 from iron.operators.softmax import Softmax
 
+_PROFILES = Path(__file__).parent / "profiles" / "mha_prefill_lxl"
 
-def _gemm(a, b, *out, b_col_maj=False):
-    # A 64-wide context fits four columns of 16; wider products use the
-    # device's full width. Float accumulation avoids rounding after each K tile.
+
+def _gemm(a, b, *out, b_col_maj=False, accumulate_f32=False):
+    # Match the original BFP multiplies, with f32 partial sums only for
+    # context and output products. Geometry comes from the graph's profile.
     return GEMM.step(
         a,
         b,
         *out,
         b_col_maj=b_col_maj,
-        tile_m=16,
-        tile_k=64,
-        tile_n=16,
-        precision=Precision.HIGHEST,
+        precision=Precision.MEDIUM,
+        accumulate_f32=accumulate_f32,
     )
 
 
@@ -51,6 +53,8 @@ class AttentionPrefillFused(Graph):
     Inputs are already projected and rotated. ``embedding_dim`` describes
     the surrounding projections and is used by the projected variant.
     """
+
+    profile = _PROFILES
 
     def __init__(
         self,
@@ -76,18 +80,16 @@ class AttentionPrefillFused(Graph):
             seq_len,
         )
         self.causal_mask = causal_mask
-        self.block_rows = math.gcd(seq_len, 512)
+        self.block_rows = seq_len if seq_len <= 1024 else math.gcd(seq_len, 512)
         self.scale = param(np.full((256,), 1 / math.sqrt(head_dim), dtype=bfloat16))
-        # One diagonal mask shared across query blocks. The
-        # accurate exp2 kernel splits log2(e) into signed limbs: -inf would
-        # produce inf - inf there, so use the same finite sentinel as its mask.
+        # One diagonal mask shared across query blocks.
         self.mask = (
             param(
                 np.broadcast_to(
                     np.triu(
                         np.full(
                             (self.block_rows, self.block_rows),
-                            float(finfo(bfloat16).min),
+                            -np.inf,
                         ),
                         k=1,
                     ),
@@ -133,8 +135,12 @@ class AttentionPrefillFused(Graph):
             short_rows = scores.reshape(h * self.block_rows * end // 256, 256)
             RowwiseMul.step(short_rows, self.scale, short_rows)
             if self.causal_mask:
-                diagonal = Copy.step(scores[:, :, start:stop])
-                scores[:, :, start:stop] = diagonal + self.mask
+                if start == 0:
+                    # The first block is its entire diagonal, contiguous.
+                    ElementwiseAdd.step(scores, self.mask, scores)
+                else:
+                    diagonal = Copy.step(scores[:, :, start:stop])
+                    scores[:, :, start:stop] = diagonal + self.mask
             # A streamed softmax unrolls its rows on each core. Splitting at
             # 256 rows fits four channels on both NPU1 and NPU2.
             rows = h * self.block_rows
@@ -142,13 +148,14 @@ class AttentionPrefillFused(Graph):
             flat = scores.reshape(rows, end)
             for row in range(0, rows, batch):
                 part = flat[row : min(row + batch, rows)]
-                Softmax.step(part, part, num_channels=4, accurate_exp2=True)
+                Softmax.step(part, part)
             for head in range(h):
                 group = head // (h // g)
                 _gemm(
                     scores[head],
                     values[group, :end],
                     self.attn_context[head, start:stop],
+                    accumulate_f32=True,
                 )
         return Copy.step(self.attn_context)
 
@@ -160,6 +167,8 @@ class AttentionPrefillProjectedFused(Graph):
     ``w_query (E, H*d)``, ``w_key/w_value (E, G*d)`` and
     ``w_output (H*d, E)``. The output is ``(S, E)``.
     """
+
+    profile = _PROFILES
 
     def __init__(
         self,
@@ -199,4 +208,4 @@ class AttentionPrefillProjectedFused(Graph):
         v = Copy.step(v.reshape(s, g, d).transpose(1, 0, 2))
         context = self.attention(q, k, v)
         interleaved = Copy.step(context.transpose(1, 0, 2)).reshape(s, h * d)
-        return _gemm(interleaved, w_output)
+        return _gemm(interleaved, w_output, accumulate_f32=True)
