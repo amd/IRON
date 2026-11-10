@@ -39,10 +39,11 @@ blocks are stream-dse's choice from the blocks the kernel library compiles
 (`kernels/aie2p.toml`; the key block apart from the head, `d_head`), or
 `query_block` pins the query block. With `causal=False` the
 score GEMM computes every block and `mha.cc` is built without its mask.
-Where each layer runs is stream-dse's.
+Where each layer runs is stream-dse's, including splitting the value GEMM
+over two cores by halves of the head.
 
 `d_head` must be a head `matmul_PV` compiles (a multiple of 16; cycles are
-measured at 64 and 128) and `seq_len` a multiple of 64.
+measured at 32, 64 and 128 columns a call) and `seq_len` a multiple of 64.
 
 ## Installing
 

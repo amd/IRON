@@ -66,12 +66,16 @@ family = "matmul"
 binding = "stream.compiler.kernels.mlir_aie:matmul_pv"
 dims = [{ name = "k", blocks = [32, 64] }, { name = "n", divisor = 16 }, { name = "m", blocks = [32, 64] }]
 cycles = [
+    { m = 32, k = 32, n = 32, cycles = 2802.0 },
     { m = 32, k = 32, n = 64, cycles = 4870.0 },
     { m = 32, k = 32, n = 128, cycles = 9013.0 },
+    { m = 32, k = 64, n = 32, cycles = 3919.0 },
     { m = 32, k = 64, n = 64, cycles = 8092.0 },
     { m = 32, k = 64, n = 128, cycles = 13484.0 },
+    { m = 64, k = 32, n = 32, cycles = 5495.0 },
     { m = 64, k = 32, n = 64, cycles = 9639.0 },
     { m = 64, k = 32, n = 128, cycles = 17913.0 },
+    { m = 64, k = 64, n = 32, cycles = 7739.0 },
     { m = 64, k = 64, n = 64, cycles = 14057.0 },
     { m = 64, k = 64, n = 128, cycles = 26810.0 },
 ]
