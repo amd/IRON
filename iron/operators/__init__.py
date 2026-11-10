@@ -20,6 +20,7 @@ from .log import Log
 from .magnitude import Magnitude
 from .merge import Merge
 from .mha import MHA
+from .mha_prefill_stream.op import MHAPrefillStream
 from .relu import ReLU
 from .resample.op import PatchPositions, Resample, ResampleTaps
 from .rms_norm import RMSNorm
@@ -48,6 +49,7 @@ __all__ = [
     "Limbs",
     "Log",
     "MHA",
+    "MHAPrefillStream",
     "Magnitude",
     "Merge",
     "PatchPositions",
