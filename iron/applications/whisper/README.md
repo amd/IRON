@@ -27,6 +27,16 @@ features once to `bfloat16`. Only sample padding/reflection and WAV decoding
 stay on the host. Long-form normalization uses the complete recording plus
 30 seconds of silence, before slicing its decoder windows.
 
+The extensive long-form test records Hugging Face's own whole-clip
+timestamped generation, keyed by the fixed audio clip rather than the NPU's
+window seeks. It allows at most one substituted word (WER also capped at
+2%) and 0.5 s of word-aligned timing drift. These bounds cover the observed
+Strix timestamp near-tie (one word, up to 0.4 s) while requiring equal word
+counts and rejecting missing or duplicated speech, reversed timestamps and
+missing interior segment endpoints. An unclosed final segment is bounded by
+the clip duration, and a final HF timestamp past the clip edge is clamped to
+that edge because the last window includes padding.
+
 Token selection also runs on the NPU. The host writes one small Sample
 draw row per step: history-dependent suppression ranges and the
 timestamp/text split. Static scattered suppression tokens are a resident

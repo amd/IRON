@@ -66,7 +66,9 @@ def test_log_mel(log_mel, frames, golden, record_property):
 @pytest.mark.parametrize("silent", [False, True])
 def test_whisper_log_mel(silent, record_property):
     """Check the fused Whisper frontend against Hugging Face's feature extractor."""
-    from transformers import WhisperFeatureExtractor
+    WhisperFeatureExtractor = pytest.importorskip(
+        "transformers"
+    ).WhisperFeatureExtractor
 
     frames = 64
     graph = LogMel(

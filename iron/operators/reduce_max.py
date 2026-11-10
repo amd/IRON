@@ -69,8 +69,15 @@ class ReduceMax(Operator):
             [Worker(core, [source.cons(), result.prod(), partial, kernel, rtp])], [rtp]
         )
 
-    def reference(self, x):
-        return np.array([np.max(x)], dtype=np.float32)
+    def reference(self, x, valid=None):
+        return np.array(
+            [
+                np.max(
+                    np.asarray(x).reshape(-1)[: self.valid if valid is None else valid]
+                )
+            ],
+            dtype=np.float32,
+        )
 
     def tolerance(self):
         return Tolerance.exact(note="maximum selects an input element without rounding")

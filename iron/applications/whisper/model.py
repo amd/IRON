@@ -689,10 +689,16 @@ class Whisper(Model):
     def release(self) -> None:
         """Free the decoder's loops and all versions' device memory."""
         self.decoder.release()
+        self._release_frontends()
+        super().release()
+
+    def _release_frontends(self) -> None:
+        """Release each frontend image and its independently owned arena."""
         for frontend in self._frontends.values():
             frontend.release()
+            if frontend.arena is not None:
+                frontend.arena.release()
         self._frontends.clear()
-        super().release()
 
     def encode(self, mel: np.ndarray, *, readback: bool = True) -> np.ndarray | None:
         """Run the audio encoder on ``mel`` ``(frames, num_mel_bins)`` and populate cross-attention K/V.
@@ -788,6 +794,7 @@ class Whisper(Model):
         wave = np.zeros(length, np.float32)
         wave[: min(length, padded.size)] = padded[:length]
         if capacity not in self._frontends:
+            self._release_frontends()
             graph = LogMel(
                 frame=N_FFT,
                 fft=N_FFT,

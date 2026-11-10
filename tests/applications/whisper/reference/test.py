@@ -13,6 +13,7 @@ prefill + decoding match Hugging Face's forward logits.
 import json
 from types import SimpleNamespace
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.iron.kernels.sample import apply_ranges_ref
@@ -198,10 +199,11 @@ def test_every_step_of_every_version_resolves(npu1, npu2):
     one_layer = dataclasses.replace(TOY, num_hidden_layers=1, encoder_layers=1)
     weights = checkpoint(one_layer, shapes(one_layer)).tree("unread")
     for dev in (npu1, npu2):
-        model = Whisper(one_layer, weights)
-        for call in model.shapes():
-            for step in model.record(**call).steps:
-                step.op.resolved(dev)
+        with aie_utils.set_current_device(dev):
+            model = Whisper(one_layer, weights)
+            for call in model.shapes():
+                for step in model.record(**call).steps:
+                    step.op.resolved(dev)
 
 
 def test_default_config_uses_generation_and_tokenizer_ids(tmp_path):
@@ -259,10 +261,11 @@ def test_whisper_small_decoder_profile_resolves(npu1, npu2):
     config = WhisperConfig(num_hidden_layers=1, encoder_layers=1)
     weights = checkpoint(config, shapes(config)).tree("unread")
     for dev in (npu1, npu2):
-        model = Whisper(config, weights)
-        for call in model.decoder.shapes():
-            for step in model.record(**call).steps:
-                step.op.resolved(dev)
+        with aie_utils.set_current_device(dev):
+            model = Whisper(config, weights)
+            for call in model.decoder.shapes():
+                for step in model.record(**call).steps:
+                    step.op.resolved(dev)
 
 
 @pytest.mark.parametrize(

@@ -12,6 +12,7 @@ long-form timestamp decoding.
 """
 
 import functools
+import json
 import os
 import time
 from types import SimpleNamespace
@@ -21,22 +22,20 @@ import numpy as np
 import pytest
 
 from iron.applications.whisper.audio import (
-    HOP_LENGTH,
     MEL_MAX_ABS_ERROR,
     N_SAMPLES,
+    SAMPLE_RATE,
 )
 from iron.applications.whisper.model import (
-    TIMESTAMP_TOLERANCE,
     TokenPolicy,
     Whisper,
-    decode_window,
-    windows_match,
 )
 from iron.lm import Checkpoint
 from iron.lm.generation import divergence, kl_stats
 from iron.lm.golden import RECORD, Golden
 from iron.lm.testing import check_embedding, require, weights_dir
 from iron.tests.support.librispeech import utterance
+from iron.tests.support.whisper import check_long_form
 
 DIRECTORY = weights_dir("whisper-small")
 
@@ -244,34 +243,39 @@ def test_whisper_long_form(model, reference, feature_extractor, record_property)
     assert res["long_form"] and len(res["windows"]) >= 2
     wave = clip("long")
     mel = hf_mel(feature_extractor, wave, long_form=True)
-    content_frames = wave.size // HOP_LENGTH
     mel_error = float(np.max(np.abs(res["mel"] - mel)))
     record_property("MelMaxAbsError", mel_error)
     assert mel_error <= MEL_MAX_ABS_ERROR, mel_error
-    policy = TokenPolicy(model.config, timestamps=True)
-    worst = 0
-    for i, w in enumerate(res["windows"]):
-        seek = int(w["seek"])
-        expected = reference(
-            f"long_window_single_call {i} {seek}",
-            mel,
-            lambda hf, audio, s=seek: np.asarray(
-                decode_window(
-                    hf, audio, s, content_frames, policy, frames=model.config.frames
-                )[1],
-                np.int32,
-            ),
-        )
-        # Golden stores every result as float32, including recorded token IDs.
-        expected_tokens = expected.astype(np.int32).tolist()
-        ok, diff = windows_match(
-            w["tokens"],
-            expected_tokens,
-            model.config,
-            tokenizer=model.tokenizer,
-        )
-        assert ok, f"window {i} (seek {seek}): {w['tokens']} != {expected_tokens}"
-        if diff is not None:
-            worst = max(worst, diff)
-    record_property("DifferingTokens", worst)
-    assert worst <= TIMESTAMP_TOLERANCE
+    recorded = reference(
+        f"whole long-form HF {CLIPS['long']}",
+        wave,
+        lambda hf, audio: hf.long_form(audio),
+    )
+    expected = json.loads(recorded.astype(np.uint8).tobytes().decode("utf-8"))
+    wer, drift = check_long_form(res, expected, wave.size / SAMPLE_RATE)
+    record_property("WER", wer)
+    record_property("TimestampDrift", drift)
+
+
+def test_whisper_frontend_cache_is_bounded(model, feature_extractor):
+    """Reuse one capacity and release its arena on eviction and model teardown."""
+    previous = None
+    previous_samples = None
+    for samples in (1600, 1600, 16000, 1600):
+        wave = np.zeros(samples, np.float32)
+        got, _ = model.log_mel(wave, long_form=True)
+        want = hf_mel(feature_extractor, wave, long_form=True)
+        assert np.max(np.abs(got - want)) <= MEL_MAX_ABS_ERROR
+        assert len(model._frontends) == 1
+        current = next(iter(model._frontends.values()))
+        if previous is not None:
+            if samples == 1600 and previous_samples == 1600:
+                assert current is previous
+            else:
+                assert current is not previous
+                assert not previous.is_loaded
+                assert previous.arena is not None and not previous.arena.loaded
+        previous, previous_samples = current, samples
+    model.release()
+    assert not model._frontends
+    assert previous is not None and not previous.is_loaded

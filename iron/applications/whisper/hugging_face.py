@@ -12,6 +12,7 @@ running ``--check-reference``.
 # pyright: reportMissingImports=false
 
 import copy
+import json
 from typing import Any
 
 import numpy as np
@@ -74,6 +75,55 @@ class HuggingFaceWhisper(HuggingFace):
         with torch.no_grad():
             out = self.model.model.encoder(torch.from_numpy(features))
         return out.last_hidden_state[0].numpy()
+
+    def long_form(self, waveform: np.ndarray) -> np.ndarray:
+        """Record HF's whole-clip transcript and segments without IRON's window policy."""
+        from transformers import WhisperTokenizer
+
+        if self.feature_extractor is None:
+            raise RuntimeError(
+                "HuggingFaceWhisper.long_form requires a loaded checkpoint"
+            )
+        tokenizer = WhisperTokenizer.from_pretrained(self.model.config._name_or_path)
+        generation_config = copy.deepcopy(self.model.generation_config)
+        generation_config.no_timestamps_token_id = tokenizer.convert_tokens_to_ids(
+            "<|notimestamps|>"
+        )
+        generation_config.forced_decoder_ids = [
+            [1, tokenizer.convert_tokens_to_ids("<|en|>")],
+            [2, tokenizer.convert_tokens_to_ids("<|transcribe|>")],
+            [3, generation_config.no_timestamps_token_id],
+        ]
+        extracted = self.feature_extractor(
+            np.asarray(waveform, np.float32),
+            sampling_rate=16000,
+            padding="longest",
+            truncation=False,
+            return_tensors="pt",
+        )
+        with torch.no_grad():
+            output = self.model.generate(
+                input_features=extracted.input_features,
+                generation_config=generation_config,
+                return_timestamps=True,
+                return_segments=True,
+                condition_on_prev_tokens=False,
+                do_sample=False,
+                max_new_tokens=224,
+            )
+        segments = [
+            (
+                float(segment["start"]),
+                float(segment["end"]),
+                tokenizer.decode(segment["tokens"], skip_special_tokens=True).strip(),
+            )
+            for segment in output["segments"][0]
+        ]
+        result = {
+            "text": tokenizer.decode(output["sequences"][0], skip_special_tokens=True),
+            "segments": segments,
+        }
+        return np.frombuffer(json.dumps(result).encode("utf-8"), dtype=np.uint8)
 
     def logits(self, tokens, *arrays: Any, **kwargs: Any) -> np.ndarray:
         """Return the float32 logits after ``tokens`` given ``mel`` in ``arrays``."""
