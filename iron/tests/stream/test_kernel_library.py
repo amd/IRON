@@ -9,6 +9,7 @@ pytest.importorskip("stream", reason="stream-dse is not installed")
 pytest.importorskip("onnxscript", reason="onnxscript is not installed")
 
 from aie.iron import ExternalFunction  # noqa: E402
+from aie.utils.compile.jit.operator import Unresolvable  # noqa: E402
 from stream.compiler.kernels.binding import resolve  # noqa: E402
 from stream.compiler.kernels.registry import AIE_KERNELS  # noqa: E402
 
@@ -55,5 +56,5 @@ def test_a_pinned_library_offers_one_block():
 
 def test_an_architecture_without_a_library_is_refused():
     assert library_path("aie2p").exists()
-    with pytest.raises(FileNotFoundError, match="aie2"):
+    with pytest.raises(Unresolvable, match="aie2"):
         load_library("aie2")

@@ -15,6 +15,8 @@ from dataclasses import replace
 from functools import cache
 from pathlib import Path
 
+from aie.utils.compile.jit.operator import Unresolvable
+
 KERNELS = Path(__file__).resolve().parent / "kernels"
 
 
@@ -28,13 +30,18 @@ def load_library(arch: str):
     """Return the kernel library of ``arch``.
 
     Raises:
-        FileNotFoundError: IRON has no library for ``arch``.
+        Unresolvable: IRON has no library for ``arch``, or stream-dse is not
+            installed.
     """
-    from stream.compiler.kernels.library import KernelLibrary
-
     path = library_path(arch)
     if not path.exists():
-        raise FileNotFoundError(f"no stream-dse kernel library for {arch} ({path})")
+        raise Unresolvable(f"no stream-dse kernel library for {arch} ({path})")
+    try:
+        from stream.compiler.kernels.library import KernelLibrary
+    except ImportError:
+        raise Unresolvable(
+            "stream-dse is not installed (requirements_stream.txt)"
+        ) from None
     return KernelLibrary.load(path)
 
 
