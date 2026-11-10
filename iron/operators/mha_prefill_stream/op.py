@@ -19,12 +19,13 @@ RESULTS = {SCORES: "scores", SOFTMAX: "probs"}
 
 
 class MHAPrefillStream(StreamOperator):
-    """Causal flash attention ``softmax(q @ k_t) @ v`` for every head, as stream-dse places it.
+    """Flash attention ``softmax(q @ k_t) @ v`` for every head, as stream-dse places it.
 
     Over a pre-scaled ``q`` (by ``1 / sqrt(d_head)``) and a pre-transposed
     ``k_t``, heads leading; one fused group whose key axis runs in the
-    flash kernels' block. ``query_block`` pins the query block; None leaves
-    it to stream-dse's tile search. See README.md.
+    flash kernels' block, causal unless ``causal`` is False. ``query_block``
+    pins the query block; None leaves it to stream-dse's tile search. See
+    README.md.
     """
 
     test = Testing(
@@ -32,6 +33,7 @@ class MHAPrefillStream(StreamOperator):
             Case(dict(heads=32, seq_len=256), bench=True),
             Case(dict(heads=32, seq_len=2048), extensive=True),
             Case(dict(heads=32, seq_len=1024, d_head=128), extensive=True),
+            Case(dict(heads=32, seq_len=1024, causal=False), extensive=True),
         ],
         draw=lambda op: dict(normal=(op.q, op.k_t, op.v), scale=op.d_head**-0.25),
     )
@@ -39,6 +41,7 @@ class MHAPrefillStream(StreamOperator):
     heads: int = param()
     seq_len: int = param()
     d_head: int = param(default=64)
+    causal: bool = param(default=True)
     query_block: int | None = param(default=None)
 
     q = In(heads, seq_len, d_head, dtype=bfloat16)
@@ -87,7 +90,7 @@ class MHAPrefillStream(StreamOperator):
         from .design import mapping
 
         seed = self.query_block or self.query_blocks()[0]
-        return [mapping(seed, self.key_blocks()[-1], self.d_head)]
+        return [mapping(seed, self.key_blocks()[-1], self.d_head, self.causal)]
 
     def library(self):
         from iron.common.stream.kernel_library import pinned_to_block
@@ -100,15 +103,17 @@ class MHAPrefillStream(StreamOperator):
         return LAYERS
 
     def ops(self) -> int:
-        # Causal: about half of the score and context products are computed.
-        return 2 * self.heads * self.seq_len * self.seq_len * self.d_head
+        # The score and context products; causal, about half of each is computed.
+        full = 4 * self.heads * self.seq_len * self.seq_len * self.d_head
+        return full // 2 if self.causal else full
 
     def reference(self, q, k_t, v):
-        """Return each head's causal attention in float32."""
+        """Return each head's attention in float32, causal if the operator is."""
         q, k_t, v = (np.asarray(t, dtype=np.float32) for t in (q, k_t, v))
         scores = q @ k_t
-        future = np.triu(np.ones(scores.shape[-2:], dtype=bool), k=1)
-        scores = np.where(future, -np.inf, scores)
+        if self.causal:
+            future = np.triu(np.ones(scores.shape[-2:], dtype=bool), k=1)
+            scores = np.where(future, -np.inf, scores)
         p = np.exp(scores - scores.max(axis=-1, keepdims=True))
         return (p / p.sum(axis=-1, keepdims=True)) @ v
 
