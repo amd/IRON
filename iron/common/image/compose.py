@@ -244,10 +244,7 @@ def phases(fusion: Fusion, arrays: Mapping[int, BuiltArray]) -> dict[int, int]:
         for e in incoming.get(j, ()):
             (sink,) = [b for b in arrays[j].op.buffers if b.name == e.input]
             per_object = math.prod(sink.obj_shape)
-            moved: dict[int, int] = {}
-            for lane, tap, _, _ in sink.transfers():
-                moved[lane] = moved.get(lane, 0) + math.prod(tap.sizes)
-            whole = all(n <= per_object for n in moved.values())
+            whole = all(n <= per_object for n in sink.moved_per_lane().values())
             phase[j] = max(phase[j], phase[e.producer] + int(whole))
     order = [phase[j] for j in fusion.steps]
     if order != sorted(order):

@@ -302,6 +302,22 @@ class Operand:
         self.fed_from = source
         source.feeds.append(self)
 
+    def moved_per_lane(self) -> dict[int, int]:
+        """Return the elements each lane moves in a call, by lane.
+
+        Raises:
+            ValueError: A transfer's count is staged, known only to the sequence.
+        """
+        moved: dict[int, int] = {}
+        for lane, tap, _, _ in self.transfers():
+            n = tap.numel
+            if not isinstance(n, int | np.integer):
+                raise ValueError(
+                    f"{self.name}'s lane {lane} moves a count only the sequence knows"
+                )
+            moved[lane] = moved.get(lane, 0) + int(n)
+        return moved
+
     def reader(self, lane: int, depth: int | None = None) -> Any:
         """Return a consumer end of output lane ``lane`` for an on-chip reader.
 
@@ -326,9 +342,7 @@ class Operand:
                 f"no fifo to add another reader to"
             )
         fifo = self.lane_fifos[lane]
-        moved = sum(
-            math.prod(tap.sizes) for k, tap, _, _ in self.transfers() if k == lane
-        )
+        moved = self.moved_per_lane().get(lane, 0)
         whole = -(-moved // math.prod(self.obj_shape))
         own = fifo.depth if depth is None else depth
         return fifo.cons(max(whole, own or 1))
