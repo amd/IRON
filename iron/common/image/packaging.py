@@ -39,6 +39,9 @@ class Plan:
     values: list  # (name, kind, lowering)
     # The steps starting each command after the first, queued back to back.
     commands: tuple[int, ...] = ()
+    # A full ELF undoes each configuration once its steps are done, in place
+    # of resetting the array before the next (aiecc's --reconfig-teardown).
+    teardown: bool = False
 
     def idle(self, steps, values) -> frozenset[int]:
         """Return the commands a call with ``values`` leaves without work.
@@ -91,12 +94,15 @@ def plan(
     check: bool = False,
     step_words: list[frozenset[str]] | None = None,
     fusions: Sequence[Fusion] = (),
+    teardown: bool = False,
 ) -> Plan:
     """Derive the packaging for ``recording`` on ``dev``, refusing a shipped image.
 
     ``full_elf=True`` where the device or ``check`` forbids it, or a step reading over
     ``SCRATCHPAD_WORDS`` (``step_words``, each step's by its shared symbol). A command
     never starts within the span of one of ``fusions``: its members are one call.
+    ``teardown`` undoes each configuration of a full ELF once its steps are done,
+    rather than resetting the array before the next; refused for an xclbin per step.
     """
     shipped = [op for op in recording.operators if op.external is not None]
     if shipped:
@@ -124,6 +130,16 @@ def plan(
         reasons = forced or ["one sequence, one configuration set: a full ELF"]
     else:
         reasons = [f"full_elf={full_elf}: asked for", *forced]
+    if teardown and not full_elf:
+        raise ValueError(
+            f"{recording.name}: teardown=True undoes a full ELF's configurations; "
+            f"an xclbin per step has none to undo"
+        )
+    if teardown:
+        reasons.append(
+            "teardown=True: each configuration undone once done, not the array "
+            "reset before the next"
+        )
 
     values = []
     for v in recording.values:
@@ -178,4 +194,4 @@ def plan(
                 f"a host step runs between commands: one starts at steps "
                 f"{sorted(hosted)}"
             )
-    return Plan(full_elf, reasons, values, tuple(commands))
+    return Plan(full_elf, reasons, values, tuple(commands), teardown)

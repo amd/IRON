@@ -39,6 +39,9 @@ class FullELF:
         shared_words: Design symbol -> the scratchpad word it shares.
         packing: Designs configured as one device, whose steps run without
             reconfiguring between them.
+        teardown: Undo each configuration once its steps are done, in place
+            of resetting the array before the next (aiecc's
+            ``--reconfig-teardown``); only where loads are expanded.
     """
 
     # --get-scratchpad-parameters emits the parameter table the host writes
@@ -54,11 +57,13 @@ class FullELF:
         commands: Sequence[int] = (),
         shared_words: Mapping[str, str] | None = None,
         packing: Packing = Packing(),
+        teardown: bool = False,
     ):
         self.reconfigure = reconfigure
         self.commands = tuple(commands)
         self.shared_words = dict(shared_words or {})
         self.packing = packing
+        self.teardown = teardown
         self.composition: Composition | None = None
         self.design: CompilableDesign | None = None
 

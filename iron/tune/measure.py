@@ -228,6 +228,8 @@ class Standalone:
             `False` the shared buffer stays a normal host round trip, the
             baseline a fusion is priced against.
         packing: The designs a full ELF configures as one device.
+        teardown: A full ELF undoes each configuration once done, in place of
+            the reset before the next (``FullELF``'s ``teardown``).
     """
 
     def __init__(
@@ -244,6 +246,7 @@ class Standalone:
         fuse: bool = True,
         packing: Packing = Packing(),
         build_only: bool = False,
+        teardown: bool = False,
     ):
         if any(f.edges for f in fusions) and not distinct:
             # An edge's buffer is named from its repeat-local producer and
@@ -285,7 +288,9 @@ class Standalone:
         # Configure the array every call, as a design beside others in a
         # model's image is, so one timed alone pays that too.
         packaging = (
-            FullELF(reconfigure=True, packing=packing) if full_elf else PerStep()
+            FullELF(reconfigure=True, packing=packing, teardown=teardown)
+            if full_elf
+            else PerStep()
         )
         self.sequence = Image(
             Recording.of_steps(name, steps, in_names, out_names),
@@ -885,17 +890,20 @@ class Cache:
         )
 
     @staticmethod
-    def switch_cost_key(dev) -> str:
+    def switch_cost_key(dev, teardown: bool = False) -> str:
         """Return the entry a device-configuration switch's cost at ``dev`` is kept in.
 
         The probe designs ``switch_cost`` alternates, so editing how they are generated
-        misses rather than reusing a stale cost.
+        misses rather than reusing a stale cost; a switch that tears down is its own.
         """
         designs = [
             OperatorDesign(op.resolved(dev)).compilable()
             for op in _switch_cost_probes(dev)
         ]
-        key = tuple((d.recipe_hash, d.artifact_hash) for d in designs)
+        key = (
+            *((d.recipe_hash, d.artifact_hash) for d in designs),
+            *(["teardown"] if teardown else []),
+        )
         return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
 
     def get_cycles(self, recipe_key: str) -> int | None:
@@ -1454,6 +1462,7 @@ def switch_cost(
     remeasure: bool = False,
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
+    teardown: bool = False,
 ) -> tuple[float, float]:
     """Return the cost of a device-configuration switch at ``dev``.
 
@@ -1476,6 +1485,8 @@ def switch_cost(
             `remeasure`; what is measured is written to it.
         lock: Held from the first load through releasing every probe's
             context; none taken where None.
+        teardown: Each configuration is undone once done, in place of the
+            reset before the next (``Standalone``'s ``teardown``).
 
     Returns:
         ``(fixed_us, per_core_us)``.
@@ -1487,7 +1498,7 @@ def switch_cost(
         raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
     key = None
     if cache is not None:
-        key = Cache.switch_cost_key(dev)
+        key = Cache.switch_cost_key(dev, teardown)
         if not remeasure:
             cached = cache.get_switch_cost(key)
             if cached is not None:
@@ -1504,10 +1515,11 @@ def switch_cost(
             }
             for kind, steps in kinds.items():
                 runs[(cols, kind, n)] = Standalone(
-                    f"sw_{cols}_{kind}{n}",
+                    f"sw_{cols}_{kind}{n}{'_td' if teardown else ''}",
                     steps,
                     full_elf=dev.can_dispatch_full_elf,
                     load=False,
+                    teardown=teardown and dev.can_dispatch_full_elf,
                 )
     keys = list(runs)
     building = time.perf_counter() - begun

@@ -357,6 +357,8 @@ class Composition:
             or seq.traced
             or full_elf.reconfigure
         )
+        # aiecc tears a configuration down only where its loads are expanded.
+        self.teardown = full_elf.teardown and self.expands
         self.layout = seq.layout
         self.buffer_sizes = seq.buffer_sizes
         inside = set(range(len(seq.steps))) - set(place)
@@ -425,6 +427,7 @@ class Composition:
             *([self.commands] if self.commands else []),
             *([self.packing.annealed] if self.packing.annealed else []),
             *(["expands"] if self.expands else []),
+            *(["teardown"] if self.teardown else []),
         )
         h.update(repr(state).encode())
         return h.hexdigest()[:24]
@@ -562,6 +565,7 @@ class Composition:
             [*configurations.values(), main],
             entry=entries[0],
             expand_load_pdis=self.expands or None,
+            reconfig_teardown=self.teardown or None,
         ).resolve_program()
         # aiecc places the rest with its default placer; these route only so.
         annealed = packing.annealed_devices()

@@ -209,3 +209,17 @@ def test_a_host_step_within_a_fusion_is_refused(npu2):
     recording = Shrinks().record(x=(4096,))
     with pytest.raises(ValueError, match=r"host step runs within a fusion"):
         plan(npu2, recording, fusions=(Fusion(FusionKind.PACK, (0, 1)),))
+
+
+def test_a_teardown_is_a_full_elfs_and_says_so():
+    """Check that ``teardown`` is planned for a full ELF and refused for an xclbin per step.
+
+    Which has no configurations of its own to undo.
+    """
+    rec = _recorded()
+    planned = plan(NPU2(), rec, teardown=True)
+    assert planned.full_elf and planned.teardown
+    assert any("teardown=True" in r for r in planned.reasons)
+    assert not plan(NPU2(), rec).teardown
+    with pytest.raises(ValueError, match="an xclbin per step has none to undo"):
+        plan(NPU2(), rec, full_elf=False, teardown=True)

@@ -820,7 +820,12 @@ def unbuilt_image(
         merged = merges(recording, fusions, packing, require_device())
         fusions = sorted((*fusions, *merged), key=lambda f: f.steps[0])
     packaging = (
-        FullELF(commands=plan.commands, shared_words=shared, packing=packing)
+        FullELF(
+            commands=plan.commands,
+            shared_words=shared,
+            packing=packing,
+            teardown=plan.teardown,
+        )
         if plan.full_elf
         else PerStep(check)
     )
