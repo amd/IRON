@@ -566,8 +566,35 @@ def test_a_phase_awaits_its_fills_before_the_next_phase_takes_its_channels():
 
 
 def test_a_phased_fusion_is_refused_on_an_xclbin():
+    """Refuse a phased fusion an xclbin per step would build, before any cache lookup.
+
+    A pack has no phases at all.
+    """
     with pytest.raises(ValueError, match="no phases to run apart"):
         Fusion(FusionKind.PACK, (0, 1), phased=True)
+    mul, down = _mul_down()
+    with pytest.raises(ValueError, match="an xclbin's one kernel cannot"):
+        FusedDesign(_mul_down_fusion(True), [mul.resolved(), down.resolved()])
+    FusedDesign(_mul_down_fusion(False), [mul.resolved(), down.resolved()])
+
+
+def test_a_phased_fusion_is_its_own_build():
+    """Name a phased fusion apart from its members unphased: their modules differ.
+
+    So neither hits the other's cached ELF, and both may sit in one recording.
+    """
+    names = ["m", "d"]
+    assert _mul_down_fusion(True).name(names) != _mul_down_fusion(False).name(names)
+    identities = []
+    for phased in (False, True):
+        image = Image(
+            _mul_down_recording("phased_identity", *_mul_down()),
+            FullELF(),
+            fusions=(_mul_down_fusion(phased),),
+        )
+        image._prepare()
+        identities.append(Composition(image).identity)
+    assert identities[0] != identities[1]
 
 
 def test_staged_edges_run_forward():

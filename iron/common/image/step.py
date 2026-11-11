@@ -165,12 +165,14 @@ class Fusion:
         """Return this fusion's device symbol, ``designs`` its members' design names.
 
         Content-named, so one hits the cache across processes, and distinct from any
-        member's own. Wiring is spelled by each member's place in the fusion, not in the
-        sequence, so one recurring down a model shares a symbol.
+        member's own, and a phased one's from its members unphased. Wiring is spelled by
+        each member's place in the fusion, not in the sequence, so one recurring down a
+        model shares a symbol.
         """
         wiring = ",".join(f"{p}:{o}>{c}:{i}" for p, o, c, i in self.local_edges)
+        kind = f"{self.kind.value}/phased" if self.phased else self.kind.value
         digest = hashlib.sha256(
-            f"{self.kind.value}[{'|'.join(designs)}]({wiring})".encode()
+            f"{kind}[{'|'.join(designs)}]({wiring})".encode()
         ).hexdigest()[:8]
         return f"fusion{len(designs)}_{digest}"
 

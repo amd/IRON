@@ -175,6 +175,13 @@ class FusedDesign:
                 f"{[type(op).__name__ for op in foreign]} ships its xclbin or is "
                 f"exported by another tool, which a fusion cannot build into one"
             )
+        # Here, not at generation: a cache hit never generates.
+        if fusion.phased:
+            raise ValueError(
+                f"{fusion.kind.value} fusion {fusion.steps}: a phased fusion runs a "
+                f"sequence a phase, which a full ELF dispatches in turn and an "
+                f"xclbin's one kernel cannot"
+            )
         self.fusion = fusion
         self.designs = [OperatorDesign(op, full_elf=False) for op in ops]
         # A dispatch parameter is bound by one runtime, so each member takes its
@@ -207,15 +214,7 @@ class FusedDesign:
         Each member's array, in fusion order, wired by its edges, as one device
         configuration and sequence (``fused_configuration``).
 
-        Raises:
-            ValueError: The fusion is phased: an xclbin dispatches one sequence, and a
-                phased fusion runs one a phase (a full ELF's).
         """
-        if self.fusion.phased:
-            raise ValueError(
-                f"{self.name}: a phased fusion runs a sequence a phase, which a full "
-                f"ELF dispatches in turn and an xclbin's one kernel cannot"
-            )
         configured, _ = fused_configuration(
             self.name,
             self.fusion,
