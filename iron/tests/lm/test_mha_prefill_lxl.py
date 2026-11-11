@@ -3,21 +3,34 @@
 
 """Layer-by-layer attention against an independent, stage-rounded reference."""
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.dialects.aie import AIEArch
 from aie.utils.benchmark import run_iters
 from ml_dtypes import bfloat16
 
+from iron.common.declare import Profile
 from iron.common.graph.compiled import _step_words
 from iron.common.image.packaging import plan
+from iron.lm import AttentionPrefillFused, AttentionPrefillProjectedFused
 from iron.operators.gemm import GEMM
-from iron.operators.mha_prefill_lxl import (
-    AttentionPrefillFused,
-    AttentionPrefillProjectedFused,
-)
 from iron.operators.softmax import Softmax
 from iron.tests.support.lowering import lower
 from iron.tests.support.tools import requires
+
+
+def _profile(dev):
+    profile = Profile()
+    profile.add(GEMM, tile_m=16, tile_k=64, tile_n=64)
+    profile.add(GEMM, N=64, tile_n=16)
+    profile.add(GEMM, N=128, tile_n=32 if dev.arch is AIEArch.AIE2 else 16)
+    if dev.arch is AIEArch.AIE2p:
+        profile.add(GEMM, N=256, tile_n=32)
+    for n in (192, 384, 768, 1536, 3072):
+        profile.add(GEMM, N=n, tile_n=48)
+    profile.add(Softmax, num_channels=4)
+    return profile
 
 
 def _draw(rng, shape, scale=0.5):
@@ -114,13 +127,15 @@ def test_reference(request, device, projected, causal, g):
 
 @pytest.mark.parametrize("s", [8192, 32768])
 @pytest.mark.parametrize("causal", [False, True])
-def test_long_rows_reuse_scratch_and_stream_softmax(npu2, s, causal):
+@pytest.mark.parametrize("device", ["npu1", "npu2"])
+def test_long_rows_reuse_scratch_and_stream_softmax(request, device, s, causal):
+    dev = request.getfixturevalue(device)
     op = AttentionPrefillFused(2, 1, 64, 256, s, causal)
     rec = op.record(queries=(2, s, 64), keys=(1, s, 64), values=(1, s, 64))
     gemms = [step.op for step in rec.steps if isinstance(step.op, GEMM)]
     assert all(gemm.M == op.block_rows for gemm in gemms)
     softmax = [
-        step.op.resolved(npu2) for step in rec.steps if isinstance(step.op, Softmax)
+        step.op.resolved(dev) for step in rec.steps if isinstance(step.op, Softmax)
     ]
     assert softmax[-1].streamed and softmax[-1].cols == s
     assert all(sm.rows // sm.cores <= 48 for sm in softmax if sm.streamed)
@@ -137,7 +152,7 @@ def test_long_rows_reuse_scratch_and_stream_softmax(npu2, s, causal):
     }
     if causal:
         assert op.mask.shape == (op.num_heads, op.block_rows, op.block_rows)
-    chosen = plan(npu2, rec, full_elf=True, step_words=_step_words(rec))
+    chosen = plan(dev, rec, step_words=_step_words(rec))
     assert not chosen.commands
 
 
@@ -157,6 +172,20 @@ def test_projected_model_shapes_resolve(npu2, h, g, e):
     assert rec.outputs[0].shape == (256, e)
     chosen = plan(npu2, rec, full_elf=True, step_words=_step_words(rec))
     assert not chosen.commands
+
+
+@pytest.mark.parametrize("device", ["npu1", "npu2"])
+def test_profile_reaches_nested_attention(request, device):
+    dev = request.getfixturevalue(device)
+    op, inputs, _ = _case(True)
+    op.profile = Profile()
+    op.profile.add(GEMM, tile_m=32, tile_k=64, tile_n=16)
+    op.profile.add(Softmax, num_channels=2)
+    rec = op.record(**{n: a.shape for n, a in inputs.items()})
+    gemms = [s.op.resolved(dev) for s in rec.steps if isinstance(s.op, GEMM)]
+    assert all(gemm.tile_m == 32 and gemm.tile_n == 16 for gemm in gemms)
+    softmax = [s.op for s in rec.steps if isinstance(s.op, Softmax)]
+    assert softmax and all(sm.num_channels == 2 for sm in softmax)
 
 
 @pytest.mark.parametrize(
@@ -214,6 +243,7 @@ def test_long_context_stages_lower(request, device, tmp_path):
 
 
 @pytest.mark.bench
+@pytest.mark.parametrize("tuned", [False, True], ids=["defaults", "profile"])
 @pytest.mark.parametrize("causal", [False, True], ids=["unmasked", "causal"])
 @pytest.mark.parametrize("projected", [False, True], ids=["core", "projected"])
 @pytest.mark.parametrize(
@@ -224,8 +254,10 @@ def test_long_context_stages_lower(request, device, tmp_path):
     ],
     ids=["separate", "single"],
 )
-def test_dispatch(projected, full_elf, causal, record_property):
+def test_dispatch(projected, full_elf, causal, tuned, record_property):
     op, inputs, expected = _case(projected, causal=causal)
+    if tuned:
+        op.profile = _profile(aie_utils.get_current_device())
     compiled = op.compile(full_elf=full_elf, **{n: a.shape for n, a in inputs.items()})
     try:
         actual = compiled(*inputs.values())
@@ -241,5 +273,14 @@ def test_dispatch(projected, full_elf, causal, record_property):
         assert timing is not None
         record_property("Latency", timing.median_us)
         record_property("Latency MAD", timing.mad_us)
+    finally:
+        op.release()
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_long_context_dispatch_without_profile():
+    op, inputs, expected = _case(False, h=1, s=4608)
+    try:
+        _check(op(*inputs.values()), expected, device=True)
     finally:
         op.release()

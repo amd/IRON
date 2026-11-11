@@ -4,8 +4,8 @@
 """Layer-by-layer attention prefill with grouped KV heads."""
 
 import math
-from pathlib import Path
 
+import aie.utils as aie_utils
 import numpy as np
 from ml_dtypes import bfloat16
 
@@ -18,8 +18,6 @@ from iron.operators.gemm import GEMM
 from iron.operators.rope import RoPE
 from iron.operators.softmax import Softmax
 
-_PROFILES = Path(__file__).parent / "profiles" / "mha_prefill_lxl"
-
 
 class AttentionPrefillFused(Graph):
     """Prefill over Q ``(H, S, d)`` and K/V ``(G, S, d)``; output ``(H, S, d)``.
@@ -27,8 +25,6 @@ class AttentionPrefillFused(Graph):
     ``num_heads / num_kv_groups`` adjacent query heads share one KV head.
     Inputs are already projected and rotated.
     """
-
-    profile = _PROFILES
 
     def __init__(
         self,
@@ -78,6 +74,9 @@ class AttentionPrefillFused(Graph):
 
     def body(self, queries, keys, values):
         h, g, s, d = self.num_heads, self.num_kv_groups, self.seq_len, self.head_dim
+        dev = aie_utils.get_current_device()
+        assert dev is not None
+        columns = dev.cols
         if (
             queries.shape != (h, s, d)
             or keys.shape != (g, s, d)
@@ -111,9 +110,9 @@ class AttentionPrefillFused(Graph):
                 else:
                     diagonal = Copy.step(scores[:, :, start:stop])
                     scores[:, :, start:stop] = diagonal + self.mask
-            # Cap streamed rows per core to fit program memory.
+            # Fit streamed rows with the default one channel per column.
             rows = h * self.block_rows
-            batch = rows if end <= 4096 else 256
+            batch = rows if end <= 4096 else min(256, 32 * columns)
             flat = scores.reshape(rows, end)
             for row in range(0, rows, batch):
                 part = flat[row : min(row + batch, rows)]
@@ -137,8 +136,6 @@ class AttentionPrefillProjectedFused(Graph):
     ``w_query (E, H*d)``, ``w_key/w_value (E, G*d)`` and
     ``w_output (H*d, E)``. The output is ``(S, E)``.
     """
-
-    profile = _PROFILES
 
     def __init__(
         self,
