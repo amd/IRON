@@ -213,13 +213,15 @@ def test_long_context_stages_lower(request, device, tmp_path):
         lower(stage.resolved(dev), path)
 
 
-@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.bench
 @pytest.mark.parametrize("causal", [False, True], ids=["unmasked", "causal"])
 @pytest.mark.parametrize("projected", [False, True], ids=["core", "projected"])
 @pytest.mark.parametrize(
     "full_elf",
-    [False, pytest.param(True, marks=pytest.mark.supported_devices("npu2"))],
+    [
+        pytest.param(False, marks=pytest.mark.supported_devices("npu1", "npu2")),
+        pytest.param(True, marks=pytest.mark.supported_devices("npu2")),
+    ],
     ids=["separate", "single"],
 )
 def test_dispatch(projected, full_elf, causal, record_property):
