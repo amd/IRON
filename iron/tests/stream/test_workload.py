@@ -80,10 +80,20 @@ def test_the_mapping_declares_kernels_and_no_placement(workload, k):
 
 def test_a_block_no_core_can_divide_is_no_candidate(npu2):
     labels = [label for label, _ in design.candidates(256, 512, 2048, npu2)]
-    seeds = {k: design.GEMM_BLOCKS if k == 1 else design.GEMM_BLOCKS[:1] for k in PARTITIONS}
+    seeds = {
+        k: design.GEMM_BLOCKS if k == 1 else design.GEMM_BLOCKS[:1] for k in PARTITIONS
+    }
     assert labels == [(k, b) for k in sorted(PARTITIONS) for b in seeds[k]]
     with pytest.raises(ValueError, match="hidden_dim"):
         design.candidates(256, 512, 2000, npu2, k=1)
+
+
+def test_a_sequence_too_short_for_the_large_block_offers_every_partition_the_small_one(
+    npu2,
+):
+    """128 rows over four core rows take the 32-row block only: each partition is offered it."""
+    labels = [label for label, _ in design.candidates(128, 1024, 4096, npu2)]
+    assert labels == [(k, design.GEMM_BLOCKS[-1]) for k in sorted(PARTITIONS)]
 
 
 def test_the_layers_read_what_the_exported_graph_says(workload):
