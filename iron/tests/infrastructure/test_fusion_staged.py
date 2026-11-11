@@ -178,6 +178,38 @@ def _plan(producer, output, consumer, input_) -> Staging:
     return Staging(getattr(producer, output), getattr(consumer, input_))
 
 
+def _skip():
+    """Return a residual add read by RMSNorm and, past a GEMV reducing its row, again.
+
+    Each add moves two lanes of four 256-element objects; the second add reads the
+    first's output and the GEMV's.
+    """
+    add = ElementwiseAdd(size=2048, num_aie_columns=2, tile_size=256)
+    norm = RMSNorm(rows=1, tile_size=2048)
+    proj = GEMV(M=2048, K=2048, feed_b=True, num_aie_columns=2)
+    add2 = ElementwiseAdd(size=2048, num_aie_columns=2, tile_size=256)
+    return add, norm, proj, add2
+
+
+def _skip_recording(name, add, norm, proj, add2):
+    steps = sequences.steps(
+        (add, "a", "b", "h"),
+        (norm, "h", "n"),
+        (proj, "W", "n", "g"),
+        (add2, "g", "h", "out"),
+    )
+    return Recording.of_steps(name, steps, ["a", "b", "W"], ["out"])
+
+
+def _skip_fusion():
+    return _staged(
+        Edge(0, "y", 1, "x"),
+        Edge(1, "y", 2, "B"),
+        Edge(2, "C", 3, "a"),
+        Edge(0, "y", 3, "b"),
+    )
+
+
 def _composed(recording, fusions) -> str:
     image = Image(recording, FullELF(), fusions=fusions)
     image._prepare()
@@ -382,6 +414,25 @@ def test_fan_out_to_two_of_one_design_places_each_its_own_array():
         diagnostic = places(ir.Module.parse(text))
     assert diagnostic is None, diagnostic
     assert text.count("aie.core(") == 3
+
+
+def test_a_later_reader_holds_its_lanes_whole_call():
+    """Hold a lane's whole call at a reader that takes it a phase later.
+
+    The second add reads the first's lanes only once the GEMV past the norm has its
+    row: its ends hold a lane's four objects, so the first add never waits on it while
+    the norm still needs the rest.
+    """
+    text = _composed(_skip_recording("skip_struct", *_skip()), (_skip_fusion(),))
+    with ir.Context(), ir.Location.unknown():
+        diagnostic = places(ir.Module.parse(text))
+    assert diagnostic is None, diagnostic
+    later = re.findall(
+        r"aie\.objectfifo @\S+\(%\w+, \{%\w+, %\w+\}, "
+        r"\[2 : i32, 2 : i32, 4 : i32\]\)",
+        text,
+    )
+    assert len(later) == 2, text
 
 
 def test_staged_edges_run_forward():
@@ -818,6 +869,27 @@ def _run_mlp(packaging_name: str) -> list:
     return outs
 
 
+def _run_skip(packaging_name: str) -> list:
+    """Return the skip window's output fused, then apart."""
+    packaging = {"full_elf": FullELF, "per_step": PerStep}[packaging_name]
+    outs = []
+    for fusions in ((_skip_fusion(),), ()):
+        add, norm, proj, add2 = _skip()
+        image = Image(
+            _skip_recording("skip_device", add, norm, proj, add2),
+            packaging(),
+            fusions=fusions,
+        )
+        image.compile()
+        inputs = {
+            "a": vectors(add).inputs["a"],
+            "b": vectors(add, seed=7).inputs["b"],
+            "W": proj.resolved().A.device_form(vectors(proj, seed=3).inputs["A"]),
+        }
+        outs.append(_dispatch(image.get_callable(), inputs, {"out": 2048})["out"])
+    return outs
+
+
 # Ample for two compiles and two dispatches.
 _MLP_TIMEOUT_S = 900
 
@@ -836,5 +908,24 @@ def test_mlp_window_matches_reference_and_unfused(packaging):
         )
     ).reshape(-1)
     verdict = compare(fused, ref, gate.tolerance())
+    assert verdict, verdict.detail
+    _bit_equal({"out": fused}, {"out": apart})
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("packaging", ["full_elf", "per_step"])
+def test_a_reader_a_phase_later_does_not_hang(packaging):
+    """Run a residual add read by the norm and, past the GEMV, by a second add.
+
+    In a child process a hang cannot outlive, it matches the reference and the steps
+    apart; with two-deep ends it timed out on the device.
+    """
+    fused, apart = hang.bounded(_MLP_TIMEOUT_S, _run_skip, packaging)
+    add, norm, proj, add2 = (op.resolved() for op in _skip())
+    a, b = vectors(add).inputs["a"], vectors(add, seed=7).inputs["b"]
+    h = add.reference(a, b)
+    g = proj.reference(vectors(proj, seed=3).inputs["A"], norm.reference(h))
+    ref = np.asarray(add2.reference(g, h)).reshape(-1)
+    verdict = compare(fused, ref, proj.tolerance())
     assert verdict, verdict.detail
     _bit_equal({"out": fused}, {"out": apart})
