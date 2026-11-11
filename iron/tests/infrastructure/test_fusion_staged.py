@@ -210,6 +210,45 @@ def _skip_fusion():
     )
 
 
+def _residual(mul_first: bool):
+    """Return a residual add read once, past a GEMV fed whole, and the steps' order.
+
+    The first add moves two lanes of sixteen 256-element objects into the second add,
+    its only reader; the GEMV takes the multiply's vector whole. ``mul_first`` puts
+    the multiply before the first add.
+    """
+    add = ElementwiseAdd(size=8192, num_aie_columns=2, tile_size=256)
+    mul = ElementwiseMul(size=2048, num_aie_columns=2, tile_size=1024)
+    proj = GEMV(M=8192, K=2048, feed_b=True, num_aie_columns=2)
+    add2 = ElementwiseAdd(size=8192, num_aie_columns=2, tile_size=256)
+    steps = {
+        "add": (add, "a", "b", "h"),
+        "mul": (mul, "c", "d", "m"),
+        "proj": (proj, "W", "m", "g"),
+        "add2": (add2, "g", "h", "out"),
+    }
+    order = (
+        ["mul", "add", "proj", "add2"] if mul_first else ["add", "mul", "proj", "add2"]
+    )
+    return [steps[k][0] for k in order], [steps[k] for k in order], order
+
+
+def _residual_fusion(order, phased=True) -> Fusion:
+    at = {k: i for i, k in enumerate(order)}
+    edges = (
+        Edge(at["mul"], "y", at["proj"], "B"),
+        Edge(at["proj"], "C", at["add2"], "a"),
+        Edge(at["add"], "y", at["add2"], "b"),
+    )
+    return Fusion(FusionKind.STAGED, (0, 1, 2, 3), edges, phased=phased)
+
+
+def _residual_recording(name, order, steps):
+    return Recording.of_steps(
+        name, sequences.steps(*steps), ["a", "b", "c", "d", "W"], ["out"]
+    )
+
+
 def _composed(recording, fusions) -> str:
     image = Image(recording, FullELF(), fusions=fusions)
     image._prepare()
@@ -449,6 +488,39 @@ def test_a_reader_of_a_whole_object_starts_a_phase():
     assert phases(_mul_down_fusion(True), arrays) == {0: 0, 1: 1}
 
 
+def test_a_first_reader_of_several_objects_runs_in_its_producers_phase():
+    """Keep a residual add with its only reader, the add past the GEMV, in one phase.
+
+    Its lanes move sixteen objects into an end two deep: run a phase earlier, it would
+    stall once that end fills, and its phase's awaited fills would never complete, as
+    the reader waits on the GEMV's weights the next phase sends. The multiply first,
+    the residual add runs with the GEMV and the second add; the add first, its phase
+    would precede the multiply's, out of step order, so the fusion runs in no phases.
+    """
+    for mul_first, want in ((True, {0: 0, 1: 1, 2: 1, 3: 1}), (False, None)):
+        ops, steps, order = _residual(mul_first)
+        rec = _residual_recording("residual_phases", order, steps)
+        arrays = {
+            j: BuiltArray(OperatorDesign(rec.steps[j].op.resolved())) for j in range(4)
+        }
+        if want is None:
+            with pytest.raises(ValueError, match="do not follow step order"):
+                phases(_residual_fusion(order), arrays)
+        else:
+            assert phases(_residual_fusion(order), arrays) == want
+
+
+def test_a_later_reader_may_run_phases_after_its_producer():
+    """Run the skip window's second add, a later reader of the first, two phases on."""
+    rec = _skip_recording("skip_phases", *_skip())
+    arrays = {
+        j: BuiltArray(OperatorDesign(rec.steps[j].op.resolved())) for j in range(4)
+    }
+    fusion = Fusion(FusionKind.STAGED, (0, 1, 2, 3), _skip_fusion().edges, phased=True)
+    # The norm takes the add's row whole, the GEMV the norm's: three phases.
+    assert phases(fusion, arrays) == {0: 0, 1: 1, 2: 2, 3: 2}
+
+
 def test_a_phased_fusion_takes_the_shims_channels_a_phase_at_a_time():
     """Place a fusion past the shim's sending channels once it runs a sequence a phase.
 
@@ -488,7 +560,9 @@ def test_a_phase_awaits_its_fills_before_the_next_phase_takes_its_channels():
     first = first[: first.index("aie.runtime_sequence @sequence_1")]
     starts = first.count("aiex.dma_start_task")
     assert starts == 16 and first.count("aiex.dma_await_task") == starts, first
-    assert first.rindex("aiex.dma_await_task") < first.index("aiex.dma_free_task"), first
+    assert first.rindex("aiex.dma_await_task") < first.index(
+        "aiex.dma_free_task"
+    ), first
 
 
 def test_a_phased_fusion_is_refused_on_an_xclbin():
@@ -988,5 +1062,75 @@ def test_a_reader_a_phase_later_does_not_hang(packaging):
     g = proj.reference(vectors(proj, seed=3).inputs["A"], norm.reference(h))
     ref = np.asarray(add2.reference(g, h)).reshape(-1)
     verdict = compare(fused, ref, proj.tolerance())
+    assert verdict, verdict.detail
+    _bit_equal({"out": fused}, {"out": apart})
+
+
+def _phased_window(window: str):
+    """Return a phased window's recording, fusion and inputs, by name, and its reference."""
+    if window == "mul_down":
+        # Sixteen multiply lanes then eight GEMV lanes: the phases take the shim's
+        # sending channels in turn.
+        mul, down = _mul_down(mul_cols=8)
+        rec = _mul_down_recording("phased_mul_down", mul, down)
+        fusion = _mul_down_fusion(True)
+        g, u = vectors(mul).inputs["a"], vectors(mul, seed=7).inputs["b"]
+        W = vectors(down, seed=11).inputs["A"]
+        inputs = {"g": g, "u": u, "W": down.resolved().A.device_form(W)}
+        ref = down.resolved().reference(W, mul.resolved().reference(g, u))
+        return rec, fusion, inputs, np.asarray(ref).reshape(-1), down
+    if window == "skip":
+        add, norm, proj, add2 = _skip()
+        rec = _skip_recording("phased_skip", add, norm, proj, add2)
+        fusion = Fusion(
+            FusionKind.STAGED, (0, 1, 2, 3), _skip_fusion().edges, phased=True
+        )
+        a, b = vectors(add).inputs["a"], vectors(add, seed=7).inputs["b"]
+        W = vectors(proj, seed=3).inputs["A"]
+        inputs = {"a": a, "b": b, "W": proj.resolved().A.device_form(W)}
+        h = add.resolved().reference(a, b)
+        g = proj.resolved().reference(W, norm.resolved().reference(h))
+        return (
+            rec,
+            fusion,
+            inputs,
+            np.asarray(add2.resolved().reference(g, h)).reshape(-1),
+            proj,
+        )
+    ops, steps, order = _residual(mul_first=True)
+    mul, add, proj, add2 = ops
+    rec = _residual_recording("phased_residual", order, steps)
+    a, b = vectors(add).inputs["a"], vectors(add, seed=7).inputs["b"]
+    c, d = vectors(mul).inputs["a"], vectors(mul, seed=5).inputs["b"]
+    W = vectors(proj, seed=3).inputs["A"]
+    inputs = {"a": a, "b": b, "c": c, "d": d, "W": proj.resolved().A.device_form(W)}
+    g = proj.resolved().reference(W, mul.resolved().reference(c, d))
+    ref = add2.resolved().reference(g, add.resolved().reference(a, b))
+    return rec, _residual_fusion(order), inputs, np.asarray(ref).reshape(-1), proj
+
+
+def _run_phased(window: str) -> list:
+    """Return the window's output run phased, then apart, in a full ELF."""
+    outs = []
+    for fused in (True, False):
+        rec, fusion, inputs, ref, _ = _phased_window(window)
+        image = Image(rec, FullELF(), fusions=(fusion,) if fused else ())
+        image.compile()
+        outs.append(_dispatch(image.get_callable(), inputs, {"out": ref.size})["out"])
+    return outs
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("window", ["mul_down", "skip", "residual"])
+def test_a_phased_window_matches_reference_and_unfused(window):
+    """Run a window a sequence a phase on the device, in a child a hang cannot outlive.
+
+    The multiply into the down projection takes the shim's channels in turn; the skip
+    window's second add reads the first two phases on; the residual add runs with its
+    only reader, a phase after the multiply. Each matches numpy and the steps apart.
+    """
+    fused, apart = hang.bounded(_MLP_TIMEOUT_S, _run_phased, window)
+    _, _, _, ref, gemv = _phased_window(window)
+    verdict = compare(fused, ref, gemv.resolved().tolerance())
     assert verdict, verdict.detail
     _bit_equal({"out": fused}, {"out": apart})

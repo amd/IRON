@@ -225,27 +225,55 @@ def fused_configuration(
 def phases(fusion: Fusion, arrays: Mapping[int, BuiltArray]) -> dict[int, int]:
     """Return each member's phase, the sequence of a phased fusion that runs it.
 
-    A member fed through an input whose lanes each move one object a call (GEMV's
-    fed ``B``, the whole vector) runs a phase after its producer, else in the latest
-    of its producers'. Such a consumer takes its input whole before computing, so its
-    producer finishes into the consumer's fifo without waiting on the consumer's own
-    host transfers: a sequence can end there and the next begin.
+    A phase must finish without the next phase's transfers, as a dispatch does: its
+    sequence awaits its fills, and the next takes the shim's channels after it. So a
+    member's producer finishes into the member's fifo only where that fifo holds
+    the producer's whole call: an input whose lanes each move one object a call
+    (GEMV's fed ``B``, the whole vector), which starts a phase, or a lane's later
+    reader, whose end holds the lane's call (``Operand.reader``), which may run a
+    phase or more after its producer. Any other edge, a lane's first reader taking
+    several objects, keeps producer and consumer in one phase: where the consumer
+    runs later for another input, its producer runs later with it.
 
     Raises:
-        ValueError: Members of one phase are not consecutive in ``fusion.steps``,
-            so the phases' sequences could not run in step order.
+        ValueError: The edges' demands contradict (an edge that must start a phase
+            and a chain that must not, between the same members), or members of one
+            phase are not consecutive in ``fusion.steps``, so the phases' sequences
+            could not run in step order.
     """
+    # The order BuiltArray binds readers in: by consumer in step order, then edge.
     incoming: dict[int, list[Edge]] = {}
     for e in fusion.edges:
         incoming.setdefault(e.consumer, []).append(e)
-    phase: dict[int, int] = {}
+    seen: set[tuple[int, str]] = set()
+    starts, holds, joins = [], [], []
     for j in fusion.steps:
-        phase[j] = 0
         for e in incoming.get(j, ()):
             (sink,) = [b for b in arrays[j].op.buffers if b.name == e.input]
             per_object = math.prod(sink.obj_shape)
             whole = all(n <= per_object for n in sink.moved_per_lane().values())
-            phase[j] = max(phase[j], phase[e.producer] + int(whole))
+            later = (e.producer, e.output) in seen
+            seen.add((e.producer, e.output))
+            (starts if whole else holds if later else joins).append(e)
+    phase = dict.fromkeys(fusion.steps, 0)
+    while True:
+        before = dict(phase)
+        for e in starts:
+            phase[e.consumer] = max(phase[e.consumer], phase[e.producer] + 1)
+        for e in holds:
+            phase[e.consumer] = max(phase[e.consumer], phase[e.producer])
+        for e in joins:
+            phase[e.producer] = phase[e.consumer] = max(
+                phase[e.producer], phase[e.consumer]
+            )
+        if phase == before:
+            break
+        # Consistent demands need no more phases than members; past that, they cycle.
+        if max(phase.values()) > len(fusion.steps):
+            raise ValueError(
+                f"fusion {fusion.steps}: an edge that starts a phase and a chain "
+                f"that keeps one join the same members, so it runs in no phases"
+            )
     order = [phase[j] for j in fusion.steps]
     if order != sorted(order):
         raise ValueError(

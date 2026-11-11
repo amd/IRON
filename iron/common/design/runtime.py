@@ -460,6 +460,10 @@ class MergedRuntime(Runtime):
         later operator drains. With ``await_fills`` (a phase of a phased fusion) the
         group awaits the fills as well as the drains, so the next phase's sequence,
         which may take the same shim channels and descriptors, runs once they are done.
+        An unmanaged fill (a sequence an operator writes itself, GEMV's) is never freed,
+        so its descriptors are never reused; its channel's next tasks queue behind it,
+        and ``compose.phases`` keeps every member a phase feeds able to finish without
+        the next phase.
         """
 
         def run(calls) -> None:
