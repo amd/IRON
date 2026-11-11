@@ -3,6 +3,7 @@
 
 """How every stream-dse solve runs, and the cache that keeps each one."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -61,8 +62,13 @@ def solver(monkeypatch, tmp_path):
 
     def generate_code(hardware, workload, out, mapping, options):
         calls.generate += 1
+        occupancy = [{"memory": "tile_0_2", "resident_bits": 8, "capacity_bits": 64}]
+        allocation = {"performance": {"memory_occupancy": occupancy}}
         return SimpleNamespace(
-            cycles=30.0, group_cycles=(10.0, 15.0), dispatch_cycles=5.0
+            cycles=30.0,
+            group_cycles=(10.0, 15.0),
+            dispatch_cycles=5.0,
+            context={"group_allocations": {1: None, 0: allocation}},
         )
 
     import stream.api
@@ -81,6 +87,11 @@ def test_a_solve_builds_the_cheapest_candidate_once(solver, npu2):
     assert solution.groups == tuple(tuple(g.layers) for g in candidates[-1][1])
     assert (solution.cycles, solution.group_cycles) == (30.0, (10.0, 15.0))
     assert (solution.directory / "inputs" / "workload.onnx").exists()
+    occupancy = json.loads((solution.directory / runner.OCCUPANCY).read_text())
+    assert occupancy == {
+        "0": [{"memory": "tile_0_2", "resident_bits": 8, "capacity_bits": 64}],
+        "1": None,
+    }
 
     again = runner.solve("swiglu", ("key",), workload, candidates, npu2, None)
     assert again == solution and (solver.select, solver.generate) == (1, 1)

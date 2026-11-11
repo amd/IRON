@@ -40,6 +40,8 @@ ROOT = NPU_CACHE_HOME / "stream"
 # The stream-dse hardware description of each device, by its name.
 ACCELERATORS = {"npu2": "whole_array_strix.yaml"}
 SOLUTION = "solution.json"
+# Per group, what the solve keeps resident in each memory (its memory_occupancy report).
+OCCUPANCY = "occupancy.json"
 
 
 def backend() -> str:
@@ -217,5 +219,11 @@ def solve(
             tuple(estimate.group_cycles),
             estimate.dispatch_cycles,
         )
+        allocations = estimate.context.get("group_allocations") or {}
+        occupancy = {
+            group: ((allocation or {}).get("performance") or {}).get("memory_occupancy")
+            for group, allocation in sorted(allocations.items())
+        }
+        (directory / OCCUPANCY).write_text(json.dumps(occupancy, indent=1) + "\n")
         solution.save()
         return solution
