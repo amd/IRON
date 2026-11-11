@@ -35,7 +35,7 @@ BLOCK_INDEX = (0, 2, 0)
 
 # Each kernel's scalars, after its buffers, as stream-dse's codegen calls it.
 SCALARS: dict[str, Callable[[dict[str, int]], list[Any]]] = {
-    "matmul_bf16_bf16": lambda s: [],
+    "matmul_bf16_f32": lambda s: [],
     "matmul_bf16_bf16_high": lambda s: [],
     "silu_bf16_size": lambda s: [s["m"] * s["n"]],
     "eltwise_mul_bf16_vector_size": lambda s: [s["m"] * s["n"]],

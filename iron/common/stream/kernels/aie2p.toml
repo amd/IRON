@@ -13,21 +13,31 @@ mac = { m = 8, k = 8, n = 8 }
 [family.vector]
 ops_per_cycle = 16.0
 
-[kernel.matmul_bf16_bf16]
+# A GEMM call sums its K tiles into a float accumulator of the core's own, as
+# stream-dse's GEMMs bind mm.cc (accumulate), so its calls are measured so; the
+# search picks the call shape from these rows. Measured 2026-11-11, turbo.
+[kernel.matmul_bf16_f32]
 family = "matmul"
 binding = "stream.compiler.kernels.mlir_aie:mm"
+options = { accumulate = true }
 dims = [
     { name = "k", divisor = 8 },
     { name = "n", divisor = 16 },
     { name = "m", divisor = 16 },
 ]
 cycles = [
-    { m = 64, k = 64, n = 64, cycles = 1502.0 },
-    { m = 32, k = 64, n = 64, cycles = 759.0 },
-    { m = 32, k = 32, n = 64, cycles = 542.0 },
-    { m = 32, k = 64, n = 32, cycles = 408.0 },
+    { m = 64, k = 64, n = 64, cycles = 1620.0 },
+    { m = 32, k = 64, n = 64, cycles = 815.0 },
+    { m = 32, k = 128, n = 64, cycles = 1267.0 },
+    { m = 64, k = 128, n = 32, cycles = 1306.0 },
+    { m = 32, k = 256, n = 32, cycles = 1099.0 },
+    { m = 32, k = 128, n = 32, cycles = 656.0 },
+    { m = 64, k = 64, n = 32, cycles = 851.0 },
+    { m = 32, k = 32, n = 64, cycles = 629.0 },
+    { m = 32, k = 64, n = 32, cycles = 444.0 },
+    { m = 64, k = 32, n = 64, cycles = 1220.0 },
 ]
-per_op = { cycles = 1502.0, ops = 262144 }
+per_op = { cycles = 1620.0, ops = 262144 }
 
 [kernel.matmul_bf16_bf16_high]
 family = "matmul"
