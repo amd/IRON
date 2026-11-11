@@ -7,8 +7,10 @@ from .op import (
     DOWN,
     GATE,
     PARTITIONS,
+    POST_OP_PARTITIONS,
     UP,
     SwiGLUFusedStream,
+    SwiGLUGatedStream,
     SwiGLUMulStream,
     SwiGLUProjectionStream,
     SwiGLUSiLUStream,
@@ -41,6 +43,9 @@ class SwiGLUPrefillStream(iron.Graph):
             return SwiGLUFusedStream.step(
                 x, self.w_gate, self.w_up, self.w_down, **shape
             )
+        if explorer.solution().groups in POST_OP_PARTITIONS.values():
+            hidden = SwiGLUGatedStream.step(x, self.w_gate, self.w_up, **shape)
+            return SwiGLUProjectionStream.step(hidden, self.w_down, layer=DOWN, **shape)
         gate = SwiGLUProjectionStream.step(x, self.w_gate, layer=GATE, **shape)
         up = SwiGLUProjectionStream.step(x, self.w_up, layer=UP, **shape)
         hidden = SwiGLUMulStream.step(SwiGLUSiLUStream.step(gate, **shape), up, **shape)

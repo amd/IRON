@@ -21,7 +21,9 @@ from iron.operators.swiglu_prefill_stream.op import (  # noqa: E402
     LAYERS,
     MUL,
     PARTITIONS,
+    READS,
     RESULTS,
+    SILU,
 )
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -79,3 +81,30 @@ def test_a_block_no_core_can_divide_is_no_candidate(npu2):
     assert labels == [(k, b) for k in sorted(PARTITIONS) for b in seeds[k]]
     with pytest.raises(ValueError, match="hidden_dim"):
         design.candidates(256, 512, 2000, npu2, k=1)
+
+
+def test_the_layers_read_what_the_exported_graph_says(workload):
+    produced_by = {
+        out: node.name for node in workload.graph.node for out in node.output
+    }
+    reads = {
+        node.name: tuple(produced_by[t] for t in node.input if t in produced_by)
+        for node in workload.graph.node
+    }
+    assert reads == READS
+
+
+def test_the_post_op_partition_hands_the_gate_to_the_up_projection(workload):
+    """SiLU and the product run as post-ops of the gate and up projections.
+
+    The up projection reads the gate's result from the core beside it, so
+    both are one group.
+    """
+    kernels, groups = design.mapping(2, design.GEMM_BLOCKS[-1], DIMS[2])
+    mapping = build_mapping(workload, kernels, groups)
+    front, down = mapping["fused_groups"]
+    assert front["post_ops"] == [SILU, MUL]
+    assert "post_ops" not in down
+    assert group_boundaries(workload, [front["layers"]]) == [
+        (("input", "w_gate", "w_up"), ("intermediate",))
+    ]

@@ -18,8 +18,50 @@ from iron.common.testing import Case, Testing
 GATE, UP, SILU, MUL, DOWN = "Gemm_Left", "Gemm_Right", "Silu", "Elt_Mul", "Gemm_Down"
 LAYERS = (GATE, UP, SILU, MUL, DOWN)
 RESULTS = {GATE: "left", UP: "right", SILU: "left_swished", MUL: "intermediate"}
+# The layers whose results each layer reads.
+READS = {GATE: (), UP: (), SILU: (GATE,), MUL: (SILU, UP), DOWN: (MUL,)}
+GEMMS = (GATE, UP, DOWN)
+
+
+def _post_op_groups() -> tuple[tuple[str, ...], ...]:
+    """Return each GEMM with the elementwise layers stream-dse runs on its cores as post-ops.
+
+    An elementwise layer goes with the latest GEMM whose result it reads, the
+    others it reads coming from before; a GEMM a post-op reads is the next
+    group's own, and their groups are ``_handing_groups``'.
+    """
+    owner, groups = {}, {}
+    for layer in LAYERS:
+        if layer in GEMMS:
+            owner[layer], groups[layer] = layer, [layer]
+            continue
+        owner[layer] = max((owner[r] for r in READS[layer]), key=LAYERS.index)
+        groups[owner[layer]].append(layer)
+    return tuple(tuple(group) for group in groups.values())
+
+
+def _handing_groups(groups) -> tuple[tuple[str, ...], ...]:
+    """Return ``groups`` with each one a post-op of the next reads merged into it."""
+    merged = [list(groups[0])]
+    for group in groups[1:]:
+        reads = {r for layer in group if layer not in GEMMS for r in READS[layer]}
+        if reads & set(merged[-1]):
+            merged[-1] += group
+        else:
+            merged.append(list(group))
+    return tuple(tuple(group) for group in merged)
+
+
 # Each partition stream-dse may choose, by its number of fused groups.
 PARTITIONS = {1: (LAYERS,), 5: tuple((layer,) for layer in LAYERS)}
+# The partition whose elementwise layers run as post-ops of the GEMMs, a
+# post-op reading what the GEMM beside it hands on core to core: a core
+# reads two operands and the post-op's input over its DMA channels only from
+# the core whose memory it shares.
+POST_OP_PARTITIONS = {
+    len(groups): groups for groups in (_handing_groups(_post_op_groups()),)
+}
+PARTITIONS = dict(sorted((PARTITIONS | POST_OP_PARTITIONS).items()))
 
 
 def _bf16(x):
@@ -158,6 +200,34 @@ class SwiGLUFusedStream(_SwiGLUStream):
         up = _bf16(x @ np.asarray(w_up, dtype=np.float32))
         hidden = _mul(_silu(gate), up)
         return hidden @ np.asarray(w_down, dtype=np.float32)
+
+    def tolerance(self) -> Tolerance:
+        return GEMM_TOLERANCE
+
+
+class SwiGLUGatedStream(_SwiGLUStream):
+    """The gate and up projections and their gated product as one fused group.
+
+    ``SiLU(x @ w_gate) * (x @ w_up)`` over ``(seq_len, hidden_dim)``, the
+    SiLU and the product run as post-ops on the GEMMs' cores.
+    """
+
+    x = In(_SwiGLUStream.seq_len, _SwiGLUStream.embedding_dim, dtype=bfloat16)
+    w_gate = In(_SwiGLUStream.embedding_dim, _SwiGLUStream.hidden_dim, dtype=bfloat16)
+    w_up = In(_SwiGLUStream.embedding_dim, _SwiGLUStream.hidden_dim, dtype=bfloat16)
+    y = Out(_SwiGLUStream.seq_len, _SwiGLUStream.hidden_dim, dtype=bfloat16)
+
+    def layers(self):
+        return next(g for gs in POST_OP_PARTITIONS.values() for g in gs if MUL in g)
+
+    def ops(self) -> int:
+        return 4 * self.seq_len * self.embedding_dim * self.hidden_dim
+
+    def reference(self, x, w_gate, w_up):
+        x = np.asarray(x, dtype=np.float32)
+        gate = _bf16(x @ np.asarray(w_gate, dtype=np.float32))
+        up = _bf16(x @ np.asarray(w_up, dtype=np.float32))
+        return _mul(_silu(gate), up)
 
     def tolerance(self) -> Tolerance:
         return GEMM_TOLERANCE

@@ -21,7 +21,18 @@ from iron.common.stream.hardware import ComputeArray
 from iron.common.stream.mapping import FusedGroup
 from iron.common.stream.workload import export_workload
 
-from .op import DOWN, GATE, LAYERS, MUL, PARTITIONS, RESULTS, SILU, UP
+from .op import (
+    DOWN,
+    GATE,
+    GEMMS,
+    LAYERS,
+    MUL,
+    PARTITIONS,
+    POST_OP_PARTITIONS,
+    RESULTS,
+    SILU,
+    UP,
+)
 
 # Each GEMM block a candidate seeds its tile search with, as
 # (sequence, embedding, hidden), largest first. A partition with one GEMM
@@ -93,7 +104,15 @@ def mapping(k: int, block, hidden_dim: int) -> tuple[dict[str, dict], list[Fused
         DOWN: gemm(sequence, hidden, embedding),
     }
     groups = [
-        FusedGroup(f"Fused_Group_{i + 1}", layers)
+        FusedGroup(
+            f"Fused_Group_{i + 1}",
+            layers,
+            post_ops=(
+                tuple(layer for layer in layers if layer not in GEMMS)
+                if k in POST_OP_PARTITIONS
+                else ()
+            ),
+        )
         for i, layers in enumerate(PARTITIONS[k])
     ]
     return kernels, groups
@@ -102,7 +121,8 @@ def mapping(k: int, block, hidden_dim: int) -> tuple[dict[str, dict], list[Fused
 def fits(k: int, block, seq_len: int, embedding_dim: int, hidden_dim: int, grid):
     """Return why no core of ``grid`` can take ``block`` at this size, else None."""
     sequence, embedding, hidden = block
-    split = grid.num_columns if len(PARTITIONS[k]) == len(LAYERS) else 2
+    alone = all(len(set(group) & set(GEMMS)) <= 1 for group in PARTITIONS[k])
+    split = grid.num_columns if alone else 2
     if seq_len % grid.num_rows or seq_len < sequence * grid.num_rows:
         return (
             f"seq_len ({seq_len}) must be a multiple of {grid.num_rows} and at "

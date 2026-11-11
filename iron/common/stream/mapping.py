@@ -27,11 +27,14 @@ class FusedGroup:
         name: The group's name in the mapping.
         layers: Its nodes, by name.
         intra_core_tiling: ``(node, dim, tile)`` entries.
+        post_ops: Its elementwise nodes that stream-dse runs on the cores
+            of the GEMM producing their input, at its output tile.
     """
 
     name: str
     layers: Sequence[str]
     intra_core_tiling: Sequence[tuple[str, str, int]] = ()
+    post_ops: Sequence[str] = ()
 
 
 def group_boundaries(
@@ -117,6 +120,7 @@ def build_mapping(
                     {"dim": f"{node}.{dim}", "tile": tile}
                     for node, dim, tile in group.intra_core_tiling
                 ],
+                **({"post_ops": list(group.post_ops)} if group.post_ops else {}),
             }
             for group in groups
         ],
