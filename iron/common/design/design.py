@@ -357,7 +357,11 @@ def configuration(
             f"{name}: its traced arrays ask for trace sizes {sorted(sizes)}; one "
             f"configuration has one trace buffer, so give them one size"
         )
-    merge = MergedRuntime.fuse if fuse else MergedRuntime.merge
+    merge = (
+        functools.partial(MergedRuntime.fuse, await_fills=bool(phases))
+        if fuse
+        else MergedRuntime.merge
+    )
     runtimes = (
         [
             merge(

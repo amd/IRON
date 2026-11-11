@@ -473,6 +473,24 @@ def test_a_phased_fusion_takes_the_shims_channels_a_phase_at_a_time():
     assert "aiex.run @sequence_1(" in text and "aiex.run @sequence_1(" not in whole
 
 
+def test_a_phase_awaits_its_fills_before_the_next_phase_takes_its_channels():
+    """End a phase only once its fills complete, as a dispatch ends.
+
+    mlir-aie lets the next phase's sequence reuse the shim channels and descriptors the
+    phase used; freed without an await (the multiply's phase drains nothing), they were
+    reused in flight and Llama decode's 9-step window hung at 8 GEMV lanes.
+    """
+    text = _composed(
+        _mul_down_recording("awaited_phases", *_mul_down(mul_cols=8)),
+        (_mul_down_fusion(True),),
+    )
+    first = text[text.index("aie.runtime_sequence(") :]
+    first = first[: first.index("aie.runtime_sequence @sequence_1")]
+    starts = first.count("aiex.dma_start_task")
+    assert starts == 16 and first.count("aiex.dma_await_task") == starts, first
+    assert first.rindex("aiex.dma_await_task") < first.index("aiex.dma_free_task"), first
+
+
 def test_a_phased_fusion_is_refused_on_an_xclbin():
     with pytest.raises(ValueError, match="no phases to run apart"):
         Fusion(FusionKind.PACK, (0, 1), phased=True)

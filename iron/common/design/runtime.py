@@ -62,6 +62,9 @@ class OperatorRuntime(Runtime):
         self._queues: dict[str, list[Task]] = {}
         self._deferred: list[Task] = []
         self.group: TaskGroup | None = None
+        # A phased fusion's phase awaits its fills too: its descriptors and shim
+        # channels are reused by the next phase's sequence only once they complete.
+        self.await_fills = False
         # Raises if any stream of a built array is unbound. A stream kept
         # on-chip has no host end.
         lanes = [
@@ -303,7 +306,8 @@ class OperatorRuntime(Runtime):
                 queue.pop(0).await_()
             common = dict(wait=True, managed=False)
         elif managed:
-            common = dict(wait=wait, group=group)
+            waited = wait or (verb == "fill" and self.await_fills)
+            common = dict(wait=waited, group=group)
         else:
             if group is not None:
                 raise ValueError("an unmanaged transfer joins no group")
@@ -448,12 +452,14 @@ class MergedRuntime(Runtime):
         return merged
 
     @classmethod
-    def fuse(cls, runtimes, name=None) -> MergedRuntime:
+    def fuse(cls, runtimes, name=None, await_fills: bool = False) -> MergedRuntime:
         """Operator runtimes whose streams meet on-chip, as one sequence.
 
         Each runs its preamble, then all their transfers go in one task group that
         finishes once (``task_group``), since an operator's input completes only once a
-        later operator drains.
+        later operator drains. With ``await_fills`` (a phase of a phased fusion) the
+        group awaits the fills as well as the drains, so the next phase's sequence,
+        which may take the same shim channels and descriptors, runs once they are done.
         """
 
         def run(calls) -> None:
@@ -469,10 +475,12 @@ class MergedRuntime(Runtime):
             for runtime, _ in calls:
                 token = active_runtime.set(runtime)
                 runtime.group = tg
+                runtime.await_fills = await_fills
                 try:
                     runtime.run()
                 finally:
                     runtime.group = None
+                    runtime.await_fills = False
                     active_runtime.reset(token)
             tg.finish()
             for runtime, _ in calls:
