@@ -27,8 +27,9 @@ namespace
 
 constexpr std::uint32_t kMaxHeader = 1 << 20;
 constexpr std::uint32_t kProtocolVersion = 1;
-constexpr std::uint32_t kCapabilities =
-    static_cast<std::uint32_t>(Capability::CausalLM) | static_cast<std::uint32_t>(Capability::Embeddings);
+constexpr std::uint32_t kCapabilities = static_cast<std::uint32_t>(Capability::CausalLM) |
+                                        static_cast<std::uint32_t>(Capability::Embeddings) |
+                                        static_cast<std::uint32_t>(Capability::EmbeddingRequests);
 // Missing handshake fields mean the original protocol; never extend this mask.
 constexpr std::uint32_t kLegacyCapabilities = 0b11;
 
@@ -214,16 +215,15 @@ void Worker::reset()
     request({{"command", "reset"}});
 }
 
-std::vector<float> Worker::embed(const std::string &text, const std::string &task, std::uint32_t dimensions)
+std::vector<float> Worker::embed_request(const nlohmann::json &options, std::uint64_t &prompt_tokens)
 {
-    if (!supports(Capability::Embeddings))
-        throw std::runtime_error("IRON server does not support embeddings");
-    auto response = request({{"command", "embed"}, {"task", task}, {"dimensions", dimensions}, {"size", text.size()}},
-                            text.data(),
-                            text.size());
+    if (!supports(Capability::EmbeddingRequests))
+        throw std::runtime_error("IRON server lacks JSON embedding requests; update IRON");
+    const auto payload = options.dump();
+    auto response = request({{"command", "embed_request"}, {"size", payload.size()}}, payload.data(), payload.size());
     try {
-        const std::size_t count = response.at("count").get<std::size_t>();
-        std::vector<float> values(count);
+        std::vector<float> values(response.at("count").get<std::size_t>());
+        prompt_tokens = response.at("prompt_tokens").get<std::uint64_t>();
         read_all(values.data(), values.size() * sizeof(values[0]));
         return values;
     } catch (...) {

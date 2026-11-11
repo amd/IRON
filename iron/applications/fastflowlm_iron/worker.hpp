@@ -17,6 +17,7 @@ namespace flm::iron
 enum class Capability : std::uint32_t {
     CausalLM = 1 << 0, // logits and reset
     Embeddings = 1 << 1,
+    EmbeddingRequests = 1 << 2, // model-specific JSON and token usage
 };
 
 class Worker
@@ -29,7 +30,7 @@ class Worker
     Worker &operator=(const Worker &) = delete;
 
     std::vector<std::uint16_t> logits(const std::vector<int> &tokens);
-    std::vector<float> embed(const std::string &text, const std::string &task, std::uint32_t dimensions = 768);
+    std::vector<float> embed_request(const nlohmann::json &options, std::uint64_t &prompt_tokens);
     void reset();
     bool supports(Capability capability) const noexcept
     {

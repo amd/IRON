@@ -5,7 +5,8 @@
 
 ``load_model`` offers ``protocol_version`` and a ``capabilities`` bitmask;
 the reply echoes the version and the intersection of supported bits. Bits
-are independent, never reassigned: 0 is logits + reset, 1 is embeddings.
+are independent, never reassigned: 0 is logits + reset, 1 is embeddings,
+2 is model-specific JSON embedding requests with token usage.
 Only use an optional feature when its bit was negotiated. Unknown bits are
 ignored; incompatible payload or command changes require a new version.
 Keep the initial length-prefixed JSON exchange readable across versions.
@@ -32,7 +33,8 @@ from iron.applications import model_class
 PROTOCOL_VERSION = 1
 CAUSAL_LM = 1 << 0
 EMBEDDINGS = 1 << 1
-CAPABILITIES = CAUSAL_LM | EMBEDDINGS
+EMBEDDING_REQUESTS = 1 << 2
+CAPABILITIES = CAUSAL_LM | EMBEDDINGS | EMBEDDING_REQUESTS
 LEGACY_CAPABILITIES = 0b11
 
 
@@ -120,6 +122,17 @@ def serve(input_stream, output_stream):
                     dtype="<f4",
                 )
                 send(output_stream, {"ok": True, "count": value.size}, value.tobytes())
+            elif name == "embed_request":
+                options = json.loads(read_exact(input_stream, command["size"]))
+                if model is None:
+                    raise RuntimeError("No model is loaded")
+                value, prompt_tokens = model.embed_request(options)
+                value = np.asarray(value, dtype="<f4")
+                send(
+                    output_stream,
+                    {"ok": True, "count": value.size, "prompt_tokens": prompt_tokens},
+                    value.tobytes(),
+                )
             elif name == "close":
                 send(output_stream, {"ok": True})
                 return
@@ -128,7 +141,9 @@ def serve(input_stream, output_stream):
         except Exception as error:
             # Keep even escaped diagnostics below the client's 1 MiB header limit.
             reply = {"ok": False, "error": str(error)[:4096]}
-            if command.get("command") == "embed" and isinstance(error, ValueError):
+            if command.get("command") in ("embed", "embed_request") and isinstance(
+                error, ValueError
+            ):
                 reply["invalid_argument"] = True
             send(output_stream, reply)
 

@@ -48,3 +48,44 @@ in each of `/srv/fastflowlm/models/llama3.2-1b-instruct/` and
 `/srv/fastflowlm/models/embeddinggemma-2/`. Set `FLM_MODEL_PATH` to another directory
 containing `models/` to reuse local weights. No token is needed when weights
 are already present.
+
+## Embedding requests
+
+`embeddinggemma-2:740m` accepts a string `input` (or a batch of strings), an
+optional `task`, document `title`, and `dimensions` (768, 512, 256, or 128;
+default 768). Each output is normalized. Options stay in the request JSON;
+IRON formats and tokenizes the text, and reports processed tokens including
+prefixes and special tokens. Unknown options or unsupported values return 400.
+A title is accepted only for document tasks and defaults to `none`.
+
+Task names are case-sensitive and specific to this model:
+
+| Names | Prompt |
+|---|---|
+| Omitted, empty, `query`, `SearchQuery`, `Retrieval-query`, `Retrieval`, `BitextMining`, `Reranking` | `task: search result \| query: ` |
+| `document`, `Document`, `Retrieval-document` | `title: <title> \| text: ` |
+| `Classification`, `MultilabelClassification` | `task: classification \| query: ` |
+| `Clustering` | `task: clustering \| query: ` |
+| `CodeRetrieval`, `InstructionRetrieval` | `task: code retrieval \| query: ` |
+| `FactChecking` | `task: fact checking \| query: ` |
+| `QuestionAnswering` | `task: question answering \| query: ` |
+| `SentenceSimilarity`, `STS`, `PairClassification`, `Summarization` | `task: sentence similarity \| query: ` |
+
+These aliases select prompts, not downstream scoring or classification operations.
+For example, `Reranking` uses the query prompt; embed candidate documents with
+`document`. Other models can define different tasks and options.
+
+```json
+{"model":"embeddinggemma-2:740m","input":"Paris is in France.","task":"document","title":"France","dimensions":128}
+```
+
+To keep chat and embedding engines loaded in the same server:
+
+```bash
+flm serve llama3.2-iron:1b -e embeddinggemma-2:740m --ctx-len 2048 --model-extension "$PWD/build/plugin/extension.json"
+```
+
+Chat and embedding requests use their respective engines; the client connects
+them into a retrieval workflow. The integration test embeds documents between
+two chat turns, checking that chat state survives. The plugin requires the IRON
+server's JSON embedding request capability; rebuild/update both together.

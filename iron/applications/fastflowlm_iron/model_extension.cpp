@@ -39,7 +39,7 @@ struct Model {
     std::vector<int> tokens, saved;
     std::vector<uint16_t> logits;
     std::vector<float> embedding;
-    uint32_t capacity = 0, limit = 0, dimensions = 768;
+    uint32_t capacity = 0, limit = 0;
     void Run(flm_bf16_view_v1 *out)
     {
         if (tokens.empty() || tokens.size() > limit)
@@ -176,22 +176,27 @@ int LoadEmbedding(void *object,
         const auto info = nlohmann::json::parse(Text(metadata));
         m.worker.reset();
         m.worker = std::make_unique<Worker>(Text(path), info.at("iron_model").get<std::string>());
-        m.dimensions = info.value("embedding_dimensions", 768u);
+        if (!m.worker->supports(flm::iron::Capability::EmbeddingRequests))
+            throw std::runtime_error("IRON server lacks JSON embedding requests; update IRON");
     });
 }
 int Embed(void *object,
-          flm_span_v1 text,
-          flm_span_v1 task,
-          uint32_t dimensions,
-          flm_f32_view_v1 *out,
+          flm_span_v1 request,
+          const flm_cancellation_v1 *cancellation,
+          flm_embedding_result_v1 *out,
           const flm_error_sink_v1 *error)
 {
+    if (out->struct_size < FLM_EMBEDDING_RESULT_V1_MIN_SIZE)
+        return FLM_MODEL_EXTENSION_STATUS_UNSUPPORTED;
+    if (cancellation && cancellation->is_cancelled(cancellation->context))
+        return FLM_MODEL_EXTENSION_STATUS_CANCELLED;
     return Guard(error, [&] {
         auto &m = Get(object);
         if (!m.worker)
             throw std::runtime_error("IRON embedding model is not loaded");
-        m.embedding = m.worker->embed(Text(text), Text(task), dimensions ? dimensions : m.dimensions);
-        *out = {m.embedding.data(), m.embedding.size()};
+        uint64_t prompt_tokens = 0;
+        m.embedding = m.worker->embed_request(nlohmann::json::parse(Text(request)), prompt_tokens);
+        *out = {sizeof(*out), m.embedding.data(), m.embedding.size(), prompt_tokens};
     });
 }
 int CreateEmbedding(void *,

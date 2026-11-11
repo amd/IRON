@@ -61,12 +61,12 @@ int ServeFake()
             nlohmann::json reply = {{"ok", true}};
             if (model != "legacy") {
                 TEST_REQUIRE(command.at("protocol_version") == 1);
-                TEST_REQUIRE(command.at("capabilities") == 3);
+                TEST_REQUIRE(command.at("capabilities") == 7);
                 reply["protocol_version"] = model == "wrong_version" ? 2 : 1;
-                reply["capabilities"] = model == "embedding_only" ? 2
+                reply["capabilities"] = model == "embedding_only" ? 6
                                         : model == "causal_only"  ? 1
-                                        : model == "future"       ? 7
-                                                                  : 3;
+                                        : model == "future"       ? 15
+                                                                  : 7;
             }
             send(reply);
             if (model == "dies")
@@ -90,15 +90,17 @@ int ServeFake()
                                                 static_cast<std::uint16_t>(tokens.size())};
                 send({{"ok", true}, {"count", 2}}, values, sizeof(values));
             }
-        } else if (name == "embed") {
+        } else if (name == "embed_request") {
             std::string text(command.at("size").get<std::size_t>(), '\0');
             read(text.data(), text.size());
-            if (command.at("task") == "unknown") {
+            const auto options = nlohmann::json::parse(text);
+            if (options.value("task", "") == "unknown") {
                 send({{"ok", false}, {"error", "Unsupported task"}, {"invalid_argument", true}});
                 continue;
             }
-            const float values[] = {static_cast<float>(text.size()), command.at("dimensions").get<float>()};
-            send({{"ok", true}, {"count", 2}}, values, sizeof(values));
+            const float values[] = {static_cast<float>(options.at("input").get<std::string>().size()),
+                                    options.value("dimensions", 768.0f)};
+            send({{"ok", true}, {"count", 2}, {"prompt_tokens", 9}}, values, sizeof(values));
         } else {
             TEST_REQUIRE(name == "reset" || name == "close");
             send({{"ok", true}});
@@ -124,18 +126,26 @@ int main(int argc, char **argv)
     llama.reset();
     TEST_REQUIRE(!llama.poisoned());
 
+    uint64_t prompt_tokens = 0;
     flm::iron::Worker embedding("/unused", "embedding_gemma2");
-    RequireContains(RequireThrows([&] { embedding.embed("hello", "unknown"); }), "Unsupported task");
+    RequireContains(
+        RequireThrows([&] { embedding.embed_request({{"input", "hello"}, {"task", "unknown"}}, prompt_tokens); }),
+        "Unsupported task");
     TEST_REQUIRE(!embedding.poisoned());
-    const auto result = embedding.embed("hello", "query", 128);
+    const auto result =
+        embedding.embed_request({{"input", "hello"}, {"task", "query"}, {"dimensions", 128}}, prompt_tokens);
     TEST_REQUIRE(result == std::vector<float>({5.0f, 128.0f}));
+    TEST_REQUIRE(prompt_tokens == 9);
 
     using flm::iron::Capability;
     for (const char *model : {"legacy", "future"}) {
         flm::iron::Worker compatible("/unused", model);
         TEST_REQUIRE(compatible.supports(Capability::CausalLM));
         TEST_REQUIRE(compatible.supports(Capability::Embeddings));
-        TEST_REQUIRE(!compatible.supports(static_cast<Capability>(4)));
+        TEST_REQUIRE(!compatible.supports(static_cast<Capability>(8)));
+        if (std::string(model) == "legacy")
+            RequireContains(RequireThrows([&] { compatible.embed_request({{"input", "hi"}}, prompt_tokens); }),
+                            "update IRON");
         TEST_REQUIRE(compatible.logits({26}) == std::vector<std::uint16_t>({26, 1}));
     }
     flm::iron::Worker embedding_only("/unused", "embedding_only");
@@ -143,11 +153,13 @@ int main(int argc, char **argv)
     RequireContains(RequireThrows([&] { embedding_only.logits({1}); }), "support");
     RequireContains(RequireThrows([&] { embedding_only.reset(); }), "support");
     TEST_REQUIRE(!embedding_only.poisoned());
-    TEST_REQUIRE(embedding_only.embed("hello", "query", 128) == result);
+    TEST_REQUIRE(embedding_only.embed_request({{"input", "hello"}, {"task", "query"}, {"dimensions", 128}},
+                                              prompt_tokens) == result);
 
     flm::iron::Worker causal_only("/unused", "causal_only");
     TEST_REQUIRE(!causal_only.supports(Capability::Embeddings));
-    RequireContains(RequireThrows([&] { causal_only.embed("hello", "query"); }), "support");
+    RequireContains(RequireThrows([&] { causal_only.embed_request({{"input", "hello"}}, prompt_tokens); }),
+                    "update IRON");
     TEST_REQUIRE(!causal_only.poisoned());
     causal_only.reset();
     RequireContains(RequireThrows([] { flm::iron::Worker incompatible("/unused", "wrong_version"); }),

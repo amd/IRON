@@ -77,13 +77,21 @@ void test_plugin()
     const auto metadata = Span("{\"iron_model\":\"embedding_gemma2\"}");
     TEST_REQUIRE(emb.load(emb.object, Span("/unused"), metadata, 1, nullptr) != 0);
     TEST_REQUIRE(emb.load(emb.object, Span("/unused"), metadata, 0, nullptr) == 0);
-    flm_f32_view_v1 vector{};
-    TEST_REQUIRE(emb.embed(emb.object, Span("hello"), Span("unknown"), 0, &vector, nullptr) ==
+    flm_embedding_result_v1 vector{};
+    vector.struct_size = sizeof(vector);
+    TEST_REQUIRE(emb.embed(emb.object, Span(R"({"input":"hello","task":"unknown"})"), nullptr, &vector, nullptr) ==
                  FLM_MODEL_EXTENSION_STATUS_INVALID_ARGUMENT);
-    TEST_REQUIRE(emb.embed(emb.object, Span("hello"), Span(""), 0, &vector, nullptr) == 0);
+    TEST_REQUIRE(emb.embed(emb.object, Span(R"({"input":"hello"})"), nullptr, &vector, nullptr) == 0);
     TEST_REQUIRE(vector.size == 2 && vector.data[0] == 5 && vector.data[1] == 768);
-    TEST_REQUIRE(emb.embed(emb.object, Span("hello"), Span("document"), 128, &vector, nullptr) == 0);
-    TEST_REQUIRE(vector.data[1] == 128);
+    TEST_REQUIRE(emb.embed(emb.object,
+                           Span(R"({"input":"hello","task":"document","title":"France","dimensions":128})"),
+                           nullptr,
+                           &vector,
+                           nullptr) == 0);
+    TEST_REQUIRE(vector.data[1] == 128 && vector.prompt_tokens == 9);
+    const flm_cancellation_v1 cancelled{nullptr, [](void *) { return 1; }};
+    TEST_REQUIRE(emb.embed(emb.object, Span("{}"), &cancelled, &vector, nullptr) ==
+                 FLM_MODEL_EXTENSION_STATUS_CANCELLED);
     emb.destroy(emb.object);
 }
 } // namespace

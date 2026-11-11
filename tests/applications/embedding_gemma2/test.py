@@ -195,6 +195,40 @@ def test_text_task_defaults_and_validation():
         processor.encode("hello", "unknown")
 
 
+def test_embedding_request():
+    """Format titles before tokenization and reject invalid request options."""
+    processor = TextProcessor.__new__(TextProcessor)
+    processor.config = Config()
+    processor.tokenizer = SimpleNamespace(
+        encode=lambda text: SimpleNamespace(ids=list(text.encode()))
+    )
+    model = SimpleNamespace(
+        config=Config(),
+        processor=processor,
+        encode=lambda tokens, dims: (bytes(tokens).decode(), dims),
+    )
+    request = {
+        "input": "hello",
+        "task": "document",
+        "title": "World",
+        "dimensions": 128,
+    }
+    vector, count = EmbeddingGemma.embed_request(model, request)
+    assert vector == ("title: World | text: hello", 128)
+    assert count == len(vector[0])
+    for field, value in (
+        ("title", 7),
+        ("dimensions", 0),
+        ("dimensions", 128.0),
+        ("dimensions", True),
+        ("task", "query"),
+        ("input", {}),
+        ("unknown_option", True),
+    ):
+        with pytest.raises(ValueError):
+            EmbeddingGemma.embed_request(model, {**request, field: value})
+
+
 @pytest.fixture(scope="module")
 def processor():
     require(DIRECTORY / "tokenizer.json")

@@ -94,6 +94,17 @@ def test_model(tmp_path, installation, tag, name):
     (tmp_path / "models" / model.name).symlink_to(
         model.resolve(), target_is_directory=True
     )
+    if name == "llama3.2-1b-instruct":
+        embedding = root / "models/embeddinggemma-2"
+        require(
+            embedding / "model.safetensors",
+            embedding / "tokenizer.json",
+            embedding / "tokenizer_config.json",
+            embedding / "config.json",
+        )
+        (tmp_path / "models/embeddinggemma-2").symlink_to(
+            embedding.resolve(), target_is_directory=True
+        )
     env["FLM_MODEL_PATH"] = str(tmp_path)
     env["FLM_MODELINFO_PATH"] = str(installation / "install/share/flm/model_info.json")
     with socket.socket() as sock:
@@ -106,13 +117,19 @@ def test_model(tmp_path, installation, tag, name):
             [
                 "bash",
                 "-c",
-                'source "$1" && exec flm serve "$3" '
-                '--ctx-len 2048 --port "$2" --model-extension "$4"',
+                'source "$1" && FLM_MODEL_PATH="$5" exec flm serve "$3" '
+                '--ctx-len 2048 --port "$2" --model-extension "$4" "${@:6}"',
                 "bash",
                 str(installation / "install/flm_env.sh"),
                 str(port),
                 "Ollama/" + tag,
                 str(installation / "plugin/extension.json"),
+                str(tmp_path),
+                *(
+                    ["-e", "Ollama/embeddinggemma-2:740m"]
+                    if name == "llama3.2-1b-instruct"
+                    else []
+                ),
             ],
             env=env,
             stdout=output,
@@ -216,6 +233,26 @@ def test_model(tmp_path, installation, tag, name):
                 print(answer)
                 assert "paris" in answer.lower()
                 assert reply["usage"]["completion_tokens"] > 1
+                # Exercise the embedding engine between two turns of the same chat.
+                document = {
+                    "model": "embeddinggemma-2:740m",
+                    "input": "Paris is in France.",
+                    "task": "document",
+                    "dimensions": 128,
+                }
+                plain = post(url, "/v1/embeddings", document)
+                document["title"] = "Cities of Europe"
+                titled = post(url, "/v1/embeddings", document)
+                vector = np.asarray(titled["data"][0]["embedding"])
+                assert vector.shape == (128,) and np.isfinite(vector).all()
+                np.testing.assert_allclose(np.linalg.norm(vector), 1, atol=0.02)
+                assert not np.allclose(vector, plain["data"][0]["embedding"])
+                assert (
+                    titled["usage"]["prompt_tokens"]
+                    > plain["usage"]["prompt_tokens"]
+                    > 0
+                )
+                print("Chat + -e: title reaches embedding provider; chat continues")
                 messages.extend(
                     [
                         {"role": "assistant", "content": answer},

@@ -163,7 +163,9 @@ def test_server_keeps_diagnostics_off_the_pipe():
     assert b"native output" in result.stderr
 
 
-@pytest.mark.parametrize("offered,agreed", [(0, 0), (1, 1), (2, 2), (3, 3), (7, 3)])
+@pytest.mark.parametrize(
+    "offered,agreed", [(0, 0), (1, 1), (2, 2), (3, 3), (7, 7), (15, 7)]
+)
 def test_server_negotiates_capabilities(monkeypatch, offered, agreed):
     monkeypatch.setattr(lm_server, "load_model", lambda command: object())
     output = io.BytesIO()
@@ -248,3 +250,35 @@ def test_embedding_task_passthrough_and_recovery(monkeypatch, task, invalid_task
     assert len(json.dumps(replies[1]).encode()) < 1 << 20  # C++ worker's header limit.
     assert replies[2] == {"ok": True, "count": 1}
     assert replies[3] == np.asarray([5], dtype=np.float32).tobytes()
+
+
+def test_json_embedding_request(monkeypatch):
+    class Model:
+        def embed_request(self, options):
+            if options["task"] == "unknown":
+                raise ValueError("Unsupported task")
+            assert options == {
+                "input": {"text": "hello", "title": "World"},
+                "task": "model-specific",
+                "dimensions": 2,
+            }
+            return np.asarray([1, 2], np.float32), 7
+
+    monkeypatch.setattr(lm_server, "load_model", lambda _: Model())
+    commands = request({"command": "load_model", "capabilities": 7})
+    for task in ("unknown", "model-specific"):
+        payload = json.dumps(
+            {
+                "input": {"text": "hello", "title": "World"},
+                "task": task,
+                "dimensions": 2,
+            }
+        ).encode()
+        commands += request({"command": "embed_request", "size": len(payload)}, payload)
+    output = io.BytesIO()
+    lm_server.serve(io.BytesIO(commands), output)
+    replies = responses(output.getvalue(), [4])
+    assert replies[0]["capabilities"] == 7
+    assert replies[1]["invalid_argument"]
+    assert replies[2] == {"ok": True, "count": 2, "prompt_tokens": 7}
+    assert replies[3] == np.asarray([1, 2], dtype="<f4").tobytes()

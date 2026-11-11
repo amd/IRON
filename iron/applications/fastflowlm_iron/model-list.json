@@ -145,8 +145,7 @@
           }
         ],
         "model_kind": "embedding",
-        "frontend_provider": "iron",
-        "embedding_dimensions": 768
+        "frontend_provider": "iron"
       }
     }
   }
