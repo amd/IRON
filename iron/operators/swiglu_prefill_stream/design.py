@@ -39,6 +39,9 @@ from .op import (
 # per group takes the first only: stream-dse's tile search tries every call
 # the kernel library measures for a group of one kernel.
 GEMM_BLOCKS = ((64, 64, 64), (32, 32, 64))
+# The widest embedding a GEMM with post-ops takes per call: a core has room
+# for the tile its post-ops read beside its float sum only below the 64 block.
+POST_OP_EMBEDDING = 32
 # The widest piece of a row one elementwise core takes when it has a layer
 # to itself.
 ELEMENTWISE_WIDTH = 2048
@@ -96,9 +99,13 @@ def mapping(k: int, block, hidden_dim: int) -> tuple[dict[str, dict], list[Fused
         elementwise = dict(layout="contiguous", m=1, n=_row_width(hidden_dim))
     else:
         elementwise = dict(layout="default", m=sequence, n=hidden)
+    if k in POST_OP_PARTITIONS:
+        projection = gemm(sequence, min(embedding, POST_OP_EMBEDDING), hidden)
+    else:
+        projection = gemm(sequence, embedding, hidden)
     kernels = {
-        GATE: gemm(sequence, embedding, hidden),
-        UP: gemm(sequence, embedding, hidden),
+        GATE: projection,
+        UP: projection,
         SILU: elementwise,
         MUL: elementwise,
         DOWN: gemm(sequence, hidden, embedding),

@@ -18,12 +18,15 @@ import yaml  # noqa: E402
 from iron.common.stream.mapping import build_mapping, group_boundaries  # noqa: E402
 from iron.operators.swiglu_prefill_stream import design  # noqa: E402
 from iron.operators.swiglu_prefill_stream.op import (  # noqa: E402
+    DOWN,
+    GATE,
     LAYERS,
     MUL,
     PARTITIONS,
     READS,
     RESULTS,
     SILU,
+    UP,
 )
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -108,3 +111,9 @@ def test_the_post_op_partition_hands_the_gate_to_the_up_projection(workload):
     assert group_boundaries(workload, [front["layers"]]) == [
         (("input", "w_gate", "w_up"), ("intermediate",))
     ]
+
+
+def test_only_the_gemms_with_post_ops_narrow_their_embedding():
+    kernels, _ = design.mapping(2, design.GEMM_BLOCKS[0], DIMS[2])
+    assert kernels[GATE]["k"] == kernels[UP]["k"] == design.POST_OP_EMBEDDING
+    assert (kernels[DOWN]["m"], kernels[DOWN]["k"], kernels[DOWN]["n"]) == (64, 64, 64)
