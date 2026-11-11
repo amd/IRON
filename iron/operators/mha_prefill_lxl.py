@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Layer-by-layer attention prefill, captured as one full-ELF dispatch.
-
-GEMM, scale, causal mask, softmax and context GEMM remain separate stages.
-Unlike ``MHA``'s dataflow pipeline, their intermediate scores use NPU
-buffers in host memory, with no host synchronization between stages. Query
-blocks bound that scratch space to O(num_heads * block_rows * seq_len).
-Each stage processes all heads before the array is reconfigured.
-
-Both graphs use the usual ``record``, ``reference`` and ``compile`` API.
-``compile(full_elf=True, queries=(H, S, d), keys=(G, S, d),
-values=(G, S, d))`` makes one dispatch; ``full_elf=False`` dispatches each
-stage separately. Keys and values are shared by each group of query heads.
-"""
+"""Layer-by-layer attention prefill with grouped KV heads."""
 
 import math
 from pathlib import Path
@@ -33,25 +21,11 @@ from iron.operators.softmax import Softmax
 _PROFILES = Path(__file__).parent / "profiles" / "mha_prefill_lxl"
 
 
-def _gemm(a, b, *out, b_col_maj=False, accumulate_f32=False):
-    # Match the original BFP multiplies, with f32 partial sums only for
-    # context and output products. Geometry comes from the graph's profile.
-    return GEMM.step(
-        a,
-        b,
-        *out,
-        b_col_maj=b_col_maj,
-        precision=Precision.MEDIUM,
-        accumulate_f32=accumulate_f32,
-    )
-
-
 class AttentionPrefillFused(Graph):
     """Prefill over Q ``(H, S, d)`` and K/V ``(G, S, d)``; output ``(H, S, d)``.
 
     ``num_heads / num_kv_groups`` adjacent query heads share one KV head.
-    Inputs are already projected and rotated. ``embedding_dim`` describes
-    the surrounding projections and is used by the projected variant.
+    Inputs are already projected and rotated.
     """
 
     profile = _PROFILES
@@ -82,7 +56,6 @@ class AttentionPrefillFused(Graph):
         self.causal_mask = causal_mask
         self.block_rows = seq_len if seq_len <= 1024 else math.gcd(seq_len, 512)
         self.scale = param(np.full((256,), 1 / math.sqrt(head_dim), dtype=bfloat16))
-        # One diagonal mask shared across query blocks.
         self.mask = (
             param(
                 np.broadcast_to(
@@ -100,8 +73,7 @@ class AttentionPrefillFused(Graph):
             else None
         )
         self.attn_context = state((num_heads, seq_len, head_dim))
-        # Sliced intermediates are pinned by the graph allocator. Reuse one
-        # state for the partial writes so each block does not pin its scores.
+        # Reuse pinned score storage across query blocks.
         self.scores = state((num_heads * self.block_rows * seq_len,))
 
     def body(self, queries, keys, values):
@@ -116,33 +88,30 @@ class AttentionPrefillFused(Graph):
             )
         for start in range(0, s, self.block_rows):
             stop = start + self.block_rows
-            # Causal blocks read only the prefix they can attend to. The
-            # triangular addend masks the future inside the last block.
             end = stop if self.causal_mask else s
             scores = self.scores[: h * self.block_rows * end].reshape(
                 h, self.block_rows, end
             )
             for head in range(h):
                 group = head // (h // g)
-                _gemm(
+                GEMM.step(
                     queries[head, start:stop],
                     keys[group, :end],
                     scores[head],
                     b_col_maj=True,
+                    precision=Precision.MEDIUM,
                 )
-            # Scale in short rows: a scalar broadcast holds one constant
-            # row on each core, so a seq_len-wide row would exceed L1.
+            # Short rows keep the broadcast scale within L1.
             short_rows = scores.reshape(h * self.block_rows * end // 256, 256)
             RowwiseMul.step(short_rows, self.scale, short_rows)
             if self.causal_mask:
                 if start == 0:
-                    # The first block is its entire diagonal, contiguous.
+                    # The first diagonal block is contiguous.
                     ElementwiseAdd.step(scores, self.mask, scores)
                 else:
                     diagonal = Copy.step(scores[:, :, start:stop])
                     scores[:, :, start:stop] = diagonal + self.mask
-            # A streamed softmax unrolls its rows on each core. Splitting at
-            # 256 rows fits four channels on both NPU1 and NPU2.
+            # Cap streamed rows per core to fit program memory.
             rows = h * self.block_rows
             batch = rows if end <= 4096 else 256
             flat = scores.reshape(rows, end)
@@ -151,10 +120,11 @@ class AttentionPrefillFused(Graph):
                 Softmax.step(part, part)
             for head in range(h):
                 group = head // (h // g)
-                _gemm(
+                GEMM.step(
                     scores[head],
                     values[group, :end],
                     self.attn_context[head, start:stop],
+                    precision=Precision.MEDIUM,
                     accumulate_f32=True,
                 )
         return Copy.step(self.attn_context)
@@ -198,14 +168,16 @@ class AttentionPrefillProjectedFused(Graph):
         )
         if actual != expected:
             raise ValueError(f"expected input shapes {expected}, got {actual}")
-        q = RoPE.step(_gemm(x, w_query).reshape(s * h, d), rope_angles)
-        k = RoPE.step(_gemm(x, w_key).reshape(s * g, d), rope_angles)
-        v = _gemm(x, w_value)
-        # Copy materializes the views once; no explicit transpose or GQA repeat
-        # operator is needed. The nested graph is captured in this dispatch.
+        q = GEMM.step(x, w_query, precision=Precision.MEDIUM)
+        q = RoPE.step(q.reshape(s * h, d), rope_angles)
+        k = GEMM.step(x, w_key, precision=Precision.MEDIUM)
+        k = RoPE.step(k.reshape(s * g, d), rope_angles)
+        v = GEMM.step(x, w_value, precision=Precision.MEDIUM)
         q = Copy.step(q.reshape(s, h, d).transpose(1, 0, 2))
         k = Copy.step(k.reshape(s, g, d).transpose(1, 0, 2))
         v = Copy.step(v.reshape(s, g, d).transpose(1, 0, 2))
         context = self.attention(q, k, v)
         interleaved = Copy.step(context.transpose(1, 0, 2)).reshape(s, h * d)
-        return _gemm(interleaved, w_output, accumulate_f32=True)
+        return GEMM.step(
+            interleaved, w_output, precision=Precision.MEDIUM, accumulate_f32=True
+        )
