@@ -24,7 +24,9 @@ from iron.common.stream.workload import export_workload
 from .op import DOWN, GATE, LAYERS, MUL, PARTITIONS, RESULTS, SILU, UP
 
 # Each GEMM block a candidate seeds its tile search with, as
-# (sequence, embedding, hidden), largest first.
+# (sequence, embedding, hidden), largest first. A partition with one GEMM
+# per group takes the first only: stream-dse's tile search tries every call
+# the kernel library measures for a group of one kernel.
 GEMM_BLOCKS = ((64, 64, 64), (32, 32, 64))
 # The widest piece of a row one elementwise core takes when it has a layer
 # to itself.
@@ -127,7 +129,8 @@ def candidates(seq_len, embedding_dim, hidden_dim, dev, k=None, gemm_block=None)
     grid = ComputeArray.from_device(dev)
     chosen, refused = [], []
     for partition in PARTITIONS if k is None else (k,):
-        for block in GEMM_BLOCKS if gemm_block is None else (tuple(gemm_block),):
+        seeds = GEMM_BLOCKS if partition == 1 else GEMM_BLOCKS[:1]
+        for block in seeds if gemm_block is None else (tuple(gemm_block),):
             why = fits(partition, block, seq_len, embedding_dim, hidden_dim, grid)
             if why is None:
                 chosen.append(

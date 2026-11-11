@@ -75,6 +75,7 @@ def test_the_mapping_declares_kernels_and_no_placement(workload, k):
 
 def test_a_block_no_core_can_divide_is_no_candidate(npu2):
     labels = [label for label, _ in design.candidates(256, 512, 2048, npu2)]
-    assert labels == [(k, b) for k in sorted(PARTITIONS) for b in design.GEMM_BLOCKS]
+    seeds = {k: design.GEMM_BLOCKS if k == 1 else design.GEMM_BLOCKS[:1] for k in PARTITIONS}
+    assert labels == [(k, b) for k in sorted(PARTITIONS) for b in seeds[k]]
     with pytest.raises(ValueError, match="hidden_dim"):
         design.candidates(256, 512, 2000, npu2, k=1)
