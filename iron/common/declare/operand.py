@@ -306,7 +306,12 @@ class Operand:
         """Return a consumer end of output lane ``lane`` for an on-chip reader.
 
         The first call returns the end bound for the lane's drain; later calls return
-        a new end of the lane's fifo, ``depth`` deep (else the fifo's own).
+        a new end of the lane's fifo, ``depth`` deep (else the fifo's own), and never
+        shallower than the objects the lane moves in a call. A later reader can wait
+        on what an earlier one computes from the same stream (a residual add read by a
+        norm and, past the projections, by the next add), and a broadcast advances at
+        its slowest reader: with fewer buffers the writer stalls before the earlier
+        reader has its input, and the array deadlocks.
 
         Raises:
             ValueError: The lane has a reader already and its build bound the
@@ -320,7 +325,13 @@ class Operand:
                 f"{self.name} was bound without fifos(), so its lane {lane} has "
                 f"no fifo to add another reader to"
             )
-        return self.lane_fifos[lane].cons(depth)
+        fifo = self.lane_fifos[lane]
+        moved = sum(
+            math.prod(tap.sizes) for k, tap, _, _ in self.transfers() if k == lane
+        )
+        whole = -(-moved // math.prod(self.obj_shape))
+        own = fifo.depth if depth is None else depth
+        return fifo.cons(max(whole, own or 1))
 
     @property
     def on_chip(self) -> bool:
