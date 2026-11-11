@@ -311,6 +311,7 @@ def configuration(
     arrays: Mapping[str, BuiltArray],
     steps: Sequence[str] = (),
     fuse: bool = False,
+    phases: Sequence[Sequence[str]] = (),
 ) -> DeviceConfiguration:
     """Build ``arrays`` as one device configuration ``name``.
 
@@ -318,14 +319,19 @@ def configuration(
     alone, else named for its key. Given ``steps`` (keys of ``arrays``), one
     ``sequence`` runs theirs in order, back to back (``MergedRuntime.merge``), or,
     ``fuse``, in one task group (``MergedRuntime.fuse``), each step on an array of its
-    own.
+    own; with ``phases`` (``steps`` split, in order), one fused sequence per phase,
+    ``sequence`` then ``sequence_<k>``, which a caller runs in turn: no shim end is in
+    flight in two of them, so the phases take the shim's channels in turn.
 
     Raises:
         ValueError: The arrays are built for different devices, traced with
-            different trace sizes, or ``fuse`` is given no ``steps``.
+            different trace sizes, ``fuse`` is given no ``steps``, or ``phases``
+            are not ``steps`` in order or are given without ``fuse``.
     """
     if fuse and not steps:
         raise ValueError("fuse needs steps to fuse")
+    if phases and (not fuse or [k for phase in phases for k in phase] != list(steps)):
+        raise ValueError(f"phases {phases} are not the fused steps {steps} in order")
     # Fused steps issue at once, so each keeps its own array: on one, a later
     # step's preamble would rewrite words an earlier step's core has not read yet.
     of = (
@@ -353,7 +359,13 @@ def configuration(
         )
     merge = MergedRuntime.fuse if fuse else MergedRuntime.merge
     runtimes = (
-        [merge([owners[of[k]].runtime(arrays[k], None) for k in steps], "sequence")]
+        [
+            merge(
+                [owners[of[k]].runtime(arrays[k], None) for k in phase],
+                "sequence" if p == 0 else f"sequence_{p}",
+            )
+            for p, phase in enumerate(phases or (steps,))
+        ]
         if steps
         else [
             owners[of[key]].runtime(array, "sequence" if len(arrays) == 1 else key)

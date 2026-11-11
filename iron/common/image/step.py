@@ -75,7 +75,10 @@ class Fusion:
     """A set of steps that build and dispatch as one device configuration, with no host transfer between.
 
     ``kind`` how, ``steps`` its members (increasing, distinct indices into a sequence)
-    and ``edges`` each on-chip hand-off among them.
+    and ``edges`` each on-chip hand-off among them. A ``phased`` stream or staged
+    fusion runs one sequence per phase in its configuration, not one for all
+    (``compose.fused_configuration``), so its phases take the shim's channels in
+    turn, as a packing's members do.
 
     An edge between two steps that are not adjacent in ``steps`` is only
     valid where every step between them (by index) is also a member; a
@@ -85,10 +88,13 @@ class Fusion:
     kind: FusionKind
     steps: tuple[int, ...]
     edges: tuple[Edge, ...] = ()
+    phased: bool = False
 
     def __post_init__(self) -> None:
         if len(self.steps) < 2:
             raise ValueError("a fusion needs at least two steps")
+        if self.phased and self.kind not in (FusionKind.STREAM, FusionKind.STAGED):
+            raise ValueError(f"a {self.kind.value} fusion has no phases to run apart")
         if list(self.steps) != sorted(set(self.steps)):
             raise ValueError(
                 f"fusion steps {self.steps} must be increasing and distinct"

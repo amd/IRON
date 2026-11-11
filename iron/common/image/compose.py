@@ -190,7 +190,8 @@ def fused_configuration(
 
     Each array fed where an edge feeds it (staged through memtiles in a staged fusion),
     and one sequence running every member, in one task group, or back to back in a
-    merge. On an xclbin, ``dispatch`` is each member's dispatch-time scalars.
+    merge; a ``phased`` fusion's members in one sequence per phase (``phases``). On an
+    xclbin, ``dispatch`` is each member's dispatch-time scalars.
     """
     incoming: dict[int, list[Edge]] = {}
     for e in fusion.edges:
@@ -205,6 +206,10 @@ def fused_configuration(
         arrays[j] = BuiltArray(
             design, words, own, fed=fed, staged=fusion.kind is FusionKind.STAGED
         )
+    grouped: dict[int, list[str]] = {}
+    if fusion.phased:
+        for j, p in phases(fusion, arrays).items():
+            grouped.setdefault(p, []).append(str(j))
     configured = configuration(
         name,
         {str(j): arrays[j] for j in fusion.steps},
@@ -212,8 +217,57 @@ def fused_configuration(
         # A merge's steps have no edge to keep alive across a shared task
         # group; run them back to back, each fully awaited.
         fuse=fusion.kind is not FusionKind.MERGE,
+        phases=[grouped[p] for p in sorted(grouped)],
     )
     return configured, [arrays[j] for j in fusion.steps]
+
+
+def phases(fusion: Fusion, arrays: Mapping[int, BuiltArray]) -> dict[int, int]:
+    """Return each member's phase, the sequence of a phased fusion that runs it.
+
+    A member fed through an input whose lanes each move one object a call (GEMV's
+    fed ``B``, the whole vector) runs a phase after its producer, else in the latest
+    of its producers'. Such a consumer takes its input whole before computing, so its
+    producer finishes into the consumer's fifo without waiting on the consumer's own
+    host transfers: a sequence can end there and the next begin.
+
+    Raises:
+        ValueError: Members of one phase are not consecutive in ``fusion.steps``,
+            so the phases' sequences could not run in step order.
+    """
+    incoming: dict[int, list[Edge]] = {}
+    for e in fusion.edges:
+        incoming.setdefault(e.consumer, []).append(e)
+    phase: dict[int, int] = {}
+    for j in fusion.steps:
+        phase[j] = 0
+        for e in incoming.get(j, ()):
+            (sink,) = [b for b in arrays[j].op.buffers if b.name == e.input]
+            per_object = math.prod(sink.obj_shape)
+            moved: dict[int, int] = {}
+            for lane, tap, _, _ in sink.transfers():
+                moved[lane] = moved.get(lane, 0) + math.prod(tap.sizes)
+            whole = all(n <= per_object for n in moved.values())
+            phase[j] = max(phase[j], phase[e.producer] + int(whole))
+    order = [phase[j] for j in fusion.steps]
+    if order != sorted(order):
+        raise ValueError(
+            f"fusion {fusion.steps}: its phases {order} do not follow step order"
+        )
+    # A phase with no host transfer holds no shim channel, and its own sequence would
+    # take no arguments: it runs in the latest hosted phase before it, else the first.
+    hosted = sorted(
+        {
+            phase[j]
+            for j in fusion.steps
+            if any(not b.on_chip for b in arrays[j].op.buffers)
+        }
+    ) or [order[0]]
+    merged = {
+        p: hosted.index(max((q for q in hosted if q <= p), default=hosted[0]))
+        for p in set(order)
+    }
+    return {j: merged[phase[j]] for j in fusion.steps}
 
 
 def fits(
@@ -436,16 +490,26 @@ class Composition:
             configurations[symbol] = configured
             runtimes.update(zip(members, configured.runtimes))
 
+        # A phased fusion's sequences, each with the span of the fusion's buffers its
+        # members take, run in turn where the fusion's step runs.
+        phased: dict[str, list[tuple[Runtime, int, int]]] = {}
         for symbol, (designs, fusion) in self.fusions.items():
             configured, members = fused_configuration(symbol, fusion, designs, words)
             configurations[symbol] = configured
             runtimes[symbol] = configured.runtimes[0]
-            types[symbol] = [
-                b.flat_type
+            taken = [
+                [b.flat_type for b in array.op.buffers if not b.on_chip]
                 for array in members
-                for b in array.op.buffers
-                if not b.on_chip
             ]
+            types[symbol] = [t for each in taken for t in each]
+            if len(configured.runtimes) > 1:
+                ends = list(itertools.accumulate(len(each) for each in taken))
+                per = phases(fusion, dict(zip(fusion.steps, members)))
+                last = {per[j]: k for k, j in enumerate(fusion.steps)}
+                firsts = [0, *(ends[last[p]] for p in sorted(last))]
+                phased[symbol] = list(
+                    zip(configured.runtimes, firsts[:-1], firsts[1:], strict=True)
+                )
 
         calls = [
             (
@@ -467,18 +531,20 @@ class Composition:
                 # Consecutive steps in one device share its configure point.
                 for configured, steps in itertools.groupby(command, key=lambda c: c[0]):
                     with configured.configure():
-                        for _, runtime, views, _ in steps:
-                            runtime.call(
-                                *(
-                                    memref.view(
-                                        np_ndarray_type_to_memref_type(view_type),
-                                        held[kind].op,
-                                        constant(offset, index=True),
-                                        [],
-                                    )
-                                    for kind, offset, view_type in views
+                        for _, runtime, views, name in steps:
+                            args = [
+                                memref.view(
+                                    np_ndarray_type_to_memref_type(view_type),
+                                    held[kind].op,
+                                    constant(offset, index=True),
+                                    [],
                                 )
-                            )
+                                for kind, offset, view_type in views
+                            ]
+                            for sequence, a, b in phased.get(
+                                name, [(runtime, 0, len(args))]
+                            ):
+                                sequence.call(*args[a:b])
 
             return sequence
 

@@ -23,7 +23,7 @@ from iron.common.declare.operand import Staging
 from iron.common.design import BuiltArray, OperatorDesign
 from iron.common.graph.fusion import candidates
 from iron.common.graph.record import Recording
-from iron.common.image.compose import Composition, places
+from iron.common.image.compose import Composition, phases, places
 from iron.common.image.link import FullELF, FusedDesign, PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind
@@ -433,6 +433,49 @@ def test_a_later_reader_holds_its_lanes_whole_call():
         text,
     )
     assert len(later) == 2, text
+
+
+def _mul_down_fusion(phased: bool) -> Fusion:
+    return Fusion(FusionKind.STAGED, (0, 1), (Edge(0, "y", 1, "B"),), phased=phased)
+
+
+def test_a_reader_of_a_whole_object_starts_a_phase():
+    """Run the down projection, fed its vector as one object, a phase after the multiply."""
+    mul, down = _mul_down()
+    rec = _mul_down_recording("phases_of", mul, down)
+    image = Image(rec, FullELF(), fusions=(_mul_down_fusion(True),))
+    image._prepare()
+    arrays = {j: BuiltArray(OperatorDesign(rec.steps[j].op.resolved())) for j in (0, 1)}
+    assert phases(_mul_down_fusion(True), arrays) == {0: 0, 1: 1}
+
+
+def test_a_phased_fusion_takes_the_shims_channels_a_phase_at_a_time():
+    """Place a fusion past the shim's sending channels once it runs a sequence a phase.
+
+    Eight multiply lanes reading two inputs and eight down-projection lanes need 24
+    sending channels at once, past npu2's 16: as one sequence they do not place; a
+    sequence a phase, 16 then 8, they do.
+    """
+    whole = _composed(
+        _mul_down_recording("one_sequence", *_mul_down(mul_cols=8)),
+        (_mul_down_fusion(False),),
+    )
+    with ir.Context(), ir.Location.unknown():
+        diagnostic = places(ir.Module.parse(whole))
+    assert diagnostic is not None and "16/16 output channels used" in diagnostic
+    text = _composed(
+        _mul_down_recording("a_sequence_a_phase", *_mul_down(mul_cols=8)),
+        (_mul_down_fusion(True),),
+    )
+    with ir.Context(), ir.Location.unknown():
+        diagnostic = places(ir.Module.parse(text))
+    assert diagnostic is None, diagnostic
+    assert "aiex.run @sequence_1(" in text and "aiex.run @sequence_1(" not in whole
+
+
+def test_a_phased_fusion_is_refused_on_an_xclbin():
+    with pytest.raises(ValueError, match="no phases to run apart"):
+        Fusion(FusionKind.PACK, (0, 1), phased=True)
 
 
 def test_staged_edges_run_forward():
