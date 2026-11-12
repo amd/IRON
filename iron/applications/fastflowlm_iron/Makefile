@@ -3,7 +3,7 @@
 
 FLM_REPO   := https://github.com/andrej/FastFlowLM.git
 # Temporary pin to feat/embedding-model-extensions until embedding plugins merge.
-FLM_COMMIT := 54823aa974bd80e9f76e770f712f4fa4669d09c6
+FLM_COMMIT := 1b27e4e2be4d4dfe81f7153ef7486c498ade65bf
 BUILD      := $(CURDIR)/build
 FLM_ROOT   := $(BUILD)/FastFlowLM
 
