@@ -209,6 +209,38 @@ def test_fusion_needs_at_least_two_steps():
         Fusion(FusionKind.STREAM, (0,), ())
 
 
+@pytest.mark.supported_devices("npu2")
+def test_a_member_no_edge_touches_runs_beside_a_stream_on_the_device():
+    """The SiLU -> Mul stream, plus an independent GEMV riding beside it with no edge of its own.
+
+    Both outputs match their own operators' references (REGIONS-IMPLEMENT 4.3), built and run
+    as the one device configuration the hazard check (sequence.py) accepts.
+    """
+    recording = _chain_and_rider(independent=True)
+    fusion = Fusion(FusionKind.STREAM, (0, 1, 2), (Edge(0, "y", 1, "a"),))
+    silu, mul, rider = (recording.steps[i].op.resolved() for i in (0, 1, 2))
+    image = Image(recording, FullELF(), fusions=(fusion,))
+    image.compile()
+    x = vectors(silu).inputs["x"]
+    up = vectors(mul, seed=7).inputs["b"]
+    A = vectors(rider, seed=3).inputs["A"]
+    side = vectors(rider, seed=5).inputs["B"]
+    out = image.get_callable()
+    out.get_buffer(BufferRef("x")).numpy_view()[: x.size] = x.reshape(-1)
+    out.get_buffer(BufferRef("up")).numpy_view()[: up.size] = up.reshape(-1)
+    out.get_buffer(BufferRef("A")).numpy_view()[: A.size] = A.reshape(-1)
+    out.get_buffer(BufferRef("side")).numpy_view()[: side.size] = side.reshape(-1)
+    out()
+    chain_out = out.get_buffer(BufferRef("out")).numpy()[:2048].copy()
+    rider_out = out.get_buffer(BufferRef("y")).numpy()[:2048].copy()
+    chain_ref = np.asarray(mul.reference(silu.reference(x), up))
+    rider_ref = np.asarray(rider.reference(A, side))
+    chain_verdict = compare(chain_out, chain_ref, mul.tolerance())
+    assert chain_verdict, chain_verdict.detail
+    rider_verdict = compare(rider_out, rider_ref, rider.tolerance())
+    assert rider_verdict, rider_verdict.detail
+
+
 # ---------------------------------------------------------------------------
 # A member no edge touches (REGIONS-IMPLEMENT 4.3).
 # ---------------------------------------------------------------------------

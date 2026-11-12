@@ -22,6 +22,7 @@ from iron import Profile, Scratchpad
 from iron.common.declare.operand import Staging
 from iron.common.design import BuiltArray, OperatorDesign
 from iron.common.graph.fusion import candidates
+from iron.common.graph.fusion import fusions as graph_fusions
 from iron.common.graph.record import Recording
 from iron.common.image.compose import Composition, phases, places
 from iron.common.image.link import FullELF, FusedDesign, PerStep
@@ -1161,3 +1162,48 @@ def test_a_phased_window_matches_reference_and_unfused(window):
     verdict = compare(fused, ref, gemv.resolved().tolerance())
     assert verdict, verdict.detail
     _bit_equal({"out": fused}, {"out": apart})
+
+
+def _run_profile_phased() -> list:
+    """Build the mul-into-down pair's fusion by matching a profile, not constructing it.
+
+    The profile names it phased (REGIONS-IMPLEMENT 4.2); ``_mul_down_fusion`` builds the
+    same ``Fusion`` directly. Returns numpy data only: an ``Operator`` does not pickle
+    (a ``param(derive=lambda op: ...)`` closure), and the child's return crosses the
+    queue through a background thread outside ``hang._child``'s own ``try``, so a
+    pickling failure there ends the child with nothing on the queue, not an exception.
+    """
+    mul, down = _mul_down(mul_cols=8)
+    rec = _mul_down_recording("fuse_profile_phased", mul, down)
+    profile = Profile()
+    profile.add_fusion(
+        FusionKind.STAGED,
+        [(type(mul), {"size": mul.size}), (type(down), {"M": down.M, "K": down.K})],
+        [(0, "y", 1, "B")],
+        phased=True,
+    )
+    (fusion,) = graph_fusions(rec, profile)
+    assert fusion.phased, "the profile's phased entry should be the one matched"
+    g, u = vectors(mul).inputs["a"], vectors(mul, seed=7).inputs["b"]
+    W = vectors(down, seed=11).inputs["A"]
+    inputs = {"g": g, "u": u, "W": down.resolved().A.device_form(W)}
+    image = Image(rec, FullELF(), fusions=(fusion,))
+    image.compile()
+    out = _dispatch(image.get_callable(), inputs, {"out": 2048})["out"]
+    ref = np.asarray(down.resolved().reference(W, mul.resolved().reference(g, u))).reshape(-1)
+    return [out, ref]
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_profile_naming_a_phased_fusion_builds_and_matches_reference_on_the_device():
+    """A profile naming the mul-into-down pair phased builds and matches on the device.
+
+    Bit-identically to the directly-constructed phased fusion (``_phased_window("mul_down")``,
+    REGIONS-IMPLEMENT 4.2), and to the operators' own reference.
+    """
+    out, ref = hang.bounded(_MLP_TIMEOUT_S, _run_profile_phased)
+    _, down = _mul_down(mul_cols=8)
+    verdict = compare(out, ref, down.resolved().tolerance())
+    assert verdict, verdict.detail
+    direct, _ = hang.bounded(_MLP_TIMEOUT_S, _run_phased, "mul_down")
+    _bit_equal({"out": out}, {"out": direct})

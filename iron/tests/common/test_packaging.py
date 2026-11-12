@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from aie.helpers.taplib import PerCall
 from aie.iron.device import NPU1, NPU2, NPU1Col1, from_name
+from ml_dtypes import bfloat16
 
 import iron
 from iron import Carried, Scratchpad
@@ -235,3 +236,24 @@ def test_graph_compile_reaches_teardown_to_plan(npu2):
     assert torn.plan.full_elf and torn.plan.teardown
     plain = Chain(256, 64).compile(full_elf=True, a=(256,), b=(256,))
     assert not plain.plan.teardown
+
+
+@pytest.mark.supported_devices("npu2")
+def test_graph_compiled_with_teardown_runs_bit_identically():
+    """``Graph.compile(teardown=True)`` runs on the device, torn down between configurations.
+
+    Add, SiLU, multiply, add, SiLU each their own configuration: bit-identical to the same
+    graph's own reference, and to the same compile without ``teardown`` (REGIONS-IMPLEMENT
+    4.4).
+    """
+    rng = np.random.default_rng(0)
+    a = rng.random(256).astype(np.float32).astype(bfloat16)
+    b = rng.random(256).astype(np.float32).astype(bfloat16)
+    chain = Chain(256, 64)
+    torn = chain.compile(full_elf=True, teardown=True, a=(256,), b=(256,))
+    reset = Chain(256, 64).compile(full_elf=True, a=(256,), b=(256,))
+    out_torn = np.asarray(torn(a, b))[:256]
+    out_reset = np.asarray(reset(a, b))[:256]
+    ref = np.asarray(chain.reference(a, b))[:256]
+    assert np.array_equal(out_torn.view(np.uint16), out_reset.view(np.uint16)), "torn-down and reset runs differ"
+    assert np.array_equal(out_torn.view(np.uint16), ref.view(np.uint16)), "the torn-down run does not match the reference"
