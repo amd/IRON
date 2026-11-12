@@ -255,6 +255,8 @@ def test_long_context_stages_lower(request, device, tmp_path):
     ids=["separate", "single"],
 )
 def test_dispatch(projected, full_elf, causal, tuned, record_property):
+    if not tuned and aie_utils.get_current_device().arch is AIEArch.AIE2:
+        pytest.skip("Default configurations are tested on NPU2")
     op, inputs, expected = _case(projected, causal=causal)
     if tuned:
         op.profile = _profile(aie_utils.get_current_device())
