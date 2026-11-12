@@ -543,6 +543,7 @@ class Graph:
         dev: Device | None = None,
         full_elf: bool | None = None,
         check: bool = False,
+        teardown: bool = False,
         feeds: CompiledGraph | None = None,
         **shapes: Sequence[int] | tuple[Sequence[int], DTypeLike],
     ) -> CompiledGraph:
@@ -556,6 +557,9 @@ class Graph:
             full_elf: One full ELF, else an xclbin per step; ``None`` derives it.
             check: Run each step on its own dispatch, raising at the first
                 outside its ``tolerance()``.
+            teardown: Undo a full ELF's configurations once their steps are
+                done, rather than resetting the array before the next
+                (``plan``'s own, refused for an xclbin per step).
             feeds: The version a full ELF's Emit starts; by default itself
                 when it takes no tensor.
             **shapes: Each input's shape, or ``(shape, dtype)``.
@@ -565,7 +569,9 @@ class Graph:
             if dev is not None
             else contextlib.nullcontext()
         ):
-            recording, chosen, fused, packing = self._planned(full_elf, check, shapes)
+            recording, chosen, fused, packing = self._planned(
+                full_elf, check, shapes, teardown=teardown
+            )
             logger.info("%s", recording.report(chosen, self.name))
             emit, sized = self._emit(recording, chosen, feeds)
             version = CompiledGraph(
@@ -589,7 +595,11 @@ class Graph:
             return version
 
     def _planned(
-        self, full_elf: bool | None, check: bool, shapes: Mapping[str, Any]
+        self,
+        full_elf: bool | None,
+        check: bool,
+        shapes: Mapping[str, Any],
+        teardown: bool = False,
     ) -> tuple[Recording, Plan, tuple[Fusion, ...], Packing]:
         """Record the version for ``shapes`` as ``compile`` builds it on the current device: weights coded, profile applied, planned."""
         recording = self.record(**shapes)
@@ -608,6 +618,7 @@ class Graph:
             check,
             step_words=_step_words(recording),
             fusions=fused,
+            teardown=teardown,
         )
         return recording, chosen, fused, packing
 

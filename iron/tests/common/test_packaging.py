@@ -19,6 +19,7 @@ from iron.common.image.sequence import Image
 from iron.common.image.step import Fusion, FusionKind
 from iron.operators.mha import MHA
 from iron.operators.relu import ReLU
+from iron.tests.support.graphs import Chain
 from iron.tests.support.llama_model import small
 from iron.tests.support.shipped import Shipped
 
@@ -223,3 +224,14 @@ def test_a_teardown_is_a_full_elfs_and_says_so():
     assert not plan(NPU2(), rec).teardown
     with pytest.raises(ValueError, match="an xclbin per step has none to undo"):
         plan(NPU2(), rec, full_elf=False, teardown=True)
+
+
+def test_graph_compile_reaches_teardown_to_plan(npu2):
+    """``Graph.compile(teardown=True)`` reaches the same ``Plan`` ``plan()`` makes directly.
+
+    Device-free: compiling lowers to MLIR, which needs no XRT.
+    """
+    torn = Chain(256, 64).compile(full_elf=True, teardown=True, a=(256,), b=(256,))
+    assert torn.plan.full_elf and torn.plan.teardown
+    plain = Chain(256, 64).compile(full_elf=True, a=(256,), b=(256,))
+    assert not plain.plan.teardown
