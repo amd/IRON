@@ -85,6 +85,21 @@ def _cases(cls, dev: Device):
     medium = dict(M=2048, K=2048, N=2048, b_col_maj=True, precision=Precision.MEDIUM)
     label = "M_2048-K_2048-N_2048-b_col_maj_True"
     out.append(Case(medium, id=label, bench=True, lower=True))
+    out.append(
+        Case(
+            dict(
+                M=256,
+                K=1024,
+                N=64,
+                tile_m=16,
+                tile_n=16,
+                precision=Precision.MEDIUM,
+                accumulate_f32=True,
+            ),
+            id="bfp16_f32_accumulation",
+            lower=True,
+        )
+    )
     # flm/gemm's README compares flm.ProjectionGEMM and the shipped overlay
     # with this, in the same emulated mode, on the eight-column NPU2.
     if dev.arch is AIEArch.AIE2p and dev.cols == 8:
@@ -167,6 +182,9 @@ class GEMM(Operator):
     b_col_maj: bool = param(default=False, array=True)
     c_col_maj: bool = param(default=False, array=True)
     precision: Precision = param(array=True)
+    # Keep partial sums in float32 independently of input rounding. This
+    # permits MEDIUM's BFP multiplies with one final rounding to bf16.
+    accumulate_f32: bool = param(default=False, array=True)
     input_dtype: Any = param(default=bfloat16, repr=False)
     output_dtype: Any = param(default=bfloat16, repr=False)
     # Filled by resolve.
@@ -368,11 +386,11 @@ class GEMM(Operator):
 
     @property
     def wider_accumulator(self) -> bool:
-        """Check whether ``build()`` and ``GEMM.held()`` build HIGHEST's f32 buffer.
+        """Check whether ``build()`` and ``GEMM.held()`` need an f32 buffer.
 
         For a bf16 C's partial sums, beside C's own.
         """
-        return self.precision == Precision.HIGHEST and (
+        return (self.precision == Precision.HIGHEST or self.accumulate_f32) and (
             np.dtype(self.output_dtype) == np.dtype(bfloat16)
         )
 
@@ -383,7 +401,7 @@ class GEMM(Operator):
             self.tile_k,
             self.tile_n,
             input_dtype=self.input_dtype,
-            # HIGHEST accumulates in f32 in L1, so the matmul's C is f32.
+            # Wider accumulation keeps the matmul's C in f32 in L1.
             output_dtype=(np.float32 if self.wider_accumulator else self.output_dtype),
             b_col_maj=self.b_col_maj,
             c_col_maj=self.c_col_maj,
@@ -695,7 +713,7 @@ class GEMM(Operator):
         units = 4.0 if self.precision == Precision.MEDIUM else 2.0
         per_tile = (
             np.dtype(self.output_dtype) == np.dtype(bfloat16)
-            and self.precision != Precision.HIGHEST
+            and not self.wider_accumulator
         )
 
         def bound(A, B):
