@@ -115,7 +115,12 @@ def _hand_offs(recording: Recording, ops: list[Operator]) -> dict[str, tuple[int
 
 
 def _stream_runs(recording: Recording) -> list[Fusion]:
-    """Every window of 2 or more consecutive steps, no host step crossing it, that runs as one stream or staged fusion, ordered by first step then length."""
+    """Every window of 2 or more consecutive steps, no host step crossing it, that runs as one stream or staged fusion, ordered by first step then length.
+
+    At least one on-chip hand-off, not every member on one: a member no edge touches may
+    still be in the window, independent of its neighbours (``_validate_fusions`` holds it
+    at build).
+    """
     resolved = [step.op.resolved() for step in recording.steps]
     hand_offs = _hand_offs(recording, resolved)
     uses = [step.roots() for step in recording.steps]
@@ -151,8 +156,10 @@ def _stream_runs(recording: Recording) -> list[Fusion]:
                     valid = False
                     break
                 edges.extend(Edge(writer, output, j, fed[j]) for j in sorted(fed))
-            on_edge = {e.producer for e in edges} | {e.consumer for e in edges}
-            if not valid or set(window) != on_edge:
+            # A member the edges never touch rides beside the chain: _validate_fusions
+            # holds it independent of every other member at build, the same way a
+            # pack's members are, since nothing here records why it is safe.
+            if not valid or not edges:
                 continue
             edges.sort(key=lambda e: (e.producer, e.consumer))
             ops = resolved[lo : hi + 1]

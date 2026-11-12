@@ -100,6 +100,23 @@ class Image:
                             f"pack {fusion.steps}: step {i} and step {k} are not "
                             f"independent, so issuing them concurrently is a hazard"
                         )
+            if fusion.kind in (FusionKind.STREAM, FusionKind.STAGED):
+                # A member no edge touches runs beside the chain, not fed by or
+                # feeding it: independent of every other member, the same hazard
+                # a pack's own members must clear, since nothing elides their
+                # host transfers into one another.
+                edged = {e.producer for e in fusion.edges} | {e.consumer for e in fusion.edges}
+                direct = {(e.producer, e.consumer) for e in fusion.edges} | {(e.consumer, e.producer) for e in fusion.edges}
+                uses = [(i, *self.steps[i].roots()) for i in fusion.steps]
+                for (i, ri, wi), (k, rk, wk) in itertools.combinations(uses, 2):
+                    if (i in edged and k in edged) and (i, k) in direct:
+                        continue
+                    if set(wi) & {*rk, *wk} or set(wk) & set(ri):
+                        raise ValueError(
+                            f"{fusion.kind.value} {fusion.steps}: step {i} and "
+                            f"step {k} share a root with no edge between them, "
+                            f"so running them in one configuration is a hazard"
+                        )
             for edge in fusion.edges:
                 producer, consumer = (
                     self.steps[edge.producer],

@@ -60,9 +60,7 @@ def test_fused_pair_is_one_device_configuration(size, cols):
     unfused._prepare()
     unfused_text = Composition(unfused).text()
 
-    assert (
-        unfused_text.count("aie.device(") - fused_text.count("aie.device(") == 1
-    ), "a fused pair should drop exactly one aie.device"
+    assert unfused_text.count("aie.device(") - fused_text.count("aie.device(") == 1, "a fused pair should drop exactly one aie.device"
 
 
 def test_fused_identity_differs_from_unfused():
@@ -74,9 +72,7 @@ def test_fused_identity_differs_from_unfused():
     )
     fused._prepare()
     silu2, mul2 = fusable.silu_mul(2048, 1024, num_aie_columns=1)
-    unfused = Image(
-        fusable.silu_mul_recording("fuse_identity_unfused", silu2, mul2), FullELF()
-    )
+    unfused = Image(fusable.silu_mul_recording("fuse_identity_unfused", silu2, mul2), FullELF())
     unfused._prepare()
     assert Composition(fused).identity != Composition(unfused).identity
 
@@ -100,15 +96,11 @@ def test_gemv_to_elementwiseadd_fused_pair_is_one_device_configuration():
     assert diagnostic is None, diagnostic
 
     gemv2, add2 = fusable.gemv_add(2048, 2048)
-    unfused = Image(
-        fusable.gemv_add_recording("gemv_add_struct_unfused", gemv2, add2), FullELF()
-    )
+    unfused = Image(fusable.gemv_add_recording("gemv_add_struct_unfused", gemv2, add2), FullELF())
     unfused._prepare()
     unfused_text = Composition(unfused).text()
 
-    assert (
-        unfused_text.count("aie.device(") - fused_text.count("aie.device(") == 1
-    ), "a fused pair should drop exactly one aie.device"
+    assert unfused_text.count("aie.device(") - fused_text.count("aie.device(") == 1, "a fused pair should drop exactly one aie.device"
 
 
 def test_three_step_fusion_is_one_device_configuration():
@@ -127,17 +119,13 @@ def test_three_step_fusion_is_one_device_configuration():
 
     gemv2, silu2, mul2 = fusable.gemv_silu_mul(2048, 1, 1024)
     unfused = Image(
-        fusable.gemv_silu_mul_recording(
-            "three_step_struct_unfused", gemv2, silu2, mul2
-        ),
+        fusable.gemv_silu_mul_recording("three_step_struct_unfused", gemv2, silu2, mul2),
         FullELF(),
     )
     unfused._prepare()
     unfused_text = Composition(unfused).text()
 
-    assert (
-        unfused_text.count("aie.device(") - fused_text.count("aie.device(") == 2
-    ), "a three-step fusion should drop two aie.devices"
+    assert unfused_text.count("aie.device(") - fused_text.count("aie.device(") == 2, "a three-step fusion should drop two aie.devices"
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +140,7 @@ def test_bad_step_index_refused():
         Image(recording, FullELF(), fusions=(fusable.stream(1, "y", "a"),))
 
 
-@pytest.mark.parametrize(
-    "packaging", [FullELF(), PerStep()], ids=["full_elf", "per_step"]
-)
+@pytest.mark.parametrize("packaging", [FullELF(), PerStep()], ids=["full_elf", "per_step"])
 def test_an_image_refuses_a_fusion_with_a_gap(packaging):
     silu, mul = fusable.silu_mul(2048, 1024, num_aie_columns=1)
     steps = sequences.steps((silu, "x", "a"), (mul, "a", "up", "b"), (silu, "up", "c"))
@@ -223,6 +209,39 @@ def test_fusion_needs_at_least_two_steps():
         Fusion(FusionKind.STREAM, (0,), ())
 
 
+# ---------------------------------------------------------------------------
+# A member no edge touches (REGIONS-IMPLEMENT 4.3).
+# ---------------------------------------------------------------------------
+
+
+def _chain_and_rider(independent: bool):
+    """Return a SiLU -> Mul stream, plus a third step.
+
+    Independent of the chain (``independent``), or reading the chain's own on-chip
+    intermediate (``mid``) without being one of its edge's recorded readers, a hazard
+    no edge records.
+    """
+    silu, mul = fusable.silu_mul(2048, 1024, num_aie_columns=1)
+    rider = GEMV(M=2048, K=2048, tile_size_input=4, tile_size_output=256)
+    third = "side" if independent else "mid"
+    steps = sequences.steps((silu, "x", "mid"), (mul, "mid", "up", "out"), (rider, "A", third, "y"))
+    inputs = ["x", "up", "A"] + (["side"] if independent else [])
+    return Recording.of_steps("fuse_rider", steps, inputs, ["out", "y"])
+
+
+def test_a_member_no_edge_touches_may_ride_beside_a_stream():
+    recording = _chain_and_rider(independent=True)
+    fusion = Fusion(FusionKind.STREAM, (0, 1, 2), (Edge(0, "y", 1, "a"),))
+    Image(recording, FullELF(), fusions=(fusion,))
+
+
+def test_a_rider_sharing_the_chains_own_input_is_refused_as_a_hazard():
+    recording = _chain_and_rider(independent=False)
+    fusion = Fusion(FusionKind.STREAM, (0, 1, 2), (Edge(0, "y", 1, "a"),))
+    with pytest.raises(ValueError, match="share a root with no edge between them"):
+        Image(recording, FullELF(), fusions=(fusion,))
+
+
 def test_fusion_steps_must_be_increasing_and_distinct():
     with pytest.raises(ValueError, match="increasing and distinct"):
         Fusion(FusionKind.STREAM, (1, 0), ())
@@ -272,9 +291,7 @@ def test_feed_refuses_a_pinned_source():
     gather = Gather(rows=8, table_rows=8, row=32, feeds=1).resolved()
     produced = BuiltArray(OperatorDesign(gather))
     (source,) = [b for b in produced.op.buffers if b.name == "y"]
-    clamp = Clamp(
-        size=32, num_aie_columns=1, tile_size=32, low=0.0, high=1.0
-    ).resolved()
+    clamp = Clamp(size=32, num_aie_columns=1, tile_size=32, low=0.0, high=1.0).resolved()
     with pytest.raises(ValueError, match="pinned"):
         clamp.x.feed(source)
 
@@ -284,9 +301,7 @@ def test_feed_refuses_a_lane_order_mismatch():
 
     So lane 0's host access order differs, and ``feed`` names it.
     """
-    gemv = GEMV(
-        M=2048, K=64, num_batches=4, tile_size_input=4, tile_size_output=256
-    ).resolved()
+    gemv = GEMV(M=2048, K=64, num_batches=4, tile_size_input=4, tile_size_output=256).resolved()
     add = ElementwiseAdd(size=2048, tile_size=256).resolved()
     produced = BuiltArray(OperatorDesign(gemv))
     (source,) = [b for b in produced.op.buffers if b.name == "C"]
@@ -339,9 +354,7 @@ def test_fused_matches_reference_and_unfused():
     )
     verdict = compare(out, y_ref, tol)
     assert verdict, verdict.detail
-    assert np.array_equal(
-        out.view(np.uint16), baseline.view(np.uint16)
-    ), "the fused and unfused devices differ"
+    assert np.array_equal(out.view(np.uint16), baseline.view(np.uint16)), "the fused and unfused devices differ"
 
 
 @pytest.mark.supported_devices("npu2")
@@ -351,9 +364,7 @@ def test_fused_per_call_shared_value():
     Which the device still reads correctly.
     """
     size, cols, tile = 2048, 1, 1024
-    silu, mul = fusable.silu_mul(
-        size, tile, num_aie_columns=cols, bound_values={"valid": None}
-    )
+    silu, mul = fusable.silu_mul(size, tile, num_aie_columns=cols, bound_values={"valid": None})
     # "valid" bounds each core's trip count only through "count", derived from
     # it; that is the word a core reads, and the one the two operators share.
     shared = {
@@ -366,20 +377,12 @@ def test_fused_per_call_shared_value():
         fusions=(fusable.stream(0, "y", "a"),),
     )
     img.compile()
-    assert (
-        sum(p.name == "fuse_count" for p in img.artifacts.parameter_table) == 1
-    ), "both operators' count should share one scratchpad word"
+    assert sum(p.name == "fuse_count" for p in img.artifacts.parameter_table) == 1, "both operators' count should share one scratchpad word"
 
     # Every per-call word both operators declare, not just the shared one: a
     # bounded call still writes each buffer's own tile count.
     declared = img.artifacts.parameters
-    words = {
-        shared.get(v.symbol, v.symbol): np.int32(
-            size if v.derive is None else op.derived_at(v.name, valid=size)
-        )
-        for op in (silu, mul)
-        for v in op.values
-    }
+    words = {shared.get(v.symbol, v.symbol): np.int32(size if v.derive is None else op.derived_at(v.name, valid=size)) for op in (silu, mul) for v in op.values}
 
     run = img.get_callable()
     gate = vectors(silu).inputs["x"]
@@ -391,9 +394,7 @@ def test_fused_per_call_shared_value():
     out = run.get_buffer(BufferRef("out")).numpy()[:size].copy()
 
     y_ref = np.asarray(mul.reference(silu.reference(gate), up))
-    tol = Tolerance.bf16_ulps(
-        3, atol=mul.tolerance().atol, note="shared valid, every element live"
-    )
+    tol = Tolerance.bf16_ulps(3, atol=mul.tolerance().atol, note="shared valid, every element live")
     verdict = compare(out, y_ref, tol)
     assert verdict, verdict.detail
 
@@ -439,13 +440,9 @@ def test_gemv_to_elementwiseadd_matches_reference_and_unfused(record_property):
     tol = gemv.tolerance()
     verdict = compare(out, y_ref, tol)
     assert verdict, verdict.detail
-    assert np.array_equal(
-        out.view(np.uint16), baseline.view(np.uint16)
-    ), "the fused and unfused devices differ"
+    assert np.array_equal(out.view(np.uint16), baseline.view(np.uint16)), "the fused and unfused devices differ"
 
-    fused_stats, unfused_stats = time_interleaved(
-        [fused_run, plain_run], Timing(rounds=20), log=lambda _: None
-    )
+    fused_stats, unfused_stats = time_interleaved([fused_run, plain_run], Timing(rounds=20), log=lambda _: None)
     record_property("Fused min us", min(fused_stats.samples_us))
     record_property("Fused median us", statistics.median(fused_stats.samples_us))
     record_property("Unfused min us", min(unfused_stats.samples_us))
@@ -488,11 +485,8 @@ def test_three_step_fusion_matches_reference_and_unfused():
     tol = Tolerance.bf16_ulps(
         3,
         atol=mul.tolerance().atol,
-        note="GEMV's accumulation and SiLU's 1 ulp through the multiply, "
-        "plus both roundings",
+        note="GEMV's accumulation and SiLU's 1 ulp through the multiply, plus both roundings",
     )
     verdict = compare(out, y_ref, tol)
     assert verdict, verdict.detail
-    assert np.array_equal(
-        out.view(np.uint16), baseline.view(np.uint16)
-    ), "the fused and unfused devices differ"
+    assert np.array_equal(out.view(np.uint16), baseline.view(np.uint16)), "the fused and unfused devices differ"
