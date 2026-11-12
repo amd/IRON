@@ -1047,8 +1047,8 @@ def confirm_fusions(
             trial_profile = Profile()
             for cls, dims, tunables in profile:
                 trial_profile.add(cls, **dims, **tunables)
-            for kind, steps, edges, versions in profile.fusions():
-                trial_profile.add_fusion(kind, steps, edges, versions)
+            for f in profile.fusions():
+                trial_profile.add_fusion(f.kind, f.steps, f.edges, f.versions, f.phased)
             for group in active:
                 trial_profile.add_fusion(
                     group.kind, group.dims(combos.get(group)), group.edges, [version]
@@ -1295,20 +1295,20 @@ def price_fusions(
         *(c.versions for c in calls)
     )
     existing = profile.fusions() if profile is not None else []
-    for kind, steps, edges, versions in existing:
+    for f in existing:
         probe = Profile()
-        probe.add_fusion(kind, steps, edges, versions)
+        probe.add_fusion(f.kind, f.steps, f.edges, f.versions)
         replaced = {
             v
             for g in all_found
             for v in g.versions
             if probe.fused(g.kind, g.steps, g.edges, v)
         }
-        scope = every if versions is None else versions
-        if versions is None and not replaced:
-            out.add_fusion(kind, steps, edges)
+        scope = every if f.versions is None else f.versions
+        if f.versions is None and not replaced:
+            out.add_fusion(f.kind, f.steps, f.edges, phased=f.phased)
         elif scope - replaced:
-            out.add_fusion(kind, steps, edges, scope - replaced)
+            out.add_fusion(f.kind, f.steps, f.edges, scope - replaced, f.phased)
 
     kept = {g: frozenset(g.versions) for g in taken}
     if confirm:

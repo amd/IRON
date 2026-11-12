@@ -660,8 +660,8 @@ def test_a_later_batch_takes_the_groups_earlier_batches_priced(tmp_path):
     assert profile is not None
     assert len([line for line in logs if "priced earlier" in line]) == len(groups)
     assert not any(" ± " in line for line in logs)  # narrow_group's own price line
-    [(kind, _, _, versions)] = profile.fusions()
-    assert kind is gaining.kind and versions == {recording.version}
+    [entry] = profile.fusions()
+    assert entry.kind is gaining.kind and entry.versions == {recording.version}
     assert profile.fused(gaining.kind, gaining.steps, gaining.edges, recording.version)
     assert not priced_path.exists()
 
@@ -699,7 +699,7 @@ def test_price_fusions_keeps_an_entry_in_the_versions_it_does_not_search(tmp_pat
         log=lambda _: None,
     )
     assert out is not None
-    assert [versions for *_, versions in out.fusions()] == [
+    assert [f.versions for f in out.fusions()] == [
         frozenset({other}),
         frozenset({other}),
     ]
@@ -739,7 +739,7 @@ def test_a_tune_of_one_version_keeps_an_unscoped_entry_in_the_others(tmp_path):
         log=lambda _: None,
     )
     assert out is not None
-    assert [versions for *_, versions in out.fusions()] == [frozenset({prompt})]
+    assert [f.versions for f in out.fusions()] == [frozenset({prompt})]
 
 
 # ---------------------------------------------------------------------------
@@ -1112,7 +1112,7 @@ def test_price_fusions_takes_the_qkv_pack_without_confirming_end_to_end(tmp_path
         confirm=False,
         log=lambda _: None,
     )
-    kinds = [kind for kind, _, _, _ in profile.fusions()]
+    kinds = [f.kind for f in profile.fusions()]
     assert kinds == [FusionKind.PACK]
 
 

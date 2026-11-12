@@ -9,6 +9,7 @@ Version labels, live-fusion and live-packing accounting, bisection's profile sub
 import pytest
 
 from iron import Profile
+from iron.common.declare.profile import FusionEntry
 from iron.common.graph.coded import CodedWeight
 from iron.common.graph.fusion import candidates
 from iron.common.image.step import FusionKind
@@ -34,11 +35,10 @@ def _silu_mul_entry(recording):
     gate = recording.steps[fusion.steps[0]].op.resolved()
     mul = recording.steps[fusion.steps[1]].op.resolved()
     edge = fusion.edges[0]
-    return (
+    return FusionEntry(
         FusionKind.STREAM,
-        [(SiLU, dict(size=gate.size)), (ElementwiseMul, dict(size=mul.size))],
-        [(0, edge.output, 1, edge.input)],
-        None,
+        ((SiLU, dict(size=gate.size), None), (ElementwiseMul, dict(size=mul.size), None)),
+        ((0, edge.output, 1, edge.input),),
     )
 
 
@@ -65,7 +65,7 @@ def test_classify_entries_tags_by_matching_version():
     }
     entry = _silu_mul_entry(recordings["decode"])
     candidate = Profile()
-    candidate.add_fusion(*entry)
+    candidate.add_fusion(entry.kind, entry.steps, entry.edges)
     [(tag, matches)] = validate.classify_entries(candidate, recordings)
     assert tag == ("fusion", candidate.fusions()[0])
     assert matches == {"decode"}
@@ -89,11 +89,10 @@ def test_classify_entries_tags_a_packing_by_the_versions_it_names():
 
 
 def _raw_entry():
-    return (
+    return FusionEntry(
         FusionKind.STREAM,
-        [(SiLU, {"size": 2048}), (ElementwiseMul, {"size": 2048})],
-        [(0, "y", 1, "a")],
-        None,
+        ((SiLU, {"size": 2048}, None), (ElementwiseMul, {"size": 2048}, None)),
+        ((0, "y", 1, "a"),),
     )
 
 
@@ -102,7 +101,7 @@ def test_build_variant_adds_tagged_entries_to_the_stock_profile():
     stock.add(SiLU, tile_size=1024)
     entry = _raw_entry()
     expected = Profile()
-    expected.add_fusion(*entry)
+    expected.add_fusion(entry.kind, entry.steps, entry.edges)
     variant = validate.build_variant(stock, [("fusion", entry)])
     assert variant.fusions() == expected.fusions()
     assert list(variant) == list(stock)
@@ -119,7 +118,7 @@ def test_verify_live_and_changed_versions_see_a_candidates_live_fusion():
     candidate_profile = Profile()
     for cls, dims, tunables in stock_model.profile:
         candidate_profile.add(cls, **dims, **tunables)
-    candidate_profile.add_fusion(*entry)
+    candidate_profile.add_fusion(entry.kind, entry.steps, entry.edges)
     candidate_model = small()
     candidate_model.profile = candidate_profile
 
@@ -176,7 +175,7 @@ def test_verify_live_reads_an_xclbin_per_step(npu1):
     entry = _silu_mul_entry(stock_model.record(**stock_model.shapes()[0]))
     candidate_profile = Profile()
     candidate_profile.add(MHA, seq_pad=1, num_pipelines=2)
-    candidate_profile.add_fusion(*entry)
+    candidate_profile.add_fusion(entry.kind, entry.steps, entry.edges)
     candidate_model = small()
     candidate_model.profile = candidate_profile
 

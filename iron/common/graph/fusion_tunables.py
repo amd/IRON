@@ -35,7 +35,7 @@ def apply(
     for fusion in fused:
         ops = [recording.steps[i].op.resolved(dev) for i in fusion.steps]
         tunables = profile.fusion_tunables(
-            fusion.kind, ops, fusion.local_edges, version
+            fusion.kind, ops, fusion.local_edges, version, fusion.phased
         )
         if tunables is None:
             continue

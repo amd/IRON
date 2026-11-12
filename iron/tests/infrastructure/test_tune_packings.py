@@ -16,7 +16,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Profile, Scratchpad
 from iron.common import Operator
-from iron.common.declare.profile import PackingEntry
+from iron.common.declare.profile import FusionEntry, PackingEntry
 from iron.common.graph.compiled import apply_profile
 from iron.common.graph.packing import apply as apply_packings
 from iron.common.graph.record import Recording
@@ -382,13 +382,11 @@ def _version(name: str) -> tuple:
         (-50.0, None, False, "do not gain beyond the noise"),  # unmeasurable noise
     ],
 )
-def test_decide_fold_keeps_the_fusions_only_where_the_call_gains_beyond_noise(
-    delta, se, kept, message
-):
+def test_decide_fold_keeps_the_fusions_only_where_the_call_gains_beyond_noise(delta, se, kept, message):
     """A regression, or a gain too small next to ``CONFIDENCE`` standard errors of noise, both narrow the version's entry away entirely."""
     decode = Timed(Alternating().record(x=(SIZE,)))
     v = _version("decode")
-    fusions = [(FusionKind.FOLD, (), (), frozenset({v}))]
+    fusions = [FusionEntry(FusionKind.FOLD, (), (), frozenset({v}))]
     logged = []
     got = _decide_fold(fusions, decode, v, delta, se, logged.append)
     assert got == (fusions if kept else [])
@@ -411,20 +409,20 @@ _DECODE_V, _PROMPT_V = _version("decode"), _version("prompt")
     "fusions,expected",
     [
         pytest.param(
-            [(FusionKind.FOLD, (), (), frozenset({_DECODE_V}))],
+            [FusionEntry(FusionKind.FOLD, (), (), frozenset({_DECODE_V}))],
             [],
             id="drops an entry naming only the rejected version",
         ),
         pytest.param(
-            [(FusionKind.FOLD, (), (), frozenset({_DECODE_V, _PROMPT_V}))],
-            [(FusionKind.FOLD, (), (), frozenset({_PROMPT_V}))],
+            [FusionEntry(FusionKind.FOLD, (), (), frozenset({_DECODE_V, _PROMPT_V}))],
+            [FusionEntry(FusionKind.FOLD, (), (), frozenset({_PROMPT_V}))],
             id="shrinks an entry naming several versions",
         ),
         pytest.param(
             [
-                (FusionKind.FOLD, (), (), None),
-                (FusionKind.FOLD, (), (), frozenset({_PROMPT_V})),
-                (FusionKind.STREAM, (), (), frozenset({_DECODE_V})),
+                FusionEntry(FusionKind.FOLD, (), (), None),
+                FusionEntry(FusionKind.FOLD, (), (), frozenset({_PROMPT_V})),
+                FusionEntry(FusionKind.STREAM, (), (), frozenset({_DECODE_V})),
             ],
             None,
             id="leaves other kinds and other versions alone",
@@ -432,9 +430,7 @@ _DECODE_V, _PROMPT_V = _version("decode"), _version("prompt")
     ],
 )
 def test_narrow_for_rejected(fusions, expected):
-    assert _narrow_for_rejected(fusions, _DECODE_V) == (
-        fusions if expected is None else expected
-    )
+    assert _narrow_for_rejected(fusions, _DECODE_V) == (fusions if expected is None else expected)
 
 
 def test_a_version_that_rejects_its_folds_takes_the_packings_searched_without_them():
@@ -495,19 +491,17 @@ def test_fold_profile_scopes_each_entry_to_the_version_it_was_found_in():
 
     with_folds = fold_profile(Profile(), [Timed(decode), Timed(prompt)])
     fusions = with_folds.fusions()
-    by_class = {steps[0][0].__name__: versions for _, steps, _, versions in fusions}
+    by_class = {f.steps[0][0].__name__: f.versions for f in fusions}
     assert by_class["GEMV"] == frozenset({decode.version})
-    silu_versions = {
-        versions for _, steps, _, versions in fusions if steps[0][0].__name__ == "SiLU"
-    }
+    silu_versions = {f.versions for f in fusions if f.steps[0][0].__name__ == "SiLU"}
     assert silu_versions == {frozenset({decode.version}), frozenset({prompt.version})}
 
     # Rejecting the prompt's own folds (the per-version decision) drops
     # only its own singleton-scoped entry, decode's own untouched.
     narrowed = _narrow_for_rejected(fusions, prompt.version)
     assert len(narrowed) == len(fusions) - 1
-    assert frozenset({decode.version}) in {v for _, _, _, v in narrowed}
-    assert frozenset({prompt.version}) not in {v for _, _, _, v in narrowed}
+    assert frozenset({decode.version}) in {f.versions for f in narrowed}
+    assert frozenset({prompt.version}) not in {f.versions for f in narrowed}
 
 
 @pytest.mark.supported_devices("npu1")

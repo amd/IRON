@@ -136,13 +136,13 @@ def fold_profile(base: Profile, calls: Sequence[Timed]) -> Profile:
     out = Profile()
     for cls, dims, tunables in base:
         out.add(cls, **dims, **tunables)
-    for kind, steps, edges, versions in base.fusions():
-        out.add_fusion(kind, steps, edges, versions)
+    for f in base.fusions():
+        out.add_fusion(f.kind, f.steps, f.edges, f.versions, f.phased)
     for entry in base.packings():
         out.add_packing(entry.members, entry.versions)
     existing = {
-        (kind, tuple((c, tuple(sorted(d.items()))) for c, d, _ in steps), edges)
-        for kind, steps, edges, _ in base.fusions()
+        (f.kind, tuple((c, tuple(sorted(d.items()))) for c, d, _ in f.steps), f.edges)
+        for f in base.fusions()
     }
     found: dict[Hashable, tuple[FusionKind, list, tuple, set[Version]]] = {}
     for call in calls:

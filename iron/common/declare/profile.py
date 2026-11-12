@@ -29,19 +29,26 @@ _Op = TypeVar("_Op", bound="Operator")
 # input's name, shape and dtype name, in the order its body takes them.
 Version = tuple[tuple[str, tuple[int, ...], str], ...]
 
-# A fusion entry: ``kind``, its steps (each ``(operator class, dims,
-# tunables)``), the edges wiring them (local indices into steps), and the
-# versions it applies in, or every version where None.
-_FusionEntry = tuple[
-    FusionKind,
-    tuple[tuple[type, dict[str, Any], dict[str, Any] | None], ...],
-    tuple[tuple[int, str, int, str], ...],
-    frozenset[Version] | None,
-]
 _FusionStep = (
     tuple[type, Mapping[str, Any] | None]
     | tuple[type, Mapping[str, Any] | None, Mapping[str, Any] | None]
 )
+
+
+@dataclasses.dataclass(frozen=True)
+class FusionEntry:
+    """Steps that run as one device configuration, each ``(operator class, dims, tunables)``.
+
+    ``edges`` wire them on-chip as ``(producer, output, consumer, input)``, local indices into
+    ``steps``; ``versions`` limits where this applies, every version where None; a ``phased``
+    stream or staged fusion runs one sequence per phase (``Fusion.phased``).
+    """
+
+    kind: FusionKind
+    steps: tuple[tuple[type, dict[str, Any], dict[str, Any] | None], ...]
+    edges: tuple[tuple[int, str, int, str], ...]
+    versions: frozenset[Version] | None = None
+    phased: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -117,7 +124,7 @@ class Profile:
 
     def __init__(self) -> None:
         self._entries: list[tuple[type, dict[str, Any], dict[str, Any]]] = []
-        self._fusions: list[_FusionEntry] = []
+        self._fusions: list[FusionEntry] = []
         self._packings: list[PackingEntry] = []
 
     def make(self, cls: type[_Op], **kwargs: Any) -> _Op:
@@ -164,6 +171,7 @@ class Profile:
         steps: Sequence[_FusionStep],
         edges: Sequence[tuple[int, str, int, str]],
         versions: Iterable[Version] | None = None,
+        phased: bool = False,
     ) -> None:
         """Add a fusion entry: ``kind`` steps run as one device configuration, wired on-chip by ``edges``.
 
@@ -176,10 +184,13 @@ class Profile:
             versions: The graph versions (``Recording.version``) the entry
                 applies in, as a packing entry's own; every version where
                 None.
+            phased: The fusion runs one sequence per phase (``Fusion.phased``), so its
+                phases take the shim's channels in turn; stream and staged only.
 
         Raises:
             TypeError: ``kind`` is ``MERGE`` (a packing's form on an xclbin,
-                ``add_packing``), fewer than two steps are given, no version is given
+                ``add_packing``), ``phased`` is given for a kind other than stream or
+                staged, fewer than two steps are given, no version is given
                 (an empty ``versions``, not None), a dim is not a
                 non-tunable ``param()`` of its class, a name in ``tunables``
                 is not a ``tunable()`` of its class, an edge names a step
@@ -191,6 +202,8 @@ class Profile:
                 "a merge is what a packing runs as on an xclbin: name its steps' "
                 "shapes in add_packing"
             )
+        if phased and kind not in (FusionKind.STREAM, FusionKind.STAGED):
+            raise TypeError(f"a {kind.value} fusion has no phases to run apart")
         if len(steps) < 2:
             raise TypeError("a fusion entry needs at least two steps")
         resolved = self._members(steps)
@@ -212,7 +225,7 @@ class Profile:
         scope = None if versions is None else frozenset(versions)
         if scope is not None and not scope:
             raise TypeError("a fusion entry names at least one version, or None")
-        self._fusions.append((kind, resolved, tuple(edges), scope))
+        self._fusions.append(FusionEntry(kind, resolved, tuple(edges), scope, phased))
 
     def add_packing(
         self,
@@ -270,14 +283,15 @@ class Profile:
         steps: Sequence[Operator],
         edges: Sequence[tuple[int, str, int, str]],
         version: Version | None = None,
+        phased: bool = False,
     ) -> bool:
         """Whether this profile fuses ``steps`` (resolved operators, in order) of ``kind``, wired by ``edges``, in ``version``.
 
-        Matched to a fusion entry of the same kind, length and wiring, whose steps'
-        classes and dims match in order, and whose own ``versions`` names ``version``
-        or names none.
+        Matched to a fusion entry of the same kind, length, wiring and ``phased``, whose
+        steps' classes and dims match in order, and whose own ``versions`` names
+        ``version`` or names none.
         """
-        return self._matching(kind, steps, edges, version) is not None
+        return self._matching(kind, steps, edges, version, phased) is not None
 
     def fusion_tunables(
         self,
@@ -285,6 +299,7 @@ class Profile:
         steps: Sequence[Operator],
         edges: Sequence[tuple[int, str, int, str]],
         version: Version | None = None,
+        phased: bool = False,
     ) -> list[dict[str, Any] | None] | None:
         """Return the matching fusion entry's per-step tunables (``add_fusion``'s ``tunables``), in order.
 
@@ -292,8 +307,8 @@ class Profile:
             None where no entry matches (``fused``); a step's own entry is None where
             it keeps what it takes unfused.
         """
-        entry = self._matching(kind, steps, edges, version)
-        return None if entry is None else [t for _, _, t in entry]
+        entry = self._matching(kind, steps, edges, version, phased)
+        return None if entry is None else [t for _, _, t in entry.steps]
 
     def _matching(
         self,
@@ -301,27 +316,29 @@ class Profile:
         steps: Sequence[Operator],
         edges: Sequence[tuple[int, str, int, str]],
         version: Version | None = None,
-    ) -> tuple[tuple[type, dict[str, Any], dict[str, Any] | None], ...] | None:
+        phased: bool = False,
+    ) -> FusionEntry | None:
         step_dims = [self.dims(type(s), vars(s)) for s in steps]
         edges = tuple(edges)
         return next(
             (
-                entry_steps
-                for entry_kind, entry_steps, entry_edges, entry_versions in self._fusions
-                if entry_kind is kind
-                and len(entry_steps) == len(steps)
-                and entry_edges == edges
-                and (entry_versions is None or version in entry_versions)
+                entry
+                for entry in self._fusions
+                if entry.kind is kind
+                and entry.phased == phased
+                and len(entry.steps) == len(steps)
+                and entry.edges == edges
+                and (entry.versions is None or version in entry.versions)
                 and all(
                     isinstance(s, cls) and self.matches(matched, dims)
-                    for s, (cls, matched, _), dims in zip(steps, entry_steps, step_dims)
+                    for s, (cls, matched, _), dims in zip(steps, entry.steps, step_dims)
                 )
             ),
             None,
         )
 
-    def fusions(self) -> list[_FusionEntry]:
-        """Each fusion entry as ``(kind, steps, edges, versions)``, ``steps`` each ``(operator class, dims, tunables)``, in the order added."""
+    def fusions(self) -> list[FusionEntry]:
+        """Each fusion entry, in the order added."""
         return list(self._fusions)
 
     def packings_of(
@@ -443,13 +460,15 @@ class Profile:
                     "steps",
                     "edges",
                     "versions",
+                    "phased",
                 }
-            ):
+            ) or fusion.get("phased", True) is not True:
                 raise ValueError(
                     f"{path}: a fusion is {{'kind': ..., 'steps': [...], "
                     f"'edges': [...]}}, with 'versions': [{{input: [shape, "
                     f"dtype]}}, ...] where it applies in only some of a "
-                    f"graph's versions"
+                    f"graph's versions, and 'phased': true where it runs a "
+                    f"sequence per phase"
                 )
             edges = [tuple(e) for e in fusion["edges"]]
             profile.add_fusion(
@@ -457,6 +476,7 @@ class Profile:
                 members(fusion["steps"]),
                 edges,
                 _load_versions(fusion.get("versions")),
+                phased="phased" in fusion,
             )
         for packing in data.get("packings", ()):
             if not isinstance(packing, dict) or not {"members"} <= set(packing) <= {
@@ -508,13 +528,14 @@ class Profile:
         fusion_lines = [
             json.dumps(
                 {
-                    "kind": kind.value,
-                    "steps": members(steps),
-                    "edges": [list(e) for e in edges],
-                    **_dump_versions(versions),
+                    "kind": f.kind.value,
+                    "steps": members(f.steps),
+                    "edges": [list(e) for e in f.edges],
+                    **_dump_versions(f.versions),
+                    **({"phased": True} if f.phased else {}),
                 }
             )
-            for kind, steps, edges, versions in self._fusions
+            for f in self._fusions
         ]
         packing_lines = [
             json.dumps(

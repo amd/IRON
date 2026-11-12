@@ -272,13 +272,15 @@ def build_variant(stock: Profile, tags) -> Profile:
     profile = Profile()
     for cls, dims, tunables in stock:
         profile.add(cls, **dims, **tunables)
-    for fusion in stock.fusions():
-        profile.add_fusion(*fusion)
+    for f in stock.fusions():
+        profile.add_fusion(f.kind, f.steps, f.edges, f.versions, f.phased)
     for packing in stock.packings():
         profile.add_packing(packing.members, packing.versions)
     for kind, entry in tags:
         if kind == "fusion":
-            profile.add_fusion(*entry)
+            profile.add_fusion(
+                entry.kind, entry.steps, entry.edges, entry.versions, entry.phased
+            )
         else:
             profile.add_packing(entry.members, entry.versions)
     return profile

@@ -90,20 +90,13 @@ def test_fold_profile_writes_down_projs_add_and_silus_mul_by_shape(decode):
 
     assert list(out) == list(base)  # the one tunable entry survives, unchanged
     fusions = out.fusions()
-    kinds = sorted(
-        (kind.value, tuple(c.__name__ for c, _, _ in steps))
-        for kind, steps, _, _ in fusions
-    )
+    kinds = sorted((f.kind.value, tuple(c.__name__ for c, _, _ in f.steps)) for f in fusions)
     assert kinds == [
         (FusionKind.FOLD.value, ("GEMV", "ElementwiseAdd")),
         (FusionKind.FOLD.value, ("SiLU", "ElementwiseMul")),
     ]
-    assert all(versions == frozenset({decode.version}) for *_, versions in fusions)
-    (gemv_fold,) = (
-        steps
-        for kind, steps, _, _ in fusions
-        if kind is FusionKind.FOLD and steps[0][0] is GEMV
-    )
+    assert all(f.versions == frozenset({decode.version}) for f in fusions)
+    (gemv_fold,) = (f.steps for f in fusions if f.kind is FusionKind.FOLD and f.steps[0][0] is GEMV)
     assert gemv_fold[0][1]["K"] == 8192, "down_proj's own K, not q/o's 2048"
 
 

@@ -6,13 +6,15 @@
 No NPU above ``# On the device``.
 """
 
+import dataclasses
+
 import aie.utils as aie_utils
 import numpy as np
 import pytest
 
 import iron
 from iron import Profile, Scratchpad
-from iron.common.declare.profile import PackingEntry
+from iron.common.declare.profile import FusionEntry, PackingEntry
 from iron.common.graph.fold import fold_candidates
 from iron.common.image.step import FusionKind
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -106,15 +108,14 @@ def test_a_fold_touches_only_the_version_whose_steps_it_names():
     gate, mul = (decode.steps[i].op.resolved() for i in fold.steps)
     assert isinstance(gate, SiLU) and isinstance(mul, ElementwiseMul)
     edge = fold.edges[0]
-    entry = (
+    entry = FusionEntry(
         FusionKind.FOLD,
-        [(SiLU, {"size": gate.size}), (ElementwiseMul, {"size": mul.size})],
-        [(0, edge.output, 1, edge.input)],
-        None,
+        ((SiLU, {"size": gate.size}, None), (ElementwiseMul, {"size": mul.size}, None)),
+        ((0, edge.output, 1, edge.input),),
     )
     assert touches("fusion", entry, decode)
     assert not touches("fusion", entry, prompt)
-    scoped = (*entry[:3], frozenset({prompt.version}))
+    scoped = dataclasses.replace(entry, versions=frozenset({prompt.version}))
     assert not touches("fusion", scoped, decode)
 
 

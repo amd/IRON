@@ -38,7 +38,7 @@ from aie.iron.device import Device
 from aie.utils.compile.jit.params import widths
 
 from iron.common.declare import Operator, Profile
-from iron.common.declare.profile import PackingEntry, Version
+from iron.common.declare.profile import FusionEntry, PackingEntry, Version
 from iron.common.design import BuiltArray, OperatorDesign
 from iron.common.graph.compiled import _words, apply_profile
 from iron.common.image.step import FusionKind
@@ -604,8 +604,8 @@ def _profile(base: Profile, packings: Sequence[PackingEntry]) -> Profile:
     out = Profile()
     for cls, dims, tunables in base:
         out.add(cls, **dims, **tunables)
-    for kind, steps, edges, versions in base.fusions():
-        out.add_fusion(kind, steps, edges, versions)
+    for f in base.fusions():
+        out.add_fusion(f.kind, f.steps, f.edges, f.versions, f.phased)
     for p in packings:
         out.add_packing(p.members, p.versions)
     return out
@@ -847,7 +847,7 @@ def price_packings(
     )
 
 
-def _with_fusions(base: Profile, fusions: Sequence) -> Profile:
+def _with_fusions(base: Profile, fusions: Sequence[FusionEntry]) -> Profile:
     """``base``'s entries and packings with ``fusions`` as its only fusions.
 
     The fold-narrowing counterpart of ``_profile``, which does the same for a profile's
@@ -856,14 +856,16 @@ def _with_fusions(base: Profile, fusions: Sequence) -> Profile:
     out = Profile()
     for cls, dims, tunables in base:
         out.add(cls, **dims, **tunables)
-    for kind, steps, edges, versions in fusions:
-        out.add_fusion(kind, steps, edges, versions)
+    for f in fusions:
+        out.add_fusion(f.kind, f.steps, f.edges, f.versions, f.phased)
     for entry in base.packings():
         out.add_packing(entry.members, entry.versions)
     return out
 
 
-def _narrow_for_rejected(fusions: Sequence, version: Version) -> list:
+def _narrow_for_rejected(
+    fusions: Sequence[FusionEntry], version: Version
+) -> list[FusionEntry]:
     """``fusions`` with a ``FOLD`` entry's own ``versions`` narrowed past ``version``, dropped entirely where that would leave it naming none.
 
     A version ``price_folds_before_packing`` rejects keeps the profile as it stood for
@@ -873,18 +875,18 @@ def _narrow_for_rejected(fusions: Sequence, version: Version) -> list:
     searched on the folded steps.
     """
     out = []
-    for kind, steps, edges, versions in fusions:
-        if kind is FusionKind.FOLD and versions is not None and version in versions:
-            remaining = versions - {version}
+    for f in fusions:
+        if f.kind is FusionKind.FOLD and f.versions is not None and version in f.versions:
+            remaining = f.versions - {version}
             if not remaining:
                 continue
-            versions = remaining
-        out.append((kind, steps, edges, versions))
+            f = dataclasses.replace(f, versions=remaining)
+        out.append(f)
     return out
 
 
 def _decide_fold(
-    fusions: Sequence,
+    fusions: Sequence[FusionEntry],
     call: Timed,
     version: Version,
     delta: float,

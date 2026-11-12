@@ -162,7 +162,8 @@ def test_the_seed_codes_a_shape_in_the_packings_and_fusions_naming_it():
         [(0, "C", 1, "x")],
     )
     seed = coded_seed(recorder("none"), aie_utils.ensure_current_device(), start)
-    [(_, steps, _, _)] = seed.fusions()
+    [entry] = seed.fusions()
+    steps = entry.steps
     [packing] = seed.packings()
     assert [t for _, _, t in packing.members] == [
         {"tile_size_input": 4, "coded_a": True},

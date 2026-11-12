@@ -21,7 +21,7 @@ from typing import Any
 from aie.iron.device import Device
 
 from iron.common.declare import Profile
-from iron.common.declare.profile import PackingEntry, Version
+from iron.common.declare.profile import FusionEntry, PackingEntry, Version
 from iron.common.graph.fold import chosen_folds
 from iron.common.graph.fusion import fusions as graph_fusions
 from iron.common.graph.record import Recording
@@ -68,13 +68,12 @@ def touches(kind: str, entry: Any, recording: Recording) -> bool:
         )
     probe = Profile()
     if kind == "fusion":
-        fusion_kind, steps, edges, versions = entry
-        if versions is not None and version not in versions:
+        if entry.versions is not None and version not in entry.versions:
             return False
-        probe.add_fusion(fusion_kind, steps, edges)
+        probe.add_fusion(entry.kind, entry.steps, entry.edges, phased=entry.phased)
         found = (
             chosen_folds(recording, probe)
-            if fusion_kind is FusionKind.FOLD
+            if entry.kind is FusionKind.FOLD
             else graph_fusions(recording, probe)
         )
         return bool(found)
@@ -103,21 +102,22 @@ def narrowed(
     for entry in base:
         if any(touches("tunable", entry, r) for r in lost):
             out.add(entry[0], **entry[1], **entry[2])
-    fusions: list = []
-    for kind, steps, edges, versions in candidate.fusions():
-        if versions is not None:
-            versions = versions - losers
-        elif any(touches("fusion", (kind, steps, edges, None), r) for r in lost):
+    fusions: list[FusionEntry] = []
+    for f in candidate.fusions():
+        if f.versions is not None:
+            f = dataclasses.replace(f, versions=f.versions - losers)
+        elif any(touches("fusion", f, r) for r in lost):
             continue
-        if versions is None or versions:
-            fusions.append((kind, steps, edges, versions))
-    for kind, steps, edges, versions in base.fusions():
-        if any(touches("fusion", (kind, steps, edges, versions), r) for r in lost):
-            scope = None if versions is None else versions & losers
-            if (kind, steps, edges, scope) not in fusions:
-                fusions.append((kind, steps, edges, scope))
-    for fusion in fusions:
-        out.add_fusion(*fusion)
+        if f.versions is None or f.versions:
+            fusions.append(f)
+    for f in base.fusions():
+        if any(touches("fusion", f, r) for r in lost):
+            scope = None if f.versions is None else f.versions & losers
+            kept = dataclasses.replace(f, versions=scope)
+            if kept not in fusions:
+                fusions.append(kept)
+    for f in fusions:
+        out.add_fusion(f.kind, f.steps, f.edges, f.versions, f.phased)
     packings: list[PackingEntry] = []
     for entry in candidate.packings():
         if entry.versions is not None:
@@ -419,8 +419,10 @@ def entries(profile: Profile) -> set[str]:
 
     out = {f"tunables {step(cls, d, t)}" for cls, d, t in profile}
     out |= {
-        f"{kind.value} " + " + ".join(step(*s) for s in steps) + scope(versions)
-        for kind, steps, _, versions in profile.fusions()
+        f"{f.kind.value}{'/phased' if f.phased else ''} "
+        + " + ".join(step(*s) for s in f.steps)
+        + scope(f.versions)
+        for f in profile.fusions()
     }
     out |= {
         "packing " + " + ".join(step(*m) for m in p.members) + scope(p.versions)

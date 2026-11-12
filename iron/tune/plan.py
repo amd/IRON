@@ -78,9 +78,13 @@ class Coding:
             ],
         )
         given = [(self.shapes[k].cls, self.dims[k], self.flags[k]) for k in keys]
-        for kind, steps, edges, versions in self.base.fusions():
+        for f in self.base.fusions():
             out.add_fusion(
-                kind, [_coded_member(s, given) for s in steps], edges, versions
+                f.kind,
+                [_coded_member(s, given) for s in f.steps],
+                f.edges,
+                f.versions,
+                f.phased,
             )
         for packing in self.base.packings():
             out.add_packing(
