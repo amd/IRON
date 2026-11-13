@@ -12,7 +12,7 @@ import dataclasses
 import math
 from collections.abc import Hashable
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
@@ -29,25 +29,45 @@ from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs, stacked
 from iron.operators.log import Log
+from iron.operators.log10_clamp import Log10Clamp
 from iron.operators.magnitude import Magnitude
 from iron.operators.mha import MHA
+from iron.operators.reduce_max import ReduceMax
 from iron.operators.resample.op import SIDE, PatchPositions, Resample, ResampleTaps
 
 
-def filterbank(fft: int, mels: int, sample_rate: int, max_hz: float) -> np.ndarray:
-    """Compute the ``(fft // 2 + 1, mels)`` unnormalized mel triangles, HTK scale.
+def filterbank(
+    fft: int,
+    mels: int,
+    sample_rate: int,
+    max_hz: float,
+    *,
+    scale: Literal["htk", "slaney"] = "htk",
+) -> np.ndarray:
+    """Compute ``(fft // 2 + 1, mels)`` mel triangles, HTK or normalized Slaney scale.
 
     Over the rfft's bins, from 0 Hz to ``max_hz``, float64, as transformers'
     ``mel_filter_bank``.
     """
-    mel = np.linspace(0, 2595 * math.log10(1 + max_hz / 700), mels + 2)
-    edges = 700 * (10 ** (mel / 2595) - 1)
+    if scale == "htk":
+        mel = np.linspace(0, 2595 * math.log10(1 + max_hz / 700), mels + 2)
+        edges = 700 * (10 ** (mel / 2595) - 1)
+    elif scale == "slaney":
+        step = math.log(6.4) / 27.0
+        top = 3 * max_hz / 200 if max_hz < 1000 else 15 + math.log(max_hz / 1000) / step
+        mel = np.linspace(0, top, mels + 2)
+        edges = np.where(mel < 15, 200 * mel / 3, 1000 * np.exp((mel - 15) * step))
+    else:
+        raise ValueError(f"Unknown mel scale: {scale}")
     bins = np.linspace(0, sample_rate // 2, fft // 2 + 1)
     slopes = edges[None, :] - bins[:, None]
     widths = np.diff(edges)
-    return np.maximum(
+    filters = np.maximum(
         0, np.minimum(-slopes[:, :-2] / widths[:-1], slopes[:, 2:] / widths[1:])
     )
+    if scale == "slaney":
+        filters *= 2 / (edges[2:] - edges[:-2])
+    return filters
 
 
 class LogMel(iron.Graph):
@@ -66,17 +86,24 @@ class LogMel(iron.Graph):
         sample_rate: int = 16000,
         max_hz: float = 8000.0,
         mel_floor: float = 1e-3,
+        mel_scale: Literal["htk", "slaney"] = "htk",
+        power: int = 1,
+        decades: float | None = None,
+        shift: float = 0.0,
+        scale: float = 1.0,
     ):
         if fft < frame:
             raise ValueError(
                 f"LogMel: an rfft of {fft} points is shorter than a frame of {frame}"
             )
         self.frame, self.hop, self.fft, self.mels = frame, hop, fft, mels
-        self.mel_floor = mel_floor
+        self.mel_floor, self.power = mel_floor, power
+        self.decades, self.shift, self.scale = decades, shift, scale
         # The samples a frame is read as: six limb planes of them are the
         # rfft GEMM's K, whole 64s; the rfft's rows past the frame are zero.
         self.span = -(-frame // 32) * 32
-        filters = filterbank(fft, mels, sample_rate, max_hz)
+        filters = filterbank(fft, mels, sample_rate, max_hz, scale=mel_scale)
+        mel_width = -(-mels // 64) * 64
         bins = fft // 2 + 1
         width = -(-bins // 64) * 64
         angle = 2 * np.pi * np.arange(frame)[:, None] * np.arange(bins) / fft
@@ -88,7 +115,7 @@ class LogMel(iron.Graph):
         dft[:frame, width : width + bins] = -window * np.sin(angle)
         self.dft = iron.param(stacked(dft))
         self.filterbank = iron.param(
-            stacked(np.pad(filters, ((0, width - bins), (0, 0))))
+            stacked(np.pad(filters, ((0, width - bins), (0, mel_width - mels))))
         )
 
     def body(
@@ -111,10 +138,24 @@ class LogMel(iron.Graph):
         exact = dict(tile_m=32, output_dtype=np.float32, precision=Precision.HIGHEST)
         spectrum = GEMM.step(Limbs.step(a), self.dft, **exact)
         energy = GEMM.step(
-            Limbs.step(Magnitude.step(spectrum)),
+            Limbs.step(Magnitude.step(spectrum, power=self.power)),
             self.filterbank,
             **exact,
         )
+        if self.decades is not None:
+            maximum = ReduceMax.step(energy.reshape(math.prod(energy.shape)))
+            normalized = Log10Clamp.step(
+                energy.reshape(math.prod(energy.shape)),
+                maximum,
+                mel_floor=self.mel_floor,
+                decades=self.decades,
+                shift=self.shift,
+                scale=self.scale,
+            ).reshape(*energy.shape)
+            valid = normalized[:, : self.mels]
+            return (
+                Copy.step(valid, features) if features is not None else Copy.step(valid)
+            )
         if features is None:
             return Log.step(energy, offset=self.mel_floor)
         return Log.step(energy, features, offset=self.mel_floor)

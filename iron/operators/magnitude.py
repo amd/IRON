@@ -12,12 +12,13 @@ from iron.common.testing import Case, Testing
 
 
 class Magnitude(Rowwise):
-    """The magnitude of each row of complex float32 held as `[re | im]`."""
+    """The magnitude (or power) of complex float32 rows held as `[re | im]`."""
 
     test = Testing(
         [
             Case(dict(rows=64, width=640, num_aie_columns=1)),
             Case(dict(rows=512, width=640, num_aie_columns=4)),
+            Case(dict(rows=64, width=512, num_aie_columns=1, power=2), lower=True),
             lambda cls, dev: [
                 Case(dict(rows=4096, width=640, num_aie_columns=dev.cols), bench=True)
             ],
@@ -35,6 +36,7 @@ class Magnitude(Rowwise):
     )
 
     width: int = param()
+    power: int = param(default=1, array=True)
     tile_size: int = param(derive=lambda op: op.width // 2)
 
     x = In(
@@ -59,4 +61,4 @@ class Magnitude(Rowwise):
             )
 
     def kernel(self):
-        return eltwise.magnitude_f32(self.tile_size)
+        return eltwise.magnitude_f32(self.tile_size, power=self.power)

@@ -75,6 +75,7 @@ CHECKPOINTS = {
     "gemma4": {"gemma4": "Gemma 4 E2B"},
     "gemma4_flm": {"": "Gemma 4 E2B in FastFlowLM"},
     "embedding_gemma2": {"": "EmbeddingGemma 2"},
+    "whisper": {"": "Whisper-small"},
     "long_context": {"llama_3.2_1b": "Llama 3.2 1B · 8K-token prompt"},
 }
 

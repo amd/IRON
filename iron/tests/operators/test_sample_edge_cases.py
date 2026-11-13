@@ -25,6 +25,7 @@ tokens must be the records, each in its position's slot.
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.iron.kernels import sample as kernels
 from aie.iron.kernels.sample import draw_row
 from ml_dtypes import bfloat16
 
@@ -79,7 +80,62 @@ KINDS = [
 ]
 
 
-pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize("chunk", [256, 2048])
+def test_ranges_and_forced_timestamps_change_per_call(chunk):
+    """Mask across columns and switch the forced rule without rebuilding."""
+    vocab, split, max_ranges = 4096, 2048, 3
+    words = kernels.select_row_words(max_ranges, True)
+    draws = iron.state((1, words), np.int32)
+    tokens = iron.state((1,), np.int32)
+
+    class Draw(iron.Graph):
+        def body(self, logits):
+            _, token = Sample.step(
+                logits,
+                draws,
+                tokens,
+                cores=2,
+                chunk=chunk,
+                max_ranges=max_ranges,
+                probability_rule=True,
+                drawable=vocab - 2,
+            )
+            return token
+
+    net = Draw().compile(logits=(vocab,))
+    try:
+        for text, ranges, boundary in [
+            (10, [], split),
+            (20, [], split),
+            (10, [], vocab),
+            (20, [(7, 8), (2040, 2050)], split),
+        ]:
+            logits = np.full(vocab, -np.inf, bfloat16)
+            logits[7], logits[2049], logits[2050:2150] = text, 9, 7
+            logits[-2:] = 100  # no padding token may contribute to the rule
+            row = np.concatenate(
+                [
+                    draw_row(0.0, 1, 0),
+                    kernels.range_words(ranges, max_ranges),
+                    kernels.split_word(boundary),
+                ]
+            ).reshape(1, words)
+            net.write(draws, row)
+            got = int(net(logits).numpy()[0])
+            logits[-2:] = -np.inf
+            want = kernels.sample_ref(
+                logits,
+                0.0,
+                1,
+                0,
+                ranges=ranges,
+                probability_rule_split=boundary,
+                columns=2,
+            )
+            assert got == want, (text, ranges, boundary, got, want)
+    finally:
+        net.release()
 
 
 def _boundaries(vocab: int, slice_size: int, chunk: int, last: int) -> np.ndarray:

@@ -8,6 +8,7 @@ Built from a checkpoint's files (``load``), which generates from a prompt;
 to its ids.
 """
 
+import ctypes
 import dataclasses
 import datetime
 import functools
@@ -16,9 +17,10 @@ import json
 import logging
 import math
 import os
+import sys
 import time
 from collections.abc import Callable, Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 import numpy as np
@@ -83,8 +85,29 @@ def _cgroup_limit(root: Path = CGROUP, proc_cgroup: Path = PROC_CGROUP) -> int |
             limits.append(int(text))
         if path in ("", "/"):
             break
-        path = str(Path(path).parent)
+        path = str(PurePosixPath(path).parent)
     return min(limits) if limits else None
+
+
+def _physical_memory() -> int:
+    """Return this host's physical memory in bytes."""
+    if sys.platform != "win32":
+        return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+
+    class MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("length", ctypes.c_uint32),
+            ("memory_load", ctypes.c_uint32),
+            ("total_phys", ctypes.c_uint64),
+            *(("unused_" + str(i), ctypes.c_uint64) for i in range(6)),
+        ]
+
+    status = MemoryStatusEx(length=ctypes.sizeof(MemoryStatusEx))
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(  # pyright: ignore[reportAttributeAccessIssue]
+        ctypes.byref(status)
+    ):
+        raise ctypes.WinError()  # pyright: ignore[reportAttributeAccessIssue]
+    return int(status.total_phys)
 
 
 def host_budget() -> int:
@@ -93,7 +116,7 @@ def host_budget() -> int:
     Physical memory minus ``HOST_RESERVE``, or the cgroup's limit minus
     ``CGROUP_RESERVE`` when a cgroup caps this process, whichever is smaller.
     """
-    phys = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") - HOST_RESERVE
+    phys = _physical_memory() - HOST_RESERVE
     limit = _cgroup_limit()
     return phys if limit is None else min(phys, limit - CGROUP_RESERVE)
 

@@ -13,6 +13,7 @@ import math
 import mmap
 import pickle
 import struct
+import sys
 import zipfile
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
@@ -113,8 +114,9 @@ class _Shard:
         begin = array.ctypes.data - self._address
         if not (array.flags.c_contiguous and 0 <= begin < len(self._map)):
             return False
-        start = begin - begin % mmap.PAGESIZE
-        self._map.madvise(mmap.MADV_DONTNEED, start, begin + array.nbytes - start)
+        if sys.platform != "win32":
+            start = begin - begin % mmap.PAGESIZE
+            self._map.madvise(mmap.MADV_DONTNEED, start, begin + array.nbytes - start)
         return True
 
 

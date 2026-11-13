@@ -43,11 +43,13 @@ def test_rope_is_correctly_rounded_at_position_zero_and_one():
     angles = rope_angles(D, 2, base)
     assert np.array_equal(angles[0, ::2], np.ones(D // 2, np.float32))
     assert np.array_equal(angles[0, 1::2], np.zeros(D // 2, np.float32))
-    inv = (1.0 / base ** (np.arange(0, D, 2, dtype=np.float32) / np.float32(D))).astype(
-        np.float32
-    )
+    exponents = np.arange(0, D, 2, dtype=np.float32) / np.float32(D)
+    inv = (1.0 / base ** exponents.astype(np.float64)).astype(np.float32)
     assert np.array_equal(
         angles[1, ::2], np.cos(inv.astype(np.float64)).astype(np.float32)
+    )
+    assert np.array_equal(
+        angles[1, 1::2], np.sin(inv.astype(np.float64)).astype(np.float32)
     )
 
 

@@ -7,3 +7,6 @@
 safetensors
 pillow==12.3.0
 soundfile==0.14.0
+# Independent Hugging Face Whisper test references, not NPU runtime dependencies.
+torch==2.15.0
+transformers==5.22.1
