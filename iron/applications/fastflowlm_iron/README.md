@@ -16,7 +16,9 @@ until that interface merges. Run from this directory:
 source /opt/xilinx/xrt/setup.sh
 source /path/to/ironenv/bin/activate
 make flm
+model_path=${FLM_MODEL_PATH:-$HOME/.cache/fastflowlm}
 source build/install/flm_env.sh
+export FLM_MODEL_PATH="$model_path"
 
 read -rsp 'Hugging Face token: ' HF_TOKEN; echo
 export HF_TOKEN
@@ -45,7 +47,8 @@ The [integration test](../../../tests/applications/fastflowlm_iron/test.py) chec
 Llama chat and EmbeddingGemma-2 through the HTTP API on NPU2. CI needs
 `config.json`, `model.safetensors`, `tokenizer.json` and `tokenizer_config.json`
 in each of `/srv/fastflowlm/models/llama3.2-1b-instruct/` and
-`/srv/fastflowlm/models/embeddinggemma-2/`. Set `FLM_MODEL_PATH` to another directory
+`/srv/embeddinggemma-2/` (shared with the standalone IRON tests). The test
+also accepts checkpoints under `$FLM_MODEL_PATH/models/`. Set `FLM_MODEL_PATH` to another directory
 containing `models/` to reuse local weights. No token is needed when weights
 are already present.
 

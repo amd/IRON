@@ -27,6 +27,10 @@ APP = Path(applications.__file__).with_name("fastflowlm_iron")
 
 @pytest.fixture(scope="module")
 def installation():
+    return build_flm()
+
+
+def build_flm(timeout=1800):
     # An explicit build permits testing a freshly built local FLM/plugin pair.
     if build := os.environ.get("FLM_TEST_BUILD"):
         return Path(build)
@@ -34,13 +38,19 @@ def installation():
     env.pop("USER", None)  # Match the CI container's environment.
     build = APP / "build"
     build.mkdir(exist_ok=True)
-    subprocess.run(
+    with subprocess.Popen(
         ["flock", str(build / ".lock"), "make", "flm"],
         cwd=APP,
         env=env,
-        check=True,
-        timeout=1800,
-    )
+        start_new_session=True,
+    ) as process:
+        try:
+            status = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            raise
+        if status:
+            raise subprocess.CalledProcessError(status, process.args)
     return build
 
 
@@ -54,6 +64,79 @@ def test_installation_serializes_builds(tmp_path, monkeypatch):
     with ThreadPoolExecutor(2) as pool:
         builds = list(pool.map(lambda _: installation.__wrapped__(), range(2)))
     assert builds == [tmp_path / "build"] * 2
+
+
+def model_directory(name):
+    root = Path(os.environ.get("FLM_MODEL_PATH", weights_dir("fastflowlm")))
+    model = root / "models" / name
+    return model if model.is_dir() else weights_dir(name)
+
+
+def test_model_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLM_MODEL_PATH", str(tmp_path / "flm"))
+    monkeypatch.setenv("IRON_EXAMPLE_WEIGHTS_DIR", str(tmp_path))
+    assert model_directory("embeddinggemma-2") == tmp_path / "embeddinggemma-2"
+    model = tmp_path / "flm/models/embeddinggemma-2"
+    model.mkdir(parents=True)
+    assert model_directory("embeddinggemma-2") == model
+
+
+def test_installation_timeout_releases_lock(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLM_TEST_BUILD", raising=False)
+    monkeypatch.setattr(sys.modules[__name__], "APP", tmp_path)
+    (tmp_path / "Makefile").write_text("flm:\n\ttouch started\n\tsleep 60\n")
+    with pytest.raises(subprocess.TimeoutExpired):
+        build_flm(timeout=2)
+    assert (tmp_path / "started").exists()
+    subprocess.run(
+        ["flock", "-w", "5", str(tmp_path / "build/.lock"), "true"], check=True
+    )
+
+
+def test_build_reselects_revision(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(source), *args], text=True
+        ).strip()
+
+    git("init")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.com")
+    (source / "src").mkdir()
+    installer = source / "src/home_install.sh"
+    installer.write_text(
+        '#!/bin/sh\ngit -C "$(dirname "$0")" rev-parse HEAD > "$FLM_PREFIX"\n'
+    )
+    installer.chmod(0o755)
+    git("add", ".")
+    git("commit", "-m", "A")
+    first = git("rev-parse", "HEAD")
+    git("commit", "--allow-empty", "-m", "B")
+    second = git("rev-parse", "HEAD")
+    # Only Git selection is under test; omit the C++ build and contract tests.
+    for command in ("cmake", "ctest"):
+        stub = tmp_path / command
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+    build = tmp_path / "build"
+    for revision in (first, second, first):
+        subprocess.run(
+            [
+                "make",
+                "-f",
+                str(APP / "Makefile"),
+                "flm",
+                f"FLM_REPO={source}",
+                f"FLM_COMMIT={revision}",
+                f"BUILD={build}",
+            ],
+            env=dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}"),
+            check=True,
+        )
+        assert (build / "install").read_text().strip() == revision
 
 
 def post(url, path, body):
@@ -75,35 +158,27 @@ def post(url, path, body):
     ],
 )
 def test_model(tmp_path, installation, tag, name):
-    root = Path(os.environ.get("FLM_MODEL_PATH", weights_dir("fastflowlm")))
-    model = root / "models" / name
-    require(
-        *(
-            model / f
-            for f in (
-                "config.json",
-                "model.safetensors",
-                "tokenizer.json",
-                "tokenizer_config.json",
-            )
-        )
-    )
     env = dict(os.environ, PATH=f"{Path(sys.executable).parent}:{os.environ['PATH']}")
     # Keep FastFlowLM's writable files away from CI's read-only weights mount.
     (tmp_path / "models").mkdir()
-    (tmp_path / "models" / model.name).symlink_to(
-        model.resolve(), target_is_directory=True
-    )
+    names = [name]
     if name == "llama3.2-1b-instruct":
-        embedding = root / "models/embeddinggemma-2"
+        names.append("embeddinggemma-2")
+    for model_name in names:
+        model = model_directory(model_name)
         require(
-            embedding / "model.safetensors",
-            embedding / "tokenizer.json",
-            embedding / "tokenizer_config.json",
-            embedding / "config.json",
+            *(
+                model / f
+                for f in (
+                    "config.json",
+                    "model.safetensors",
+                    "tokenizer.json",
+                    "tokenizer_config.json",
+                )
+            )
         )
-        (tmp_path / "models/embeddinggemma-2").symlink_to(
-            embedding.resolve(), target_is_directory=True
+        (tmp_path / "models" / model_name).symlink_to(
+            model.resolve(), target_is_directory=True
         )
     env["FLM_MODEL_PATH"] = str(tmp_path)
     env["FLM_MODELINFO_PATH"] = str(installation / "install/share/flm/model_info.json")

@@ -9,6 +9,8 @@ FLM_ROOT   := $(BUILD)/FastFlowLM
 
 .PHONY: flm
 flm: $(FLM_ROOT)/.git/iron-$(FLM_COMMIT)
+	git -C $(FLM_ROOT) checkout $(FLM_COMMIT)
+	git -C $(FLM_ROOT) submodule update --init --recursive
 	USER=$${USER:-$$(id -un)} BUILD_DIR=$(BUILD)/flm FLM_PREFIX=$(BUILD)/install \
 	    CMAKE_BUILD_PARALLEL_LEVEL=$${CMAKE_BUILD_PARALLEL_LEVEL:-2} \
 	    $(FLM_ROOT)/src/home_install.sh
@@ -21,6 +23,4 @@ flm: $(FLM_ROOT)/.git/iron-$(FLM_COMMIT)
 $(FLM_ROOT)/.git/iron-$(FLM_COMMIT):
 	git init $(FLM_ROOT)
 	git -C $(FLM_ROOT) fetch --depth 1 $(FLM_REPO) $(FLM_COMMIT)
-	git -C $(FLM_ROOT) checkout $(FLM_COMMIT)
-	git -C $(FLM_ROOT) submodule update --init --recursive
 	touch $@
