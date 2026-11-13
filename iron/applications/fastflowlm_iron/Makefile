@@ -1,9 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-FLM_REPO   := https://github.com/andrej/FastFlowLM.git
-# Temporary pin to feat/embedding-model-extensions until embedding plugins merge.
-FLM_COMMIT := 9e7eee50f7efe54c6bbc61e009ba355e67cfff5d
+FLM_REPO   := https://github.com/ROCm/FastFlowLM.git
+FLM_COMMIT := 69f691b58c30effdd29fa263839054b545d8ecc7
 BUILD      := $(CURDIR)/build
 FLM_ROOT   := $(BUILD)/FastFlowLM
 

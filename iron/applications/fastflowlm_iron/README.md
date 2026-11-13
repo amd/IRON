@@ -8,9 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 On an NPU2 machine, install [IRON](../../../README.md#installation-linux) and
 [the build dependencies](../../../ci/docker-based/Dockerfile)
 (the IRON CI container includes them). `make flm` builds FastFlowLM and this
-plugin against its installed extension SDK. FastFlowLM is temporarily pinned to
-[`feat/embedding-model-extensions`](https://github.com/andrej/FastFlowLM/tree/feat/embedding-model-extensions)
-until that interface merges. Run from this directory:
+plugin against its installed extension SDK. Run from this directory:
 
 ```bash
 source /opt/xilinx/xrt/setup.sh
