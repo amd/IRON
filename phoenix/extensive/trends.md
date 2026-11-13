@@ -1,70 +1,72 @@
 # Performance trends
 
-**Operators added:** `mha_prefill_lxl`
-
 Benchmarks that moved by at least 5% and by more than 2x the spread the runs measured:
 
 | Operator | Parametrization | Metric | Previous | Current | Change |
 |---|---|---|---|---|---|
-| `AXPY` | `npu1-AXPY-size_8388608-num_aie_columns_4-tile_size_4096-scalar_factor_3.0` | `Latency MAD` | 763.06 µs | 1154.37 µs | ⚪ +51.28% |
-| `Clamp` | `npu1-Clamp-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096-low_-0.75-high_1.25` | `Latency MAD` | 766.61 µs | 502.27 µs | ⚪ -34.48% |
-| `Copy` | `npu1-Copy-bench_flat_4mi` | `Latency MAD` | 11.64 µs | 6.15 µs | ⚪ -47.17% |
-| `DepthwiseConv1d` | `npu1-DepthwiseConv1d-rows_768-channels_1024-num_aie_columns_4` | `Latency MAD` | 10.82 µs | 12.98 µs | ⚪ +19.97% |
-| `ElementwiseAdd` | `npu1-ElementwiseAdd-size_8388608-num_aie_columns_4-tile_size_4096` | `Latency MAD` | 1171.12 µs | 634.29 µs | ⚪ -45.84% |
-| `ElementwiseMul` | `npu1-ElementwiseMul-size_8388608-num_aie_columns_4-tile_size_4096` | `Latency MAD` | 276.61 µs | 658.23 µs | ⚪ +137.97% |
-| `Emit` | `npu1-Emit-eight_carried` | `Latency MAD` | 10.00 µs | 5.07 µs | ⚪ -49.28% |
-| `GELU` | `npu1-GELU-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency MAD` | 197.97 µs | 443.88 µs | ⚪ +124.21% |
-| `GEMM` | `npu1-GEMM-M_2048-K_2048-N_2048-b_col_maj_True` | `Latency MAD` | 533.13 µs | 345.84 µs | ⚪ -35.13% |
-| `GEMV` | `npu1-GEMV-M_1536-K_12288-num_aie_columns_4-tile_size_input_1-tile_size_output_64` | `Latency MAD` | 254.24 µs | 129.24 µs | ⚪ -49.17% |
-| `GEMV` | `npu1-GEMV-M_2048-K_8192-num_aie_columns_4-tile_size_input_1-tile_size_output_256` | `Bandwidth` | 10.23 GB/s | 15.79 GB/s | 🟢 +54.37% |
-| `GEMV` | `npu1-GEMV-M_2048-K_8192-num_aie_columns_4-tile_size_input_1-tile_size_output_256` | `Latency` | 3282.96 µs | 2126.64 µs | 🟢 -35.22% |
-| `GEMV` | `npu1-GEMV-M_2048-K_8192-num_aie_columns_4-tile_size_input_1-tile_size_output_256` | `Latency MAD` | 399.62 µs | 4.87 µs | ⚪ -98.78% |
-| `GEMV` | `npu1-GEMV-M_2048-K_8192-num_aie_columns_4-tile_size_input_1-tile_size_output_256` | `Throughput` | 10.22 GOP/s | 15.78 GOP/s | 🟢 +54.37% |
-| `GEMV` | `npu1-GEMV-M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_1024` | `Latency MAD` | 123.40 µs | 600.21 µs | ⚪ +386.38% |
-| `GEMV` | `npu1-GEMV-M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_512-num_channels_2` | `Latency` | 1687.73 µs | 3397.97 µs | 🔴 +101.33% |
-| `GEMV` | `npu1-GEMV-M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_512-num_channels_2` | `Latency MAD` | 550.26 µs | 364.95 µs | ⚪ -33.68% |
-| `LayerNorm` | `npu1-LayerNorm-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096-weighted_True` | `Latency MAD` | 609.45 µs | 36.04 µs | ⚪ -94.09% |
-| `LayerNorm` | `npu1-LayerNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096` | `Bandwidth` | 10.89 GB/s | 29.37 GB/s | 🟢 +169.75% |
-| `LayerNorm` | `npu1-LayerNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency` | 3082.25 µs | 1142.64 µs | 🟢 -62.93% |
-| `LayerNorm` | `npu1-LayerNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency MAD` | 607.91 µs | 18.98 µs | ⚪ -96.88% |
-| `LayerNorm` | `npu1-LayerNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096` | `Throughput` | 16.33 GOP/s | 44.05 GOP/s | 🟢 +169.75% |
-| `Limbs` | `npu1-Limbs-rows_4096-line_320-num_aie_columns_4` | `Bandwidth` | 7.03 GB/s | 21.24 GB/s | 🟢 +201.98% |
-| `Limbs` | `npu1-Limbs-rows_4096-line_320-num_aie_columns_4` | `Latency` | 2981.77 µs | 987.40 µs | 🟢 -66.89% |
-| `Limbs` | `npu1-Limbs-rows_4096-line_320-num_aie_columns_4` | `Latency MAD` | 136.77 µs | 5.48 µs | ⚪ -95.99% |
-| `Limbs` | `npu1-Limbs-rows_4096-line_320-num_aie_columns_4` | `Throughput` | 0.44 GOP/s | 1.33 GOP/s | 🟢 +201.98% |
-| `Log` | `npu1-Log-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency MAD` | 229.55 µs | 272.73 µs | ⚪ +18.81% |
-| `MHA` | `npu1-MHA-num_heads_1-seq_len_16384-num_pipelines_4` | `Latency MAD` | 69.35 µs | 83.48 µs | ⚪ +20.38% |
-| `MHA` | `npu1-MHA-num_heads_8-num_KV_heads_2-seq_len_16384-num_pipelines_4` | `Latency MAD` | 82.48 µs | 54.35 µs | ⚪ -34.10% |
-| `Magnitude` | `npu1-Magnitude-rows_4096-width_640-num_aie_columns_4` | `Latency MAD` | 36.48 µs | 135.23 µs | ⚪ +270.72% |
-| `Merge` | `npu1-Merge-rows_2048-placeholders_((258881, 2048), (258880, 2560))` | `Latency MAD` | 12.79 µs | 9.76 µs | ⚪ -23.66% |
-| `PatchPositions` | `npu1-PatchPositions-rows_2560-out_height_672-out_width_912` | `Latency MAD` | 34.52 µs | 9.12 µs | ⚪ -73.58% |
-| `RMSNorm` | `npu1-RMSNorm-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096-weighted_True` | `Latency MAD` | 178.39 µs | 308.66 µs | ⚪ +73.03% |
-| `RMSNorm` | `npu1-RMSNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096` | `Bandwidth` | 10.82 GB/s | 29.21 GB/s | 🟢 +169.93% |
-| `RMSNorm` | `npu1-RMSNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency` | 3100.99 µs | 1148.83 µs | 🟢 -62.95% |
-| `RMSNorm` | `npu1-RMSNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency MAD` | 388.06 µs | 21.53 µs | ⚪ -94.45% |
-| `RMSNorm` | `npu1-RMSNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096` | `Throughput` | 10.82 GOP/s | 29.21 GOP/s | 🟢 +169.93% |
-| `ReLU` | `npu1-ReLU-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Bandwidth` | 10.17 GB/s | 29.64 GB/s | 🟢 +191.50% |
-| `ReLU` | `npu1-ReLU-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency` | 3299.54 µs | 1131.93 µs | 🟢 -65.69% |
-| `ReLU` | `npu1-ReLU-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency MAD` | 307.73 µs | 18.14 µs | ⚪ -94.10% |
-| `ReLU` | `npu1-ReLU-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Throughput` | 2.54 GOP/s | 7.41 GOP/s | 🟢 +191.50% |
-| `Resample` | `npu1-Resample-height_3024-width_4032-out_height_672-out_width_912` | `Latency MAD` | 211.96 µs | 315.22 µs | ⚪ +48.72% |
-| `ResampleTaps` | `npu1-ResampleTaps-in_size_4032-out_size_912` | `Latency MAD` | 59.49 µs | 88.22 µs | ⚪ +48.30% |
-| `RoPE` | `npu1-RoPE-rows_4096-cols_512-angle_rows_8` | `Latency MAD` | 71.72 µs | 106.62 µs | ⚪ +48.65% |
-| `RowwiseAdd` | `npu1-RowwiseAdd-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096` | `Latency MAD` | 715.58 µs | 436.73 µs | ⚪ -38.97% |
-| `RowwiseMul` | `npu1-RowwiseMul-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096` | `Bandwidth` | 9.96 GB/s | 28.55 GB/s | 🟢 +186.68% |
-| `RowwiseMul` | `npu1-RowwiseMul-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096` | `Latency` | 3370.22 µs | 1175.60 µs | 🟢 -65.12% |
-| `RowwiseMul` | `npu1-RowwiseMul-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096` | `Latency MAD` | 237.41 µs | 15.65 µs | ⚪ -93.41% |
-| `RowwiseMul` | `npu1-RowwiseMul-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096` | `Throughput` | 2.49 GOP/s | 7.14 GOP/s | 🟢 +186.68% |
-| `Sample` | `npu1-Sample-llama` | `Latency MAD` | 9.56 µs | 12.75 µs | ⚪ +33.33% |
-| `SelectiveScan` | `npu1-SelectiveScan-rows_64-heads_16-head_dim_64-state_size_64-groups_2` | `Latency MAD` | 522.72 µs | 414.24 µs | ⚪ -20.75% |
-| `SiLU` | `npu1-SiLU-size_8388608-num_aie_columns_4-tile_size_4096` | `Latency MAD` | 263.57 µs | 717.28 µs | ⚪ +172.14% |
-| `Sigmoid` | `npu1-Sigmoid-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency MAD` | 843.59 µs | 284.43 µs | ⚪ -66.28% |
-| `Softmax` | `npu1-Softmax-rows_4096-cols_512-num_aie_columns_2-num_channels_2` | `Bandwidth` | 2.77 GB/s | 6.46 GB/s | 🟢 +133.21% |
-| `Softmax` | `npu1-Softmax-rows_4096-cols_512-num_aie_columns_2-num_channels_2` | `Latency` | 3029.99 µs | 1299.24 µs | 🟢 -57.12% |
-| `Softmax` | `npu1-Softmax-rows_4096-cols_512-num_aie_columns_2-num_channels_2` | `Latency MAD` | 550.83 µs | 25.48 µs | ⚪ -95.37% |
-| `Softmax` | `npu1-Softmax-rows_4096-cols_512-num_aie_columns_2-num_channels_2` | `Throughput` | 0.69 GOP/s | 1.61 GOP/s | 🟢 +133.21% |
-| `Tanh` | `npu1-Tanh-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency MAD` | 678.24 µs | 1163.78 µs | ⚪ +71.59% |
-| `copy_gather` | `test_a_prompt_chunk_s_rows_are_gathered_each_call` | `Bandwidth` | 0.50 GB/s | 1.46 GB/s | 🟢 +188.64% |
-| `copy_gather` | `test_a_prompt_chunk_s_rows_are_gathered_each_call` | `Latency` | 4158.06 µs | 1440.57 µs | 🟢 -65.35% |
-| `flm/gemm` | `npu1-M_2048-K_2048-N_1024-epilogue_none-rounding_conv_even` | `Latency MAD` | 1008.38 µs | 4.69 µs | ⚪ -99.54% |
+| `AXPY` | `npu1-AXPY-size_8388608-num_aie_columns_4-tile_size_4096-scalar_factor_3.0` | `Latency MAD` | 1154.37 µs | 346.45 µs | ⚪ -69.99% |
+| `Clamp` | `npu1-Clamp-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096-low_-0.75-high_1.25` | `Latency MAD` | 502.27 µs | 327.98 µs | ⚪ -34.70% |
+| `Copy` | `npu1-Copy-bench_flat_4mi` | `Bandwidth` | 15.72 GB/s | 5.27 GB/s | 🔴 -66.46% |
+| `Copy` | `npu1-Copy-bench_flat_4mi` | `Latency` | 1066.99 µs | 3180.81 µs | 🔴 +198.11% |
+| `Copy` | `npu1-Copy-bench_flat_4mi` | `Latency MAD` | 6.15 µs | 85.46 µs | ⚪ +1290.35% |
+| `DepthwiseConv1d` | `npu1-DepthwiseConv1d-rows_768-channels_1024-num_aie_columns_4` | `Latency MAD` | 12.98 µs | 6.35 µs | ⚪ -51.08% |
+| `ElementwiseAdd` | `npu1-ElementwiseAdd-size_8388608-num_aie_columns_4-tile_size_4096` | `Latency MAD` | 634.29 µs | 433.79 µs | ⚪ -31.61% |
+| `ElementwiseMul` | `npu1-ElementwiseMul-size_8388608-num_aie_columns_4-tile_size_4096` | `Bandwidth` | 16.94 GB/s | 32.27 GB/s | 🟢 +90.49% |
+| `ElementwiseMul` | `npu1-ElementwiseMul-size_8388608-num_aie_columns_4-tile_size_4096` | `Latency` | 2971.49 µs | 1559.93 µs | 🟢 -47.50% |
+| `ElementwiseMul` | `npu1-ElementwiseMul-size_8388608-num_aie_columns_4-tile_size_4096` | `Latency MAD` | 658.23 µs | 6.52 µs | ⚪ -99.01% |
+| `ElementwiseMul` | `npu1-ElementwiseMul-size_8388608-num_aie_columns_4-tile_size_4096` | `Throughput` | 2.82 GOP/s | 5.38 GOP/s | 🟢 +90.49% |
+| `Emit` | `npu1-Emit-eight_carried` | `Latency MAD` | 5.07 µs | 12.91 µs | ⚪ +154.49% |
+| `GELU` | `npu1-GELU-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency MAD` | 443.88 µs | 381.07 µs | ⚪ -14.15% |
+| `GEMM` | `npu1-GEMM-M_2048-K_2048-N_2048-b_col_maj_True` | `Latency MAD` | 345.84 µs | 321.56 µs | ⚪ -7.02% |
+| `GEMV` | `npu1-GEMV-M_1536-K_12288-num_aie_columns_4-tile_size_input_1-tile_size_output_64` | `Latency MAD` | 129.24 µs | 90.23 µs | ⚪ -30.18% |
+| `GEMV` | `npu1-GEMV-M_2048-K_8192-num_aie_columns_4-tile_size_input_1-tile_size_output_256` | `Latency MAD` | 4.87 µs | 55.90 µs | ⚪ +1046.79% |
+| `GEMV` | `npu1-GEMV-M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_1024` | `Latency MAD` | 600.21 µs | 278.84 µs | ⚪ -53.54% |
+| `GEMV` | `npu1-GEMV-M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_512-num_channels_2` | `Bandwidth` | 9.88 GB/s | 27.03 GB/s | 🟢 +173.53% |
+| `GEMV` | `npu1-GEMV-M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_512-num_channels_2` | `Latency` | 3397.97 µs | 1242.26 µs | 🟢 -63.44% |
+| `GEMV` | `npu1-GEMV-M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_512-num_channels_2` | `Latency MAD` | 364.95 µs | 80.74 µs | ⚪ -77.88% |
+| `GEMV` | `npu1-GEMV-M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_512-num_channels_2` | `Throughput` | 9.87 GOP/s | 27.01 GOP/s | 🟢 +173.53% |
+| `LayerNorm` | `npu1-LayerNorm-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096-weighted_True` | `Bandwidth` | 27.92 GB/s | 10.91 GB/s | 🔴 -60.94% |
+| `LayerNorm` | `npu1-LayerNorm-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096-weighted_True` | `Latency` | 1202.04 µs | 3077.18 µs | 🔴 +156.00% |
+| `LayerNorm` | `npu1-LayerNorm-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096-weighted_True` | `Latency MAD` | 36.04 µs | 543.92 µs | ⚪ +1409.08% |
+| `LayerNorm` | `npu1-LayerNorm-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096-weighted_True` | `Throughput` | 41.87 GOP/s | 16.36 GOP/s | 🔴 -60.94% |
+| `LayerNorm` | `npu1-LayerNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency MAD` | 18.98 µs | 10.48 µs | ⚪ -44.79% |
+| `Limbs` | `npu1-Limbs-rows_4096-line_320-num_aie_columns_4` | `Latency MAD` | 5.48 µs | 25.69 µs | ⚪ +368.85% |
+| `Log` | `npu1-Log-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency MAD` | 272.73 µs | 314.61 µs | ⚪ +15.36% |
+| `MHA` | `npu1-MHA-num_heads_1-seq_len_16384-num_pipelines_4` | `Latency MAD` | 83.48 µs | 29.26 µs | ⚪ -64.96% |
+| `MHA` | `npu1-MHA-num_heads_8-num_KV_heads_2-seq_len_16384-num_pipelines_4` | `Latency MAD` | 54.35 µs | 79.02 µs | ⚪ +45.38% |
+| `Magnitude` | `npu1-Magnitude-rows_4096-width_640-num_aie_columns_4` | `Latency MAD` | 135.23 µs | 341.73 µs | ⚪ +152.70% |
+| `Merge` | `npu1-Merge-rows_2048-placeholders_((258881, 2048), (258880, 2560))` | `Latency MAD` | 9.76 µs | 8.49 µs | ⚪ -13.03% |
+| `PatchPositions` | `npu1-PatchPositions-rows_2560-out_height_672-out_width_912` | `Latency MAD` | 9.12 µs | 13.89 µs | ⚪ +52.22% |
+| `RMSNorm` | `npu1-RMSNorm-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096-weighted_True` | `Latency MAD` | 308.66 µs | 532.80 µs | ⚪ +72.62% |
+| `RMSNorm` | `npu1-RMSNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096` | `Bandwidth` | 29.21 GB/s | 10.30 GB/s | 🔴 -64.75% |
+| `RMSNorm` | `npu1-RMSNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency` | 1148.83 µs | 3259.14 µs | 🔴 +183.69% |
+| `RMSNorm` | `npu1-RMSNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency MAD` | 21.53 µs | 390.30 µs | ⚪ +1712.77% |
+| `RMSNorm` | `npu1-RMSNorm-rows_2048-num_aie_columns_4-num_channels_2-tile_size_4096` | `Throughput` | 29.21 GOP/s | 10.30 GOP/s | 🔴 -64.75% |
+| `ReLU` | `npu1-ReLU-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency MAD` | 18.14 µs | 10.55 µs | ⚪ -41.86% |
+| `ResampleTaps` | `npu1-ResampleTaps-in_size_4032-out_size_912` | `Latency MAD` | 88.22 µs | 43.00 µs | ⚪ -51.26% |
+| `RoPE` | `npu1-RoPE-rows_4096-cols_512-angle_rows_8` | `Latency MAD` | 106.62 µs | 87.03 µs | ⚪ -18.38% |
+| `RowwiseAdd` | `npu1-RowwiseAdd-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096` | `Latency MAD` | 436.73 µs | 798.62 µs | ⚪ +82.86% |
+| `RowwiseMul` | `npu1-RowwiseMul-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096` | `Bandwidth` | 28.55 GB/s | 10.88 GB/s | 🔴 -61.88% |
+| `RowwiseMul` | `npu1-RowwiseMul-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096` | `Latency` | 1175.60 µs | 3084.30 µs | 🔴 +162.36% |
+| `RowwiseMul` | `npu1-RowwiseMul-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096` | `Latency MAD` | 15.65 µs | 420.96 µs | ⚪ +2589.94% |
+| `RowwiseMul` | `npu1-RowwiseMul-rows_2048-num_aie_columns_2-num_channels_2-tile_size_4096` | `Throughput` | 7.14 GOP/s | 2.72 GOP/s | 🔴 -61.88% |
+| `Sample` | `npu1-Sample-llama` | `Latency MAD` | 12.75 µs | 37.19 µs | ⚪ +191.74% |
+| `SelectiveScan` | `npu1-SelectiveScan-rows_64-heads_16-head_dim_64-state_size_64-groups_2` | `Latency MAD` | 414.24 µs | 229.70 µs | ⚪ -44.55% |
+| `SiLU` | `npu1-SiLU-size_8388608-num_aie_columns_4-tile_size_4096` | `Bandwidth` | 10.31 GB/s | 17.47 GB/s | 🟢 +69.35% |
+| `SiLU` | `npu1-SiLU-size_8388608-num_aie_columns_4-tile_size_4096` | `Latency MAD` | 717.28 µs | 185.95 µs | ⚪ -74.08% |
+| `SiLU` | `npu1-SiLU-size_8388608-num_aie_columns_4-tile_size_4096` | `Throughput` | 2.58 GOP/s | 4.37 GOP/s | 🟢 +69.35% |
+| `Sigmoid` | `npu1-Sigmoid-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Bandwidth` | 10.08 GB/s | 29.56 GB/s | 🟢 +193.28% |
+| `Sigmoid` | `npu1-Sigmoid-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency` | 3329.39 µs | 1135.23 µs | 🟢 -65.90% |
+| `Sigmoid` | `npu1-Sigmoid-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency MAD` | 284.43 µs | 10.69 µs | ⚪ -96.24% |
+| `Sigmoid` | `npu1-Sigmoid-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Throughput` | 2.52 GOP/s | 7.39 GOP/s | 🟢 +193.28% |
+| `Softmax` | `npu1-Softmax-rows_4096-cols_512-num_aie_columns_2-num_channels_2` | `Latency MAD` | 25.48 µs | 28.92 µs | ⚪ +13.50% |
+| `Tanh` | `npu1-Tanh-size_8388608-num_aie_columns_4-num_channels_2-tile_size_4096` | `Latency MAD` | 1163.78 µs | 950.47 µs | ⚪ -18.33% |
+| `copy_gather` | `test_a_prompt_chunk_s_rows_are_gathered_each_call` | `Bandwidth` | 1.46 GB/s | 1.58 GB/s | 🟢 +8.46% |
+| `copy_gather` | `test_a_prompt_chunk_s_rows_are_gathered_each_call` | `Latency` | 1440.57 µs | 1328.18 µs | 🟢 -7.80% |
+| `flm/gemm` | `npu1-M_1024-K_2560-N_2560-epilogue_none-rounding_conv_even` | `Latency MAD` | 136.61 µs | 443.02 µs | ⚪ +224.30% |
+| `flm/gemm` | `npu1-M_2048-K_2048-N_1024-epilogue_none-rounding_conv_even` | `Latency MAD` | 4.69 µs | 1004.64 µs | ⚪ +21327.83% |
+| `mha_prefill_lxl` | `separate-core-causal-profile` | `Latency MAD` | 728.74 µs | 515.01 µs | ⚪ -29.33% |
+| `mha_prefill_lxl` | `separate-core-unmasked-profile` | `Latency MAD` | 422.57 µs | 551.66 µs | ⚪ +30.55% |
+| `mha_prefill_lxl` | `separate-projected-causal-profile` | `Latency MAD` | 571.22 µs | 884.70 µs | ⚪ +54.88% |
+| `mha_prefill_lxl` | `separate-projected-unmasked-profile` | `Latency MAD` | 584.05 µs | 810.36 µs | ⚪ +38.75% |
 
