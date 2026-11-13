@@ -4,9 +4,10 @@ Benchmarks that moved by at least 5% and by more than 2x the spread the runs mea
 
 | Operator | Parametrization | Metric | Previous | Current | Change |
 |---|---|---|---|---|---|
-| `embedding_gemma2` | `long_document` | `Latency` | 1796268.40 µs | 1656369.78 µs | 🟢 -7.79% |
-| `granite` | `granite_4_2_3b_prompt_1024_tokens_1` | `TTFT` | 5.77 s | 5.30 s | 🟢 -8.18% |
-| `llama` | `llama_3.2_3b-prompt_1024_tokens_40` | `TTFT` | 3.26 s | 3.09 s | 🟢 -5.41% |
-| `llama` | `llama_3.2_3b-prompt_13_tokens_1` | `TTFT` | 1.71 s | 1.92 s | 🔴 +12.26% |
-| `llama` | `llama_3.2_3b-prompt_13_tokens_40` | `TTFT` | 1.62 s | 1.79 s | 🔴 +10.17% |
+| `granite` | `granite_4_2_3b_prompt_1024_tokens_1` | `TTFT` | 5.30 s | 5.81 s | 🔴 +9.66% |
+| `granite` | `granite_4_2_3b_prompt_1024_tokens_40` | `TTFT` | 6.05 s | 5.22 s | 🟢 -13.62% |
+| `llama` | `llama_3.2_3b-prompt_1024_tokens_40` | `TTFT` | 3.09 s | 3.28 s | 🔴 +6.18% |
+| `llama` | `llama_3.2_3b-prompt_13_tokens_1` | `TTFT` | 1.92 s | 1.76 s | 🟢 -8.29% |
+| `long_context` | `gemma4_e2b_each_step-16384` | `TTFT` | 120.40 s | 112.16 s | 🟢 -6.85% |
+| `long_context` | `gemma4_e2b_each_step-32768` | `TTFT` | 120.39 s | 112.72 s | 🟢 -6.37% |
 

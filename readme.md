@@ -3903,42 +3903,42 @@
 | TestAudio::test_audio_features[name_medium] | ✅ | - | ✅ | - |
 | TestAudio::test_audio_features[name_passage] | ✅ | - | ✅ | - |
 | TestAudio::test_audio_features[name_short] | ✅ | - | ✅ | - |
-| TestAudio::test_audio_latency[name_extended] | ✅ | 358311.66 | ✅ | 5043027.60 |
-| TestAudio::test_audio_latency[name_long] | ✅ | 423237.72 | ✅ | 4947838.68 |
-| TestAudio::test_audio_latency[name_medium] | ✅ | 301199.25 | ✅ | 4769571.33 |
-| TestAudio::test_audio_latency[name_passage] | ✅ | 349018.65 | ✅ | 4809306.17 |
-| TestAudio::test_audio_latency[name_short] | ✅ | 292760.85 | ✅ | 4722518.68 |
+| TestAudio::test_audio_latency[name_extended] | ✅ | 358753.90 | ✅ | 4841028.81 |
+| TestAudio::test_audio_latency[name_long] | ✅ | 424035.55 | ✅ | 4965791.53 |
+| TestAudio::test_audio_latency[name_medium] | ✅ | 301077.29 | ✅ | 4821019.84 |
+| TestAudio::test_audio_latency[name_passage] | ✅ | 348164.91 | ✅ | 4787106.56 |
+| TestAudio::test_audio_latency[name_short] | ✅ | 292448.23 | ✅ | 4700954.11 |
 | TestEachStep::test_embeddinggemma_2_each_step_accuracy[past_the_window] | ✅ | - | - | - |
 | TestEachStep::test_embeddinggemma_2_each_step_accuracy[query] | ✅ | - | - | - |
 | TestEachStep::test_embeddinggemma_2_each_step_multimodal[test_embeddinggemma_2_each_step_multimodal] | ✅ | - | - | - |
-| TestVision::test_image_processor[name_cats-shape_(1080, 1920)-tokens_140] | ✅ | 12897.17 | ✅ | 40561.17 |
-| TestVision::test_image_processor[name_cats-shape_(17, 23)-tokens_140] | ✅ | 7794.47 | ✅ | 16321.10 |
-| TestVision::test_image_processor[name_cats-shape_(2003, 97)-tokens_140] | ✅ | 11252.27 | ✅ | 31464.03 |
-| TestVision::test_image_processor[name_cats-shape_(3024, 4032)-tokens_280] | ✅ | 28280.34 | ✅ | 97080.16 |
-| TestVision::test_image_processor[name_cats-shape_(333, 517)-tokens_140] | ✅ | 8488.36 | ✅ | 19942.92 |
-| TestVision::test_image_processor[name_cats-shape_(4032, 3024)-tokens_280] | ✅ | 29623.90 | ✅ | 99953.88 |
-| TestVision::test_image_processor[name_cats-shape_(4096, 3072)-tokens_280] | ✅ | 29673.64 | ✅ | 99535.14 |
-| TestVision::test_image_processor[name_cats-shape_(480, 640)-tokens_280] | ✅ | 10036.29 | ✅ | 33614.50 |
-| TestVision::test_image_processor[name_cats-shape_(672, 517)-tokens_280] | ✅ | 10154.37 | ✅ | 33487.74 |
-| TestVision::test_image_processor[name_cats-shape_(672, 960)-tokens_280] | ✅ | 9925.42 | ✅ | 32471.84 |
-| TestVision::test_image_processor[name_cats-shape_None-tokens_280] | ✅ | 9997.94 | ✅ | 33507.94 |
-| TestVision::test_image_processor[name_living_room-shape_None-tokens_140] | ✅ | 9854.75 | ✅ | 26282.95 |
-| TestVision::test_image_processor[name_stop_sign-shape_None-tokens_280] | ✅ | 10487.92 | ✅ | 33615.04 |
-| TestVision::test_image_processor_npu2_only[test_image_processor_npu2_only] | ✅ | 10012.73 | - | - |
+| TestVision::test_image_processor[name_cats-shape_(1080, 1920)-tokens_140] | ✅ | 14007.79 | ✅ | 36288.50 |
+| TestVision::test_image_processor[name_cats-shape_(17, 23)-tokens_140] | ✅ | 8593.01 | ✅ | 22242.88 |
+| TestVision::test_image_processor[name_cats-shape_(2003, 97)-tokens_140] | ✅ | 11275.20 | ✅ | 26033.63 |
+| TestVision::test_image_processor[name_cats-shape_(3024, 4032)-tokens_280] | ✅ | 27977.40 | ✅ | 99871.18 |
+| TestVision::test_image_processor[name_cats-shape_(333, 517)-tokens_140] | ✅ | 7972.09 | ✅ | 23739.80 |
+| TestVision::test_image_processor[name_cats-shape_(4032, 3024)-tokens_280] | ✅ | 29624.64 | ✅ | 96559.48 |
+| TestVision::test_image_processor[name_cats-shape_(4096, 3072)-tokens_280] | ✅ | 29790.03 | ✅ | 96165.37 |
+| TestVision::test_image_processor[name_cats-shape_(480, 640)-tokens_280] | ✅ | 11092.63 | ✅ | 31896.05 |
+| TestVision::test_image_processor[name_cats-shape_(672, 517)-tokens_280] | ✅ | 9756.80 | ✅ | 26783.76 |
+| TestVision::test_image_processor[name_cats-shape_(672, 960)-tokens_280] | ✅ | 11082.71 | ✅ | 26154.35 |
+| TestVision::test_image_processor[name_cats-shape_None-tokens_280] | ✅ | 9926.79 | ✅ | 32066.42 |
+| TestVision::test_image_processor[name_living_room-shape_None-tokens_140] | ✅ | 8117.68 | ✅ | 25555.80 |
+| TestVision::test_image_processor[name_stop_sign-shape_None-tokens_280] | ✅ | 10547.00 | ✅ | 28885.09 |
+| TestVision::test_image_processor_npu2_only[test_image_processor_npu2_only] | ✅ | 11409.06 | - | - |
 | TestVision::test_vision_accuracy[name_cats] | ✅ | - | ✅ | - |
 | TestVision::test_vision_accuracy[name_living_room] | ✅ | - | ✅ | - |
 | TestVision::test_vision_accuracy[name_stop_sign] | ✅ | - | ✅ | - |
-| TestVision::test_vision_latency[name_cats] | ✅ | 721117.01 | ✅ | 2078316.92 |
-| TestVision::test_vision_latency[name_living_room] | ✅ | 412309.06 | ✅ | 1574059.52 |
+| TestVision::test_vision_latency[name_cats] | ✅ | 721245.54 | ✅ | 2084942.47 |
+| TestVision::test_vision_latency[name_living_room] | ✅ | 412273.90 | ✅ | 1529931.34 |
 | test_embeddinggemma_2_accuracy[document] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[long_document] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[near_the_limit] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[past_the_window] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[query] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_determinism[test_embeddinggemma_2_determinism] | ✅ | - | ✅ | - |
-| test_embeddinggemma_2_latency[long_document] | ✅ | 340593.44 | ✅ | 1656369.78 |
-| test_embeddinggemma_2_latency[past_the_window] | ✅ | 547604.72 | ✅ | 2961302.23 |
-| test_embeddinggemma_2_latency[query] | ✅ | 284947.62 | ✅ | 1246725.71 |
+| test_embeddinggemma_2_latency[long_document] | ✅ | 339509.40 | ✅ | 1643673.41 |
+| test_embeddinggemma_2_latency[past_the_window] | ✅ | 547829.35 | ✅ | 2992483.63 |
+| test_embeddinggemma_2_latency[query] | ✅ | 284843.06 | ✅ | 1240245.39 |
 | test_embeddinggemma_2_multimodal[case_audio] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_multimodal[case_both] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_multimodal[case_image] | ✅ | - | ✅ | - |
@@ -4155,8 +4155,7 @@
 | test_decode_deep_in_the_cache[gemma4_e2b_each_step-16384] | - | - | ✅ | n/a |
 | test_decode_deep_in_the_cache[gemma4_e2b_each_step-32768] | - | - | ✅ | n/a |
 | test_decode_deep_in_the_cache[gemma4_e2b_each_step-4096] | - | - | ✅ | n/a |
-| test_decode_deep_in_the_cache[gemma4_e2b_each_step-65536] | - | - | ✅ | n/a |
-| test_decode_deep_in_the_cache[gemma4_e2b_each_step-whole] | - | - | ❌ | n/a |
+| test_decode_deep_in_the_cache[gemma4_e2b_each_step-65536] | - | - | ❌ | n/a |
 | test_decode_deep_in_the_cache[granite_4.2_3b_each_step-16384] | - | - | ✅ | n/a |
 | test_decode_deep_in_the_cache[granite_4.2_3b_each_step-32768] | - | - | ✅ | n/a |
 | test_decode_deep_in_the_cache[granite_4.2_3b_each_step-4096] | - | - | ✅ | n/a |
@@ -4191,7 +4190,6 @@
 | test_prompt_deep_in_the_cache[gemma4_e2b_each_step-16384] | - | - | ✅ | n/a |
 | test_prompt_deep_in_the_cache[gemma4_e2b_each_step-32768] | - | - | ❌ | n/a |
 | test_prompt_deep_in_the_cache[gemma4_e2b_each_step-4096] | - | - | ✅ | n/a |
-| test_prompt_deep_in_the_cache[gemma4_e2b_each_step-65536] | - | - | ❌ | n/a |
 | test_prompt_deep_in_the_cache[granite_4.2_3b_each_step-16384] | - | - | ✅ | n/a |
 | test_prompt_deep_in_the_cache[granite_4.2_3b_each_step-32768] | - | - | ✅ | n/a |
 | test_prompt_deep_in_the_cache[granite_4.2_3b_each_step-4096] | - | - | ✅ | n/a |
@@ -4213,7 +4211,6 @@
 | test_prompt_deep_in_the_cache[llama_3.2_3b_each_step-whole] | - | - | ✅ | n/a |
 | test_prompt_time_at_8k[gemma4_e2b_each_step-16384] | - | - | ✅ | n/a |
 | test_prompt_time_at_8k[gemma4_e2b_each_step-32768] | - | - | ✅ | n/a |
-| test_prompt_time_at_8k[gemma4_e2b_each_step-65536] | - | - | ✅ | n/a |
 | test_prompt_time_at_8k[granite_4.2_3b_each_step-16384] | - | - | ✅ | n/a |
 | test_prompt_time_at_8k[granite_4.2_3b_each_step-32768] | - | - | ✅ | n/a |
 | test_prompt_time_at_8k[granite_4.2_3b_each_step-65536] | - | - | ✅ | n/a |
@@ -4232,7 +4229,6 @@
 | test_prompt_time_at_the_whole_context[gemma4_e2b_each_step-16384] | - | - | ✅ | n/a |
 | test_prompt_time_at_the_whole_context[gemma4_e2b_each_step-32768] | - | - | ❌ | n/a |
 | test_prompt_time_at_the_whole_context[gemma4_e2b_each_step-4096] | - | - | ✅ | n/a |
-| test_prompt_time_at_the_whole_context[gemma4_e2b_each_step-65536] | - | - | ❌ | n/a |
 | test_prompt_time_at_the_whole_context[granite_4.2_3b_each_step-16384] | - | - | ✅ | n/a |
 | test_prompt_time_at_the_whole_context[granite_4.2_3b_each_step-32768] | - | - | ✅ | n/a |
 | test_prompt_time_at_the_whole_context[granite_4.2_3b_each_step-4096] | - | - | ✅ | n/a |
