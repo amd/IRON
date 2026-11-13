@@ -216,7 +216,11 @@ def test_model(tmp_path, installation, tag, name):
             while True:
                 assert server.poll() is None, "FastFlowLM exited during startup"
                 try:
-                    with urllib.request.urlopen(url + "/api/version", timeout=2):
+                    # The socket listens while models load; allow startup to finish.
+                    with urllib.request.urlopen(
+                        url + "/api/version",
+                        timeout=max(1, deadline - time.monotonic()),
+                    ):
                         break
                 except OSError:
                     assert time.monotonic() < deadline, "FastFlowLM startup timed out"
