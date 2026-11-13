@@ -185,13 +185,17 @@ def fused_configuration(
     designs: Sequence[OperatorDesign],
     words: Mapping[str, str] | None = None,
     dispatch: Sequence[Mapping[str, object]] | None = None,
+    independent: Mapping[str, BuiltArray] | None = None,
 ) -> tuple[DeviceConfiguration, list[BuiltArray]]:
     """Return ``fusion``'s members, ``designs`` in its step order, as one device configuration ``name`` and their arrays.
 
     Each array fed where an edge feeds it (staged through memtiles in a staged fusion),
     and one sequence running every member, in one task group, or back to back in a
     merge; a ``phased`` fusion's members in one sequence per phase (``phases``). On an
-    xclbin, ``dispatch`` is each member's dispatch-time scalars.
+    xclbin, ``dispatch`` is each member's dispatch-time scalars. Given ``independent``,
+    each of its arrays takes its own sequence beside the fusion's, in the same
+    configuration: a packing group's other members, where one of its members is a
+    fusion (``Composition``, ``common.graph.packing``).
     """
     incoming: dict[int, list[Edge]] = {}
     for e in fusion.edges:
@@ -212,7 +216,7 @@ def fused_configuration(
             grouped.setdefault(p, []).append(str(j))
     configured = configuration(
         name,
-        {str(j): arrays[j] for j in fusion.steps},
+        {str(j): arrays[j] for j in fusion.steps} | dict(independent or {}),
         steps=[str(j) for j in fusion.steps],
         # A merge's steps have no edge to keep alive across a shared task
         # group; run them back to back, each fully awaited.
@@ -304,7 +308,9 @@ def fits(
     """Return ``None`` if ``designs``, by device name, place, allocate and route under ``placer``, else the diagnostic.
 
     ``words`` maps a design symbol to the scratchpad word it shares. Given ``fusion``,
-    ``designs`` are its members in step order, built fused (``fused_configuration``).
+    its members are ``designs`` keyed by their step index (``str``), built fused
+    (``fused_configuration``); any other key of ``designs`` packs beside it, its own
+    sequence in the same configuration.
     """
     exported = [n for n, d in designs.items() if d.op.exported_design() is not None]
     try:
@@ -320,8 +326,18 @@ def fits(
                 arrays = {n: BuiltArray(d, words) for n, d in designs.items()}
                 configured = configuration(next(iter(arrays)), arrays)
             else:
+                keys = {str(j) for j in fusion.steps}
+                independent = {
+                    n: BuiltArray(d, words)
+                    for n, d in designs.items()
+                    if n not in keys
+                }
                 configured, _ = fused_configuration(
-                    "fused", fusion, list(designs.values()), words
+                    "fused",
+                    fusion,
+                    [designs[str(j)] for j in fusion.steps],
+                    words,
+                    independent=independent or None,
                 )
             module = Program.compose(
                 [configured], entry=configured.runtimes[0]
@@ -404,19 +420,41 @@ class Composition:
 
         A group the default placer cannot route is placed by the annealing one where
         that routes it (``Packing.annealed``); one neither routes (an operator's
-        mapping changed since the profile was tuned) runs unpacked, with a warning.
+        mapping changed since the profile was tuned) runs unpacked, with a warning. A
+        group naming a fusion's own symbol builds it fused, its other members beside
+        it (``fits``'s ``fusion``); one naming more than one fusion is not yet
+        combined, so it runs unpacked too.
         """
         groups, annealed = [], set()
         for group in packing.groups:
-            members = {n: self.designs[n] for n in group if n in self.designs}
-            if len(members) < 2:
+            kept = [n for n in group if n in self.designs or n in self.fusions]
+            plain = {n: self.designs[n] for n in kept if n in self.designs}
+            windows = [n for n in kept if n in self.fusions]
+            if len(windows) > 1:
+                logger.warning(
+                    "packing %s names more than one fusion, which packing does "
+                    "not yet combine, so it is not packed",
+                    ", ".join(kept),
+                )
                 continue
-            key = tuple(d.identity for d in members.values())
+            if len(kept) < 2:
+                continue
+            if windows:
+                (window,) = windows
+                member_designs, fusion = self.fusions[window]
+                designs = plain | dict(
+                    zip((str(j) for j in fusion.steps), member_designs)
+                )
+                key = (*(d.identity for d in plain.values()), window)
+            else:
+                fusion = None
+                designs = plain
+                key = tuple(d.identity for d in plain.values())
             if key not in _placed:
-                refused = fits(members)
+                refused = fits(designs, fusion=fusion)
                 if refused is None:
                     _placed[key] = (SEQUENTIAL, None)
-                elif fits(members, placer=ANNEALED) is None:
+                elif fits(designs, fusion=fusion, placer=ANNEALED) is None:
                     _placed[key] = (ANNEALED, None)
                 else:
                     _placed[key] = (SEQUENTIAL, refused)
@@ -424,13 +462,13 @@ class Composition:
             if refused is not None:
                 logger.warning(
                     "packing %s does not place, so it is not packed: %s",
-                    ", ".join(members),
+                    ", ".join(kept),
                     refused,
                 )
                 continue
-            groups.append(tuple(members))
+            groups.append(tuple(kept))
             if placer == ANNEALED:
-                annealed.update(members)
+                annealed.update(kept)
         return Packing(tuple(groups), tuple(sorted(annealed)))
 
     @property
@@ -491,6 +529,7 @@ class Composition:
 
         packing = self.packing.sharing(
             {n: of[n] if n in arrays else n for n in self.designs}
+            | {n: n for n in self.fusions}
         )
         sample = next(iter(self.designs.values()), None)
         if sample is None:
@@ -499,7 +538,12 @@ class Composition:
         configurations: dict[str, DeviceConfiguration] = {}
         runtimes: dict[str, Runtime] = {}
         types: dict[str, list] = {}
+        # A phased fusion's sequences, each with the span of the fusion's buffers its
+        # members take, run in turn where the fusion's step runs.
+        phased: dict[str, list[tuple[Runtime, int, int]]] = {}
+        packed: set[str] = set()
         for symbol, members in packing.devices(self.designs).items():
+            windows = [m for m in members if m in self.fusions]
             outside = [m for m in members if m in exported]
             if outside and len(members) > 1:
                 raise CoResidenceError(
@@ -509,19 +553,58 @@ class Composition:
             if outside:
                 (name,) = outside
                 configured, types[name] = self._exported(symbol, name, exported[name])
+                configurations[symbol] = configured
+                runtimes.update(zip(members, configured.runtimes))
+            elif windows:
+                (window,) = windows
+                member_designs, fusion = self.fusions[window]
+                plain = [m for m in members if m != window]
+                configured, fused_members = fused_configuration(
+                    symbol,
+                    fusion,
+                    member_designs,
+                    words,
+                    independent={m: arrays[m] for m in plain},
+                )
+                configurations[symbol] = configured
+                n_phases = len(configured.runtimes) - len(plain)
+                runtimes[window] = configured.runtimes[0]
+                for m, runtime in zip(plain, configured.runtimes[n_phases:]):
+                    runtimes[m] = runtime
+                    types[m] = [
+                        b.flat_type for b in arrays[m].op.buffers if not b.on_chip
+                    ]
+                taken = [
+                    [b.flat_type for b in array.op.buffers if not b.on_chip]
+                    for array in fused_members
+                ]
+                types[window] = [t for each in taken for t in each]
+                if n_phases > 1:
+                    ends = list(itertools.accumulate(len(each) for each in taken))
+                    per = phases(fusion, dict(zip(fusion.steps, fused_members)))
+                    last = {per[j]: k for k, j in enumerate(fusion.steps)}
+                    firsts = [0, *(ends[last[p]] for p in sorted(last))]
+                    phased[window] = list(
+                        zip(
+                            configured.runtimes[:n_phases],
+                            firsts[:-1],
+                            firsts[1:],
+                            strict=True,
+                        )
+                    )
+                packed.add(window)
             else:
                 configured = configuration(symbol, {m: arrays[m] for m in members})
                 for m in members:
                     types[m] = [
                         b.flat_type for b in arrays[m].op.buffers if not b.on_chip
                     ]
-            configurations[symbol] = configured
-            runtimes.update(zip(members, configured.runtimes))
+                configurations[symbol] = configured
+                runtimes.update(zip(members, configured.runtimes))
 
-        # A phased fusion's sequences, each with the span of the fusion's buffers its
-        # members take, run in turn where the fusion's step runs.
-        phased: dict[str, list[tuple[Runtime, int, int]]] = {}
         for symbol, (designs, fusion) in self.fusions.items():
+            if symbol in packed:
+                continue
             configured, members = fused_configuration(symbol, fusion, designs, words)
             configurations[symbol] = configured
             runtimes[symbol] = configured.runtimes[0]

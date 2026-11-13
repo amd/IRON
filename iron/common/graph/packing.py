@@ -30,19 +30,20 @@ def apply(
 ) -> tuple[Recording, Packing]:
     """Return ``recording`` with each step a packing entry applying in its version names (``Profile.packings_of``).
 
-    Outside ``fused``, rebuilt at its member's tunables, and the packing grouping their
-    designs, one group per entry that names two or more of them. Where several entries
-    name a step's shape, the one naming most of the recording's shapes takes it, the
-    earlier on a tie: the grouping found for this graph, not another model's that shares
-    one of its shapes.
+    Rebuilt at its member's tunables, and the packing grouping their designs, one group
+    per entry that names two or more of them. A step inside a fusion in ``fused`` packs
+    by its fusion's own symbol (``compose.Composition``'s), every member riding beside
+    it in the one group its first matching member names; a later member matching
+    another entry does not move it. Where several entries name a step's shape, the one
+    naming most of the recording's shapes takes it, the earlier on a tie: the grouping
+    found for this graph, not another model's that shares one of its shapes.
     """
-    inside = {i for f in fused for i in f.steps}
+    fusion_of = {i: f for f in fused for i in f.steps}
     version = recording.version
     found = {
         i: matches
         for i, step in enumerate(recording.steps)
-        if i not in inside
-        and (matches := profile.packings_of(step.op.resolved(dev), version))
+        if (matches := profile.packings_of(step.op.resolved(dev), version))
     }
     covered: dict[int, set[int]] = {}
     for matches in found.values():
@@ -57,8 +58,25 @@ def apply(
             tunables[i] = given
     recording = rebuild(recording, tunables, dev)
     groups: dict[int, dict[str, None]] = {}
+    claimed: dict[int, int] = {}  # id(fusion) -> the one entry it packs under
+    symbols: dict[int, str] = {}
     for i, entry in members.items():
-        name = OperatorDesign(recording.steps[i].op.resolved(dev)).name
+        f = fusion_of.get(i)
+        if f is not None:
+            if id(f) in claimed and claimed[id(f)] != entry:
+                continue
+            claimed[id(f)] = entry
+            name = symbols.setdefault(
+                id(f),
+                f.name(
+                    [
+                        OperatorDesign(recording.steps[j].op.resolved(dev)).name
+                        for j in f.steps
+                    ]
+                ),
+            )
+        else:
+            name = OperatorDesign(recording.steps[i].op.resolved(dev)).name
         groups.setdefault(entry, {})[name] = None
     return recording, Packing(tuple(tuple(g) for g in groups.values() if len(g) > 1))
 

@@ -230,12 +230,43 @@ def test_a_packing_composes_its_designs_into_one_device(npu2):
     assert devices == [Packing.device_name(list(group))]
 
 
-def test_a_fused_step_is_left_to_its_fusion(npu2):
+def test_a_window_inside_a_packing_builds_as_one_device(npu2):
     recording = _recording()
     profile = _packed((GEMV, {}), (SiLU, {}), (ElementwiseMul, {}))
     fused = (Fusion(FusionKind.STREAM, (1, 2), (Edge(1, "y", 2, "a"),)),)
-    _, packing = apply_packings(recording, profile, fused, npu2)
-    assert packing == Packing()
+    packed, packing = apply_packings(recording, profile, fused, npu2)
+    seq = Image(packed, FullELF(packing=packing), fusions=fused)
+    seq._prepare()
+    (group,) = packing.groups
+    devices = re.findall(
+        r"^  aie\.device\(\w+\) @(\w+) \{$", Composition(seq).text(), re.M
+    )
+    assert devices == [Packing.device_name(list(group))]
+
+
+def test_a_fused_step_packs_beside_its_fusion_by_the_fusion_s_own_symbol(npu2):
+    recording = _recording()
+    profile = _packed((GEMV, {}), (SiLU, {}), (ElementwiseMul, {}))
+    fused = (Fusion(FusionKind.STREAM, (1, 2), (Edge(1, "y", 2, "a"),)),)
+    packed, packing = apply_packings(recording, profile, fused, npu2)
+    gemv, silu, mul = (s.op.resolved(npu2) for s in packed.steps)
+    symbol = fused[0].name([OperatorDesign(silu).name, OperatorDesign(mul).name])
+    (group,) = packing.groups
+    assert set(group) == {OperatorDesign(gemv).name, symbol}
+
+
+def test_a_fusion_s_later_member_matching_another_entry_does_not_move_it(npu2):
+    """SiLU, the fusion's first member, decides its group; Mul's own match is ignored."""
+    recording = _recording()
+    profile = Profile()
+    profile.add_packing([(GEMV, {}), (SiLU, {})])
+    profile.add_packing([(ElementwiseMul, {}), (Copy, {"input_buffer_size": 64})])
+    fused = (Fusion(FusionKind.STREAM, (1, 2), (Edge(1, "y", 2, "a"),)),)
+    packed, packing = apply_packings(recording, profile, fused, npu2)
+    gemv, silu, mul = (s.op.resolved(npu2) for s in packed.steps)
+    symbol = fused[0].name([OperatorDesign(silu).name, OperatorDesign(mul).name])
+    (group,) = packing.groups
+    assert set(group) == {OperatorDesign(gemv).name, symbol}
 
 
 def test_a_profile_without_packings_changes_nothing(npu2):

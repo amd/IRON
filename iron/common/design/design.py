@@ -321,7 +321,9 @@ def configuration(
     ``fuse``, in one task group (``MergedRuntime.fuse``), each step on an array of its
     own; with ``phases`` (``steps`` split, in order), one fused sequence per phase,
     ``sequence`` then ``sequence_<k>``, which a caller runs in turn: no shim end is in
-    flight in two of them, so the phases take the shim's channels in turn.
+    flight in two of them, so the phases take the shim's channels in turn. A key of
+    ``arrays`` outside ``steps`` takes its own sequence beside them, named for its key,
+    identity-shared with another such key the same way as when no ``steps`` are given.
 
     Raises:
         ValueError: The arrays are built for different devices, traced with
@@ -332,10 +334,13 @@ def configuration(
         raise ValueError("fuse needs steps to fuse")
     if phases and (not fuse or [k for phase in phases for k in phase] != list(steps)):
         raise ValueError(f"phases {phases} are not the fused steps {steps} in order")
+    independent = [key for key in arrays if key not in steps]
     # Fused steps issue at once, so each keeps its own array: on one, a later
     # step's preamble would rewrite words an earlier step's core has not read yet.
+    # A key outside them shares identity with another such key, as if alone.
     of = (
-        {key: id(array) for key, array in arrays.items()}
+        {key: id(arrays[key]) for key in steps}
+        | identities({key: arrays[key] for key in independent})
         if fuse
         else identities(arrays)
     )
@@ -362,20 +367,19 @@ def configuration(
         if fuse
         else MergedRuntime.merge
     )
-    runtimes = (
-        [
-            merge(
-                [owners[of[k]].runtime(arrays[k], None) for k in phase],
-                "sequence" if p == 0 else f"sequence_{p}",
-            )
-            for p, phase in enumerate(phases or (steps,))
-        ]
-        if steps
-        else [
-            owners[of[key]].runtime(array, "sequence" if len(arrays) == 1 else key)
-            for key, array in arrays.items()
-        ]
-    )
+    runtimes = [
+        merge(
+            [owners[of[k]].runtime(arrays[k], None) for k in phase],
+            "sequence" if p == 0 else f"sequence_{p}",
+        )
+        for p, phase in enumerate(phases or (steps,))
+    ] if steps else []
+    runtimes += [
+        owners[of[key]].runtime(
+            arrays[key], "sequence" if not steps and len(arrays) == 1 else key
+        )
+        for key in independent
+    ]
     first = next(iter(owners.values()))
     configured = DeviceConfiguration(
         name,

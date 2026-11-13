@@ -16,6 +16,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Profile
+from iron.common.image.step import FusionKind
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
@@ -47,6 +48,52 @@ def test_a_packed_graph_matches_its_designs_apart():
     composition = packed.sequence.packaging.composition
     devices = re.findall(r"^  aie\.device\(\w+\) @(\w+) \{$", composition.text(), re.M)
     assert len(devices) == 1, f"the three designs took {devices}"
+    apart = Projection().compile(**shapes)
+
+    rng = np.random.default_rng(0)
+    w = (rng.standard_normal((2048, 2048)) / 32).astype(bfloat16)
+    x = rng.standard_normal(2048).astype(bfloat16)
+    up = rng.standard_normal(2048).astype(bfloat16)
+    out = np.asarray(packed(w, x, up))
+    assert np.array_equal(
+        out.view(np.uint16), np.asarray(apart(w, x, up)).view(np.uint16)
+    ), "packed and apart differ"
+    verdict = compare(
+        out,
+        np.asarray(packed_graph.reference(w, x, up)),
+        Tolerance.bf16_ulps(
+            4,
+            atol=1e-6,
+            note="GEMV's float32 sum rounded once, SiLU's 1 ulp through the "
+            "multiply, and each rounding",
+        ),
+    )
+    assert verdict, verdict.detail
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_window_inside_a_pack_matches_its_designs_apart():
+    """GEMV packs beside SiLU and Mul's stream window, all three one device configuration."""
+    profile = Profile()
+    profile.add_fusion(
+        FusionKind.STREAM,
+        [(SiLU, {}), (ElementwiseMul, {})],
+        [(0, "y", 1, "a")],
+    )
+    profile.add_packing(
+        [
+            (GEMV, {}, {"num_aie_columns": 2, "num_channels": 2}),
+            (SiLU, {}, {"num_aie_columns": 1}),
+            (ElementwiseMul, {}, {"num_aie_columns": 1}),
+        ]
+    )
+    packed_graph = Projection()
+    packed_graph.profile = profile
+    shapes = dict(w=(2048, 2048), x=(2048,), up=(2048,))
+    packed = packed_graph.compile(**shapes)
+    composition = packed.sequence.packaging.composition
+    devices = re.findall(r"^  aie\.device\(\w+\) @(\w+) \{$", composition.text(), re.M)
+    assert len(devices) == 1, f"the window and GEMV took {devices}"
     apart = Projection().compile(**shapes)
 
     rng = np.random.default_rng(0)
