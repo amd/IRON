@@ -56,7 +56,7 @@ def _window(columns, channels=1):
 
 @unbuilt
 def test_per_member_width_counts_round_trip_and_are_proposed(tmp_path):
-    """(a) A window's per-member column counts round-trip through a profile and are a candidate, ordered by the cost model."""
+    """A window's per-member column counts round-trip through a profile and are a candidate, ordered by the cost model."""
     region, recording = _window(columns=2)
     entry = Entry(root=region)
     profile = Profile()
@@ -64,13 +64,16 @@ def test_per_member_width_counts_round_trip_and_are_proposed(tmp_path):
     profile.save(tmp_path / "widths.json")
     loaded = Profile.load(tmp_path / "widths.json")
     assert loaded.entries() == [entry]
-    found = list(candidates(recording, Profile(), DEVICE))
-    assert any(getattr(e, "root", None) == region for e in found)
+    start = Profile()
+    assert any(
+        entry in edit.apply(start).entries()
+        for edit in candidates(recording, start, DEVICE)
+    )
 
 
 @unbuilt
 def test_narrowed_window_is_bit_identical_to_full_width():
-    """(b) A window narrowed to fit the array is bit-identical to the same window at full width."""
+    """A window narrowed to fit the array is bit-identical to the same window at full width."""
     full_region, recording = _window(columns=min(4, _ARRAY_COLUMNS))
     narrow_region, _ = _window(columns=1)
     base = Profile()
@@ -83,7 +86,7 @@ def test_narrowed_window_is_bit_identical_to_full_width():
 
 @unbuilt
 def test_tuner_keeps_widths_that_pay_and_bounds_builds():
-    """(c) The tuner keeps the width setting that pays, builds stay bounded, and several placements are tried."""
+    """The tuner keeps the width setting that pays, builds stay bounded, and several placements are tried."""
     _, recording = _window(columns=2)
     start = Profile()
     found = search(recording, start, DEVICE, budget_s=60.0)
@@ -93,7 +96,7 @@ def test_tuner_keeps_widths_that_pay_and_bounds_builds():
 
 @unbuilt
 def test_a_width_over_the_arrays_columns_is_refused_by_counts():
-    """(−) A window whose three members each want the array's full width (#4's window over budget) is refused by counts, before any build.
+    """A window whose three members each want the array's full width is refused by counts, before any build.
 
     Each member alone is a legal design; the array has no cores left once the
     first claims every column, so the window as a whole does not fit.
@@ -109,7 +112,7 @@ def test_a_width_over_the_arrays_columns_is_refused_by_counts():
 
 @unbuilt
 def test_a_width_over_a_streams_budget_is_refused_by_counts():
-    """(−) C's narrow window (4 cores, 4 streams) wanting more DDR streams than npu2's shim channels have is refused by counts."""
+    """C's narrow window (4 cores, 4 streams) wanting more DDR streams than npu2's shim channels have is refused by counts."""
     region, recording = _window(columns=4, channels=4)
     profile = Profile()
     profile.add_entry(Entry(root=region))
@@ -121,7 +124,7 @@ def test_a_width_over_a_streams_budget_is_refused_by_counts():
 
 @unbuilt
 def test_a_by_shape_entry_claiming_fewer_runs_than_iron_applies_is_refused():
-    """(−) A width entry naming only some runs of a shape two steps of the recording share is refused: one width set must fit every run."""
+    """A width entry naming only some runs of a shape two steps of the recording share is refused: one width set must fit every run."""
     gemv, add = toys_schedule.decode_step()
     recording = toys_schedule.decode_step_recording("width_shared_shape", gemv, add)
     region = Region(
@@ -137,7 +140,7 @@ def test_a_by_shape_entry_claiming_fewer_runs_than_iron_applies_is_refused():
 
 @unbuilt
 def test_counts_the_fit_accepts_but_the_placer_refuses_need_a_witness():
-    """(−) Counts that fit the array but the placer refuses need a witness placement before they count.
+    """Counts that fit the array but the placer refuses need a witness placement before they count.
 
     Such a refusal is a compiler-failure candidate, not a bare count refusal.
     """

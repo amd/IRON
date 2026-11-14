@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Toy graphs the composition-contract tuning tests build and recordings of them.
-
-New toys the transformation tests (#13 runtime schedule, #14 DDR bandwidth, #15
-configurations, #16 widths, #19 packet transport, #20 across calls) need beyond
-``iron.tests.support.fusable`` and ``iron.tests.support.graphs``; real IRON operators
-at small sizes, real IRON operators only.
-"""
+"""Toy graphs and recordings for the schedule, configuration, width, transport and across-call tuning tests."""
 
 from __future__ import annotations
 
@@ -21,7 +15,7 @@ from iron.tests.support import sequences
 
 
 def skip() -> tuple[ElementwiseAdd, RMSNorm, GEMV, ElementwiseAdd]:
-    """Return a residual add held past RMSNorm and a GEMV, joined by a second add (#5's skip pattern)."""
+    """Return a residual add held past RMSNorm and a GEMV, joined by a second add."""
     add = ElementwiseAdd(size=2048, num_aie_columns=2, tile_size=256)
     norm = RMSNorm(rows=1, tile_size=2048)
     proj = GEMV(M=2048, K=2048, feed_b=True, num_aie_columns=2)
