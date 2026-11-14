@@ -56,18 +56,72 @@ class FusionKind(Enum):
     MERGE = "merge"
 
 
+class EdgeKind(Enum):
+    """The path an edge's objects take: a core-to-core ``STREAM``, ``STAGED`` through memtiles, ``DDR``, or the ``CASCADE``."""
+
+    STREAM = "stream"
+    STAGED = "staged"
+    DDR = "ddr"
+    CASCADE = "cascade"
+
+
+class Held(Enum):
+    """Where an edge's value waits for a later reader: ``L1``, a ``MEMTILE``, ``DDR``, or a ``LATER_PHASE``."""
+
+    L1 = "l1"
+    MEMTILE = "memtile"
+    DDR = "ddr"
+    LATER_PHASE = "later_phase"
+
+
+class HandOff(Enum):
+    """How a producer's lanes map onto a consumer's."""
+
+    EQUAL = "equal"
+    JOIN = "join"
+    SPLIT = "split"
+    RATIO = "ratio"
+    BROADCAST = "broadcast"
+    SLICES = "slices"
+    LAYOUT = "layout"
+
+
 @dataclass(frozen=True)
 class Edge:
-    """Step ``producer``'s output ``output`` streamed on-chip into step ``consumer``'s input ``input``.
+    """Step ``producer``'s output ``output`` fed on-chip into step ``consumer``'s input ``input``.
 
-    Both indices into one ``Fusion``'s ``steps``; several edges may share one
-    ``(producer, output)``, fanning out to more than one consumer.
+    Both indices into one region's parts; several edges may share one
+    ``(producer, output)``, fanning out to more than one consumer. The other
+    fields default to a whole-buffer stream at the depth the build gives it.
+
+    Attributes:
+        producer: The producing part.
+        output: The producer's output.
+        consumer: The consuming part.
+        input: The consumer's input.
+        kind: The path the objects take.
+        held: Where the value waits for a later reader, if it waits.
+        depth: Objects in flight; None for the dataflow analysis's minimum.
+        rate: Tokens per firing at the producer and the consumer; None for
+            the whole buffer.
+        shape: How the producer's lanes map onto the consumer's; None to
+            infer it.
+        dtype: The type the edge carries, where it is not the producer's
+            output type (``"float32"`` where a replaced operator kept it).
+        delay: Initial values on the edge, for a feedback cycle.
     """
 
     producer: int
     output: str
     consumer: int
     input: str
+    kind: EdgeKind = EdgeKind.STREAM
+    held: Held | None = None
+    depth: int | None = None
+    rate: tuple[int, int] | None = None
+    shape: HandOff | None = None
+    dtype: str | None = None
+    delay: int = 0
 
 
 @dataclass(frozen=True)

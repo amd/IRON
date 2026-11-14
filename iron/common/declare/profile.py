@@ -19,6 +19,7 @@ from types import FunctionType
 from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping, Sequence, TypeVar
 
 from ..image.step import FusionKind
+from .composition import Binding, Entry, Schedule, StateLayout, Variants
 
 if TYPE_CHECKING:
     from .operator import Operator
@@ -126,6 +127,51 @@ class Profile:
         self._entries: list[tuple[type, dict[str, Any], dict[str, Any]]] = []
         self._fusions: list[FusionEntry] = []
         self._packings: list[PackingEntry] = []
+        self._compositions: list[Entry] = []
+        self._schedules: list[Schedule] = []
+        self._variants: list[Variants] = []
+        self._bindings: list[Binding] = []
+        self._state_layouts: list[StateLayout] = []
+
+    def add_entry(self, entry: Entry) -> None:
+        """Add a composition entry."""
+        self._compositions.append(entry)
+
+    def entries(self) -> list[Entry]:
+        """Return the composition entries, in the order they were added."""
+        return list(self._compositions)
+
+    def add_schedule(self, schedule: Schedule) -> None:
+        """Add a version's schedule."""
+        self._schedules.append(schedule)
+
+    def schedules(self) -> list[Schedule]:
+        """Return the versions' schedules."""
+        return list(self._schedules)
+
+    def add_variants(self, variants: Variants) -> None:
+        """Add a design per range of per-call values."""
+        self._variants.append(variants)
+
+    def variants(self) -> list[Variants]:
+        """Return the per-call variants."""
+        return list(self._variants)
+
+    def add_binding(self, binding: Binding) -> None:
+        """Add how a per-call value reaches a design."""
+        self._bindings.append(binding)
+
+    def bindings(self) -> list[Binding]:
+        """Return the per-call value bindings."""
+        return list(self._bindings)
+
+    def add_state_layout(self, layout: StateLayout) -> None:
+        """Add the one layout a persistent buffer has in every version."""
+        self._state_layouts.append(layout)
+
+    def state_layouts(self) -> list[StateLayout]:
+        """Return the persistent buffers' layouts."""
+        return list(self._state_layouts)
 
     def make(self, cls: type[_Op], **kwargs: Any) -> _Op:
         """Build ``cls(**kwargs)`` with its open tunables filled from this profile.
@@ -499,8 +545,22 @@ class Profile:
         Raises:
             ValueError: An entry's or a fusion step's operator is not in
                 ``iron.operators.CATALOG``.
+            NotImplementedError: The profile holds composition entries,
+                schedules, variants, bindings or state layouts, whose JSON
+                form is not written yet.
         """
         from ...operators import CATALOG  # the operators import this module
+
+        if (
+            self._compositions
+            or self._schedules
+            or self._variants
+            or self._bindings
+            or self._state_layouts
+        ):
+            raise NotImplementedError(
+                "a profile's compositions have no JSON form yet (plan step 0a)"
+            )
 
         names = {cls: name for name, cls in CATALOG.items()}
 
