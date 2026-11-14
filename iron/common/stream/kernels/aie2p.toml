@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Each kernel's cycles per call, measured on npu2 (Strix, mlir-aie
+# 1.4.6.dev15): one core calling it on operands in its own memory. The
+# attention kernels' rows (matmul_bf16_bf16_high, partial_softmax, matmul_PV)
+# come from one later session, in which matmul_bf16_bf16 32x64x64 measured 749.
+
+[family.matmul]
+ops_per_cycle = 151.0
+mac = { m = 8, k = 8, n = 8 }
+
+[family.vector]
+ops_per_cycle = 16.0
+
+# A GEMM call sums its K tiles into a float accumulator of the core's own, as
+# stream-dse's GEMMs bind mm.cc (accumulate), so its calls are measured so; the
+# search picks the call shape from these rows. Measured 2026-11-11, turbo.
+[kernel.matmul_bf16_f32]
+family = "matmul"
+binding = "stream.compiler.kernels.mlir_aie:mm"
+options = { accumulate = true }
+dims = [
+    { name = "k", divisor = 8 },
+    { name = "n", divisor = 16 },
+    { name = "m", divisor = 16 },
+]
+cycles = [
+    { m = 64, k = 64, n = 64, cycles = 1620.0 },
+    { m = 32, k = 64, n = 64, cycles = 815.0 },
+    { m = 32, k = 128, n = 64, cycles = 1267.0 },
+    { m = 64, k = 128, n = 32, cycles = 1306.0 },
+    { m = 32, k = 256, n = 32, cycles = 1099.0 },
+    { m = 32, k = 128, n = 32, cycles = 656.0 },
+    { m = 64, k = 64, n = 32, cycles = 851.0 },
+    { m = 32, k = 32, n = 64, cycles = 629.0 },
+    { m = 32, k = 64, n = 32, cycles = 444.0 },
+    { m = 64, k = 32, n = 64, cycles = 1220.0 },
+]
+per_op = { cycles = 1620.0, ops = 262144 }
+
+[kernel.matmul_bf16_bf16_high]
+family = "matmul"
+binding = "stream.compiler.kernels.mlir_aie:mm"
+options = { bfp16 = false }
+mac = { m = 4, k = 8, n = 8 }
+dims = [
+    { name = "k", divisor = 8 },
+    { name = "n", divisor = 16 },
+    { name = "m", divisor = 8 },
+]
+cycles = [
+    { m = 32, k = 64, n = 32, cycles = 2491.0 },
+    { m = 32, k = 64, n = 64, cycles = 4909.0 },
+    { m = 32, k = 128, n = 32, cycles = 4721.0 },
+    { m = 32, k = 128, n = 64, cycles = 9362.0 },
+    { m = 64, k = 64, n = 32, cycles = 4966.0 },
+    { m = 64, k = 64, n = 64, cycles = 9783.0 },
+    { m = 64, k = 128, n = 32, cycles = 9412.0 },
+    { m = 64, k = 128, n = 64, cycles = 18688.0 },
+]
+
+[kernel.partial_softmax]
+family = "vector"
+binding = "stream.compiler.kernels.mlir_aie:partial_softmax"
+dims = [{ name = "n", blocks = [32, 64] }, { name = "m", blocks = [32, 64] }]
+cycles = [
+    { m = 32, n = 32, cycles = 3949.0 },
+    { m = 32, n = 64, cycles = 5076.0 },
+    { m = 64, n = 32, cycles = 7612.0 },
+    { m = 64, n = 64, cycles = 9881.0 },
+]
+
+[kernel.matmul_PV]
+family = "matmul"
+binding = "stream.compiler.kernels.mlir_aie:matmul_pv"
+dims = [{ name = "k", blocks = [32, 64] }, { name = "n", divisor = 16 }, { name = "m", blocks = [32, 64] }]
+cycles = [
+    { m = 32, k = 32, n = 32, cycles = 2802.0 },
+    { m = 32, k = 32, n = 64, cycles = 4870.0 },
+    { m = 32, k = 32, n = 128, cycles = 9013.0 },
+    { m = 32, k = 64, n = 32, cycles = 3919.0 },
+    { m = 32, k = 64, n = 64, cycles = 8092.0 },
+    { m = 32, k = 64, n = 128, cycles = 13484.0 },
+    { m = 64, k = 32, n = 32, cycles = 5495.0 },
+    { m = 64, k = 32, n = 64, cycles = 9639.0 },
+    { m = 64, k = 32, n = 128, cycles = 17913.0 },
+    { m = 64, k = 64, n = 32, cycles = 7739.0 },
+    { m = 64, k = 64, n = 64, cycles = 14057.0 },
+    { m = 64, k = 64, n = 128, cycles = 26810.0 },
+]
+
+[kernel.silu_bf16_size]
+family = "vector"
+binding = "stream.compiler.kernels.mlir_aie:silu"
+dims = [{ name = "n", runtime = true, keep_whole = true }, { name = "m", runtime = true }]
+cycles = [
+    { m = 1, n = 2048, cycles = 1140.0 },
+    { m = 1, n = 4096, cycles = 2225.0 },
+    { m = 1, n = 8192, cycles = 4397.0 },
+]
+
+[kernel.eltwise_mul_bf16_vector_size]
+family = "vector"
+binding = "stream.compiler.kernels.mlir_aie:mul"
+dims = [{ name = "n", runtime = true, keep_whole = true }, { name = "m", runtime = true }]
+cycles = [{ m = 1, n = 2048, cycles = 94.0 }, { m = 1, n = 4096, cycles = 153.0 }]
+
+[kernel.softmax_rows_bf16]
+family = "vector"
+binding = "stream.compiler.kernels.mlir_aie:softmax_rows"
+dims = [{ name = "n", divisor = 32 }, { name = "m", runtime = true }]
+per_op = { cycles = 329.0, ops = 256 }
+
+[kernel.softmax_rows_causal_bf16]
+family = "vector"
+binding = "stream.compiler.kernels.mlir_aie:softmax_rows_causal"
+dims = [{ name = "n", divisor = 32 }, { name = "m", runtime = true }]
+per_op = { cycles = 1245.0, ops = 256 }

@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# What the stream-dse operators (iron/operators/*_prefill_stream) need beside
+# requirements.txt: stream-dse, which solves and generates their designs, and
+# torch and onnxscript, which export their workloads. Without them those
+# operators are unresolvable and their tests skip.
+#
+#     pip install -r requirements_stream.txt
+#     stream-setup-aie   # stream-dse's AIE codegen dialects (xdsl-aie, snax-mlir),
+#                        # git installs PyPI cannot depend on; mlir_aie stays
+#                        # requirements.txt's.
+#
+# The solves use OR-Tools (STREAM_BACKEND names another solver) and are
+# cached under $NPU_CACHE_HOME/stream.
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+onnxscript>=0.7
+stream-dse>=2.4.0
+torch
