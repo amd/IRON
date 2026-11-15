@@ -20,6 +20,7 @@ from .log import Log
 from .magnitude import Magnitude
 from .merge import Merge
 from .mha import MHA
+from .mha_prefill_stream.op import MHAPrefillStream
 from .relu import ReLU
 from .resample.op import PatchPositions, Resample, ResampleTaps
 from .rms_norm import RMSNorm
@@ -29,6 +30,13 @@ from .selective_scan import SelectiveScan
 from .sigmoid import Sigmoid
 from .silu import SiLU
 from .softmax import Softmax
+from .swiglu_prefill_stream.op import (
+    SwiGLUFusedStream,
+    SwiGLUGatedStream,
+    SwiGLUMulStream,
+    SwiGLUProjectionStream,
+    SwiGLUSiLUStream,
+)
 from .tanh import Tanh
 
 __all__ = [
@@ -48,6 +56,7 @@ __all__ = [
     "Limbs",
     "Log",
     "MHA",
+    "MHAPrefillStream",
     "Magnitude",
     "Merge",
     "PatchPositions",
@@ -63,6 +72,11 @@ __all__ = [
     "SiLU",
     "Sigmoid",
     "Softmax",
+    "SwiGLUFusedStream",
+    "SwiGLUGatedStream",
+    "SwiGLUMulStream",
+    "SwiGLUProjectionStream",
+    "SwiGLUSiLUStream",
     "Tanh",
 ]
 

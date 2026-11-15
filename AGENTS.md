@@ -86,6 +86,15 @@ pydocstyle rules, `D205` and `D401` included.
 - `iron/common/image/`: what a graph lowers onto: the step sequence, the
   buffer allocator, image composition (several designs in one image),
   packaging, and an operator called on its own. All internal.
+- `iron/common/stream/`: operators whose design
+  [stream-dse](https://github.com/KULeuven-MICAS/stream) generates
+  (`StreamOperator`): the workload export, the candidate mappings, the kernel
+  library and the cached solve. A subclass gives `workload()`,
+  `candidates()` and `layers()`; `iron/operators/mha_prefill_stream/` is the
+  worked example. Optional (`requirements_stream.txt`, which brings torch to
+  export the workload); nothing else in `iron/common` imports it, and its
+  operators import without it. `iron/tests/stream/` is its device-free suite,
+  which skips where the optional stack is not installed.
 - `iron/common/feature_map.py`: `Conv2d`, a convolution over a
   channels-last feature map's rows.
 - `iron/common/elementwise.py`: the shared elementwise array, its families
