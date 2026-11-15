@@ -30,6 +30,13 @@ from .selective_scan import SelectiveScan
 from .sigmoid import Sigmoid
 from .silu import SiLU
 from .softmax import Softmax
+from .swiglu_prefill_stream.op import (
+    SwiGLUFusedStream,
+    SwiGLUGatedStream,
+    SwiGLUMulStream,
+    SwiGLUProjectionStream,
+    SwiGLUSiLUStream,
+)
 from .tanh import Tanh
 
 __all__ = [
@@ -65,6 +72,11 @@ __all__ = [
     "SiLU",
     "Sigmoid",
     "Softmax",
+    "SwiGLUFusedStream",
+    "SwiGLUGatedStream",
+    "SwiGLUMulStream",
+    "SwiGLUProjectionStream",
+    "SwiGLUSiLUStream",
     "Tanh",
 ]
 
