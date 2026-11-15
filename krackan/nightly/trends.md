@@ -4,8 +4,8 @@ Benchmarks that moved by at least 5% and by more than 2x the spread the runs mea
 
 | Operator | Parametrization | Metric | Previous | Current | Change |
 |---|---|---|---|---|---|
-| `granite_hybrid` | `granite_4_0_h_1b_prompt_1024_tokens_1` | `TTFT` | 5.10 s | 5.45 s | 🔴 +6.82% |
-| `llama` | `llama_3.2_1b-prompt_1024_tokens_1` | `TTFT` | 0.54 s | 0.57 s | 🔴 +5.24% |
-| `llama` | `llama_3.2_1b-prompt_13_tokens_1` | `TTFT` | 0.52 s | 0.48 s | 🟢 -8.81% |
-| `llama` | `llama_3.2_1b-prompt_13_tokens_40` | `TTFT` | 0.49 s | 0.52 s | 🔴 +6.68% |
+| `llama` | `llama_3.2_1b-prompt_1024_tokens_40` | `TTFT` | 0.74 s | 0.79 s | 🔴 +6.85% |
+| `llama` | `llama_3.2_1b-prompt_13_tokens_1` | `TTFT` | 0.48 s | 0.52 s | 🔴 +9.66% |
+| `llama` | `llama_3.2_3b-prompt_1024_tokens_40` | `TTFT` | 2.58 s | 2.37 s | 🟢 -8.24% |
+| `llama` | `llama_3.2_3b-prompt_13_tokens_1` | `TTFT` | 1.27 s | 1.18 s | 🟢 -7.58% |
 
