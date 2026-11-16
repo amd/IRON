@@ -129,7 +129,7 @@ class Shipped(
     B = In(
         Select(
             ProjectionGEMM.bfp16_b,
-            (ProjectionGEMM.packed_blocks,),
+            (ProjectionGEMM.packed_bytes,),
             (ProjectionGEMM.K, ProjectionGEMM.N),
         ),
         dtype=ProjectionGEMM.b_dtype,

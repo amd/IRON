@@ -140,10 +140,10 @@ class ProjectionGEMM(Operator):
     # The activation, selected at run time from the compiled-in modes; its
     # gelu is x * sigmoid(1.702x), the port's own arithmetic.
     epilogue: Epilogue | str = param(default=Epilogue.NONE)
-    # B's packed block count on AIE2P: blocks, not bytes, since B's
-    # declaration counts bfp16ebs8 blocks and bfp.itemsize turns that back
-    # into the byte count pack_b returns.
-    packed_blocks: int = param(derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
+    # Packed B's host storage: one exponent byte per eight mantissas.
+    packed_bytes: int = param(
+        derive=lambda op: op.K * op.N // bfp.BLOCK * bfp.BLOCK_BYTES, repr=False
+    )
     # 64 halves the mmul's accumulator traffic per mac; 128 halves A fetches.
     tile_n: int = tunable()
     # k tile. K must be a multiple of it, and it of the compute tile's k slice.
@@ -183,10 +183,9 @@ class ProjectionGEMM(Operator):
     # multiply unconverted: a packed B at precision='medium' there must say
     # so, since B's host shape depends on it and no device is known yet.
     bfp16_b: bool = param(default=False, repr=False, array=True)
-    # B's element type, on the array and in DDR alike; the host holds a
-    # block-float B as bytes (Operand.host_dtype).
+    # B's host element type; its array buffers use bfp16ebs8 below.
     b_dtype: Any = param(
-        derive=lambda op: v8bfp16ebs8 if op.bfp16_b else bfloat16,
+        derive=lambda op: np.uint8 if op.bfp16_b else bfloat16,
         repr=False,
         init=False,
     )
@@ -210,13 +209,13 @@ class ProjectionGEMM(Operator):
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
     A = In(M, K, obj_shape=(a_l2,), per=(rows,), depth=A_DEPTH)
-    # For bfp16 macs B is counted in bfp16ebs8 blocks, the unit every
-    # descriptor into it counts in: in bytes, a transfer would move a ninth
-    # of what it named.
+    # Packed B arrives as bytes. Its memtile and core buffers still count
+    # bfp16ebs8 blocks; the shim transfers their raw storage, including when
+    # a call changes the repeat count.
     B = In(
         Select(
             bfp16_b,
-            (packed_blocks,),
+            (packed_bytes,),
             (Select(b_col_maj, (N, K), (K, N)),),
         ),
         dtype=b_dtype,
@@ -249,7 +248,7 @@ class ProjectionGEMM(Operator):
     # Under a bound, the passes B's memtile ring takes on a column-block, less
     # one: a streamed ring's per call, as DDR reads B once per unit reached.
     b_passes_repeat = per_call(
-        derive=lambda op: _units_valid(op) * op._k_iters // op._b_ring - 1
+        derive=lambda op: _units_valid(op) * (op._k_iters // op._b_ring) - 1
     )
     # Whether the memtile replays B to every unit, as it does where B is
     # resident, so that the cores drain the replays past a bound.
@@ -371,7 +370,7 @@ class ProjectionGEMM(Operator):
             emulate_bf16_mmul_with_bfp16=emulate,
             l1_b_depth=l1_b_depth,
             a_l2=m_chunk * M_TILE * k_tile,
-            b_l2=k_tile * tile_n // b_group,
+            b_l2=k_tile * tile_n // b_group * (bfp.BLOCK_BYTES if bfp16_b else 1),
             c_l2=M_TILE * tile_n * rows // C_JOINS,
         )
 
@@ -540,7 +539,7 @@ class ProjectionGEMM(Operator):
 
         bf16_ty = np.dtype[bfloat16]
         f32 = np.dtype[np.float32]
-        b_elem_ty = np.dtype[self.b_dtype]
+        b_elem_ty = np.dtype[v8bfp16ebs8 if self.bfp16_b else bfloat16]
         # L1 (per compute tile)
         ct_a_obj_ty = np.ndarray[(CT_A_OBJ,), bf16_ty]
         ct_b_ty = np.ndarray[(CT_K * N_TILE // B_GROUP,), b_elem_ty]
@@ -1071,9 +1070,8 @@ class ProjectionGEMM(Operator):
                 (N // N_TILE, N_TILE, k_iters, K_TILE)
             ).permute((0, 2, 1, 3))
         else:
-            B = TensorAccessPattern.full((N // N_TILE, k_iters, b_slot_elems))[
-                :, :, None
-            ]
+            host_slot = b_slot_elems * (bfp.BLOCK_BYTES if self.bfp16_b else 1)
+            B = TensorAccessPattern.full((N // N_TILE, k_iters, host_slot))[:, :, None]
 
         def b_tap(mega_col, c, slab):
             # Every (mega_row, k) chunk this column consumes. B arrives
@@ -1301,7 +1299,7 @@ class ProjectionGEMM(Operator):
             m_chunk=self.m_chunk,
             epilogue=Epilogue.NONE,
             epilogue_modes=self.compiled_modes,
-            packed_blocks=None,
+            packed_bytes=None,
         )
 
     def pack_b(self, B):
