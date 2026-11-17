@@ -3900,45 +3900,45 @@
 | TestAudio::test_audio_accuracy[name_short] | ✅ | - | ✅ | - |
 | TestAudio::test_audio_features[name_extended] | ✅ | - | ✅ | - |
 | TestAudio::test_audio_features[name_long] | ✅ | - | ✅ | - |
-| TestAudio::test_audio_features[name_medium] | ❌ | - | ✅ | - |
-| TestAudio::test_audio_features[name_passage] | ❌ | - | ✅ | - |
-| TestAudio::test_audio_features[name_short] | ❌ | - | ✅ | - |
-| TestAudio::test_audio_latency[name_extended] | ✅ | 357790.68 | ✅ | 4823426.60 |
-| TestAudio::test_audio_latency[name_long] | ✅ | 423138.87 | ✅ | 5014008.29 |
-| TestAudio::test_audio_latency[name_medium] | ✅ | 300829.61 | ✅ | 4628191.73 |
-| TestAudio::test_audio_latency[name_passage] | ✅ | 347937.30 | ✅ | 4795225.48 |
-| TestAudio::test_audio_latency[name_short] | ✅ | 292876.07 | ✅ | 4764621.08 |
+| TestAudio::test_audio_features[name_medium] | ✅ | - | ❌ | - |
+| TestAudio::test_audio_features[name_passage] | ✅ | - | ❌ | - |
+| TestAudio::test_audio_features[name_short] | ✅ | - | ❌ | - |
+| TestAudio::test_audio_latency[name_extended] | ✅ | 359211.90 | ✅ | 4821047.48 |
+| TestAudio::test_audio_latency[name_long] | ✅ | 423640.13 | ✅ | 4913218.92 |
+| TestAudio::test_audio_latency[name_medium] | ✅ | 301581.23 | ✅ | 4691422.42 |
+| TestAudio::test_audio_latency[name_passage] | ✅ | 349311.40 | ✅ | 4796607.67 |
+| TestAudio::test_audio_latency[name_short] | ✅ | 292872.88 | ✅ | 4641645.97 |
 | TestEachStep::test_embeddinggemma_2_each_step_accuracy[past_the_window] | ✅ | - | - | - |
 | TestEachStep::test_embeddinggemma_2_each_step_accuracy[query] | ✅ | - | - | - |
-| TestEachStep::test_embeddinggemma_2_each_step_multimodal[test_embeddinggemma_2_each_step_multimodal] | ❌ | - | - | - |
-| TestVision::test_image_processor[name_cats-shape_(1080, 1920)-tokens_140] | ✅ | 12747.66 | ✅ | 41517.70 |
-| TestVision::test_image_processor[name_cats-shape_(17, 23)-tokens_140] | ✅ | 7686.23 | ✅ | 22497.18 |
-| TestVision::test_image_processor[name_cats-shape_(2003, 97)-tokens_140] | ✅ | 11019.67 | ✅ | 24353.97 |
-| TestVision::test_image_processor[name_cats-shape_(3024, 4032)-tokens_280] | ✅ | 27704.35 | ✅ | 95392.62 |
-| TestVision::test_image_processor[name_cats-shape_(333, 517)-tokens_140] | ✅ | 8355.07 | ✅ | 24246.98 |
-| TestVision::test_image_processor[name_cats-shape_(4032, 3024)-tokens_280] | ✅ | 29353.04 | ✅ | 96312.05 |
-| TestVision::test_image_processor[name_cats-shape_(4096, 3072)-tokens_280] | ✅ | 29103.35 | ✅ | 100899.48 |
-| TestVision::test_image_processor[name_cats-shape_(480, 640)-tokens_280] | ✅ | 9485.28 | ✅ | 31834.66 |
-| TestVision::test_image_processor[name_cats-shape_(672, 517)-tokens_280] | ✅ | 10012.99 | ✅ | 33602.86 |
-| TestVision::test_image_processor[name_cats-shape_(672, 960)-tokens_280] | ✅ | 9574.66 | ✅ | 28364.78 |
-| TestVision::test_image_processor[name_cats-shape_None-tokens_280] | ✅ | 8982.34 | ✅ | 29419.89 |
-| TestVision::test_image_processor[name_living_room-shape_None-tokens_140] | ✅ | 8384.54 | ✅ | 29095.34 |
-| TestVision::test_image_processor[name_stop_sign-shape_None-tokens_280] | ✅ | 9595.91 | ✅ | 30259.32 |
-| TestVision::test_image_processor_npu2_only[test_image_processor_npu2_only] | ✅ | 9593.10 | - | - |
+| TestEachStep::test_embeddinggemma_2_each_step_multimodal[test_embeddinggemma_2_each_step_multimodal] | ✅ | - | - | - |
+| TestVision::test_image_processor[name_cats-shape_(1080, 1920)-tokens_140] | ✅ | 13372.63 | ✅ | 40513.67 |
+| TestVision::test_image_processor[name_cats-shape_(17, 23)-tokens_140] | ✅ | 7735.44 | ✅ | 17712.85 |
+| TestVision::test_image_processor[name_cats-shape_(2003, 97)-tokens_140] | ✅ | 11022.80 | ✅ | 31472.27 |
+| TestVision::test_image_processor[name_cats-shape_(3024, 4032)-tokens_280] | ✅ | 28014.52 | ✅ | 95238.72 |
+| TestVision::test_image_processor[name_cats-shape_(333, 517)-tokens_140] | ✅ | 8207.54 | ✅ | 24768.72 |
+| TestVision::test_image_processor[name_cats-shape_(4032, 3024)-tokens_280] | ✅ | 29216.92 | ✅ | 98497.84 |
+| TestVision::test_image_processor[name_cats-shape_(4096, 3072)-tokens_280] | ✅ | 29423.81 | ✅ | 98252.86 |
+| TestVision::test_image_processor[name_cats-shape_(480, 640)-tokens_280] | ✅ | 9954.09 | ✅ | 26282.24 |
+| TestVision::test_image_processor[name_cats-shape_(672, 517)-tokens_280] | ✅ | 10749.75 | ✅ | 34261.11 |
+| TestVision::test_image_processor[name_cats-shape_(672, 960)-tokens_280] | ✅ | 9858.14 | ✅ | 30586.07 |
+| TestVision::test_image_processor[name_cats-shape_None-tokens_280] | ✅ | 9956.74 | ✅ | 31692.24 |
+| TestVision::test_image_processor[name_living_room-shape_None-tokens_140] | ✅ | 9349.01 | ✅ | 27410.55 |
+| TestVision::test_image_processor[name_stop_sign-shape_None-tokens_280] | ✅ | 10725.90 | ✅ | 30385.53 |
+| TestVision::test_image_processor_npu2_only[test_image_processor_npu2_only] | ✅ | 9589.45 | - | - |
 | TestVision::test_vision_accuracy[name_cats] | ✅ | - | ✅ | - |
 | TestVision::test_vision_accuracy[name_living_room] | ✅ | - | ✅ | - |
 | TestVision::test_vision_accuracy[name_stop_sign] | ✅ | - | ✅ | - |
-| TestVision::test_vision_latency[name_cats] | ✅ | 720445.03 | ✅ | 2121409.18 |
-| TestVision::test_vision_latency[name_living_room] | ✅ | 412090.42 | ✅ | 1594848.44 |
+| TestVision::test_vision_latency[name_cats] | ✅ | 720734.26 | ✅ | 2051027.54 |
+| TestVision::test_vision_latency[name_living_room] | ✅ | 412675.20 | ✅ | 1499559.41 |
 | test_embeddinggemma_2_accuracy[document] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[long_document] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[near_the_limit] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[past_the_window] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[query] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_determinism[test_embeddinggemma_2_determinism] | ✅ | - | ✅ | - |
-| test_embeddinggemma_2_latency[long_document] | ✅ | 341036.50 | ✅ | 1645737.76 |
-| test_embeddinggemma_2_latency[past_the_window] | ✅ | 547495.51 | ✅ | 3058579.40 |
-| test_embeddinggemma_2_latency[query] | ✅ | 286161.01 | ✅ | 1251955.03 |
+| test_embeddinggemma_2_latency[long_document] | ✅ | 339979.64 | ✅ | 1795615.88 |
+| test_embeddinggemma_2_latency[past_the_window] | ✅ | 548156.44 | ✅ | 2941468.78 |
+| test_embeddinggemma_2_latency[query] | ✅ | 285207.31 | ✅ | 1260488.50 |
 | test_embeddinggemma_2_multimodal[case_audio] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_multimodal[case_both] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_multimodal[case_image] | ✅ | - | ✅ | - |
@@ -3979,12 +3979,12 @@
 
 | Test | Krackan Status | Krackan Latency (mean) | Phoenix Status | Phoenix Latency (mean) |
 |---|---|---|---|---|
-| TestGemma4::test_a_prompt_longer_than_a_chunk_runs_in_chunks[test_a_prompt_longer_than_a_chunk_runs_in_chunks] | ✅ | n/a | ✅ | n/a |
-| TestGemma4::test_decode_from_an_empty_cache_matches_the_forward_token_by_token[test_decode_from_an_empty_cache_matches_the_forward_token_by_token] | ✅ | n/a | ✅ | n/a |
+| TestGemma4::test_a_prompt_longer_than_a_chunk_runs_in_chunks[test_a_prompt_longer_than_a_chunk_runs_in_chunks] | ❌ | n/a | ❌ | n/a |
+| TestGemma4::test_decode_from_an_empty_cache_matches_the_forward_token_by_token[test_decode_from_an_empty_cache_matches_the_forward_token_by_token] | ❌ | n/a | ❌ | n/a |
 | TestGemma4::test_every_step_of_every_version_resolves[test_every_step_of_every_version_resolves] | ✅ | n/a | ✅ | n/a |
-| TestGemma4::test_the_accuracy_check_scores_the_model_against_the_reference[test_the_accuracy_check_scores_the_model_against_the_reference] | ✅ | n/a | ✅ | n/a |
-| TestGemma4::test_the_determinism_check_finds_the_reference_deterministic[test_the_determinism_check_finds_the_reference_deterministic] | ✅ | n/a | ✅ | n/a |
-| TestGemma4::test_the_prompt_matches_the_forward_and_leaves_decode_its_caches[test_the_prompt_matches_the_forward_and_leaves_decode_its_caches] | ✅ | n/a | ✅ | n/a |
+| TestGemma4::test_the_accuracy_check_scores_the_model_against_the_reference[test_the_accuracy_check_scores_the_model_against_the_reference] | ❌ | n/a | ❌ | n/a |
+| TestGemma4::test_the_determinism_check_finds_the_reference_deterministic[test_the_determinism_check_finds_the_reference_deterministic] | ❌ | n/a | ❌ | n/a |
+| TestGemma4::test_the_prompt_matches_the_forward_and_leaves_decode_its_caches[test_the_prompt_matches_the_forward_and_leaves_decode_its_caches] | ❌ | n/a | ❌ | n/a |
 | test_a_placeholder_s_per_layer_inputs_are_the_padding_token_s[test_a_placeholder_s_per_layer_inputs_are_the_padding_token_s] | ✅ | n/a | ✅ | n/a |
 | test_a_shared_layer_with_no_earlier_layer_of_its_kind_is_refused[test_a_shared_layer_with_no_earlier_layer_of_its_kind_is_refused] | ✅ | n/a | ✅ | n/a |
 | test_bidirectional_attention_for_images_alone_is_text_s_causal[test_bidirectional_attention_for_images_alone_is_text_s_causal] | ✅ | n/a | ✅ | n/a |
@@ -4037,12 +4037,12 @@
 
 | Test | Krackan Status | Krackan Latency (mean) | Phoenix Status | Phoenix Latency (mean) |
 |---|---|---|---|---|
-| TestGranite::test_a_prompt_longer_than_a_chunk_runs_in_chunks[test_a_prompt_longer_than_a_chunk_runs_in_chunks] | ✅ | n/a | ✅ | n/a |
-| TestGranite::test_decode_from_an_empty_cache_matches_the_forward_token_by_token[test_decode_from_an_empty_cache_matches_the_forward_token_by_token] | ✅ | n/a | ✅ | n/a |
+| TestGranite::test_a_prompt_longer_than_a_chunk_runs_in_chunks[test_a_prompt_longer_than_a_chunk_runs_in_chunks] | ❌ | n/a | ❌ | n/a |
+| TestGranite::test_decode_from_an_empty_cache_matches_the_forward_token_by_token[test_decode_from_an_empty_cache_matches_the_forward_token_by_token] | ❌ | n/a | ❌ | n/a |
 | TestGranite::test_every_step_of_every_version_resolves[test_every_step_of_every_version_resolves] | ✅ | n/a | ✅ | n/a |
-| TestGranite::test_the_accuracy_check_scores_the_model_against_the_reference[test_the_accuracy_check_scores_the_model_against_the_reference] | ✅ | n/a | ✅ | n/a |
-| TestGranite::test_the_determinism_check_finds_the_reference_deterministic[test_the_determinism_check_finds_the_reference_deterministic] | ✅ | n/a | ✅ | n/a |
-| TestGranite::test_the_prompt_matches_the_forward_and_leaves_decode_its_caches[test_the_prompt_matches_the_forward_and_leaves_decode_its_caches] | ✅ | n/a | ✅ | n/a |
+| TestGranite::test_the_accuracy_check_scores_the_model_against_the_reference[test_the_accuracy_check_scores_the_model_against_the_reference] | ❌ | n/a | ❌ | n/a |
+| TestGranite::test_the_determinism_check_finds_the_reference_deterministic[test_the_determinism_check_finds_the_reference_deterministic] | ❌ | n/a | ❌ | n/a |
+| TestGranite::test_the_prompt_matches_the_forward_and_leaves_decode_its_caches[test_the_prompt_matches_the_forward_and_leaves_decode_its_caches] | ❌ | n/a | ❌ | n/a |
 
 </details>
 
@@ -4074,16 +4074,16 @@
 
 | Test | Krackan Status | Krackan Latency (mean) | Phoenix Status | Phoenix Latency (mean) |
 |---|---|---|---|---|
-| TestGraniteHybridDense::test_a_prompt_longer_than_a_chunk_runs_in_chunks[test_a_prompt_longer_than_a_chunk_runs_in_chunks] | ✅ | n/a | ✅ | n/a |
-| TestGraniteHybridDense::test_decode_from_an_empty_cache_matches_the_forward_token_by_token[test_decode_from_an_empty_cache_matches_the_forward_token_by_token] | ✅ | n/a | ✅ | n/a |
+| TestGraniteHybridDense::test_a_prompt_longer_than_a_chunk_runs_in_chunks[test_a_prompt_longer_than_a_chunk_runs_in_chunks] | ❌ | n/a | ❌ | n/a |
+| TestGraniteHybridDense::test_decode_from_an_empty_cache_matches_the_forward_token_by_token[test_decode_from_an_empty_cache_matches_the_forward_token_by_token] | ❌ | n/a | ❌ | n/a |
 | TestGraniteHybridDense::test_every_step_of_every_version_resolves[test_every_step_of_every_version_resolves] | ✅ | n/a | ✅ | n/a |
-| TestGraniteHybridDense::test_forget_restarts_from_a_valid_recurrent_state[position_0-start_0] | ✅ | n/a | ✅ | n/a |
-| TestGraniteHybridDense::test_forget_restarts_from_a_valid_recurrent_state[position_100-start_100] | ✅ | n/a | ✅ | n/a |
-| TestGraniteHybridDense::test_forget_restarts_from_a_valid_recurrent_state[position_64-start_64] | ✅ | n/a | ✅ | n/a |
-| TestGraniteHybridDense::test_forget_restarts_from_a_valid_recurrent_state[position_70-start_64] | ✅ | n/a | ✅ | n/a |
-| TestGraniteHybridDense::test_the_accuracy_check_scores_the_model_against_the_reference[test_the_accuracy_check_scores_the_model_against_the_reference] | ✅ | n/a | ✅ | n/a |
-| TestGraniteHybridDense::test_the_determinism_check_finds_the_reference_deterministic[test_the_determinism_check_finds_the_reference_deterministic] | ✅ | n/a | ✅ | n/a |
-| TestGraniteHybridDense::test_the_prompt_matches_the_forward_and_leaves_decode_its_caches[test_the_prompt_matches_the_forward_and_leaves_decode_its_caches] | ✅ | n/a | ✅ | n/a |
+| TestGraniteHybridDense::test_forget_restarts_from_a_valid_recurrent_state[position_0-start_0] | ❌ | n/a | ❌ | n/a |
+| TestGraniteHybridDense::test_forget_restarts_from_a_valid_recurrent_state[position_100-start_100] | ❌ | n/a | ❌ | n/a |
+| TestGraniteHybridDense::test_forget_restarts_from_a_valid_recurrent_state[position_64-start_64] | ❌ | n/a | ❌ | n/a |
+| TestGraniteHybridDense::test_forget_restarts_from_a_valid_recurrent_state[position_70-start_64] | ❌ | n/a | ❌ | n/a |
+| TestGraniteHybridDense::test_the_accuracy_check_scores_the_model_against_the_reference[test_the_accuracy_check_scores_the_model_against_the_reference] | ❌ | n/a | ❌ | n/a |
+| TestGraniteHybridDense::test_the_determinism_check_finds_the_reference_deterministic[test_the_determinism_check_finds_the_reference_deterministic] | ❌ | n/a | ❌ | n/a |
+| TestGraniteHybridDense::test_the_prompt_matches_the_forward_and_leaves_decode_its_caches[test_the_prompt_matches_the_forward_and_leaves_decode_its_caches] | ❌ | n/a | ❌ | n/a |
 | test_a_config_with_experts_is_refused[test_a_config_with_experts_is_refused] | ✅ | n/a | ✅ | n/a |
 | test_a_config_without_rope_reads_back_from_its_json[test_a_config_without_rope_reads_back_from_its_json] | ✅ | n/a | ✅ | n/a |
 | test_a_rope_config_without_rope_theta_takes_transformers_default[test_a_rope_config_without_rope_theta_takes_transformers_default] | ✅ | n/a | ✅ | n/a |
@@ -4138,12 +4138,12 @@
 
 | Test | Krackan Status | Krackan Latency (mean) | Phoenix Status | Phoenix Latency (mean) |
 |---|---|---|---|---|
-| TestBiasedLlama::test_a_prompt_longer_than_a_chunk_runs_in_chunks[test_a_prompt_longer_than_a_chunk_runs_in_chunks] | ✅ | n/a | ✅ | n/a |
-| TestBiasedLlama::test_decode_from_an_empty_cache_matches_the_forward_token_by_token[test_decode_from_an_empty_cache_matches_the_forward_token_by_token] | ✅ | n/a | ✅ | n/a |
+| TestBiasedLlama::test_a_prompt_longer_than_a_chunk_runs_in_chunks[test_a_prompt_longer_than_a_chunk_runs_in_chunks] | ❌ | n/a | ❌ | n/a |
+| TestBiasedLlama::test_decode_from_an_empty_cache_matches_the_forward_token_by_token[test_decode_from_an_empty_cache_matches_the_forward_token_by_token] | ❌ | n/a | ❌ | n/a |
 | TestBiasedLlama::test_every_step_of_every_version_resolves[test_every_step_of_every_version_resolves] | ✅ | n/a | ✅ | n/a |
-| TestBiasedLlama::test_the_accuracy_check_scores_the_model_against_the_reference[test_the_accuracy_check_scores_the_model_against_the_reference] | ✅ | n/a | ✅ | n/a |
-| TestBiasedLlama::test_the_determinism_check_finds_the_reference_deterministic[test_the_determinism_check_finds_the_reference_deterministic] | ✅ | n/a | ✅ | n/a |
-| TestBiasedLlama::test_the_prompt_matches_the_forward_and_leaves_decode_its_caches[test_the_prompt_matches_the_forward_and_leaves_decode_its_caches] | ✅ | n/a | ✅ | n/a |
+| TestBiasedLlama::test_the_accuracy_check_scores_the_model_against_the_reference[test_the_accuracy_check_scores_the_model_against_the_reference] | ❌ | n/a | ❌ | n/a |
+| TestBiasedLlama::test_the_determinism_check_finds_the_reference_deterministic[test_the_determinism_check_finds_the_reference_deterministic] | ❌ | n/a | ❌ | n/a |
+| TestBiasedLlama::test_the_prompt_matches_the_forward_and_leaves_decode_its_caches[test_the_prompt_matches_the_forward_and_leaves_decode_its_caches] | ❌ | n/a | ❌ | n/a |
 
 </details>
 
