@@ -262,7 +262,8 @@ def gemv_add_recording(
     """Return a projection and its residual add, the projection's ``repeat`` given explicitly.
 
     ``repeat`` must divide ``num_batches``, so a ``repeat`` past 1 takes
-    ``num_batches`` equal to it: one shared matrix of A over that many batches.
+    ``num_batches`` equal to it: one shared matrix of A over that many
+    batches, the add over every batch's output.
     """
     gemv = GEMV(
         M=M,
@@ -272,7 +273,7 @@ def gemv_add_recording(
         repeat=repeat,
         num_batches=None if repeat == 1 else repeat,
     )
-    add = ElementwiseAdd(size=M, tile_size=256)
+    add = ElementwiseAdd(size=M * repeat, tile_size=256)
     steps = sequences.steps((gemv, "A", "B", "mid"), (add, "r", "mid", "out"))
     return Recording.of_steps(name, steps, ["A", "B", "r"], ["out"])
 

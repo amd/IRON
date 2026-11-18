@@ -17,6 +17,7 @@ from iron.common.declare.composition import (
     Region,
 )
 from iron.common.declare.profile import Profile
+from iron.common.graph.record import Recording
 from iron.operators import (
     GEMV,
     Decode,
@@ -26,7 +27,9 @@ from iron.operators import (
     SiLU,
     Softmax,
 )
+from iron.tests.support import sequences
 from iron.tests.support import toys_composition as toys
+from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, measure, search
@@ -178,12 +181,24 @@ def test_search_keeps_the_pair_joined_where_it_pays(name, npu2):
 @unbuilt
 @pytest.mark.supported_devices("npu2")
 def test_a_pair_over_a_core_s_memory_is_refused(npu2):
-    region = _joined_region(
-        Member(GEMV, dict(M=16384, K=16384)), Member(SiLU, dict(size=16384)), "C", "x"
-    )
+    """A GEMV and a SiLU that each fit a core's memory alone, but not together on one worker.
+
+    On one worker the GEMV's 1024-element output tiles are the SiLU's input,
+    so they meet as they are. The GEMV alone holds 62720 of npu2's 65536
+    bytes (one A tile of 4 rows of 5760, a line, its double-buffered
+    output and the stack); the SiLU's double-buffered output adds 4096.
+    """
+    gemv = GEMV(M=6144, K=5760, tile_size_input=4, tile_size_output=1024)
+    silu = SiLU(size=6144, tile_size=1024)
+    region = _joined_region(member(gemv), member(silu), "C", "x")
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    recording = toys.fan_out_recording("oversized", M=16384)
+    recording = Recording.of_steps(
+        "oversized",
+        sequences.steps((gemv, "A", "B", "mid"), (silu, "mid", "out")),
+        ["A", "B"],
+        ["out"],
+    )
     verdict = fit(profile, [Timed(recording)], npu2)
     assert not verdict.ok and verdict.stage == "counts"
 
@@ -205,11 +220,15 @@ def test_mismatched_tile_sizes_are_refused(npu2):
 @unbuilt
 @pytest.mark.supported_devices("npu2")
 def test_more_than_a_core_s_two_input_channels_is_refused(npu2):
-    """A binary consumer needs a free input channel; both of a core's are already the producer's."""
+    """A binary consumer needs a free input channel; both of a core's are already the producer's.
+
+    ``gate``'s GEMV reads ``A`` and ``B`` through the core's two input
+    channels, so the multiply on its worker has none left for ``up``'s output.
+    """
     region = _joined_region(
+        Member(GEMV, dict(M=M, K=M)),
         Member(ElementwiseMul, dict(size=M)),
-        Member(ElementwiseAdd, dict(size=M)),
-        "y",
+        "C",
         "a",
     )
     profile = Profile()
@@ -219,18 +238,23 @@ def test_more_than_a_core_s_two_input_channels_is_refused(npu2):
     assert not verdict.ok and verdict.stage == "counts"
 
 
-@unbuilt
+@pytest.mark.xfail(
+    strict=True,
+    reason="fit has no rule for repeat's channel state yet; it refuses this "
+    "pair only because GEMV's batch-major lanes need a restage into Add's",
+)
 @pytest.mark.supported_devices("npu2")
 def test_gemv_refuses_under_repeat(npu2):
     """GEMV's ``repeat`` keeps its own channel state across calls, which a fold cannot share."""
     region = _joined_region(
-        Member(GEMV, dict(M=M, K=M, repeat=2)),
-        Member(ElementwiseAdd, dict(size=M)),
+        Member(GEMV, dict(M=2048, K=2048, repeat=2)),
+        Member(ElementwiseAdd, dict(size=2 * 2048)),
         "C",
         "b",
     )
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    recording = toys.gemv_add_recording("repeat_refused", M=M, K=M, repeat=2)
+    recording = toys.gemv_add_recording("repeat_refused", M=2048, K=2048, repeat=2)
     verdict = fit(profile, [Timed(recording)], npu2)
     assert not verdict.ok and verdict.stage == "analysis"
+    assert "repeat" in (verdict.why or "")

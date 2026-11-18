@@ -328,7 +328,8 @@ def fit(
     cores its steps record (steps sharing a worker counted once, at the most
     any of them takes), and each edge held at a chosen depth against one
     tile's memory, and through a memtile against its buffer descriptors. The
-    dataflow analysis then finds whether the region balances, whether each
+    dataflow analysis then finds whether the region's steps are convex (no
+    step outside it on a path between two of them), whether it balances, whether each
     stream edge's lanes meet as they are, and whether it runs at its chosen
     depths, the rest at their minimum. The placer last places the composed
     module, where the composer builds the region as IRON's fusions do.
@@ -348,8 +349,8 @@ def fit(
         NotImplementedError: What is not fitted yet, where nothing refuses:
             images held at once, a profile's schedules, variants, bindings,
             fusion or packing entries, an entry rooted at a configuration or
-            a step, scoped to some runs of its shape or splitting a step by
-            fission, more fifos to or
+            a step, scoped to some runs of its shape, splitting a step by
+            fission or chaining a cascade, more fifos to or
             from the host than the shim has channels (IRON's composer gives
             each its own; mlir-aie can share them), a placer setting past the
             sequential placer, a region the composer does not build, and
@@ -412,6 +413,17 @@ def fit(
         if retuned:
             recording = dataclasses.replace(recording, steps=steps)
             recording.rebind(retuned)
+        readers, writers = recording.users()
+        after = [
+            {
+                r
+                for root, ws in writers.items()
+                if s in ws
+                for r in readers.get(root, [])
+                if r > s
+            }
+            for s in range(len(recording.steps))
+        ]
         for index, entry in enumerate(profile.entries()):
             region = entry.root
             if any(m.part is not None for m in region.steps()):
@@ -421,9 +433,32 @@ def fit(
                     "built yet"
                 )
                 continue
-            if not recording.occurrences(entry):
+            if any(e.kind is EdgeKind.CASCADE for e, _, _ in region.wiring()[0]):
+                matched.add(index)
+                waiting.append(
+                    "a cascade chain, which rewrites a reduction rather than "
+                    "naming recorded hand-offs, is not matched or built yet"
+                )
+                continue
+            found = recording.occurrences(entry)
+            if not found:
                 continue
             matched.add(index)
+            inside = set(found[0])
+            frontier = [o for s in inside for o in after[s] if o not in inside]
+            seen = set(frontier)
+            while frontier:
+                o = frontier.pop()
+                if after[o] & inside:
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"its steps are not convex: step {o} "
+                        f"({type(recording.steps[o].op).__name__}), outside it, lies "
+                        f"on a path between two of them",
+                    )
+                frontier += [n for n in after[o] - inside if n not in seen]
+                seen |= after[o] - inside
             if not isinstance(region, Region):
                 waiting.append(
                     f"fitting an entry rooted at a {type(region).__name__} is not "

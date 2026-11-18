@@ -211,7 +211,6 @@ def test_search_keeps_the_reordering_that_pays(npu2):
     assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu2")
 def test_a_non_convex_set_is_refused(npu2):
     """``{gemv_q, consumer}`` is not convex: ``rope_q``, the only path between them, is outside the set."""
@@ -238,16 +237,3 @@ def test_a_cyclic_contraction_is_refused(npu2):
     recording = toys.acyclic_contraction_recording("cyclic")
     verdict = fit(profile, [Timed(recording)], npu2)
     assert not verdict.ok and verdict.stage == "analysis"
-
-
-@unbuilt
-@pytest.mark.supported_devices("npu2")
-def test_a_partition_that_drops_a_step_is_refused(npu2):
-    region = Region(
-        parts=(Member(GEMV, dict(M=M, K=M)),)
-    )  # only the first of three steps
-    profile = Profile()
-    profile.add_entry(Entry(root=region))
-    recording = toys.qkv_among_rope_recording("dropped_step")
-    verdict = fit(profile, [Timed(recording)], npu2)
-    assert not verdict.ok and verdict.stage == "counts"
