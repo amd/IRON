@@ -37,7 +37,6 @@ def _region(position: int):
     return recording, region
 
 
-@unbuilt
 @pytest.mark.parametrize("position", sorted(POSITIONS))
 def test_a_write_then_read_region_round_trips_at_every_position(position, tmp_path):
     """A region holding the writer and the reader, sharing the cache buffer the analysis orders them by.
@@ -58,7 +57,6 @@ def test_a_write_then_read_region_round_trips_at_every_position(position, tmp_pa
     )
 
 
-@unbuilt
 @pytest.mark.parametrize(
     "footprint", ["lo", "lo_plus_one", "hi_minus_one", "hi", "recorded"]
 )
@@ -84,7 +82,6 @@ def test_footprints_round_trip_at_the_boundary_positions_and_as_a_hull(
     )
 
 
-@unbuilt
 def test_two_interleaved_writers_round_trip_with_element_disjointness_named():
     """Paired K and V writers at interleaved elements: their hulls overlap, so disjointness is named element by element."""
     recording, members = interleaved_kv_write(position=1, table_rows=TABLE_ROWS)

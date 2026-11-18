@@ -10,7 +10,7 @@ from aie.iron.device import from_name
 
 import iron
 from iron import Precision, Scratchpad
-from iron.common.declare.composition import Member, Region
+from iron.common.declare.composition import Region
 from iron.common.graph.record import Recording
 from iron.common.image.step import Edge
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -19,19 +19,10 @@ from iron.operators.gemm import GEMM
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 from iron.tests.support import sequences
+from iron.tests.support.toys_edges import member
 
 NPU2 = from_name("npu2", n_cols=8)
 NPU2_SMALL = from_name("npu2", n_cols=2)
-
-
-def _member(op, *dims: str, **tunables) -> Member:
-    """Return ``op`` as a ``Member``: ``dims`` named off its own values, the rest its tunables."""
-    values = vars(op)
-    return Member(
-        cls=type(op),
-        dims={d: values[d] for d in dims},
-        tunables={t: values[t] for t in tunables} or None,
-    )
 
 
 def add_silu_mul(size: int = 512, tile: int = 128, cols: int = 1):
@@ -53,15 +44,9 @@ def add_silu_mul_recording(name: str, add, silu, mul) -> Recording:
 def add_silu_mul_region(add, silu, mul, **edge_kwargs: object) -> Region:
     """Return the stream region over ``add``, ``silu``, ``mul``, ``edge_kwargs`` applied to every edge."""
     members = (
-        _member(
-            add, "size", tile_size=add.tile_size, num_aie_columns=add.num_aie_columns
-        ),
-        _member(
-            silu, "size", tile_size=silu.tile_size, num_aie_columns=silu.num_aie_columns
-        ),
-        _member(
-            mul, "size", tile_size=mul.tile_size, num_aie_columns=mul.num_aie_columns
-        ),
+        member(add),
+        member(silu),
+        member(mul),
     )
     edges = (
         Edge(0, "y", 1, "x", **edge_kwargs),
@@ -83,21 +68,9 @@ def broadcast_skip(add_cols: int = 2, norm_cols: int = 1, depth: int | None = No
     norm = RMSNorm(rows=8, tile_size=256, num_aie_columns=norm_cols)
     second = ElementwiseAdd(size=8 * 256, tile_size=256, num_aie_columns=add_cols)
     members = (
-        _member(
-            first,
-            "size",
-            tile_size=first.tile_size,
-            num_aie_columns=first.num_aie_columns,
-        ),
-        _member(
-            norm, "rows", tile_size=norm.tile_size, num_aie_columns=norm.num_aie_columns
-        ),
-        _member(
-            second,
-            "size",
-            tile_size=second.tile_size,
-            num_aie_columns=second.num_aie_columns,
-        ),
+        member(first),
+        member(norm),
+        member(second),
     )
     skip = Edge(0, "y", 2, "b", depth=depth)
     edges = (Edge(0, "y", 1, "x"), skip)
@@ -141,17 +114,8 @@ def gemm_rowwise(
 def gemm_rowwise_region(gemm: GEMM, norm: RMSNorm, depth: int | None = None) -> Region:
     """Return the region over ``gemm`` -> ``norm``; the edge's rate is ``gemm.tile_m : 1`` rows a firing."""
     members = (
-        _member(
-            gemm,
-            "M",
-            "K",
-            "N",
-            num_aie_columns=gemm.num_aie_columns,
-            tile_m=gemm.tile_m,
-        ),
-        _member(
-            norm, "rows", tile_size=norm.tile_size, num_aie_columns=norm.num_aie_columns
-        ),
+        member(gemm),
+        member(norm),
     )
     edges = (Edge(0, "C", 1, "x", depth=depth),)
     return Region(parts=members, edges=edges)
@@ -226,22 +190,8 @@ def gemm_into_gemm_region(
 ) -> Region:
     """Return the region over ``producer`` -> ``consumer``; the edge's rate is ``producer.tile_m : consumer.tile_m`` rows a firing."""
     members = (
-        _member(
-            producer,
-            "M",
-            "K",
-            "N",
-            num_aie_columns=producer.num_aie_columns,
-            tile_m=producer.tile_m,
-        ),
-        _member(
-            consumer,
-            "M",
-            "K",
-            "N",
-            num_aie_columns=consumer.num_aie_columns,
-            tile_m=consumer.tile_m,
-        ),
+        member(producer),
+        member(consumer),
     )
     edges = (Edge(0, "C", 1, "A", depth=depth),)
     return Region(parts=members, edges=edges)
@@ -256,11 +206,7 @@ def gemm_into_gemm_recording(name: str, producer: GEMM, consumer: GEMM) -> Recor
 def running_sum(size: int = 256, tile: int = 128, cols: int = 1):
     """Return a one-step accumulate-in-place loop, the feedback family's running sum: ``acc = acc + x``."""
     add = ElementwiseAdd(size=size, tile_size=tile, num_aie_columns=cols)
-    members = (
-        _member(
-            add, "size", tile_size=add.tile_size, num_aie_columns=add.num_aie_columns
-        ),
-    )
+    members = (member(add),)
     edges = (Edge(0, "y", 0, "a"),)
     region = Region(parts=members, edges=edges)
     return region, add

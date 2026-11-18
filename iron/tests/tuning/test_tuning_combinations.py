@@ -61,7 +61,7 @@ def test_the_cover_covers_every_axis_pair_and_the_known_triple():
 
 
 def test_varying_one_axis_yields_distinct_toys_for_every_role():
-    """For each role, varying shape, held, rate or size alone yields distinct (recording, Region) pairs.
+    """For each role, varying shape, held, rate or size alone yields distinct (recorded operators, Region) pairs.
 
     ``depth`` is excluded here: a combo's depth is a name (min−1, min, knee,
     more), resolved against ``analyze``'s real ``min_depth``/``knee_depth``
@@ -90,7 +90,7 @@ def test_varying_one_axis_yields_distinct_toys_for_every_role():
                     kwargs["rate"],
                     kwargs["size"],
                 )
-                key = (recording.name, region)
+                key = (tuple(s.op for s in recording.steps), region)
                 assert not any(
                     key == other for other in seen
                 ), f"{role}: varying {axis_name} did not change the toy at {value!r}"

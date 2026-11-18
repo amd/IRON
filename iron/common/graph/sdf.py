@@ -523,6 +523,12 @@ class Derivation:
         srcs = [h.object_fifo for h in link.srcs]
         dsts = [h.object_fifo for h in link.dsts]
         time = link.mode == ObjectFifoLinkMode.Time
+        unsettled = [f.name for f in srcs + dsts if f not in self.objects]
+        if unsettled:
+            raise NotImplementedError(
+                f"a link of {', '.join(unsettled)}, whose objects a call moves no "
+                f"fill, drain or other link settles, is not modelled yet"
+            )
         events: list[tuple[ObjectFifo, bool, bool, int]] = []
         if time and len(srcs) == 1:
             for k in range(self.objects[srcs[0]]):

@@ -36,12 +36,8 @@ HELDS = ("l1", "memtile", "ddr", "later_phase")
 
 
 def member(op: Any) -> Member:
-    """Return the ``Member`` naming ``op``'s shape, its dims collected as a profile entry's are, every tunable it holds included."""
-    values = vars(op)
-    tunables = {
-        name: values[name] for name in type(op).declaration.tunables if name in values
-    }
-    return Member(type(op), Profile.dims(type(op), values), tunables or None)
+    """Return the ``Member`` naming ``op``'s shape as ``candidates`` does: its dims collected as a profile entry's are, and no tunables."""
+    return Member(type(op), Profile.dims(type(op), vars(op)))
 
 
 def realize_helds(
@@ -438,7 +434,9 @@ def join_8_into_4(size=2048):
     norm = RMSNorm(rows=8, tile_size=size, num_aie_columns=4)
     steps = sequences.steps((add, "a", "b", "mid"), (norm, "mid", "out"))
     recording = Recording.of_steps("toy_join", steps, ["a", "b"], ["out"])
-    region = Region((member(add), member(norm)), (Edge(0, "y", 1, "x"),))
+    region = Region(
+        (member(add), member(norm)), (Edge(0, "y", 1, "x", kind=EdgeKind.STAGED),)
+    )
     return recording, region
 
 
@@ -448,7 +446,9 @@ def split_4_into_8(size=2048):
     silu = SiLU(size=size, num_aie_columns=8, tile_size=size // 8)
     steps = sequences.steps((gemv, "A", "B", "mid"), (silu, "mid", "out"))
     recording = Recording.of_steps("toy_split", steps, ["A", "B"], ["out"])
-    region = Region((member(gemv), member(silu)), (Edge(0, "C", 1, "x"),))
+    region = Region(
+        (member(gemv), member(silu)), (Edge(0, "C", 1, "x", kind=EdgeKind.STAGED),)
+    )
     return recording, region
 
 
@@ -488,7 +488,9 @@ def ratio_4_into_6(size=288):
     mul = ElementwiseMul(size=size, num_aie_columns=6, tile_size=size // 6)
     steps = sequences.steps((gemv, "A", "B", "mid"), (mul, "mid", "up", "out"))
     recording = Recording.of_steps("toy_ratio", steps, ["A", "B", "up"], ["out"])
-    region = Region((member(gemv), member(mul)), (Edge(0, "C", 1, "a"),))
+    region = Region(
+        (member(gemv), member(mul)), (Edge(0, "C", 1, "a", kind=EdgeKind.STAGED),)
+    )
     return recording, region
 
 
@@ -499,7 +501,8 @@ def ratio_6_into_4(size=288):
     steps = sequences.steps((mul, "a", "b", "mid"), (add, "mid", "c", "out"))
     recording = Recording.of_steps("toy_ratio_reverse", steps, ["a", "b", "c"], ["out"])
     region = Region(
-        tuple(member(s.op) for s in recording.steps), (Edge(0, "y", 1, "a"),)
+        tuple(member(s.op) for s in recording.steps),
+        (Edge(0, "y", 1, "a", kind=EdgeKind.STAGED),),
     )
     return recording, region
 
@@ -523,7 +526,8 @@ def layout_transpose(rows=64, cols=128, tile=32):
     steps = sequences.steps((gemm, "A", "B", "mid"), (norm, "mid", "out"))
     recording = Recording.of_steps("toy_layout", steps, ["A", "B"], ["out"])
     region = Region(
-        tuple(member(s.op) for s in recording.steps), (Edge(0, "C", 1, "x"),)
+        tuple(member(s.op) for s in recording.steps),
+        (Edge(0, "C", 1, "x", kind=EdgeKind.STAGED),),
     )
     return recording, region
 

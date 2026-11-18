@@ -67,7 +67,6 @@ def test_a_residual_skip_round_trips_for_every_way_of_holding_it(held, tmp_path)
     )
 
 
-@unbuilt
 def test_a_reconvergent_diamond_round_trips():
     """Attention's Q/K/V branches rejoining (a diamond) round-trips, and ``candidates`` proposes the fan-out and the merge."""
     recording, region = diamond_qkv_merge()

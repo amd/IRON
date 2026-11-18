@@ -26,9 +26,9 @@ from aie.iron.device import Device
 from aie.utils import set_current_device
 
 from ..common.declare import Profile, Unresolvable
-from ..common.declare.composition import Member, Refinement, Region
+from ..common.declare.composition import Entry, Member, Refinement, Region
 from ..common.graph.sdf import Derivation
-from ..common.image.step import EdgeKind, FusionKind, HandOff
+from ..common.image.step import Edge, EdgeKind, FusionKind, HandOff
 from .autotune import Timed, refusal
 from .fusions import group_fit_verdict
 
@@ -49,6 +49,49 @@ class Edit(Protocol):
     def apply(self, profile: Profile) -> Profile:
         """Return ``profile`` with the edit made."""
         ...
+
+
+@dataclass(frozen=True)
+class AddEntry:
+    """An edit adding one composition entry to a profile.
+
+    Attributes:
+        entry: The entry added.
+        touches: The steps it composes, by index in the recording it was
+            found in.
+        refinement: How the edited build relates to the untuned build.
+    """
+
+    entry: Entry
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with ``entry`` added."""
+        edited = profile.copy()
+        edited.add_entry(self.entry)
+        return edited
+
+
+# What candidates does not propose yet, named where it stops.
+_NOT_GENERATED = (
+    "regions of steps that are not consecutive",
+    "chosen depths",
+    "DDR and cascade edges",
+    "inflows",
+    "shared workers",
+    "chosen phases",
+    "runtime plans",
+    "nested regions",
+    "configurations",
+    "widths and other tunables",
+    "fission",
+    "substitution",
+    "scopes",
+    "schedules",
+    "variants and bindings",
+    "state layouts",
+)
 
 
 @dataclass(frozen=True)
@@ -107,10 +150,122 @@ def candidates(
 ) -> Iterator[Edit]:
     """Yield every edit of ``profile`` that ``calls`` admit on ``device``.
 
+    A region edit names a window of consecutive recorded steps, no host step
+    inside it and no more steps than the array has cores, with an edge for
+    each hand-off the recording makes inside it: one step the only writer of
+    a whole, streamed buffer the host does not hold, a later step reading it
+    whole, the two ends one buffer. Its edges are ordered by producer, then
+    consumer, each a stream where the dataflow analysis finds the lanes meet
+    as they are (an equal or broadcast hand-off) and staged otherwise, or
+    where the analysis does not model the pair yet; whether the composer
+    builds it is ``fit``'s to say, not this. Each member names its step's shape
+    and nothing else (``Profile.dims`` of it, tunables None), so a region
+    edit composes with an edit of the same steps' tunables. Each entry is
+    yielded once, from the first call that admits it.
+
+    Args:
+        calls: The graph's calls, every version.
+        profile: The profile the edits are of.
+        device: The device.
+
     Raises:
-        NotImplementedError: Not built yet.
+        NotImplementedError: After every edit it yields: the kinds of edit
+            it does not generate yet.
     """
-    raise NotImplementedError("the candidate generator is not built yet")
+    proposed: list[Entry] = []
+    cores = device.cols * len(device.core_rows)
+    for timed in calls:
+        recording = timed.recording
+        steps = recording.steps
+        _, writers = recording.users()
+        held = recording.held
+        members = [
+            Member(type(step.op), Profile.dims(type(step.op), vars(step.op)))
+            for step in steps
+        ]
+        kinds: dict[tuple[int, str, int, str], EdgeKind | None] = {}
+        for lo in range(len(steps)):
+            for hi in range(lo + 1, min(lo + cores, len(steps))):
+                if recording.crosses_host(lo, hi):
+                    break
+                edges: list[Edge] = []
+                for c in range(lo + 1, hi + 1):
+                    for sink, read in zip(steps[c].op.buffers, steps[c].refs()):
+                        made = writers.get(read.root, [])
+                        if (
+                            not sink.fills
+                            or not sink.streamed
+                            or read.nbytes is not None
+                            or read.root in held
+                            or len(made) != 1
+                            or not lo <= made[0] < c
+                        ):
+                            continue
+                        p = made[0]
+                        for source, wrote in zip(steps[p].op.buffers, steps[p].refs()):
+                            if not (
+                                source.drains
+                                and source.streamed
+                                and wrote.root == read.root
+                                and wrote.nbytes is None
+                            ):
+                                continue
+                            pair = (p, source.name, c, sink.name)
+                            if pair not in kinds:
+                                edge = Edge(0, source.name, 1, sink.name)
+                                try:
+                                    shape = (
+                                        Derivation(
+                                            Region((members[p], members[c]), (edge,)),
+                                            recording,
+                                            device,
+                                        )
+                                        .analysis()
+                                        .hand_off[edge]
+                                    )
+                                except NotImplementedError:
+                                    kinds[pair] = EdgeKind.STAGED
+                                except ValueError:
+                                    kinds[pair] = None
+                                else:
+                                    kinds[pair] = (
+                                        EdgeKind.STREAM
+                                        if shape in (HandOff.EQUAL, HandOff.BROADCAST)
+                                        else EdgeKind.STAGED
+                                    )
+                            if kinds[pair] is not None:
+                                edges.append(
+                                    Edge(
+                                        p - lo,
+                                        source.name,
+                                        c - lo,
+                                        sink.name,
+                                        kind=kinds[pair],
+                                    )
+                                )
+                entry = Entry(
+                    Region(
+                        tuple(members[lo : hi + 1]),
+                        tuple(
+                            sorted(
+                                edges,
+                                key=lambda e: (
+                                    e.producer,
+                                    e.consumer,
+                                    e.output,
+                                    e.input,
+                                ),
+                            )
+                        ),
+                    )
+                )
+                if entry in proposed:
+                    continue
+                proposed.append(entry)
+                yield AddEntry(entry, frozenset(range(lo, hi + 1)))
+    raise NotImplementedError(
+        "candidates does not generate yet: " + ", ".join(_NOT_GENERATED)
+    )
 
 
 def fit(

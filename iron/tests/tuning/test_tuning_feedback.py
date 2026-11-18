@@ -72,8 +72,18 @@ CYCLES = {
 }
 
 
-@unbuilt
-@pytest.mark.parametrize("cycle", sorted(CYCLES))
+@pytest.mark.parametrize(
+    "cycle",
+    [
+        # A self-loop over a carried buffer is not proposed yet.
+        (
+            pytest.param(c, marks=unbuilt)
+            if c in ("sample_drawn_token", "scan_running_state")
+            else c
+        )
+        for c in sorted(CYCLES)
+    ],
+)
 def test_a_cycle_with_its_initial_values_round_trips(cycle, tmp_path):
     """A cycle with its initial values round-trips through the profile, and ``candidates`` proposes it."""
     recording, region = CYCLES[cycle]()

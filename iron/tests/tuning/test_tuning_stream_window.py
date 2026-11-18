@@ -36,7 +36,11 @@ DEVICE_NPU1 = DEVICES["npu1"]()
 
 def _outside_reader_window():
     recording, members, forward = window_with_outside_reader()
-    return recording, Region(members, forward + (skip_edge(),))
+    edges = sorted(
+        forward + (skip_edge(),),
+        key=lambda e: (e.producer, e.consumer, e.output, e.input),
+    )
+    return recording, Region(members, tuple(edges))
 
 
 WINDOWS = {
@@ -49,8 +53,14 @@ WINDOWS = {
 }
 
 
-@unbuilt
-@pytest.mark.parametrize("window", sorted(WINDOWS))
+@pytest.mark.parametrize(
+    "window",
+    [
+        # An edge out of a buffer the host also holds is not proposed yet.
+        pytest.param(w, marks=unbuilt) if w == "several_outputs" else w
+        for w in sorted(WINDOWS)
+    ],
+)
 def test_window_entry_round_trips_through_the_profile(window, tmp_path):
     """A region of stream edges round-trips through the profile, and ``candidates`` proposes a window over its chain."""
     recording, region = WINDOWS[window]()

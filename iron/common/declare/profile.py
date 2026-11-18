@@ -323,6 +323,13 @@ class Profile:
         self._bindings: list[Binding] = []
         self._state_layouts: list[StateLayout] = []
 
+    def copy(self) -> Profile:
+        """Return a profile holding the same entries, which adding to leaves this one as it is."""
+        new = Profile()
+        for name, held in vars(self).items():
+            vars(new)[name] = list(held)
+        return new
+
     def add_entry(self, entry: Entry) -> None:
         """Add a composition entry."""
         self._compositions.append(entry)

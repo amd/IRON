@@ -68,8 +68,14 @@ _DERIVED = set(SHAPES) - {"slices_qkv"}
 REPRESENTABLE_GAPS = {"ratio_4_into_6", "ratio_6_into_4", "broadcast"}
 
 
-@unbuilt
-@pytest.mark.parametrize("shape", sorted(SHAPES))
+@pytest.mark.parametrize(
+    "shape",
+    [
+        # An edge reading part of a buffer (a slice) is not proposed yet.
+        pytest.param(s, marks=unbuilt) if s == "slices_qkv" else s
+        for s in sorted(SHAPES)
+    ],
+)
 def test_a_hand_off_shape_round_trips_through_the_profile(shape, tmp_path):
     """Each hand-off shape round-trips through the profile, and ``candidates`` proposes it."""
     recording, region = SHAPES[shape]()
@@ -166,7 +172,6 @@ def test_a_restage_over_a_memtiles_channels_is_refused_before_any_build():
     assert "channel" in (result.why or "")
 
 
-@unbuilt
 @pytest.mark.parametrize("shape", sorted(REPRESENTABLE_GAPS))
 def test_any_ratio_and_broadcast_are_representable_but_unbuilt(shape):
     """Any-ratio and broadcast hand-offs round-trip and are proposed (searchable), but IRON does not build them yet."""

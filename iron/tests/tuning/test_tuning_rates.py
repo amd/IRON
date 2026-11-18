@@ -21,18 +21,16 @@ from iron.tune.search import candidates, check, fit, search
 pytestmark = pytest.mark.usefixtures("npu2")
 
 
-@unbuilt
 def test_single_rate_edge_round_trips():
     """``add -> SiLU -> mul`` at an equal-width edge: the candidate generator proposes it unchanged among its own edits."""
     add, silu, mul = toys.add_silu_mul()
     region = toys.add_silu_mul_region(add, silu, mul)
     entry = Entry(root=region)
-    profile = Profile()
-    profile.add_entry(entry)
     recording = toys.add_silu_mul_recording("single-rate", add, silu, mul)
+    start = Profile()
     assert any(
-        entry in edit.apply(profile).entries()
-        for edit in candidates([Timed(recording)], profile, toys.NPU2)
+        entry in edit.apply(start).entries()
+        for edit in candidates([Timed(recording)], start, toys.NPU2)
     )
 
 
