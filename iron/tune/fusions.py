@@ -888,9 +888,10 @@ def compare_graphs(
 
     Raises:
         NotBitIdentical: ``after``'s outputs, each within its bound (past it
-            an operator may write whole tiles), are not bit-identical to
-            ``before``'s at a point, the call's values or one of its bounds
-            halved (``_bound_points``).
+            an operator may write whole tiles), its carried buffers or its
+            states are not
+            bit-identical to ``before``'s at a point, the call's values or one
+            of its bounds halved (``_bound_points``).
         CheckTooLong: One call a round would take a point past its share of
             ``cap_s``.
         RuntimeError: A device timeout propagates as it is raised.
@@ -936,6 +937,12 @@ def compare_graphs(
                 f"{recording.name}: {build} is not the call's build; each handle as "
                 f"(call's, {build}'s) (role, shape, dtype): {differ}"
             )
+    carried = {
+        h.ref().root: h
+        for step in recording.steps
+        for h in step.slots
+        if h.ref().root in recording.feedback and h.ref().nbytes is None
+    }
     timed = call.timed_points()
     # A timed point right after it is staged: timing dispatches what was
     # staged last.
@@ -949,16 +956,35 @@ def compare_graphs(
                     after.write(own[1][name], content)
                 before(*inputs, **values)
                 after(*inputs, **values)
-                if not all(
-                    np.array_equal(
-                        before.read(h)[h.valid_index(values)],
-                        after.read(h)[h.valid_index(values)],
-                    )
-                    for h in recording.returned
-                ):
+                # Everything a call leaves the host: every output, not only
+                # those returned, every buffer carried to the next call, and
+                # every state.
+                differ = (
+                    [
+                        h.name
+                        for h in recording.outputs
+                        if not np.array_equal(
+                            before.read(h)[h.valid_index(values)],
+                            after.read(h)[h.valid_index(values)],
+                        )
+                    ]
+                    + [
+                        name
+                        for name, h in carried.items()
+                        if not np.array_equal(before.read(h), after.read(h))
+                    ]
+                    + [
+                        name
+                        for name in states
+                        if not np.array_equal(
+                            before.read(own[0][name]), after.read(own[1][name])
+                        )
+                    ]
+                )
+                if differ:
                     raise NotBitIdentical(
-                        f"{recording.name}: not bit-identical to it as before at "
-                        f"{values}"
+                        f"{recording.name}: {', '.join(differ)} not bit-identical "
+                        f"to it as before at {values}"
                     )
                 point = tuple(sorted(values.items()))
                 if weight is None or point in known.points:
