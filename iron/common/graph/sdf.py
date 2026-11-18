@@ -16,7 +16,7 @@ limit comes from the device's target model.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from fractions import Fraction
 
 from aie.iron.device import Device
@@ -27,19 +27,21 @@ from .record import Recording
 
 
 @dataclass(frozen=True)
-class Firing:
-    """One firing of an actor: the objects it holds on each edge it reads, and what it gives up and writes.
+class Event:
+    """One objectFIFO acquire or release an actor makes, in program order.
 
     Attributes:
-        holds: Per edge read, the objects held while it fires (an objectFIFO
-            acquire, counting those still held from the last firing).
-        releases: Per edge read, the objects given up when it ends.
-        writes: Per edge written, the objects it fills.
+        channel: The edge it names.
+        producer: It is made at the edge's writing end.
+        acquire: It acquires (False: it releases).
+        count: The objects. An acquire holds that many in all, counting
+            those still held; a release gives that many up.
     """
 
-    holds: dict[int, int] = field(default_factory=dict)
-    releases: dict[int, int] = field(default_factory=dict)
-    writes: dict[int, int] = field(default_factory=dict)
+    channel: int
+    producer: bool
+    acquire: bool
+    count: int
 
 
 @dataclass(frozen=True)
@@ -49,7 +51,7 @@ class Channel:
     Attributes:
         producer: The writing actor.
         consumer: The reading actor.
-        initial: Tokens on it before the first firing (a carried value).
+        initial: Objects on it before the call starts (a carried value).
         phase: The runtime phase its transfer runs in: it is read only once
             every edge of an earlier phase has had all it moves written.
     """
@@ -61,55 +63,62 @@ class Channel:
 
 
 class Flow:
-    """One call of a region as actors firing over bounded channels.
+    """One call of a region as actors replaying their objectFIFO accesses over bounded channels.
 
-    Each actor fires a finite sequence, as its core program does in one call
-    (a ramp-up, its steady firing repeated, a drain), so a sliding window or
-    a first firing unlike the rest is exact rather than averaged. A firing
-    is atomic: it may start when every edge it reads holds what it needs and
-    every edge it writes has room, counting what it gives up on an edge it
-    also writes (a carried value).
+    Each actor runs its accesses in program order, as its core does in one
+    call, loops unrolled. A reader's acquire waits until the edge holds as
+    many objects as it asks to hold; a writer's acquire waits until as many
+    slots are free; releases free them or fill them. A core may hold an
+    output slot while it waits on an input, as the hardware does. An
+    enabled access stays enabled until it runs, since only its own actor
+    takes from what it waits on, so whether a call completes does not
+    depend on the order actors run in.
 
     Args:
         channels: The edges.
-        firings: Per actor, its firings in order.
+        programs: Per actor, its accesses in order.
     """
 
     def __init__(
-        self, channels: Sequence[Channel], firings: Sequence[Sequence[Firing]]
+        self, channels: Sequence[Channel], programs: Sequence[Sequence[Event]]
     ) -> None:
         self.channels = tuple(channels)
-        self.firings = tuple(tuple(f) for f in firings)
+        self.programs = tuple(tuple(p) for p in programs)
 
-    def repetition(self) -> dict[int, int]:
-        """Return each actor's firings in the call."""
-        return {a: len(f) for a, f in enumerate(self.firings)}
+    def written(self, channel: int) -> int:
+        """Return the objects a call writes on ``channel``."""
+        producer = self.channels[channel].producer
+        return sum(
+            e.count
+            for e in self.programs[producer]
+            if e.channel == channel and e.producer and not e.acquire
+        )
+
+    def read(self, channel: int) -> int:
+        """Return the objects a call gives up on ``channel`` once read."""
+        consumer = self.channels[channel].consumer
+        return sum(
+            e.count
+            for e in self.programs[consumer]
+            if e.channel == channel and not e.producer and not e.acquire
+        )
 
     def balance(self) -> str | None:
-        """Return why the call leaves an edge with other than its initial tokens, or None where every edge balances."""
+        """Return why the call leaves an edge with other than its initial objects, or None where every edge balances."""
         for e, channel in enumerate(self.channels):
-            written = sum(f.writes.get(e, 0) for f in self.firings[channel.producer])
-            released = sum(f.releases.get(e, 0) for f in self.firings[channel.consumer])
-            if written != released:
+            if self.written(e) != self.read(e):
                 return (
                     f"edge {e} (actor {channel.producer} to {channel.consumer}): "
-                    f"{written} objects written a call, {released} read"
+                    f"{self.written(e)} objects written a call, {self.read(e)} read"
                 )
         return None
 
     def runs(self, depths: Mapping[int, int]) -> str | None:
-        """Return why the call deadlocks with each edge ``depths`` deep, or None where it completes.
-
-        Firing order does not change whether a call completes: an enabled
-        firing stays enabled until it fires.
-        """
+        """Return why the call deadlocks with each edge ``depths`` deep, or None where it completes."""
         filled = [c.initial for c in self.channels]
-        next_firing = [0] * len(self.firings)
-        totals = [
-            sum(f.writes.get(e, 0) for f in self.firings[c.producer])
-            for e, c in enumerate(self.channels)
-        ]
+        totals = [self.written(e) for e in range(len(self.channels))]
         written = [0] * len(self.channels)
+        at = [0] * len(self.programs)
         while True:
             open_phase = min(
                 (
@@ -119,63 +128,66 @@ class Flow:
                 ),
                 default=max((c.phase for c in self.channels), default=0),
             )
-            fired = False
-            for a, firings in enumerate(self.firings):
-                k = next_firing[a]
-                if k == len(firings):
-                    continue
-                firing = firings[k]
-                after = list(filled)
-                for e, held in firing.holds.items():
-                    if filled[e] < held or self.channels[e].phase > open_phase:
-                        break
-                else:
-                    for e, released in firing.releases.items():
-                        after[e] -= released
-                    if all(
-                        after[e] + count <= depths[e]
-                        for e, count in firing.writes.items()
-                    ):
-                        for e, count in firing.writes.items():
-                            after[e] += count
-                            written[e] += count
-                        filled = after
-                        next_firing[a] += 1
-                        fired = True
-            if all(n == len(f) for n, f in zip(next_firing, self.firings)):
+            ran = False
+            for a, program in enumerate(self.programs):
+                while at[a] < len(program):
+                    event = program[at[a]]
+                    e = event.channel
+                    if event.producer and event.acquire:
+                        if depths[e] - filled[e] < event.count:
+                            break
+                    elif event.producer:
+                        filled[e] += event.count
+                        written[e] += event.count
+                    elif event.acquire:
+                        if (
+                            filled[e] < event.count
+                            or self.channels[e].phase > open_phase
+                        ):
+                            break
+                    else:
+                        filled[e] -= event.count
+                    at[a] += 1
+                    ran = True
+            if all(n == len(p) for n, p in zip(at, self.programs)):
                 return None
-            if not fired:
+            if not ran:
                 waiting = [
-                    f"actor {a} at firing {n} of {len(f)}"
-                    for a, (n, f) in enumerate(zip(next_firing, self.firings))
-                    if n < len(f)
+                    f"actor {a} at access {n} of {len(p)}"
+                    for a, (n, p) in enumerate(zip(at, self.programs))
+                    if n < len(p)
                 ]
                 return "deadlocks: " + ", ".join(waiting)
 
     def minimum_depths(self) -> tuple[dict[int, int], str | None]:
         """Return each edge's smallest deadlock-free depth, every other edge as deep as a call could fill it, and why none exists where one does not.
 
-        A depth below the most a firing holds or writes on the edge, or below
-        its initial tokens, cannot run; past what a call ever has on it,
-        more depth cannot matter.
+        A depth below the most an access holds on the edge, or below its
+        initial objects, cannot run; past what a call ever has on it, more
+        depth cannot matter.
         """
+        holds = {
+            e: max(
+                [c.initial, 1]
+                + [
+                    ev.count
+                    for program in self.programs
+                    for ev in program
+                    if ev.channel == e and ev.acquire
+                ]
+            )
+            for e, c in enumerate(self.channels)
+        }
         ceiling = {
-            e: c.initial
-            + sum(f.writes.get(e, 0) for f in self.firings[c.producer])
-            + max((f.holds.get(e, 0) for f in self.firings[c.consumer]), default=0)
+            e: c.initial + self.written(e) + holds[e]
             for e, c in enumerate(self.channels)
         }
         why = self.runs(ceiling)
         if why is not None:
             return {}, why
         depths = {}
-        for e, c in enumerate(self.channels):
-            low = max(
-                [c.initial, 1]
-                + [f.holds.get(e, 0) for f in self.firings[c.consumer]]
-                + [f.writes.get(e, 0) for f in self.firings[c.producer]]
-            )
-            high = ceiling[e]
+        for e in range(len(self.channels)):
+            low, high = holds[e], ceiling[e]
             while low < high:
                 middle = (low + high) // 2
                 if self.runs({**ceiling, e: middle}) is None:

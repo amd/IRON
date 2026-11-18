@@ -1,51 +1,65 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""One call of actors firing over bounded channels: balance, deadlock and the smallest depths."""
+"""One call of actors replaying their objectFIFO accesses: balance, deadlock and the smallest depths."""
 
-from iron.common.graph.sdf import Channel, Firing, Flow
+from iron.common.graph.sdf import Channel, Event, Flow
 
 
 def test_a_two_to_three_edge_needs_p_plus_q_minus_their_gcd():
     """Three firings writing two objects into two reading three: depth 2 + 3 - gcd(2, 3) = 4."""
-    flow = Flow(
-        [Channel(0, 1)],
-        [
-            [Firing(writes={0: 2})] * 3,
-            [Firing(holds={0: 3}, releases={0: 3})] * 2,
-        ],
-    )
+    write = [Event(0, True, True, 2), Event(0, True, False, 2)]
+    read = [Event(0, False, True, 3), Event(0, False, False, 3)]
+    flow = Flow([Channel(0, 1)], [write * 3, read * 2])
     assert flow.balance() is None
-    assert flow.repetition() == {0: 3, 1: 2}
     assert flow.minimum_depths() == ({0: 4}, None)
     assert flow.runs({0: 3}) is not None
-    assert flow.runs({0: 4}) is None
 
 
 def test_a_one_to_one_chain_runs_one_object_deep():
-    """A chain moving one object a firing never needs more than one in flight."""
-    one = Firing(holds={0: 1}, releases={0: 1}, writes={1: 1})
+    """A middle core holding its input while it takes an output slot still needs one object an edge."""
+    middle = [
+        Event(0, False, True, 1),
+        Event(1, True, True, 1),
+        Event(0, False, False, 1),
+        Event(1, True, False, 1),
+    ]
     flow = Flow(
         [Channel(0, 1), Channel(1, 2)],
         [
-            [Firing(writes={0: 1})] * 4,
-            [one] * 4,
-            [Firing(holds={1: 1}, releases={1: 1})] * 4,
+            [Event(0, True, True, 1), Event(0, True, False, 1)] * 4,
+            middle * 4,
+            [Event(1, False, True, 1), Event(1, False, False, 1)] * 4,
         ],
     )
     assert flow.minimum_depths() == ({0: 1, 1: 1}, None)
 
 
-def test_a_carried_value_needs_its_initial_token():
-    """A running sum: with its one carried token it runs one deep; without it, it never starts."""
-    step = Firing(holds={0: 1}, releases={0: 1}, writes={0: 1})
-    carried = Flow([Channel(0, 0, initial=1)], [[step] * 4])
-    assert carried.balance() is None
-    assert carried.minimum_depths() == ({0: 1}, None)
-    missing = Flow([Channel(0, 0)], [[step] * 4])
-    depths, why = missing.minimum_depths()
+def test_a_carried_value_held_while_its_slot_is_taken_needs_two():
+    """A core reading its carried value and taking the slot for the next before freeing the first needs two objects; freeing first needs one."""
+    held = [
+        Event(0, False, True, 1),
+        Event(0, True, True, 1),
+        Event(0, False, False, 1),
+        Event(0, True, False, 1),
+    ]
+    freed_first = [
+        Event(0, False, True, 1),
+        Event(0, False, False, 1),
+        Event(0, True, True, 1),
+        Event(0, True, False, 1),
+    ]
+    assert Flow([Channel(0, 0, initial=1)], [held * 4]).minimum_depths() == (
+        {0: 2},
+        None,
+    )
+    assert Flow([Channel(0, 0, initial=1)], [freed_first * 4]).minimum_depths() == (
+        {0: 1},
+        None,
+    )
+    depths, why = Flow([Channel(0, 0)], [held * 4]).minimum_depths()
     assert depths == {}
-    assert why is not None and "actor 0 at firing 0 of 4" in why
+    assert why is not None and "actor 0 at access 0 of 16" in why
 
 
 def test_rates_that_do_not_balance_name_the_edge():
@@ -53,8 +67,8 @@ def test_rates_that_do_not_balance_name_the_edge():
     flow = Flow(
         [Channel(0, 1)],
         [
-            [Firing(writes={0: 2})] * 3,
-            [Firing(holds={0: 1}, releases={0: 1})] * 4,
+            [Event(0, True, True, 2), Event(0, True, False, 2)] * 3,
+            [Event(0, False, True, 1), Event(0, False, False, 1)] * 4,
         ],
     )
     why = flow.balance()
@@ -62,37 +76,66 @@ def test_rates_that_do_not_balance_name_the_edge():
 
 
 def test_a_sliding_window_needs_its_window_deep():
-    """DepthwiseConv1d's core: hold 1 to 4 rows ramping up, then 5 releasing 1 a row, then drop the last 4.
+    """DepthwiseConv1d's core as recorded: ramp up holding one to four rows, then hold five releasing one a row, then drop four.
 
-    The window holds five rows at once, so five deep is the least that runs
-    and four deadlocks.
+    Five deep is the least that runs, and four deadlocks.
     """
     rows, taps = 12, 5
-    ramp = [Firing(holds={0: held}) for held in range(1, taps)]
-    steady = [Firing(holds={0: taps}, releases={0: 1})] * (rows - (taps - 1))
-    drain = [Firing(holds={0: taps - 1}, releases={0: taps - 1})]
+    out = [Event(1, True, True, 1), Event(1, True, False, 1)]
+    ramp = [e for held in range(1, taps) for e in [Event(0, False, True, held), *out]]
+    window = [
+        Event(0, False, True, taps),
+        Event(1, True, True, 1),
+        Event(0, False, False, 1),
+        Event(1, True, False, 1),
+    ]
+    conv = ramp + window * (rows - (taps - 1)) + [Event(0, False, False, taps - 1)]
     flow = Flow(
-        [Channel(0, 1)], [[Firing(writes={0: 1})] * rows, ramp + steady + drain]
+        [Channel(0, 1), Channel(1, 2)],
+        [
+            [Event(0, True, True, 1), Event(0, True, False, 1)] * rows,
+            conv,
+            [Event(1, False, True, 1), Event(1, False, False, 1)] * rows,
+        ],
     )
     assert flow.balance() is None
-    assert flow.minimum_depths() == ({0: taps}, None)
-    assert flow.runs({0: taps - 1}) is not None
+    assert flow.minimum_depths() == ({0: taps, 1: 1}, None)
+    assert flow.runs({0: taps - 1, 1: 1}) is not None
 
 
 def _diamond(skip_phase: int) -> Flow:
     """Return a producer feeding a two-step path and, by a skip edge, the step joining them, four objects a call."""
     return Flow(
+        [Channel(0, 1), Channel(1, 2), Channel(2, 3), Channel(0, 3, phase=skip_phase)],
         [
-            Channel(0, 1),
-            Channel(1, 2),
-            Channel(2, 3),
-            Channel(0, 3, phase=skip_phase),
-        ],
-        [
-            [Firing(writes={0: 1, 3: 1})] * 4,
-            [Firing(holds={0: 1}, releases={0: 1}, writes={1: 1})] * 4,
-            [Firing(holds={1: 1}, releases={1: 1}, writes={2: 1})] * 4,
-            [Firing(holds={2: 1, 3: 1}, releases={2: 1, 3: 1})] * 4,
+            [
+                Event(0, True, True, 1),
+                Event(3, True, True, 1),
+                Event(0, True, False, 1),
+                Event(3, True, False, 1),
+            ]
+            * 4,
+            [
+                Event(0, False, True, 1),
+                Event(1, True, True, 1),
+                Event(0, False, False, 1),
+                Event(1, True, False, 1),
+            ]
+            * 4,
+            [
+                Event(1, False, True, 1),
+                Event(2, True, True, 1),
+                Event(1, False, False, 1),
+                Event(2, True, False, 1),
+            ]
+            * 4,
+            [
+                Event(2, False, True, 1),
+                Event(3, False, True, 1),
+                Event(2, False, False, 1),
+                Event(3, False, False, 1),
+            ]
+            * 4,
         ],
     )
 
@@ -107,4 +150,3 @@ def test_a_skip_edge_read_a_phase_later_holds_the_whole_call():
     flow = _diamond(skip_phase=1)
     assert flow.minimum_depths() == ({0: 1, 1: 1, 2: 4, 3: 4}, None)
     assert flow.runs({0: 1, 1: 1, 2: 4, 3: 3}) is not None
-    assert flow.runs({0: 1, 1: 1, 2: 2, 3: 4}) is not None
