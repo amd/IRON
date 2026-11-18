@@ -325,8 +325,9 @@ def composed(
             inflows, shared workers, chosen phases, a runtime plan, a chosen
             depth, fission, edges of several kinds or of DDR or the
             cascade, matching steps that are not consecutive, steps with no
-            edge that depend through memory, or an edge the composer does not
-            build as its kind (``admits``).
+            edge that depend through memory, an edge out of a buffer steps
+            past the region or the host also read (a tee), or an edge the
+            composer does not build as its kind (``admits``).
     """
     for kind, kept in (
         ("schedules", profile.schedules()),
@@ -340,6 +341,7 @@ def composed(
     fused: list[Fusion] = []
     taken: set[int] = set()
     conflicts = _pack_conflicts(recording)
+    readers, _ = recording.users()
     for entry in profile.entries():
         root = entry.root
         kinds = {e.kind for e in root.edges} if isinstance(root, Region) else set()
@@ -376,6 +378,21 @@ def composed(
                     f"with no edge between them, is not built yet"
                 )
             for e in root.edges:
+                made = recording.steps[match[e.producer]]
+                (root_name,) = {
+                    ref.root
+                    for ref, b in zip(made.refs(), made.op.buffers)
+                    if b.name == e.output
+                }
+                if (
+                    set(readers.get(root_name, [])) - set(match)
+                    or root_name in recording.held
+                ):
+                    raise NotImplementedError(
+                        f"building an edge out of {root_name!r}, which steps past "
+                        f"the region or the host also read, is not built yet: a "
+                        f"fused edge keeps no copy in host memory (a tee)"
+                    )
                 p, c = (
                     recording.steps[match[i]].op.resolved()
                     for i in (e.producer, e.consumer)

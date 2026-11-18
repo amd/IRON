@@ -105,6 +105,7 @@ def test_a_reconvergent_diamond_is_bit_identical():
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 @pytest.mark.supported_devices("npu2")
 def test_tuner_picks_the_way_of_holding_that_pays():

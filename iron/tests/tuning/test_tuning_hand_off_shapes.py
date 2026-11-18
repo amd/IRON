@@ -140,6 +140,7 @@ def test_the_4_into_8_split_builds_correctly_or_is_refused_statically_never_hang
         assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 @pytest.mark.supported_devices("npu2")
 def test_tuner_keeps_the_shape_that_pays_against_narrowing_to_equal_lanes():

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import pytest
 from aie.dialects.aie import get_target_model
 
 from iron.common.declare.composition import (
@@ -241,6 +242,7 @@ def test_skip_phases_are_bit_identical_with_no_hang():
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 def test_tuner_keeps_the_schedule_that_pays():
     """The tuner, on the window toy alone, keeps the ``RuntimePlan`` setting that pays."""

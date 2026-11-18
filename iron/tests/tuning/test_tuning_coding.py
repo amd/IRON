@@ -152,6 +152,7 @@ def test_coded_weights_are_bit_identical_to_plain():
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 def test_coding_is_kept_only_where_ddr_bytes_saved_beat_the_decode_cost():
     """The tuner keeps coding on a weight-bound decode ``GEMV`` and drops it on a compute-bound one.

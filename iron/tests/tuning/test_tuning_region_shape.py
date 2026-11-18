@@ -191,6 +191,7 @@ def test_fission_of_a_reduction_is_no_worse(npu2):
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 @pytest.mark.supported_devices("npu2")
 def test_search_keeps_the_reordering_that_pays(npu2):

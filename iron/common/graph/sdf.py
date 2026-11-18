@@ -313,8 +313,9 @@ class Derivation:
             run-time branch or a ``forever_`` in a core, a per-call count, a
             slice, a restaging IRON's ``Staging`` cannot plan, or a loop no
             fifo's objects settle.
-        ValueError: The region matches none of the recording's steps, or
-            an edge's two ends are not one buffer.
+        ValueError: The region matches none of the recording's steps, a
+            member's tunables do not resolve (``Unresolvable``), or an edge's
+            two ends are not one buffer.
     """
 
     def __init__(self, region: Region, recording: Recording, device: Device) -> None:
@@ -329,7 +330,10 @@ class Derivation:
         self.refs: list[dict[str, BufferRef]] = []
         for s, member in zip(matches[0], region.steps()):
             step = recording.steps[s]
-            op = step.op.replace(**(member.tunables or {}))
+            op = step.op
+            if member.tunables:
+                with set_current_device(device):
+                    op = op._with_tunables(**member.tunables).resolved(device)
             if op.bound_extents:
                 raise NotImplementedError(
                     f"{type(op).__name__} is bounded per call "

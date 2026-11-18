@@ -117,6 +117,7 @@ def test_buffer_below_the_computed_minimum_is_refused():
     assert result.stage == "analysis"
 
 
+@pytest.mark.extensive
 @unbuilt
 def test_tuner_picks_token_sizes_that_pay():
     """``search``, run on the multi-rate toy alone, keeps a depth at or past the analysis's minimum and passes ``check`` against the start, exact."""

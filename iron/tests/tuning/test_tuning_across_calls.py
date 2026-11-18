@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from iron.common.declare.composition import Configuration, Entry, Refinement, Schedule
 from iron.common.declare.profile import Profile
 from iron.tests.support import toys_schedule
@@ -171,6 +173,7 @@ def test_commands_in_flight_are_bit_identical_to_one_at_a_time():
         assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 def test_tuner_keeps_the_call_schedule_that_pays():
     """The tuner, on the decode-step toy alone, keeps the call schedule that pays."""

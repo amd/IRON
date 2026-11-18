@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
@@ -26,8 +27,9 @@ from aie.dialects.aie import get_target_model
 from aie.iron.device import Device
 from aie.utils import set_current_device
 
-from ..common.declare import Profile, Unresolvable
+from ..common.declare import Profile
 from ..common.declare.composition import Entry, Member, Refinement, Region
+from ..common.graph.fusion import composed
 from ..common.graph.sdf import Derivation
 from ..common.image.step import Edge, EdgeKind, FusionKind, HandOff
 from .autotune import Timed, refusal, settings
@@ -82,6 +84,11 @@ class AddEntry:
 
 
 logger = logging.getLogger(__name__)
+
+# A measured ratio under this gains: past the paired timing's noise.
+GAINS = 0.95
+# How an edit is priced: IRON's verify timing, lighter than measure's own.
+PRICING = Timing(rounds=3, calls=10)
 
 # What candidates does not propose yet, named where it stops.
 _NOT_GENERATED = (
@@ -332,9 +339,10 @@ def fit(
     """Decide whether ``profile``'s compositions fit ``device``, before any build.
 
     Each call's steps are first tuned as the profile's tunable entries name;
-    a setting its operator cannot resolve is refused by the counts, and one
-    that resolves is placed alone. Each region entry, at its first match in
-    each call's recording, then passes three stages in turn. The counts are
+    a setting its operator cannot resolve or validate is refused by the
+    counts, as is a region member's, and one that resolves is placed alone.
+    Each region entry, at its first match in each call's recording, then
+    passes three stages in turn. The counts are
     lower bounds from the target model, so they never refuse what fits: the
     cores its steps record (steps sharing a worker counted once, at the most
     any of them takes), and each edge held at a chosen depth against one
@@ -411,7 +419,7 @@ def fit(
             try:
                 with set_current_device(device):
                     tuned = op._with_tunables(**tunables).resolved(device)
-            except Unresolvable as e:
+            except ValueError as e:  # unresolvable or incompatible here
                 return Fit(False, "counts", f"{type(op).__name__} at {tunables}: {e}")
             with set_current_device(device):
                 refused = refusal(tuned)
@@ -482,6 +490,18 @@ def fit(
                     "IRON applies an entry to every run"
                 )
                 continue
+            for s, m in zip(found[0], region.steps()):
+                if not m.tunables:
+                    continue
+                try:
+                    with set_current_device(device):
+                        recording.steps[s].op._with_tunables(**m.tunables).resolved(
+                            device
+                        )
+                except ValueError as e:  # unresolvable or incompatible here
+                    return Fit(
+                        False, "counts", f"{m.cls.__name__} at {m.tunables}: {e}"
+                    )
             try:
                 derivation = Derivation(region, recording, device)
             except NotImplementedError as e:
@@ -569,6 +589,17 @@ def fit(
             )
             if why is not None:
                 return Fit(False, "analysis", f"at its chosen depths, it {why}")
+            for edge, p, _ in derivation.wired:
+                root_name = derivation.refs[p][edge.output].root
+                if (
+                    set(readers.get(root_name, [])) - inside
+                    or root_name in recording.held
+                ):
+                    unplaceable.append(
+                        f"{edge}: an edge out of {root_name!r}, which steps past "
+                        f"the region or the host also read, is not built yet (a "
+                        f"tee keeping the host's copy)"
+                    )
             for edge, p, c in derivation.wired:
                 made = derivation.obj_elements[p].get(edge.output)
                 taken = derivation.obj_elements[c].get(edge.input)
@@ -603,6 +634,14 @@ def fit(
                 unplaceable.append(
                     "placing with anything but the sequential placer is not built yet"
                 )
+            if not unplaceable:
+                alone = Profile()
+                alone.add_entry(entry)
+                try:
+                    with set_current_device(device):
+                        composed(recording, alone)
+                except NotImplementedError as e:
+                    unplaceable.append(str(e))
             if unplaceable:
                 waiting += unplaceable
                 continue
@@ -711,7 +750,11 @@ def check(
 
 
 def measure(
-    profile: Profile, base: Profile, calls: Sequence[Timed], device: Device
+    profile: Profile,
+    base: Profile,
+    calls: Sequence[Timed],
+    device: Device,
+    timing: Timing = Timing(),
 ) -> Measured:
     """Time ``calls`` built under ``profile`` against them built under ``base``, in pairs.
 
@@ -720,6 +763,13 @@ def measure(
     it goes (``compare_graphs``). A call's time is its points' medians,
     weighted; ``ratio`` weighs each point's median paired ratio by the
     base's time there.
+
+    Args:
+        profile: The profile timed.
+        base: The profile it is timed against.
+        calls: The graph's calls.
+        device: The device.
+        timing: How long each call is timed.
 
     Raises:
         ValueError: ``profile`` does not fit.
@@ -736,7 +786,7 @@ def measure(
             before = Applied.of(call, base, device).built(device)
             after = Applied.of(call, profile, device).built(device)
             compare_graphs(
-                call, before, after, timing=Timing(), known=known, log=logger.info
+                call, before, after, timing=timing, known=known, log=logger.info
             )
         for weight, values in call.timed_points():
             point = tuple(sorted(values.items()))
@@ -756,7 +806,76 @@ def search(
 ) -> Profile:
     """Return the fastest profile found from ``start`` that passes every check.
 
+    Each edit ``candidates`` yields is applied to ``start``, fitted
+    (``fit``; one that waits or is refused is passed over) and measured in
+    place against ``start`` (``measure``); one under ``GAINS`` gains, and one
+    whose build is not bit-identical is refused and logged. The gainers are
+    then taken best first, each touching no step a taken one
+    touches: a take is checked bit-identical against ``start`` (``check``)
+    and measured against the profile so far, and kept where it still gains.
+    Pricing stops at ``budget_s``.
+
+    Args:
+        calls: The graph's calls, every version.
+        start: The profile searched from.
+        device: The device.
+        budget_s: The most the pricing takes, in seconds; None for no limit.
+        max_images: The images the host may hold loaded at once; None for no limit.
+
     Raises:
-        NotImplementedError: Not built yet.
+        NotImplementedError: ``max_images`` is given (counting the images a
+            profile loads is not built yet).
     """
-    raise NotImplementedError("the search is not built yet")
+    if max_images is not None:
+        raise NotImplementedError(
+            "counting the images a profile loads is not built yet"
+        )
+    begun = time.perf_counter()
+    priced: list[tuple[float, Edit]] = []
+    edits = candidates(calls, start, device)
+    while budget_s is None or time.perf_counter() - begun < budget_s:
+        try:
+            edit = next(edits)
+        except StopIteration:
+            break
+        except NotImplementedError as e:
+            logger.info("search: %s", e)
+            break
+        edited = edit.apply(start)
+        try:
+            fitted = fit(edited, calls, device)
+        except NotImplementedError as e:
+            logger.info("search: waits: %s", e)
+            continue
+        if not fitted.ok:
+            logger.info("search: refused at %s: %s", fitted.stage, fitted.why)
+            continue
+        if edit.refinement is not Refinement.EXACT:
+            logger.info("search: waits: a no-worse edit is not checked yet")
+            continue
+        try:
+            ratio = measure(edited, start, calls, device, timing=PRICING).ratio
+        except NotBitIdentical as e:
+            logger.warning("search: refused, built wrong: %s: %s", edit, e)
+            continue
+        except NotImplementedError as e:
+            logger.info("search: waits: %s", e)
+            continue
+        logger.info("search: %.3f for %s", ratio, edit)
+        if ratio < GAINS:
+            priced.append((ratio, edit))
+    incumbent = start
+    taken: set[int] = set()
+    for ratio, edit in sorted(priced, key=lambda pair: pair[0]):
+        if taken & edit.touches:
+            continue
+        edited = edit.apply(incumbent)
+        checked = check(edited, start, calls, device, edit.refinement)
+        if not checked.ok:
+            logger.info("search: %s is not bit-identical: %s", edit, checked.why)
+            continue
+        if measure(edited, incumbent, calls, device, timing=PRICING).ratio >= GAINS:
+            continue
+        incumbent = edited
+        taken |= edit.touches
+    return incumbent

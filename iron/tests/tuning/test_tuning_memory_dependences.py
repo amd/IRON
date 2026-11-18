@@ -32,9 +32,10 @@ POSITIONS = {
 
 
 def _region(position: int):
+    """Return the write-then-read call at ``position``, its read bounded to the rows written so far, and its region."""
     recording, members = kv_write_then_read(position, table_rows=TABLE_ROWS)
     region = Region(members, ())
-    return recording, region
+    return Timed(recording, values={"n": position + 1}), region
 
 
 @pytest.mark.parametrize("position", sorted(POSITIONS))
@@ -43,7 +44,7 @@ def test_a_write_then_read_region_round_trips_at_every_position(position, tmp_pa
 
     Round-trips at the first, a middle and the last position.
     """
-    recording, region = _region(POSITIONS[position])
+    call, region = _region(POSITIONS[position])
     entry = Entry(region)
     profile = Profile()
     profile.add_entry(entry)
@@ -53,7 +54,7 @@ def test_a_write_then_read_region_round_trips_at_every_position(position, tmp_pa
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, DEVICE)
+        for edit in candidates([call], start, DEVICE)
     )
 
 
@@ -71,14 +72,14 @@ def test_footprints_round_trip_at_the_boundary_positions_and_as_a_hull(
         "hi": TABLE_ROWS - 1,
         "recorded": TABLE_ROWS - 1,
     }[footprint]
-    recording, region = _region(at)
+    call, region = _region(at)
     entry = Entry(region)
     profile = Profile()
     profile.add_entry(entry)
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, DEVICE)
+        for edit in candidates([call], start, DEVICE)
     )
 
 
@@ -101,21 +102,22 @@ def test_two_interleaved_writers_round_trip_with_element_disjointness_named():
 @pytest.mark.supported_devices("npu2")
 def test_write_then_read_is_bit_identical_to_the_steps_run_apart(position):
     """The write-then-read region is bit-identical to the same steps run apart, at each position."""
-    recording, region = _region(POSITIONS[position])
+    call, region = _region(POSITIONS[position])
     profile = Profile()
     profile.add_entry(Entry(region))
     base = Profile()
-    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
+    result = check(profile, base, [call], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 @pytest.mark.supported_devices("npu2")
 def test_tuner_keeps_the_region_where_it_pays():
     """The tuner, on the write-then-read toy alone, keeps the region (no host round trip between the steps) where it pays."""
-    recording, _ = _region(POSITIONS["middle"])
+    call, _ = _region(POSITIONS["middle"])
     start = Profile()
-    found = search([Timed(recording)], start, DEVICE, budget_s=60.0)
+    found = search([call], start, DEVICE, budget_s=60.0)
     assert any(isinstance(e.root, Region) for e in found.entries())
 
 
@@ -128,12 +130,13 @@ def test_two_configurations_sharing_a_memory_dependence_at_once_is_refused():
     the writer and the reader "at once" in ``Configuration.concurrent``
     slots, as if they were independent) is what the analysis refuses.
     """
-    recording, members = kv_write_then_read(POSITIONS["middle"], table_rows=TABLE_ROWS)
+    position = POSITIONS["middle"]
+    recording, members = kv_write_then_read(position, table_rows=TABLE_ROWS)
     write, read = members
     profile = Profile()
     profile.add_entry(Entry(Configuration(parts=(write,), concurrent=1)))
     profile.add_entry(Entry(Configuration(parts=(read,), concurrent=1)))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording, values={"n": position + 1})], DEVICE)
     assert not result.ok
     assert result.stage == "analysis"
     assert "independent" in (result.why or "") or "shared" in (result.why or "")

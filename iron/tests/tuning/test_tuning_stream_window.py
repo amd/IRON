@@ -117,6 +117,7 @@ def test_window_is_bit_identical_on_npu1_full_elf_and_per_step():
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 @pytest.mark.parametrize("window", sorted(WINDOWS))
 @pytest.mark.supported_devices("npu2")

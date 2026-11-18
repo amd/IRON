@@ -123,6 +123,7 @@ def test_a_qk_softmax_pv_style_pipeline_on_one_core():
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 def test_tuner_keeps_the_mapping_that_pays():
     """``search``, run on the three-actor toy alone, keeps a dependence-respecting order.

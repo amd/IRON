@@ -110,6 +110,7 @@ def test_a_resolve_derived_tunable_is_never_a_width():
     assert "a_depth" not in width_tunables(op)
 
 
+@pytest.mark.extensive
 @unbuilt
 @pytest.mark.parametrize("cls,case", _PARAMS_WITH_TUNABLES)
 @pytest.mark.supported_devices("npu2")
@@ -138,6 +139,7 @@ def test_each_tunable_moved_alone_is_held_to_its_own_refinement(cls, case):
     assert measure(tuned, base, calls, NPU2_DEVICE).ratio < 1.05
 
 
+@pytest.mark.extensive
 @unbuilt
 def test_search_keeps_the_fastest_setting_it_measured_on_the_one_operator_toy():
     """The tuner, on the one-operator toy, keeps the fastest setting it measured, never asserting which one."""

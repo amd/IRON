@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import pytest
 from aie.dialects.aie import get_target_model
 
 from iron.common.declare.composition import (
@@ -244,6 +245,7 @@ def test_width_partial_columns_is_bit_identical():
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 def test_switch_kinds_are_bit_identical_and_priced_per_core():
     """Every ``Switch`` kind (RELOAD, CHANGED_CORES, OVERLAPPED) is bit-identical; (c) the tuner prices the switch per core and keeps what pays."""
@@ -324,6 +326,7 @@ def test_packaging_full_elf_and_xclbin_per_step_are_bit_identical():
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 def test_tuner_keeps_the_configuration_that_pays():
     """The tuner, on the Wide toy alone, keeps the configuration (narrowed to co-reside) that pays."""

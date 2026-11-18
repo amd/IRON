@@ -345,6 +345,7 @@ def test_a_bf16_mul_then_add_hand_off_is_refused_against_the_fused_axpy(npu2):
     assert not result.ok
 
 
+@pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.xfail(
     strict=True,
@@ -372,6 +373,7 @@ def test_search_composes_the_decode_graph_where_it_pays(npu2):
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
 @unbuilt
 def test_search_composes_the_prefill_graph_where_it_pays(npu2):
@@ -395,6 +397,7 @@ def test_search_composes_the_prefill_graph_where_it_pays(npu2):
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
 @unbuilt
 def test_search_composes_the_axpy_graph_where_it_pays(npu2):

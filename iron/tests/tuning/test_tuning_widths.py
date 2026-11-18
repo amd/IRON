@@ -87,6 +87,7 @@ def test_narrowed_window_is_bit_identical_to_full_width():
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 def test_tuner_keeps_widths_that_pay_and_bounds_builds():
     """The tuner keeps the width setting that pays, builds stay bounded, and several placements are tried."""

@@ -116,6 +116,7 @@ def test_a_split_gemv_is_bit_identical_across_repeats_and_arrival_order(splits, 
     assert first.ok and second.ok
 
 
+@pytest.mark.extensive
 @unbuilt
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("splits", [2, 4, 8])

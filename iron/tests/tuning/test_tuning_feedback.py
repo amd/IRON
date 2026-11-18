@@ -131,6 +131,7 @@ def test_a_cycle_is_bit_identical_to_the_steps_or_calls_run_apart(cycle):
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 @pytest.mark.supported_devices("npu2")
 def test_tuner_keeps_the_cycle_where_it_pays():

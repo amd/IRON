@@ -158,6 +158,7 @@ def test_a_per_call_size_below_the_recorded_one_still_runs_on_one_core(npu2):
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("name", list(PAIR_REGIONS))

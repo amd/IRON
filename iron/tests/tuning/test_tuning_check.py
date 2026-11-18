@@ -6,16 +6,17 @@
 import pytest
 
 from iron.common.declare import Profile
-from iron.common.declare.composition import Entry, Refinement
+from iron.common.declare.composition import Entry, Refinement, Region
 from iron.common.graph.record import Recording
+from iron.common.image.step import Edge
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.rms_norm import RMSNorm
 from iron.tests.support import sequences
 from iron.tests.support.tools import DEVICES
-from iron.tests.support.toys_edges import chain
+from iron.tests.support.toys_edges import chain, fan_out_norm_qkv, member
 from iron.tune.autotune import Timed
-from iron.tune.search import check, measure
+from iron.tune.search import check, measure, search
 
 DEVICE = DEVICES["npu2"]()
 
@@ -76,3 +77,26 @@ def test_a_stream_window_measures_faster_than_its_steps_apart():
     measured = measure(profile, Profile(), [Timed(recording)], DEVICE)
     assert measured.ratio < 0.8
     assert measured.seconds < measured.base_seconds
+
+
+def test_a_window_whose_hand_off_the_host_still_reads_waits():
+    """RMSNorm streamed into Q alone, while K and V read the norm's output from host memory, waits.
+
+    A fused edge keeps no copy of its buffer in host memory, so building
+    this window would leave K and V reading stale data: it waits for a tee
+    rather than being built wrong.
+    """
+    recording, _ = fan_out_norm_qkv()
+    norm, q = (member(recording.steps[s].op) for s in (0, 1))
+    profile = Profile()
+    profile.add_entry(Entry(Region((norm, q), (Edge(0, "y", 1, "B"),))))
+    with pytest.raises(NotImplementedError, match="tee"):
+        check(profile, Profile(), [Timed(recording)], DEVICE, Refinement.EXACT)
+
+
+def test_search_keeps_the_stream_window_on_the_chain():
+    """The tuner, on the chain alone, keeps the whole three-step window: it measures about a third of the steps apart, and checks bit-identical."""
+    recording, region = chain()
+    found = search([Timed(recording)], Profile(), DEVICE, budget_s=60.0)
+    assert Entry(region) in found.entries()
+    assert measure(found, Profile(), [Timed(recording)], DEVICE).ratio < 0.8

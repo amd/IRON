@@ -151,6 +151,7 @@ def test_a_derived_chunk_size_is_checked_against_its_base():
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 def test_a_boundary_is_kept_only_where_its_saving_beats_a_switch_and_one_more_design():
     """The tuner keeps a boundary only where the calls it serves gain over the single bounded design plus a switch and a compile.

@@ -156,13 +156,21 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(combo):
     assert result.ok, result.why
 
 
+@pytest.mark.extensive
 @unbuilt
 @pytest.mark.parametrize("combo", COMBOS, ids=_combo_id)
 @pytest.mark.supported_devices("npu2")
 def test_each_toy_is_searched_and_the_result_passes_check(combo):
     """The tuner, run on each toy alone, keeps a profile that passes ``check`` against the start, exact."""
     _, recording, _, _ = combination_toy(*combo)
+    # A bounded toy runs at the most its per-call value may be.
+    call = Timed(
+        recording,
+        values={
+            v.name: limit.hi - 1 for v, limit in zip(recording.values, recording.limits)
+        },
+    )
     start = Profile()
-    found = search([Timed(recording)], start, DEVICE, budget_s=10.0)
-    result = check(found, start, [Timed(recording)], DEVICE, Refinement.EXACT)
+    found = search([call], start, DEVICE, budget_s=10.0)
+    result = check(found, start, [call], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
