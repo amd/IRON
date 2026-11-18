@@ -756,12 +756,19 @@ class Copy(Operator):
                         f"transfer {per_channel} (= {prod(sizes)} / {channels} "
                         f"channels)"
                     )
+        item = np.dtype(self.dtype).itemsize
         for row in self._row_shares():
             if row % self.tile_size:
                 raise ValueError(
                     f"Copy: tile_size ({self.tile_size}) must divide the {row} elements "
                     f"per channel one row of the bounded axis moves: a call "
                     f"moves any number of rows"
+                )
+            if row * item % 16:
+                raise ValueError(
+                    f"Copy: one row of the bounded axis moves {row * item} bytes per "
+                    f"channel over {self.num_channels} channels; a per-call length "
+                    f"counts whole 16-byte units"
                 )
 
     def _row_shares(self) -> list[int]:
