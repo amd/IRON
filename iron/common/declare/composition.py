@@ -8,8 +8,11 @@ linked on chip by ``Edge``s). A ``Member`` is one step, named by its
 operator class, dims and tunables as a profile entry names it. Beside the
 entries, a profile carries per-version ``Schedule``s, per-call
 ``Variants`` and ``Binding``s, and one ``StateLayout`` per persistent
-buffer. Placement and transport are the compiler's: a composition names
-counts and constraints, never tiles or channels.
+buffer. A composition names choices only; what the operators and the
+recording already fix (an edge's tokens, lanes, type and initial values, a
+dependence through memory) the dataflow analysis derives. Placement and
+transport are the compiler's: a composition names counts and constraints,
+never tiles or channels.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
-from ..image.step import Edge
+from ..image.step import Edge, EdgeKind
 
 
 class Switch(Enum):
@@ -85,25 +88,47 @@ class RuntimePlan:
 
 
 @dataclass(frozen=True)
+class Inflow:
+    """A buffer from outside a region read once and fed on chip to one of its steps.
+
+    Inflows naming one buffer share that one read, fanned out to each consumer.
+
+    Attributes:
+        buffer: The recording's buffer.
+        consumer: The consuming step.
+        input: The consumer's input.
+        kind: The path the objects take.
+        depth: Objects in flight; None for the dataflow analysis's minimum.
+    """
+
+    buffer: str
+    consumer: int
+    input: str
+    kind: EdgeKind = EdgeKind.STREAM
+    depth: int | None = None
+
+
+@dataclass(frozen=True)
 class Region:
     """Parts that run at once, linked on chip.
 
+    Indices name the region's steps depth-first through its nested regions.
+
     Attributes:
         parts: Steps or nested regions.
-        edges: Edges between parts, by local index; none for parts that share
-            no data and are issued at once.
-        workers: Parts composed onto one worker, each tuple in firing order.
+        edges: Edges between steps; none for parts that share no data and are
+            issued at once.
+        inflows: Outside buffers read once and fed on chip.
+        workers: Steps composed onto one worker, each tuple in firing order.
         phases: A phase per edge; None for one phase.
-        order: Extra ordering between parts, ``(before, after)``, for a
-            dependence through memory.
         runtime: How the region's transfers run; None for one task group.
     """
 
     parts: tuple[Member | Region, ...]
     edges: tuple[Edge, ...] = ()
+    inflows: tuple[Inflow, ...] = ()
     workers: tuple[tuple[int, ...], ...] = ()
     phases: tuple[int, ...] | None = None
-    order: tuple[tuple[int, int], ...] = ()
     runtime: RuntimePlan | None = None
 
 
@@ -164,6 +189,7 @@ class Schedule:
         commands_in_flight: Commands submitted before the previous completes.
         interleave_with: Versions mixed into the same command.
         size: A derived version to run instead, by name.
+        packaging: One full ELF, or an xclbin per step; None for the device's default.
     """
 
     version: str
@@ -174,6 +200,7 @@ class Schedule:
     commands_in_flight: int = 1
     interleave_with: tuple[str, ...] = ()
     size: str | None = None
+    packaging: Literal["full_elf", "xclbin"] | None = None
 
 
 @dataclass(frozen=True)
@@ -212,3 +239,12 @@ class StateLayout:
     buffer: str
     order: tuple[str, ...]
     tile: tuple[int, ...] | None = None
+
+
+def refinement(cls: type, tunable: str) -> Refinement:
+    """Return how moving ``cls``'s ``tunable`` off its value relates to the untuned build.
+
+    Raises:
+        NotImplementedError: Not built yet: a tunable does not declare it.
+    """
+    raise NotImplementedError("a tunable's refinement is not declared yet")

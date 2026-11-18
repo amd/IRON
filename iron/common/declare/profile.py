@@ -558,9 +558,7 @@ class Profile:
             or self._bindings
             or self._state_layouts
         ):
-            raise NotImplementedError(
-                "a profile's compositions have no JSON form yet (plan step 0a)"
-            )
+            raise NotImplementedError("a profile's compositions have no JSON form yet")
 
         names = {cls: name for name, cls in CATALOG.items()}
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The composition contract names every dataflow pattern the plan's coverage list asks for."""
+"""The composition contract names every dataflow pattern on its coverage list."""
 
 from pathlib import Path
 
@@ -12,12 +12,13 @@ from iron.common.declare.composition import (
     Binding,
     Configuration,
     Entry,
+    Inflow,
     Member,
     Region,
     Schedule,
     Variants,
 )
-from iron.common.image.step import Edge, EdgeKind, HandOff, Held
+from iron.common.image.step import Edge, EdgeKind
 from iron.operators.copy import Copy, Gather
 from iron.operators.decode import Decode
 from iron.operators.depthwise_conv1d import DepthwiseConv1d
@@ -59,7 +60,7 @@ def _skip() -> Entry:
                 Edge(3, "y", 4, "a"),
                 Edge(4, "y", 5, "B"),
                 Edge(5, "C", 6, "b"),
-                Edge(0, "y", 6, "a", held=Held.MEMTILE),
+                Edge(0, "y", 6, "a", kind=EdgeKind.STAGED),
             ),
         )
     )
@@ -136,24 +137,18 @@ def _recurrent_state() -> Entry:
             ),
             (
                 Edge(0, "y", 1, "x"),
-                Edge(3, "state", 3, "state", delay=1),
+                Edge(3, "state", 3, "state"),
             ),
-            order=((1, 2),),
         )
     )
 
 
 def _layer_into_layer() -> Entry:
-    first, second = _layer(), _layer()
+    inside = (Edge(1, "y", 2, "B"), Edge(2, "C", 3, "x"))
     return Entry(
         Region(
-            first + second,
-            (
-                Edge(1, "y", 2, "B"),
-                Edge(6, "y", 7, "a"),
-                Edge(6, "y", 8, "x"),
-                Edge(8, "y", 9, "B"),
-            ),
+            (Region(_layer(), inside), Region(_layer(), inside)),
+            (Edge(6, "y", 7, "a"), Edge(6, "y", 8, "x")),
         )
     )
 
@@ -167,8 +162,8 @@ def _multi_rate() -> Entry:
                 Member(SiLU, {"size": 128 * 256}),
             ),
             (
-                Edge(0, "y", 1, "a", rate=(2, 1)),
-                Edge(1, "y", 2, "x", rate=(1, 4)),
+                Edge(0, "y", 1, "a"),
+                Edge(1, "y", 2, "x"),
             ),
         )
     )
@@ -181,7 +176,7 @@ def _halo() -> Entry:
                 Member(DepthwiseConv1d, {"rows": 64, "channels": 256}),
                 Member(DepthwiseConv1d, {"rows": 64, "channels": 256}),
             ),
-            (Edge(0, "y", 1, "x", rate=(1, 5)),),
+            (Edge(0, "y", 1, "x"),),
         )
     )
 
@@ -194,10 +189,7 @@ def _split_k_cascade() -> Entry:
     return Entry(
         Region(
             parts,
-            tuple(
-                Edge(k, "C", k + 1, "C", kind=EdgeKind.CASCADE, dtype="float32")
-                for k in range(3)
-            ),
+            tuple(Edge(k, "C", k + 1, "C", kind=EdgeKind.CASCADE) for k in range(3)),
         )
     )
 
@@ -206,10 +198,10 @@ def _broadcast_weights() -> Entry:
     return Entry(
         Region(
             (
-                Member(RMSNorm, {"rows": 1}),
+                Member(GEMV, {"M": N, "K": N}),
                 Member(GEMV, {"M": N, "K": N}),
             ),
-            (Edge(0, "y", 1, "B", shape=HandOff.BROADCAST),),
+            inflows=(Inflow("w", 0, "A"), Inflow("w", 1, "A")),
         )
     )
 
@@ -221,7 +213,7 @@ def _gemm_tiles() -> Entry:
                 Member(GEMM, {"M": 256, "K": N, "N": N}),
                 Member(GEMM, {"M": 256, "K": N, "N": N}),
             ),
-            (Edge(0, "C", 1, "A", rate=(1, 1), shape=HandOff.EQUAL),),
+            (Edge(0, "C", 1, "A"),),
         )
     )
 
@@ -246,7 +238,7 @@ def _coded_weights() -> Entry:
     return Entry(
         Region(
             (Member(Decode, {"M": N, "K": N}), Member(GEMV, {"M": N, "K": N})),
-            (Edge(0, "y", 1, "A", held=Held.L1),),
+            (Edge(0, "y", 1, "A"),),
             workers=((0, 1),),
         )
     )

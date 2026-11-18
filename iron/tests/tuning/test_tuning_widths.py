@@ -18,6 +18,7 @@ from iron.tests.support import toys_schedule
 from iron.tests.support.fusable import gemv_silu_mul_recording
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
+from iron.tune.autotune import Timed
 from iron.tune.search import PLACEMENTS, candidates, check, fit, search
 
 DEVICE = DEVICES["npu2"]()
@@ -67,7 +68,7 @@ def test_per_member_width_counts_round_trip_and_are_proposed(tmp_path):
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates(recording, start, DEVICE)
+        for edit in candidates([Timed(recording)], start, DEVICE)
     )
 
 
@@ -80,7 +81,7 @@ def test_narrowed_window_is_bit_identical_to_full_width():
     base.add_entry(Entry(root=full_region))
     profile = Profile()
     profile.add_entry(Entry(root=narrow_region))
-    result = check(profile, base, recording, DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -89,7 +90,7 @@ def test_tuner_keeps_widths_that_pay_and_bounds_builds():
     """The tuner keeps the width setting that pays, builds stay bounded, and several placements are tried."""
     _, recording = _window(columns=2)
     start = Profile()
-    found = search(recording, start, DEVICE, budget_s=60.0)
+    found = search([Timed(recording)], start, DEVICE, budget_s=60.0)
     assert any(isinstance(e.root, Region) for e in found.entries())
     assert len(PLACEMENTS) > 1
 
@@ -104,7 +105,7 @@ def test_a_width_over_the_arrays_columns_is_refused_by_counts():
     region, recording = _window(columns=_ARRAY_COLUMNS)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "counts"
     assert "column" in (result.why or "") or "core" in (result.why or "")
@@ -116,7 +117,7 @@ def test_a_width_over_a_streams_budget_is_refused_by_counts():
     region, recording = _window(columns=4, channels=4)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "counts"
     assert "stream" in (result.why or "") or "channel" in (result.why or "")
@@ -132,7 +133,7 @@ def test_a_by_shape_entry_claiming_fewer_runs_than_iron_applies_is_refused():
     )
     profile = Profile()
     profile.add_entry(Entry(root=region, scope=Scope(occurrences=(0,))))
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "analysis"
     assert "every run" in (result.why or "") or "shape" in (result.why or "")
@@ -147,7 +148,7 @@ def test_counts_the_fit_accepts_but_the_placer_refuses_need_a_witness():
     region, recording = _window(columns=_ARRAY_COLUMNS, channels=1)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, recording, DEVICE, placements=PLACEMENTS)
+    result = fit(profile, [Timed(recording)], DEVICE, placements=PLACEMENTS)
     assert not result.ok
     assert result.stage == "placer"
     assert result.breakdown

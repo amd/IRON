@@ -13,6 +13,7 @@ from iron.common.declare.composition import (
     Member,
     Refinement,
     Region,
+    Schedule,
     Switch,
 )
 from iron.common.declare.composition import (
@@ -27,6 +28,7 @@ from iron.tests.support import toys_schedule
 from iron.tests.support.fusable import gemv_silu_mul, gemv_silu_mul_recording
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
+from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, search
 
 DEVICE = DEVICES["npu2"]()
@@ -74,7 +76,7 @@ def test_membership_as_one_design_round_trips_and_is_proposed(tmp_path):
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates(recording, start, DEVICE)
+        for edit in candidates([Timed(recording)], start, DEVICE)
     )
 
 
@@ -100,7 +102,7 @@ def test_region_as_one_packing_piece_round_trips_and_is_proposed(tmp_path):
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates(recording, start, DEVICE)
+        for edit in candidates([Timed(recording)], start, DEVICE)
     )
 
 
@@ -153,7 +155,7 @@ def test_concurrency_one_after_another_is_bit_identical():
     base = Profile()
     for member in configuration.parts:
         base.add_entry(Entry(root=Configuration(parts=(member,))))
-    result = check(profile, base, recording, DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -172,7 +174,7 @@ def test_concurrency_at_once_with_no_shared_data_is_bit_identical():
     for member in members:
         base.add_entry(Entry(root=Configuration(parts=(member,))))
     recording = gemv_silu_mul_recording("config_concurrent", gemv, silu, mul)
-    result = check(profile, base, recording, DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -199,7 +201,7 @@ def test_disjoint_columns_concurrency_is_bit_identical():
         Entry(root=Configuration(parts=(Member(type(mul), {"size": mul.size}),)))
     )
     recording = gemv_silu_mul_recording("config_disjoint_columns", gemv, silu, mul)
-    result = check(profile, base, recording, DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -216,7 +218,7 @@ def test_width_partial_columns_is_bit_identical():
     profile = Profile()
     profile.add_entry(Entry(root=narrow))
     recording = gemv_silu_mul_recording("config_width", gemv, silu, mul)
-    result = check(profile, base, recording, DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -233,9 +235,9 @@ def test_switch_kinds_are_bit_identical_and_priced_per_core():
         profile.add_entry(
             Entry(root=Configuration(parts=configuration.parts, switch=switch))
         )
-        result = check(profile, base, recording, DEVICE, Refinement.EXACT)
+        result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
         assert result.ok, result.why
-    found = search(recording, base, DEVICE, budget_s=60.0)
+    found = search([Timed(recording)], base, DEVICE, budget_s=60.0)
     assert any(
         isinstance(e.root, Configuration) and e.root.switch is not None
         for e in found.entries()
@@ -253,7 +255,7 @@ def test_teardown_true_and_false_are_bit_identical():
         profile.add_entry(
             Entry(root=Configuration(parts=configuration.parts, teardown=teardown))
         )
-        result = check(profile, base, recording, DEVICE, Refinement.EXACT)
+        result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
         assert result.ok, result.why
 
 
@@ -282,7 +284,7 @@ def test_residency_keeps_a_buffer_on_chip_and_is_bit_identical():
         Entry(root=Configuration(parts=(Member(type(mul), {"size": mul.size}),)))
     )
     recording = gemv_silu_mul_recording("config_resident", gemv, silu, mul)
-    result = check(profile, base, recording, DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -292,9 +294,11 @@ def test_packaging_full_elf_and_xclbin_per_step_are_bit_identical():
     configuration, recording = _alternating_configuration()
     full_elf = Profile()
     full_elf.add_entry(Entry(root=configuration))
+    full_elf.add_schedule(Schedule(version=recording.version, packaging="full_elf"))
     xclbin = Profile()
     xclbin.add_entry(Entry(root=configuration))
-    result = check(xclbin, full_elf, recording, DEVICE, Refinement.EXACT)
+    xclbin.add_schedule(Schedule(version=recording.version, packaging="xclbin"))
+    result = check(xclbin, full_elf, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -303,7 +307,7 @@ def test_tuner_keeps_the_configuration_that_pays():
     """The tuner, on the Wide toy alone, keeps the configuration (narrowed to co-reside) that pays."""
     _, recording = _wide_configuration()
     start = Profile()
-    found = search(recording, start, DEVICE, budget_s=60.0)
+    found = search([Timed(recording)], start, DEVICE, budget_s=60.0)
     assert any(isinstance(e.root, Configuration) for e in found.entries())
 
 
@@ -316,7 +320,7 @@ def test_a_configuration_over_the_arrays_cores_is_refused():
     assert 3 * 8 * 2 > _ARRAY_CORES
     profile = Profile()
     profile.add_entry(Entry(root=configuration))
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "counts"
     assert "cores" in (result.why or "")
@@ -344,7 +348,7 @@ def test_members_running_at_once_sharing_written_data_is_refused():
             )
         )
     )
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "analysis"
     assert "independent" in (result.why or "") or "shared" in (result.why or "")
@@ -368,7 +372,7 @@ def test_residency_across_a_teardown_is_refused():
         Entry(root=Configuration(parts=(Member(type(mul), {"size": mul.size}),)))
     )
     recording = gemv_silu_mul_recording("config_resident_teardown", gemv, silu, mul)
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "analysis"
     assert "teardown" in (result.why or "")
@@ -388,7 +392,7 @@ def test_overlapping_columns_at_once_is_refused():
     profile = Profile()
     profile.add_entry(Entry(root=left))
     profile.add_entry(Entry(root=right))
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "placer"
     assert "column" in (result.why or "") or "disjoint" in (result.why or "")
@@ -409,7 +413,8 @@ def test_phased_or_teardown_on_an_xclbin_is_refused():
     recording = gemv_silu_mul_recording("config_phased_xclbin", gemv, silu, mul)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, recording, DEVICE)
+    profile.add_schedule(Schedule(version=recording.version, packaging="xclbin"))
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
-    assert result.stage in ("counts", "analysis")
+    assert result.stage == "analysis"
     assert "xclbin" in (result.why or "")

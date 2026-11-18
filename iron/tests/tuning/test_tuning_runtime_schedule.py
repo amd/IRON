@@ -19,11 +19,12 @@ from iron.common.declare.composition import (
     Schedule,
 )
 from iron.common.declare.profile import Profile
-from iron.common.image.step import EdgeKind, Held
+from iron.common.image.step import EdgeKind
 from iron.tests.support import toys_schedule
 from iron.tests.support.fusable import gemv_silu_mul, gemv_silu_mul_recording
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
+from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, search
 
 DEVICE = DEVICES["npu2"]()
@@ -66,7 +67,7 @@ def _skip_region(phases=None):
         CompositionEdge(0, "y", 1, "x", kind=EdgeKind.STAGED),
         CompositionEdge(1, "y", 2, "B", kind=EdgeKind.STAGED),
         CompositionEdge(2, "C", 3, "a", kind=EdgeKind.STAGED),
-        CompositionEdge(0, "y", 3, "b", kind=EdgeKind.STAGED, held=Held.L1),
+        CompositionEdge(0, "y", 3, "b", kind=EdgeKind.STAGED),
     )
     region = Region(parts=members, edges=edges, phases=phases)
     recording = toys_schedule.skip_recording("runtime_skip", add, norm, proj, add2)
@@ -87,7 +88,7 @@ def test_waits_axis_round_trips_and_is_proposed(tmp_path):
         start = Profile()
         assert any(
             entry in edit.apply(start).entries()
-            for edit in candidates(recording, start, DEVICE)
+            for edit in candidates([Timed(recording)], start, DEVICE)
         )
 
 
@@ -105,7 +106,7 @@ def test_overlap_axis_round_trips_and_is_proposed(tmp_path):
         start = Profile()
         assert any(
             entry in edit.apply(start).entries()
-            for edit in candidates(recording, start, DEVICE)
+            for edit in candidates([Timed(recording)], start, DEVICE)
         )
 
 
@@ -123,7 +124,7 @@ def test_chunks_axis_round_trips_and_is_proposed(tmp_path):
         start = Profile()
         assert any(
             entry in edit.apply(start).entries()
-            for edit in candidates(recording, start, DEVICE)
+            for edit in candidates([Timed(recording)], start, DEVICE)
         )
 
 
@@ -142,7 +143,7 @@ def test_in_flight_axis_round_trips_and_is_proposed(tmp_path):
         start = Profile()
         assert any(
             entry in edit.apply(start).entries()
-            for edit in candidates(recording, start, DEVICE)
+            for edit in candidates([Timed(recording)], start, DEVICE)
         )
 
 
@@ -160,7 +161,7 @@ def test_chained_axis_round_trips_and_is_proposed(tmp_path):
         start = Profile()
         assert any(
             entry in edit.apply(start).entries()
-            for edit in candidates(recording, start, DEVICE)
+            for edit in candidates([Timed(recording)], start, DEVICE)
         )
 
 
@@ -190,7 +191,7 @@ def test_burst_and_transfer_bytes_round_trip_and_are_proposed(tmp_path):
         start = Profile()
         assert any(
             entry in edit.apply(start).entries()
-            for edit in candidates(recording, start, DEVICE)
+            for edit in candidates([Timed(recording)], start, DEVICE)
         )
 
 
@@ -207,7 +208,7 @@ def test_phase_boundaries_round_trip_and_are_proposed(tmp_path):
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates(recording, start, DEVICE)
+        for edit in candidates([Timed(recording)], start, DEVICE)
     )
 
 
@@ -221,7 +222,9 @@ def test_window_schedule_is_bit_identical_with_no_hang():
         region, _ = _window_region(waits=waits)
         profile = Profile()
         profile.add_entry(Entry(root=region))
-        result = check(profile, base_profile, recording, DEVICE, Refinement.EXACT)
+        result = check(
+            profile, base_profile, [Timed(recording)], DEVICE, Refinement.EXACT
+        )
         assert result.ok, result.why
 
 
@@ -234,7 +237,7 @@ def test_skip_phases_are_bit_identical_with_no_hang():
     region, _ = _skip_region(phases=(0, 1, 2, 2))
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = check(profile, base_profile, recording, DEVICE, Refinement.EXACT)
+    result = check(profile, base_profile, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -243,7 +246,7 @@ def test_tuner_keeps_the_schedule_that_pays():
     """The tuner, on the window toy alone, keeps the ``RuntimePlan`` setting that pays."""
     _, recording = _window_region()
     start = Profile()
-    found = search(recording, start, DEVICE, budget_s=60.0)
+    found = search([Timed(recording)], start, DEVICE, budget_s=60.0)
     assert any(
         isinstance(e.root, Region) and e.root.runtime is not None
         for e in found.entries()
@@ -258,7 +261,7 @@ def test_a_consumer_scheduled_before_its_producer_is_refused():
     profile.add_entry(Entry(root=region))
     # Order the multiply (part 2) before the GEMV (part 0) it depends on.
     profile.add_schedule(Schedule(version=recording.version, order=((2, 0),)))
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "analysis"
     assert "before" in (result.why or "")
@@ -270,7 +273,7 @@ def test_a_channel_reused_before_a_sure_await_is_refused():
     region, recording = _window_region(waits="per_channel", in_flight=1, chained=False)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage in ("counts", "analysis")
     assert "reused" in (result.why or "") or "await" in (result.why or "")
@@ -283,7 +286,7 @@ def test_more_tasks_in_flight_than_a_channels_queue_is_refused():
     region, recording = _window_region(in_flight=depth + 1)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "counts"
     assert "queue" in (result.why or "")
@@ -295,7 +298,7 @@ def test_more_buffer_descriptors_than_a_tile_has_is_refused():
     region, recording = _window_region(chunks=4096, chained=True)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "counts"
     assert "descriptor" in (result.why or "") or "BD" in (result.why or "")
@@ -303,7 +306,7 @@ def test_more_buffer_descriptors_than_a_tile_has_is_refused():
 
 @unbuilt
 def test_a_skip_crossing_a_phase_boundary_unheld_is_refused():
-    """The skip edge crossing a phase boundary with no ``held`` is refused before any build."""
+    """A skip edge on the stream, held in no memtile or DDR, crossing a phase boundary is refused before any build."""
     add, norm, proj, add2 = toys_schedule.skip()
     members = (
         Member(type(add), {"size": add.size}),
@@ -315,7 +318,7 @@ def test_a_skip_crossing_a_phase_boundary_unheld_is_refused():
         CompositionEdge(0, "y", 1, "x", kind=EdgeKind.STAGED),
         CompositionEdge(1, "y", 2, "B", kind=EdgeKind.STAGED),
         CompositionEdge(2, "C", 3, "a", kind=EdgeKind.STAGED),
-        CompositionEdge(0, "y", 3, "b", kind=EdgeKind.STAGED, held=None),
+        CompositionEdge(0, "y", 3, "b", kind=EdgeKind.STREAM),
     )
     region = Region(parts=members, edges=edges, phases=(0, 1, 2, 2))
     recording = toys_schedule.skip_recording(
@@ -323,7 +326,7 @@ def test_a_skip_crossing_a_phase_boundary_unheld_is_refused():
     )
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "analysis"
     assert "phase" in (result.why or "")

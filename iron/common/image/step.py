@@ -65,17 +65,8 @@ class EdgeKind(Enum):
     CASCADE = "cascade"
 
 
-class Held(Enum):
-    """Where an edge's value waits for a later reader: ``L1``, a ``MEMTILE``, ``DDR``, or a ``LATER_PHASE``."""
-
-    L1 = "l1"
-    MEMTILE = "memtile"
-    DDR = "ddr"
-    LATER_PHASE = "later_phase"
-
-
 class HandOff(Enum):
-    """How a producer's lanes map onto a consumer's."""
+    """How a producer's lanes map onto a consumer's, as the dataflow analysis derives it."""
 
     EQUAL = "equal"
     JOIN = "join"
@@ -90,25 +81,21 @@ class HandOff(Enum):
 class Edge:
     """Step ``producer``'s output ``output`` fed on-chip into step ``consumer``'s input ``input``.
 
-    Both indices into one region's parts; several edges may share one
-    ``(producer, output)``, fanning out to more than one consumer. The other
-    fields default to a whole-buffer stream at the depth the build gives it.
+    Indices name a region's steps depth-first through its nested regions, so
+    an edge may join steps of different nested regions; it sits in the
+    innermost region holding both. Several edges may share one
+    ``(producer, output)``, fanning out to more than one consumer. An edge
+    names only choices: the tokens, lanes, type and initial values it
+    carries are the operators' and the recording's, which the dataflow
+    analysis derives.
 
     Attributes:
-        producer: The producing part.
+        producer: The producing step.
         output: The producer's output.
-        consumer: The consuming part.
+        consumer: The consuming step.
         input: The consumer's input.
         kind: The path the objects take.
-        held: Where the value waits for a later reader, if it waits.
         depth: Objects in flight; None for the dataflow analysis's minimum.
-        rate: Tokens per firing at the producer and the consumer; None for
-            the whole buffer.
-        shape: How the producer's lanes map onto the consumer's; None to
-            infer it.
-        dtype: The type the edge carries, where it is not the producer's
-            output type (``"float32"`` where a replaced operator kept it).
-        delay: Initial values on the edge, for a feedback cycle.
     """
 
     producer: int
@@ -116,12 +103,7 @@ class Edge:
     consumer: int
     input: str
     kind: EdgeKind = EdgeKind.STREAM
-    held: Held | None = None
     depth: int | None = None
-    rate: tuple[int, int] | None = None
-    shape: HandOff | None = None
-    dtype: str | None = None
-    delay: int = 0
 
 
 @dataclass(frozen=True)

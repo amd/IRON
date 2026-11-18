@@ -11,6 +11,7 @@ from iron.common.image.step import Edge, EdgeKind
 from iron.tests.support import toys_schedule
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
+from iron.tune.autotune import Timed
 from iron.tune.search import check, fit
 
 DEVICE = DEVICES["npu2"]()
@@ -54,7 +55,7 @@ def test_the_4x2_window_builds_with_packet_transport_and_is_bit_identical():
     )  # the steps apart: no shared-channel edges
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = check(profile, base, recording, DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -64,8 +65,8 @@ def test_the_4x2_window_is_bit_identical_across_repeated_runs():
     region, recording = _packet_window()
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    first = check(profile, profile, recording, DEVICE, Refinement.EXACT)
-    second = check(profile, profile, recording, DEVICE, Refinement.EXACT)
+    first = check(profile, profile, [Timed(recording)], DEVICE, Refinement.EXACT)
+    second = check(profile, profile, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert first.ok and second.ok, (first.why, second.why)
 
 
@@ -75,5 +76,5 @@ def test_the_4x2_window_does_not_hang():
     region, recording = _packet_window()
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert result.ok, result.why

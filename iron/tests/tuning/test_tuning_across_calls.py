@@ -10,6 +10,7 @@ from iron.common.declare.profile import Profile
 from iron.tests.support import toys_schedule
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
+from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, search
 
 DEVICE = DEVICES["npu2"]()
@@ -43,7 +44,7 @@ def test_calls_per_command_round_trips_and_is_proposed(tmp_path):
         start = Profile()
         assert any(
             schedule in edit.apply(start).schedules()
-            for edit in candidates(recording, start, DEVICE)
+            for edit in candidates([Timed(recording)], start, DEVICE)
         )
 
 
@@ -97,7 +98,7 @@ def test_several_calls_per_command_are_bit_identical_to_one_per_command():
         profile.add_schedule(
             Schedule(version=recording.version, calls_per_command=calls_per_command)
         )
-        result = check(profile, base, recording, DEVICE, Refinement.EXACT)
+        result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
         assert result.ok, result.why
 
 
@@ -112,7 +113,7 @@ def test_a_merge_into_a_larger_shape_is_no_worse_where_it_reorders_a_reduction()
     base.add_schedule(Schedule(version=recording.version, calls_per_command=1))
     profile = Profile()
     profile.add_schedule(Schedule(version=recording.version, size="merged_2x"))
-    result = check(profile, base, recording, DEVICE, Refinement.NO_WORSE)
+    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.NO_WORSE)
     assert result.ok, result.why
 
 
@@ -124,7 +125,7 @@ def test_residency_across_calls_is_bit_identical_to_reloading():
     base.add_schedule(Schedule(version=recording.version))
     profile = Profile()
     profile.add_schedule(Schedule(version=recording.version, calls_per_command=2))
-    result = check(profile, base, recording, DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -136,7 +137,7 @@ def test_per_call_parameters_updated_inside_one_command_are_bit_identical():
     base.add_schedule(Schedule(version=recording.version, calls_per_command=1))
     profile = Profile()
     profile.add_schedule(Schedule(version=recording.version, calls_per_command=3))
-    result = check(profile, base, recording, DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -151,7 +152,7 @@ def test_commands_in_flight_are_bit_identical_to_one_at_a_time():
         profile.add_schedule(
             Schedule(version=recording.version, commands_in_flight=commands_in_flight)
         )
-        result = check(profile, base, recording, DEVICE, Refinement.EXACT)
+        result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
         assert result.ok, result.why
 
 
@@ -160,7 +161,7 @@ def test_tuner_keeps_the_call_schedule_that_pays():
     """The tuner, on the decode-step toy alone, keeps the call schedule that pays."""
     recording = _decode_recording()
     start = Profile()
-    found = search(recording, start, DEVICE, budget_s=60.0)
+    found = search([Timed(recording)], start, DEVICE, budget_s=60.0)
     assert any(
         s.calls_per_command > 1 or s.commands_in_flight > 1 for s in found.schedules()
     )
@@ -172,7 +173,7 @@ def test_an_overlap_breaking_a_dependence_is_refused():
     recording = _kv_recording()
     profile = Profile()
     profile.add_schedule(Schedule(version=recording.version, calls_overlapped=1))
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "analysis"
     assert "depend" in (result.why or "") or "overlap" in (result.why or "")
@@ -184,7 +185,7 @@ def test_a_merge_breaking_a_dependence_is_refused():
     recording = _kv_recording()
     profile = Profile()
     profile.add_schedule(Schedule(version=recording.version, size="merged_broken"))
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "analysis"
     assert "depend" in (result.why or "") or "merge" in (result.why or "")
@@ -199,7 +200,7 @@ def test_state_resident_across_a_teardown_is_refused():
     profile.add_entry(
         Entry(root=Configuration(parts=(), teardown=True, resident=("cache",)))
     )
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "analysis"
     assert "teardown" in (result.why or "")
@@ -213,7 +214,7 @@ def test_a_command_longer_than_the_watchdog_is_refused():
     profile.add_schedule(
         Schedule(version=recording.version, calls_per_command=_DECODE_STEPS * 1024)
     )
-    result = fit(profile, recording, DEVICE)
+    result = fit(profile, [Timed(recording)], DEVICE)
     assert not result.ok
     assert result.stage == "counts"
     assert "watchdog" in (result.why or "") or "timeout" in (result.why or "")

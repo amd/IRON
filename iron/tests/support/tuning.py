@@ -8,5 +8,5 @@ import pytest
 unbuilt = pytest.mark.xfail(
     strict=True,
     raises=NotImplementedError,
-    reason="not built yet: the composition contract's stubs raise (plan steps 0a-3)",
+    reason="not built yet: the composition contract's stubs raise",
 )
