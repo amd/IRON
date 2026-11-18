@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Sequence
+from typing import Any
 
 from ..declare import Operator, Unresolvable
+from ..declare.composition import Member, Region
 from ..declare.profile import Profile
 from ..design import BuiltArray, OperatorDesign
-from ..image.step import Edge, Fusion, FusionKind
+from ..image.step import Edge, EdgeKind, Fusion, FusionKind
 from .record import Recording
 
 # How a producer's output can feed a consumer's input, by the pair's
@@ -304,3 +306,109 @@ def fusions(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
         profile,
         sorted(candidates(recording, _EVERY_KIND), key=lambda f: f.steps[0]),
     )
+
+
+def composed(
+    recording: Recording, profile: Profile
+) -> tuple[dict[int, dict[str, Any]], tuple[Fusion, ...]]:
+    """Return what ``profile``'s composition entries build in ``recording``: each step's tunables, by index, and each region of two or more steps as a fusion.
+
+    At every match (``Recording.occurrences``) of a region of steps, the
+    first entry naming a step wins. A member's tunables are its step's. A
+    region of consecutive steps runs as one stream or staged fusion where
+    its edges are all of that kind, and as a pack where it has none.
+
+    Raises:
+        NotImplementedError: What the composer does not build yet: a
+            profile's schedules, variants, bindings or state layouts, or an
+            entry rooted at a configuration or a step, with nested regions,
+            inflows, shared workers, chosen phases, a runtime plan, a chosen
+            depth, fission, edges of several kinds or of DDR or the
+            cascade, matching steps that are not consecutive, steps with no
+            edge that depend through memory, or an edge the composer does not
+            build as its kind (``admits``).
+    """
+    for kind, kept in (
+        ("schedules", profile.schedules()),
+        ("variants", profile.variants()),
+        ("bindings", profile.bindings()),
+        ("state layouts", profile.state_layouts()),
+    ):
+        if kept:
+            raise NotImplementedError(f"building a profile's {kind} is not built yet")
+    tunables: dict[int, dict[str, Any]] = {}
+    fused: list[Fusion] = []
+    taken: set[int] = set()
+    conflicts = _pack_conflicts(recording)
+    for entry in profile.entries():
+        root = entry.root
+        kinds = {e.kind for e in root.edges} if isinstance(root, Region) else set()
+        if (
+            not isinstance(root, Region)
+            or not all(isinstance(part, Member) for part in root.parts)
+            or root.inflows
+            or root.workers
+            or root.phases is not None
+            or root.runtime is not None
+            or any(e.depth is not None for e in root.edges)
+            or any(m.part is not None for m in root.steps())
+            or len(kinds) > 1
+            or not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED}
+        ):
+            raise NotImplementedError(
+                f"building {entry} is not built yet: the composer builds a "
+                f"region of steps whose edges are all stream or all staged, "
+                f"with no chosen depth, phase, worker, inflow or runtime plan"
+            )
+        for match in recording.occurrences(entry):
+            if taken & set(match):
+                continue
+            if len(match) > 1 and match != tuple(range(match[0], match[-1] + 1)):
+                raise NotImplementedError(
+                    f"building a region of steps {match}, which are not "
+                    f"consecutive, is not built yet"
+                )
+            if not root.edges and any(
+                (a, b) in conflicts for a in match for b in match if a < b
+            ):
+                raise NotImplementedError(
+                    f"building steps {match} at once, which depend through memory "
+                    f"with no edge between them, is not built yet"
+                )
+            for e in root.edges:
+                p, c = (
+                    recording.steps[match[i]].op.resolved()
+                    for i in (e.producer, e.consumer)
+                )
+                built = admits(p, e.output, c, e.input)
+                if built is None or (
+                    e.kind is EdgeKind.STREAM and built is not FusionKind.STREAM
+                ):
+                    raise NotImplementedError(
+                        f"building {type(p).__name__}.{e.output} -> "
+                        f"{type(c).__name__}.{e.input} as a {e.kind.value} edge is "
+                        f"not built yet: the composer builds it "
+                        + ("neither way" if built is None else f"only {built.value}")
+                    )
+            tunables.update(
+                (s, dict(m.tunables)) for s, m in zip(match, root.parts) if m.tunables
+            )
+            if len(match) > 1:
+                fused.append(
+                    Fusion(
+                        (
+                            FusionKind(kinds.copy().pop().value)
+                            if kinds
+                            else FusionKind.PACK
+                        ),
+                        match,
+                        tuple(
+                            Edge(
+                                match[e.producer], e.output, match[e.consumer], e.input
+                            )
+                            for e in root.edges
+                        ),
+                    )
+                )
+                taken.update(match)
+    return tunables, tuple(fused)

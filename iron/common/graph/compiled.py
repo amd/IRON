@@ -48,8 +48,10 @@ from ..image.step import BufferRef, Fusion
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .coded import CodedWeight, Source
 from .fold import apply_folds, chosen_folds
+from .fusion import composed
 from .fusion import fusions as graph_fusions
 from .fusion_tunables import apply as apply_fusion_tunables
+from .fusion_tunables import rebuild
 from .handle import Carry, Dense, Handle, State, Weight, _Param, is_operand
 from .packing import apply as apply_packings
 from .packing import merges
@@ -801,12 +803,19 @@ def apply_profile(
 ) -> tuple[Recording, tuple[Fusion, ...], Packing]:
     """Return ``recording`` as ``profile`` compiles it on ``dev``.
 
-    Its folds applied, its fusions and their steps' tunables, and its packings.
+    Its folds applied, its composition entries' tunables and regions
+    (``composed``), its fusions and their steps' tunables, and its packings.
+    A fusion entry's fusion overlapping a composed region gives way to it.
     """
     folds = chosen_folds(recording, profile)
     if folds:
         recording = apply_folds(recording, folds)
-    fused = graph_fusions(recording, profile)
+    tunables, regions = composed(recording, profile)
+    recording = rebuild(recording, tunables, dev)
+    taken = {s for f in regions for s in f.steps}
+    fused = regions + tuple(
+        f for f in graph_fusions(recording, profile) if not taken & set(f.steps)
+    )
     if fused:
         recording = apply_fusion_tunables(recording, profile, fused, dev)
     recording, packing = apply_packings(recording, profile, fused, dev)
