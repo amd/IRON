@@ -243,6 +243,7 @@ class FusedDesign:
                     (e.producer, e.output, e.consumer, e.input)
                     for e in self.fusion.edges
                 ),
+                self.fusion.kept,
                 "xclbin",
             )
         )

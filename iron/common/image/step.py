@@ -119,12 +119,16 @@ class Fusion:
     An edge between two steps that are not adjacent in ``steps`` is only
     valid where every step between them (by index) is also a member; a
     stream or staged fusion's edges run forward, producer before consumer.
+    ``kept`` names each edge's ``(producer, output)`` whose buffer a step
+    past the fusion or the host also reads: its drain to host is kept beside
+    its on-chip readers (a tee).
     """
 
     kind: FusionKind
     steps: tuple[int, ...]
     edges: tuple[Edge, ...] = ()
     phased: bool = False
+    kept: tuple[tuple[int, str], ...] = ()
 
     def __post_init__(self) -> None:
         if len(self.steps) < 2:
@@ -159,6 +163,12 @@ class Fusion:
                     f"step {edge.consumer}'s input {edge.input!r} is fed twice"
                 )
             fed.add((edge.consumer, edge.input))
+        made = {(e.producer, e.output) for e in self.edges}
+        for producer, output in self.kept:
+            if (producer, output) not in made:
+                raise ValueError(
+                    f"kept ({producer}, {output!r}) is no edge's producer output"
+                )
 
     @property
     def local_edges(self) -> tuple[tuple[int, str, int, str], ...]:
@@ -186,8 +196,8 @@ class Fusion:
             i = i + 1 if fusion is None else fusion.steps[-1] + 1
 
     def host_refs(self, steps: Sequence[SequenceStep]) -> tuple[BufferRef, ...]:
-        """Its members' buffers in ``steps`` the host sees, in member order: all but those an edge feeds on-chip."""
-        elided = {(e.producer, e.output) for e in self.edges} | {
+        """Its members' buffers in ``steps`` the host sees, in member order: all but those an edge feeds on-chip, a kept output included."""
+        elided = {(e.producer, e.output) for e in self.edges} - set(self.kept) | {
             (e.consumer, e.input) for e in self.edges
         }
         return tuple(
@@ -206,6 +216,7 @@ class Fusion:
         model shares a symbol.
         """
         wiring = ",".join(f"{p}:{o}>{c}:{i}" for p, o, c, i in self.local_edges)
+        wiring += "".join(f"+{self.steps.index(p)}:{o}" for p, o in self.kept)
         kind = f"{self.kind.value}/phased" if self.phased else self.kind.value
         digest = hashlib.sha256(
             f"{kind}[{'|'.join(designs)}]({wiring})".encode()

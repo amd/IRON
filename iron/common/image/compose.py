@@ -210,6 +210,10 @@ def fused_configuration(
         arrays[j] = BuiltArray(
             design, words, own, fed=fed, staged=fusion.kind is FusionKind.STAGED
         )
+        for producer, output in fusion.kept:
+            if producer == j:
+                (kept,) = [b for b in arrays[j].op.buffers if b.name == output]
+                kept.keeps_host = True
     grouped: dict[int, list[str]] = {}
     if fusion.phased:
         for j, p in phases(fusion, arrays).items():

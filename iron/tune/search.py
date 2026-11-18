@@ -180,8 +180,8 @@ def candidates(
     builds it is ``fit``'s to say, not this. Each member names its step's shape
     and nothing else (``Profile.dims`` of it, tunables None), so a region
     edit composes with an edit of the same steps' tunables. Each region
-    follows at every column count its members' domains share, every member
-    at it, whatever its call gave (a region's widths override those, as a
+    follows at every other column count its members' domains share, every
+    member at it, whatever its call gave (a region's widths override those, as a
     fusion's tunables do). Then each shape's tunables: a one-member region per setting
     ``autotune.settings`` resolves (the recorded one first), touching every
     step of that shape. Each entry is yielded once, from the first call that
@@ -209,12 +209,14 @@ def candidates(
         ]
         kinds: dict[tuple[int, str, int, str], EdgeKind | None] = {}
         columns = []
+        recorded = []
         for step in steps:
             # A region's widths override what a call gave, as a fusion's
             # tunables do, so the domain is the unpinned one.
             with set_current_device(device):
                 unpinned = step.op.replace(pinned=frozenset()).resolved(device)
                 domains = unpinned._domains(device)
+                recorded.append(vars(step.op.resolved(device)).get("num_aie_columns"))
             columns.append(set(domains.get("num_aie_columns", ())))
         for lo in range(len(steps)):
             for hi in range(lo + 1, min(lo + cores, len(steps))):
@@ -297,6 +299,8 @@ def candidates(
                 touches = frozenset(range(lo, hi + 1))
                 yield AddEntry(entry, touches)
                 for width in sorted(set.intersection(*columns[lo : hi + 1])):
+                    if all(w == width for w in recorded[lo : hi + 1]):
+                        continue  # the region as recorded, built once already
                     widened = Entry(
                         Region(
                             tuple(
@@ -590,17 +594,15 @@ def fit(
             )
             if why is not None:
                 return Fit(False, "analysis", f"at its chosen depths, it {why}")
-            for edge, p, _ in derivation.wired:
-                root_name = derivation.refs[p][edge.output].root
-                if (
-                    set(readers.get(root_name, [])) - inside
-                    or root_name in recording.held
-                ):
-                    unplaceable.append(
-                        f"{edge}: an edge out of {root_name!r}, which steps past "
-                        f"the region or the host also read, is not built yet (a "
-                        f"tee keeping the host's copy)"
-                    )
+            kept = sorted(
+                {
+                    (p, edge.output)
+                    for edge, p, _ in derivation.wired
+                    if set(readers.get(derivation.refs[p][edge.output].root, []))
+                    - inside
+                    or derivation.refs[p][edge.output].root in recording.held
+                }
+            )
             for edge, p, c in derivation.wired:
                 made = derivation.obj_elements[p].get(edge.output)
                 taken = derivation.obj_elements[c].get(edge.input)
@@ -654,6 +656,7 @@ def fit(
                         (e.producer, e.output, e.consumer, e.input)
                         for e in region.edges
                     ],
+                    kept=kept,
                 )
             if refused is not None and set(placements) != {"sequential"}:
                 waiting.append(

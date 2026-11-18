@@ -60,8 +60,13 @@ def _window(columns, channels=1, kind=EdgeKind.STREAM):
 
 
 def test_per_member_width_counts_round_trip_and_are_proposed(tmp_path):
-    """A window's per-member column counts round-trip through a profile and are a candidate, ordered by the cost model."""
-    region, recording = _window(columns=2)
+    """A window's per-member column counts round-trip through a profile and are a candidate.
+
+    The window recorded at two columns, proposed at four: a width the
+    recording already has is the region as recorded, not an edit of it.
+    """
+    _, recording = _window(columns=2)
+    region, _ = _window(columns=4)
     entry = Entry(root=region)
     profile = Profile()
     profile.add_entry(entry)

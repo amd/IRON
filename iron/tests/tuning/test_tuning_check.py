@@ -79,24 +79,23 @@ def test_a_stream_window_measures_faster_than_its_steps_apart():
     assert measured.seconds < measured.base_seconds
 
 
-def test_a_window_whose_hand_off_the_host_still_reads_waits():
-    """RMSNorm streamed into Q alone, while K and V read the norm's output from host memory, waits.
+def test_a_window_whose_hand_off_steps_past_it_still_read_keeps_a_tee():
+    """RMSNorm streamed into Q alone, while K and V read the norm's output from host memory: bit-identical to the steps apart.
 
-    A fused edge keeps no copy of its buffer in host memory, so building
-    this window would leave K and V reading stale data: it waits for a tee
-    rather than being built wrong.
+    The fused edge keeps the norm's drain to host memory beside Q's on-chip
+    read (a tee, ``Fusion.kept``), so K and V read what the norm wrote.
     """
     recording, _ = fan_out_norm_qkv()
     norm, q = (member(recording.steps[s].op) for s in (0, 1))
     profile = Profile()
     profile.add_entry(Entry(Region((norm, q), (Edge(0, "y", 1, "B"),))))
-    with pytest.raises(NotImplementedError, match="tee"):
-        check(profile, Profile(), [Timed(recording)], DEVICE, Refinement.EXACT)
+    result = check(profile, Profile(), [Timed(recording)], DEVICE, Refinement.EXACT)
+    assert result.ok, result.why
 
 
 def test_search_keeps_the_stream_window_on_the_chain():
-    """The tuner, on the chain alone, keeps the whole three-step window: it measures about a third of the steps apart, and checks bit-identical."""
-    recording, region = chain()
+    """The tuner, on the chain alone, keeps a window of all three steps: it measures about a third of the steps apart."""
+    recording, _ = chain()
     found = search([Timed(recording)], Profile(), DEVICE, budget_s=60.0)
-    assert Entry(region) in found.entries()
+    assert any(len(e.root.steps()) == 3 for e in found.entries())
     assert measure(found, Profile(), [Timed(recording)], DEVICE).ratio < 0.8

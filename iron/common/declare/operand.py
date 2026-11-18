@@ -45,7 +45,8 @@ class Operand:
     binding so another reader can add more ends to one already bound.
 
     A fed input reads ``fed_from``'s lanes, or ``staged`` fifos where ``Staging``
-    restaged them; an output lists every input it ``feeds``.
+    restaged them; an output lists every input it ``feeds``, and one that
+    ``keeps_host`` drains to the host too, its inputs reading ends of their own.
     """
 
     def __init__(self, member: Any, op: Operator) -> None:
@@ -55,6 +56,7 @@ class Operand:
         self.fed_from: Operand | None = None
         self.staged: list[ObjectFifo] | None = None
         self.feeds: list[Operand] = []
+        self.keeps_host = False
         self.read_lanes: set[int] = set()
         self._decl = member.of(op)
 
@@ -297,6 +299,9 @@ class Operand:
                 )
         if mismatch is not None and not staged:
             raise ValueError(mismatch)
+        if source.keeps_host:
+            # The host's drain keeps each lane's bound end.
+            source.read_lanes.update(range(source.lanes))
         if mismatch is not None:
             self.staged = Staging(source, self).build()
         self.fed_from = source
@@ -350,7 +355,7 @@ class Operand:
     @property
     def on_chip(self) -> bool:
         """Whether this operand's stream stays on-chip, fed to or from another operator, with no host transfer."""
-        return self.fed_from is not None or bool(self.feeds)
+        return self.fed_from is not None or (bool(self.feeds) and not self.keeps_host)
 
     def pin(self, endpoints: list[DmaEndpoint]) -> None:
         """Pin each lane, in order, to a shim ``DmaEndpoint`` built elsewhere.

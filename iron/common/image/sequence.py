@@ -76,7 +76,8 @@ class Image:
         """Raise ``ValueError`` unless each fusion's steps are valid.
 
         Real, consecutive and claimed once, a pack's steps independent, and each edge
-        names a real whole-buffer hand-off that nothing past the fusion reads.
+        names a real whole-buffer hand-off, kept in host memory where anything past
+        the fusion reads it.
         """
         claimed: set[int] = set()
         for fusion in self.fusions:
@@ -167,12 +168,15 @@ class Image:
                     for i, s in enumerate(self.steps)
                     if i not in fusion.steps and out.root in s.roots()[0]
                 ]
-                if outside or out.root in {*self.outputs, *self.feedback}:
+                if (outside or out.root in {*self.outputs, *self.feedback}) and (
+                    edge.producer,
+                    edge.output,
+                ) not in fusion.kept:
                     raise ValueError(
                         f"edge {edge.producer}->{edge.consumer}: {out.root!r} is "
                         f"also read "
                         + (f"by steps {outside}" if outside else "by the host")
-                        + ", but a fused edge keeps no copy of it in host memory"
+                        + ", but the fusion keeps no copy of it in host memory"
                     )
 
     @property
