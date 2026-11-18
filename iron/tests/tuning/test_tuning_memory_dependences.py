@@ -111,14 +111,20 @@ def test_write_then_read_is_bit_identical_to_the_steps_run_apart(position):
 
 
 @pytest.mark.extensive
-@unbuilt
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="the composer does not build steps that depend through memory with no edge yet",
+)
 @pytest.mark.supported_devices("npu2")
 def test_tuner_keeps_the_region_where_it_pays():
     """The tuner, on the write-then-read toy alone, keeps the region (no host round trip between the steps) where it pays."""
     call, _ = _region(POSITIONS["middle"])
     start = Profile()
     found = search([call], start, DEVICE, budget_s=60.0)
-    assert any(isinstance(e.root, Region) for e in found.entries())
+    assert any(
+        isinstance(e.root, Region) and len(e.root.steps()) > 1 for e in found.entries()
+    )
 
 
 @unbuilt

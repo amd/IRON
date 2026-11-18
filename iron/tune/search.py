@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 import numpy as np
+from aie import ir
 from aie.dialects.aie import get_target_model
 from aie.iron.device import Device
 from aie.utils import set_current_device
@@ -809,7 +810,7 @@ def search(
     Each edit ``candidates`` yields is applied to ``start``, fitted
     (``fit``; one that waits or is refused is passed over) and measured in
     place against ``start`` (``measure``); one under ``GAINS`` gains, and one
-    whose build is not bit-identical is refused and logged. The gainers are
+    that does not build, or builds wrong, is refused and logged. The gainers are
     then taken best first, each touching no step a taken one
     touches: a take is checked bit-identical against ``start`` (``check``)
     and measured against the profile so far, and kept where it still gains.
@@ -860,6 +861,9 @@ def search(
             continue
         except NotImplementedError as e:
             logger.info("search: waits: %s", e)
+            continue
+        except (ValueError, RuntimeError, ir.MLIRError) as e:
+            logger.warning("search: refused, does not build: %s: %s", edit, e)
             continue
         logger.info("search: %.3f for %s", ratio, edit)
         if ratio < GAINS:

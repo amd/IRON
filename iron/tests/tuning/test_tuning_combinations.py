@@ -157,7 +157,6 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(combo):
 
 
 @pytest.mark.extensive
-@unbuilt
 @pytest.mark.parametrize("combo", COMBOS, ids=_combo_id)
 @pytest.mark.supported_devices("npu2")
 def test_each_toy_is_searched_and_the_result_passes_check(combo):

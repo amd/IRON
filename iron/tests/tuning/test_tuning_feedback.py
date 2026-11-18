@@ -132,7 +132,11 @@ def test_a_cycle_is_bit_identical_to_the_steps_or_calls_run_apart(cycle):
 
 
 @pytest.mark.extensive
-@unbuilt
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="candidates does not propose a self-loop over a carried buffer yet",
+)
 @pytest.mark.supported_devices("npu2")
 def test_tuner_keeps_the_cycle_where_it_pays():
     """The tuner, on the scan-state toy alone, keeps the cycle where it pays (fewer dispatches per token)."""

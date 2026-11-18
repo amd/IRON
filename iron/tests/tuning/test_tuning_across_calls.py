@@ -174,7 +174,11 @@ def test_commands_in_flight_are_bit_identical_to_one_at_a_time():
 
 
 @pytest.mark.extensive
-@unbuilt
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="candidates does not propose schedules yet",
+)
 def test_tuner_keeps_the_call_schedule_that_pays():
     """The tuner, on the decode-step toy alone, keeps the call schedule that pays."""
     recording = _decode_recording()

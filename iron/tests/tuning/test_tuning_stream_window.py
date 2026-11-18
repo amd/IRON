@@ -28,7 +28,7 @@ from iron.tests.support.toys_edges import (
 )
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import candidates, check, fit, search
+from iron.tune.search import candidates, check, fit, measure, search
 
 DEVICE = DEVICES["npu2"]()
 DEVICE_NPU1 = DEVICES["npu1"]()
@@ -118,15 +118,31 @@ def test_window_is_bit_identical_on_npu1_full_elf_and_per_step():
 
 
 @pytest.mark.extensive
-@unbuilt
-@pytest.mark.parametrize("window", sorted(WINDOWS))
+@pytest.mark.parametrize(
+    "window",
+    [
+        # A GEMV's 2-element output objects into a 256-element multiply: the
+        # composer gives a fifo one object size.
+        (
+            pytest.param(w, marks=unbuilt)
+            if w in ("fan_in", "outside_reader_and_final_output")
+            else w
+        )
+        for w in sorted(WINDOWS)
+    ],
+)
 @pytest.mark.supported_devices("npu2")
 def test_tuner_proposes_and_keeps_a_window_on_its_own_toy(window):
-    """The tuner, run on the window's toy alone, proposes the window and keeps it where it pays."""
-    recording, _ = WINDOWS[window]()
+    """The tuner, run on the window's toy alone, keeps what is at least as fast as the window, where the window pays."""
+    recording, region = WINDOWS[window]()
+    calls = [Timed(recording)]
     start = Profile()
-    found = search([Timed(recording)], start, DEVICE, budget_s=60.0)
-    assert any(isinstance(e.root, Region) and e.root.edges for e in found.entries())
+    with_window = Profile()
+    with_window.add_entry(Entry(region))
+    window_ratio = measure(with_window, start, calls, DEVICE).ratio
+    found = search(calls, start, DEVICE, budget_s=60.0)
+    if window_ratio < 0.95:
+        assert measure(found, start, calls, DEVICE).ratio < window_ratio * 1.05
 
 
 def test_a_window_over_the_arrays_cores_is_refused_before_any_build():

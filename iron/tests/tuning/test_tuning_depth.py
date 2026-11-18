@@ -4,6 +4,7 @@
 """The depth family: the minimum deadlock-free depth, below it, and past the knee, for every edge role, hand-off shape and rate."""
 
 import pytest
+from aie.utils import set_current_device
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement
@@ -13,6 +14,7 @@ from iron.tests.support import toys_dataflow as toys
 from iron.tests.support import toys_edges
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
+from iron.tune.fusions import Applied
 from iron.tune.search import check, fit, measure, search
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -131,10 +133,10 @@ def test_skip_diamond_depth_two_is_refused_before_any_build():
 def test_skip_diamond_depth_two_deadlock_opt_in_device_check():
     """Depth 2 really deadlocks on the device, confirming the analysis is tight and not merely safe (the deliberate exception to "a hang always fails a test").
 
-    Not wrapped in ``hang.bounded``: nothing is built yet (``fit`` raises
-    before any device use), so there is no hang to survive today; once the
-    composer builds this window, the device dispatch below moves inside
-    ``hang.bounded(_TIMEOUT_S, ...)`` as ``test_fusion_staged.py``'s
+    Not wrapped in ``hang.bounded``: the composer does not take a chosen
+    depth yet (``composed`` raises before any device use), so there is no
+    hang to survive today; once it does, the device dispatch below moves
+    inside ``hang.bounded(_TIMEOUT_S, ...)`` as ``test_fusion_staged.py``'s
     ``test_a_reader_a_phase_later_does_not_hang`` already does for the same
     window in the ``Fusion`` representation.
     """
@@ -142,7 +144,8 @@ def test_skip_diamond_depth_two_deadlock_opt_in_device_check():
     profile = Profile()
     profile.add_entry(Entry(root=region))
     recording = toys.broadcast_skip_recording("device-depth-two", first, norm, second)
-    fit(profile, [Timed(recording)], toys.NPU2)
+    with set_current_device(toys.NPU2):
+        Applied.of(Timed(recording), profile, toys.NPU2).built(toys.NPU2)
 
 
 @pytest.mark.extensive

@@ -327,7 +327,11 @@ def test_packaging_full_elf_and_xclbin_per_step_are_bit_identical():
 
 
 @pytest.mark.extensive
-@unbuilt
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="candidates does not propose configurations yet",
+)
 def test_tuner_keeps_the_configuration_that_pays():
     """The tuner, on the Wide toy alone, keeps the configuration (narrowed to co-reside) that pays."""
     _, recording = _wide_configuration()

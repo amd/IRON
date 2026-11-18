@@ -243,7 +243,11 @@ def test_skip_phases_are_bit_identical_with_no_hang():
 
 
 @pytest.mark.extensive
-@unbuilt
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="candidates does not propose runtime plans yet",
+)
 def test_tuner_keeps_the_schedule_that_pays():
     """The tuner, on the window toy alone, keeps the ``RuntimePlan`` setting that pays."""
     _, recording = _window_region()

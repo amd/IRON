@@ -88,13 +88,17 @@ def test_narrowed_window_is_bit_identical_to_full_width():
 
 
 @pytest.mark.extensive
-@unbuilt
 def test_tuner_keeps_widths_that_pay_and_bounds_builds():
     """The tuner keeps the width setting that pays, builds stay bounded, and several placements are tried."""
     _, recording = _window(columns=2)
     start = Profile()
     found = search([Timed(recording)], start, DEVICE, budget_s=60.0)
-    assert any(isinstance(e.root, Region) for e in found.entries())
+    assert any(
+        isinstance(e.root, Region)
+        and len(e.root.steps()) > 1
+        and all("num_aie_columns" in (m.tunables or {}) for m in e.root.steps())
+        for e in found.entries()
+    )
     assert len(PLACEMENTS) > 1
 
 

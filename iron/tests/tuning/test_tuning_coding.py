@@ -181,7 +181,10 @@ def test_coding_is_kept_only_where_ddr_bytes_saved_beat_the_decode_cost():
     ).ratio
     assert weight_bound_ratio < 0.95
     weight_bound_tuned = search(weight_bound_calls, start, NPU2_DEVICE, budget_s=5.0)
-    assert any(isinstance(e.root, Region) for e in weight_bound_tuned.entries())
+    assert any(
+        isinstance(e.root, Region) and len(e.root.steps()) > 1
+        for e in weight_bound_tuned.entries()
+    )
 
     compute_bound_calls = [Timed(compute_bound)]
     compute_bound_ratio = measure(
@@ -189,7 +192,10 @@ def test_coding_is_kept_only_where_ddr_bytes_saved_beat_the_decode_cost():
     ).ratio
     assert compute_bound_ratio > 1.05
     compute_bound_tuned = search(compute_bound_calls, start, NPU2_DEVICE, budget_s=5.0)
-    assert not any(isinstance(e.root, Region) for e in compute_bound_tuned.entries())
+    assert not any(
+        isinstance(e.root, Region) and len(e.root.steps()) > 1
+        for e in compute_bound_tuned.entries()
+    )
 
 
 @unbuilt
