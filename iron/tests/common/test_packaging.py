@@ -255,5 +255,9 @@ def test_graph_compiled_with_teardown_runs_bit_identically():
     out_torn = np.asarray(torn(a, b))[:256]
     out_reset = np.asarray(reset(a, b))[:256]
     ref = np.asarray(chain.reference(a, b))[:256]
-    assert np.array_equal(out_torn.view(np.uint16), out_reset.view(np.uint16)), "torn-down and reset runs differ"
-    assert np.array_equal(out_torn.view(np.uint16), ref.view(np.uint16)), "the torn-down run does not match the reference"
+    assert np.array_equal(
+        out_torn.view(np.uint16), out_reset.view(np.uint16)
+    ), "torn-down and reset runs differ"
+    assert np.array_equal(
+        out_torn.view(np.uint16), ref.view(np.uint16)
+    ), "the torn-down run does not match the reference"

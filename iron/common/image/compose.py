@@ -328,9 +328,7 @@ def fits(
             else:
                 keys = {str(j) for j in fusion.steps}
                 independent = {
-                    n: BuiltArray(d, words)
-                    for n, d in designs.items()
-                    if n not in keys
+                    n: BuiltArray(d, words) for n, d in designs.items() if n not in keys
                 }
                 configured, _ = fused_configuration(
                     "fused",

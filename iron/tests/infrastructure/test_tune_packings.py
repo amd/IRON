@@ -382,7 +382,9 @@ def _version(name: str) -> tuple:
         (-50.0, None, False, "do not gain beyond the noise"),  # unmeasurable noise
     ],
 )
-def test_decide_fold_keeps_the_fusions_only_where_the_call_gains_beyond_noise(delta, se, kept, message):
+def test_decide_fold_keeps_the_fusions_only_where_the_call_gains_beyond_noise(
+    delta, se, kept, message
+):
     """A regression, or a gain too small next to ``CONFIDENCE`` standard errors of noise, both narrow the version's entry away entirely."""
     decode = Timed(Alternating().record(x=(SIZE,)))
     v = _version("decode")
@@ -430,7 +432,9 @@ _DECODE_V, _PROMPT_V = _version("decode"), _version("prompt")
     ],
 )
 def test_narrow_for_rejected(fusions, expected):
-    assert _narrow_for_rejected(fusions, _DECODE_V) == (fusions if expected is None else expected)
+    assert _narrow_for_rejected(fusions, _DECODE_V) == (
+        fusions if expected is None else expected
+    )
 
 
 def test_a_version_that_rejects_its_folds_takes_the_packings_searched_without_them():

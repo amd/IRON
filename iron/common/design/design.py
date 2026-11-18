@@ -367,13 +367,17 @@ def configuration(
         if fuse
         else MergedRuntime.merge
     )
-    runtimes = [
-        merge(
-            [owners[of[k]].runtime(arrays[k], None) for k in phase],
-            "sequence" if p == 0 else f"sequence_{p}",
-        )
-        for p, phase in enumerate(phases or (steps,))
-    ] if steps else []
+    runtimes = (
+        [
+            merge(
+                [owners[of[k]].runtime(arrays[k], None) for k in phase],
+                "sequence" if p == 0 else f"sequence_{p}",
+            )
+            for p, phase in enumerate(phases or (steps,))
+        ]
+        if steps
+        else []
+    )
     runtimes += [
         owners[of[key]].runtime(
             arrays[key], "sequence" if not steps and len(arrays) == 1 else key

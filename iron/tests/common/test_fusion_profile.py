@@ -35,7 +35,9 @@ pytestmark = pytest.mark.usefixtures("npu2")
 # A fixture is found by its name in the test module.
 llama_recordings = llama_model.llama_recordings
 
-LLAMA_NPU2_PROFILE = Path(__file__).resolve().parents[2] / ("applications/llama/profiles/npu2.json")
+LLAMA_NPU2_PROFILE = Path(__file__).resolve().parents[2] / (
+    "applications/llama/profiles/npu2.json"
+)
 
 W = np.zeros(2048, bfloat16)
 
@@ -104,9 +106,13 @@ def test_a_fusion_steps_own_tunables_round_trip(tmp_path):
 
     path = tmp_path / "profile.json"
     p.save(path)
-    assert json.loads(path.read_text())["fusions"][0]["steps"][1]["tunables"] == {"num_aie_columns": 2}
+    assert json.loads(path.read_text())["fusions"][0]["steps"][1]["tunables"] == {
+        "num_aie_columns": 2
+    }
     loaded = Profile.load(path)
-    assert loaded.fusion_tunables(FusionKind.STREAM, [gate, up], [(0, "y", 1, "a")]) == [None, {"num_aie_columns": 2}]
+    assert loaded.fusion_tunables(
+        FusionKind.STREAM, [gate, up], [(0, "y", 1, "a")]
+    ) == [None, {"num_aie_columns": 2}]
 
     roundtrip = tmp_path / "roundtrip.json"
     loaded.save(roundtrip)
@@ -164,7 +170,9 @@ def test_a_tunable_entry_over_a_tuple_valued_dim_matches_after_save_and_load(tmp
     path = tmp_path / "profile.json"
     p.save(path)
     loaded = Profile.load(path)
-    assert loaded.tunables_for(GEMV, dict(M=2048, K=2048, finish=gemv.finish)) == {"num_aie_columns": 8}
+    assert loaded.tunables_for(GEMV, dict(M=2048, K=2048, finish=gemv.finish)) == {
+        "num_aie_columns": 8
+    }
 
 
 def test_a_profile_with_a_copy_fusion_round_trips():
@@ -301,7 +309,9 @@ def test_a_fusion_entry_scoped_to_decode_does_not_apply_to_the_prompt(
         versions=[decode.version],
     )
     assert scoped_to_decode.fused(FusionKind.STREAM, [gate, up], edge, decode.version)
-    assert not scoped_to_decode.fused(FusionKind.STREAM, [gate, up], edge, prompt.version)
+    assert not scoped_to_decode.fused(
+        FusionKind.STREAM, [gate, up], edge, prompt.version
+    )
     assert not scoped_to_decode.fused(FusionKind.STREAM, [gate, up], edge)
 
     scoped_to_prompt = Profile()
@@ -312,7 +322,9 @@ def test_a_fusion_entry_scoped_to_decode_does_not_apply_to_the_prompt(
         versions=[prompt.version],
     )
     assert scoped_to_prompt.fused(FusionKind.STREAM, [gate, up], edge, prompt.version)
-    assert not scoped_to_prompt.fused(FusionKind.STREAM, [gate, up], edge, decode.version)
+    assert not scoped_to_prompt.fused(
+        FusionKind.STREAM, [gate, up], edge, decode.version
+    )
 
 
 def test_add_fusion_checks_its_versions():
@@ -337,7 +349,9 @@ def test_a_fusion_entrys_versions_round_trip_through_json(tmp_path):
     )
     path = tmp_path / "profile.json"
     p.save(path)
-    assert json.loads(path.read_text())["fusions"][0]["versions"] == [{"x": [[2048], "bfloat16"]}]
+    assert json.loads(path.read_text())["fusions"][0]["versions"] == [
+        {"x": [[2048], "bfloat16"]}
+    ]
 
     loaded = Profile.load(path)
     gate = SiLU(size=2048, tile_size=2048, num_aie_columns=1).resolved()
@@ -400,7 +414,9 @@ def test_mismatched_tile_sizes_stage_the_edge():
 
     recording = Mismatched().record(x=(2048,))
     assert candidates(recording, (FusionKind.STREAM,)) == ()
-    assert candidates(recording) == (Fusion(FusionKind.STAGED, (0, 1), (Edge(0, "y", 1, "a"),)),)
+    assert candidates(recording) == (
+        Fusion(FusionKind.STAGED, (0, 1), (Edge(0, "y", 1, "a"),)),
+    )
 
 
 def test_an_edge_that_raises_raises_again_rather_than_caching_no_fusion():
@@ -533,7 +549,9 @@ def test_an_earlier_pack_wins_over_a_later_stream():
         [(SiLU, dict(size=2048)), (ElementwiseMul, dict(size=2048))],
         [(0, "y", 1, "a")],
     )
-    p.add_fusion(FusionKind.PACK, [(SiLU, dict(size=2048)), (SiLU, dict(size=2048))], [])
+    p.add_fusion(
+        FusionKind.PACK, [(SiLU, dict(size=2048)), (SiLU, dict(size=2048))], []
+    )
     assert fusions(recording, p) == (Fusion(FusionKind.PACK, (0, 1)),)
 
 
@@ -542,7 +560,12 @@ def _silu_edges(recording):
 
     Decode's also has GEMV -> ElementwiseAdd ones, which ``size`` means nothing to.
     """
-    return tuple(f for f in candidates(recording) if len(f.steps) == 2 and type(recording.steps[f.steps[0]].op.resolved()).__name__ == "SiLU")
+    return tuple(
+        f
+        for f in candidates(recording)
+        if len(f.steps) == 2
+        and type(recording.steps[f.steps[0]].op.resolved()).__name__ == "SiLU"
+    )
 
 
 def test_fusions_returns_candidates_a_matching_profile_names(llama_recordings):
@@ -583,7 +606,9 @@ def _fusion_profile() -> Profile:
 
 
 def test_compile_passes_full_elf_fusions_to_the_image():
-    version = _fused_graph(_fusion_profile()).compile(full_elf=True, check=False, x=(2048,))
+    version = _fused_graph(_fusion_profile()).compile(
+        full_elf=True, check=False, x=(2048,)
+    )
     assert version.sequence.fusions == (fusable.stream(0, "y", "a"),)
 
 
@@ -645,14 +670,18 @@ def test_a_narrowed_step_keeps_its_per_call_values(npu2):
 
 def test_a_merge_is_a_packing_not_a_fusion_entry():
     with pytest.raises(TypeError, match="add_packing"):
-        Profile().add_fusion(FusionKind.MERGE, [(ReLU, dict(size=4096)), (Tanh, dict(size=4096))], [])
+        Profile().add_fusion(
+            FusionKind.MERGE, [(ReLU, dict(size=4096)), (Tanh, dict(size=4096))], []
+        )
 
 
 def test_compile_withholds_fusions_under_check_but_not_a_step_per_xclbin():
     checked = _fused_graph(_fusion_profile()).compile(check=True, x=(2048,))
     assert checked.plan.full_elf is False and checked.sequence.fusions == ()
 
-    per_step = _fused_graph(_fusion_profile()).compile(full_elf=False, check=False, x=(2048,))
+    per_step = _fused_graph(_fusion_profile()).compile(
+        full_elf=False, check=False, x=(2048,)
+    )
     assert per_step.plan.full_elf is False
     assert per_step.sequence.fusions == (fusable.stream(0, "y", "a"),)
 
@@ -672,7 +701,12 @@ def test_a_phased_entry_matches_only_phased_and_round_trips():
     up = ElementwiseMul(size=2048, tile_size=2048).resolved()
     edge = [(0, "y", 1, "a")]
     p = Profile()
-    p.add_fusion(FusionKind.STREAM, [(SiLU, {"size": 2048}), (ElementwiseMul, {"size": 2048})], edge, phased=True)
+    p.add_fusion(
+        FusionKind.STREAM,
+        [(SiLU, {"size": 2048}), (ElementwiseMul, {"size": 2048})],
+        edge,
+        phased=True,
+    )
     assert p.fused(FusionKind.STREAM, [gate, up], edge, phased=True)
     assert not p.fused(FusionKind.STREAM, [gate, up], edge)  # unphased, no match
     assert not p.fused(FusionKind.STAGED, [gate, up], edge, phased=True)  # wrong kind
@@ -680,7 +714,12 @@ def test_a_phased_entry_matches_only_phased_and_round_trips():
 
 def test_add_fusion_refuses_phased_on_a_kind_with_no_phases():
     with pytest.raises(TypeError, match="has no phases"):
-        Profile().add_fusion(FusionKind.PACK, [(SiLU, {"size": 2048}), (ElementwiseMul, {"size": 2048})], [], phased=True)
+        Profile().add_fusion(
+            FusionKind.PACK,
+            [(SiLU, {"size": 2048}), (ElementwiseMul, {"size": 2048})],
+            [],
+            phased=True,
+        )
 
 
 def test_a_phased_entry_round_trips_through_json(tmp_path):

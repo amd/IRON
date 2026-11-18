@@ -105,8 +105,12 @@ class Image:
                 # feeding it: independent of every other member, the same hazard
                 # a pack's own members must clear, since nothing elides their
                 # host transfers into one another.
-                edged = {e.producer for e in fusion.edges} | {e.consumer for e in fusion.edges}
-                direct = {(e.producer, e.consumer) for e in fusion.edges} | {(e.consumer, e.producer) for e in fusion.edges}
+                edged = {e.producer for e in fusion.edges} | {
+                    e.consumer for e in fusion.edges
+                }
+                direct = {(e.producer, e.consumer) for e in fusion.edges} | {
+                    (e.consumer, e.producer) for e in fusion.edges
+                }
                 uses = [(i, *self.steps[i].roots()) for i in fusion.steps]
                 for (i, ri, wi), (k, rk, wk) in itertools.combinations(uses, 2):
                     if (i in edged and k in edged) and (i, k) in direct:

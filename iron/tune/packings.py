@@ -876,7 +876,11 @@ def _narrow_for_rejected(
     """
     out = []
     for f in fusions:
-        if f.kind is FusionKind.FOLD and f.versions is not None and version in f.versions:
+        if (
+            f.kind is FusionKind.FOLD
+            and f.versions is not None
+            and version in f.versions
+        ):
             remaining = f.versions - {version}
             if not remaining:
                 continue

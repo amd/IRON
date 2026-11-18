@@ -1190,7 +1190,9 @@ def _run_profile_phased() -> list:
     image = Image(rec, FullELF(), fusions=(fusion,))
     image.compile()
     out = _dispatch(image.get_callable(), inputs, {"out": 2048})["out"]
-    ref = np.asarray(down.resolved().reference(W, mul.resolved().reference(g, u))).reshape(-1)
+    ref = np.asarray(
+        down.resolved().reference(W, mul.resolved().reference(g, u))
+    ).reshape(-1)
     return [out, ref]
 
 

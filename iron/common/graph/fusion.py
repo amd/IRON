@@ -20,7 +20,9 @@ from .record import Recording
 _built: dict[tuple[str, str, str, str], FusionKind | None] = {}
 
 
-def admits(producer: Operator, output: str, consumer: Operator, input_: str) -> FusionKind | None:
+def admits(
+    producer: Operator, output: str, consumer: Operator, input_: str
+) -> FusionKind | None:
     """Return how ``producer``'s resolved ``output`` can feed ``consumer``'s resolved ``input_`` on-chip.
 
     ``STREAM`` where the pair's ``BuiltArray``s build fed directly (``Operand.feed``'s
@@ -54,7 +56,9 @@ def admits(producer: Operator, output: str, consumer: Operator, input_: str) -> 
     return found
 
 
-def _hand_offs(recording: Recording, ops: list[Operator]) -> dict[str, tuple[int, str, dict[int, str]]]:
+def _hand_offs(
+    recording: Recording, ops: list[Operator]
+) -> dict[str, tuple[int, str, dict[int, str]]]:
     """Each buffer root one step's output can hand on-chip to every reader that admits it.
 
     ``{root: (writer, output, {reader: input})}``; ``ops`` the steps' resolved
@@ -77,7 +81,11 @@ def _hand_offs(recording: Recording, ops: list[Operator]) -> dict[str, tuple[int
             chosen: dict[int, Operator] = {}
             for j in dict.fromkeys(reads):
                 nxt = recording.steps[j]
-                inputs = [(cbuf, cref) for cbuf, cref in zip(nxt.op.buffers, nxt.refs()) if cbuf.fills and cref.root == root]
+                inputs = [
+                    (cbuf, cref)
+                    for cbuf, cref in zip(nxt.op.buffers, nxt.refs())
+                    if cbuf.fills and cref.root == root
+                ]
                 if len(inputs) != 1:
                     break
                 ((cbuf, cref),) = inputs
@@ -90,14 +98,21 @@ def _hand_offs(recording: Recording, ops: list[Operator]) -> dict[str, tuple[int
                         if not isinstance(vars(reader)[name], bool):
                             continue
                         try:
-                            flipped.append(reader._with_tunables(**{name: not vars(reader)[name]}).resolved())
+                            flipped.append(
+                                reader._with_tunables(
+                                    **{name: not vars(reader)[name]}
+                                ).resolved()
+                            )
                         except ValueError:  # the flip does not resolve here
                             continue
                     reader = next(
                         (
                             v
                             for v in flipped
-                            if next(b for b in v.buffers if b.name == cbuf.name).streamed and admits(ops[i], buf.name, v, cbuf.name) is not None
+                            if next(
+                                b for b in v.buffers if b.name == cbuf.name
+                            ).streamed
+                            and admits(ops[i], buf.name, v, cbuf.name) is not None
                         ),
                         None,
                     )
@@ -163,7 +178,11 @@ def _stream_runs(recording: Recording) -> list[Fusion]:
                 continue
             edges.sort(key=lambda e: (e.producer, e.consumer))
             ops = resolved[lo : hi + 1]
-            staged = any(admits(ops[e.producer - lo], e.output, ops[e.consumer - lo], e.input) is FusionKind.STAGED for e in edges)
+            staged = any(
+                admits(ops[e.producer - lo], e.output, ops[e.consumer - lo], e.input)
+                is FusionKind.STAGED
+                for e in edges
+            )
             kind = FusionKind.STAGED if staged else FusionKind.STREAM
             fusion = Fusion(kind, tuple(window), tuple(edges))
             found.append(fusion)
@@ -195,7 +214,11 @@ def _pack_runs(recording: Recording) -> list[Fusion]:
     start = 0
     while start < n:
         end = start
-        while end + 1 < n and not any((i, end + 1) in conflicts for i in range(start, end + 1)) and not recording.crosses_host(start, end + 1):
+        while (
+            end + 1 < n
+            and not any((i, end + 1) in conflicts for i in range(start, end + 1))
+            and not recording.crosses_host(start, end + 1)
+        ):
             end += 1
         if end > start:
             for lo in range(start, end + 1):
@@ -232,7 +255,9 @@ _EVERY_KIND = (
 )
 
 
-def named(recording: Recording, profile: Profile, ordered: Sequence[Fusion]) -> tuple[Fusion, ...]:
+def named(
+    recording: Recording, profile: Profile, ordered: Sequence[Fusion]
+) -> tuple[Fusion, ...]:
     """Return the fusions of ``ordered`` that ``profile`` names (``Profile.fused``) in ``recording.version``, a step in at most one.
 
     The first of ``ordered`` wins; a stream or staged candidate is matched as it is or, failing
@@ -248,9 +273,17 @@ def named(recording: Recording, profile: Profile, ordered: Sequence[Fusion]) -> 
         if taken & set(fusion.steps):
             continue
         steps = [recording.steps[i].op.resolved() for i in fusion.steps]
-        forms = (fusion, dataclasses.replace(fusion, phased=True)) if (fusion.kind in (FusionKind.STREAM, FusionKind.STAGED)) else (fusion,)
+        forms = (
+            (fusion, dataclasses.replace(fusion, phased=True))
+            if (fusion.kind in (FusionKind.STREAM, FusionKind.STAGED))
+            else (fusion,)
+        )
         form = next(
-            (f for f in forms if profile.fused(f.kind, steps, f.local_edges, version, f.phased)),
+            (
+                f
+                for f in forms
+                if profile.fused(f.kind, steps, f.local_edges, version, f.phased)
+            ),
             None,
         )
         if form is None:

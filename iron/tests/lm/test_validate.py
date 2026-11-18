@@ -37,7 +37,10 @@ def _silu_mul_entry(recording):
     edge = fusion.edges[0]
     return FusionEntry(
         FusionKind.STREAM,
-        ((SiLU, dict(size=gate.size), None), (ElementwiseMul, dict(size=mul.size), None)),
+        (
+            (SiLU, dict(size=gate.size), None),
+            (ElementwiseMul, dict(size=mul.size), None),
+        ),
         ((0, edge.output, 1, edge.input),),
     )
 
