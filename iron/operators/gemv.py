@@ -341,6 +341,11 @@ class GEMV(Finishing):
             new.tile_size_input * new.A.shape[-1] * np.dtype(new.A.dtype).itemsize
         )
         rest = line + new.C.depth * out + dev.default_core_stack_bytes
+        # A folded finish chain ping-pongs its tile through up to two scratch
+        # tiles, and a binary step's own input streams in at C's depth.
+        rest += min(len(new.finish), 2) * out
+        if new.uses_extra and not new.rides:
+            rest += new.C.depth * out
         if new.coded_a:
             # The rows a call decodes into, which the matvec then reads.
             rest += new.tile_size_input * line
