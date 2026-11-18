@@ -175,7 +175,8 @@ def candidates(
     a whole, streamed buffer the host does not hold, a later step reading it
     whole, the two ends one buffer. Its edges are ordered by producer, then
     consumer, each a stream where the dataflow analysis finds the lanes meet
-    as they are (an equal or broadcast hand-off) and staged otherwise, or
+    as they are (an equal or broadcast hand-off, one object size at both
+    ends) and staged otherwise, or
     where the analysis does not model the pair yet; whether the composer
     builds it is ``fit``'s to say, not this. Each member names its step's shape
     and nothing else (``Profile.dims`` of it, tunables None), so a region
@@ -248,23 +249,25 @@ def candidates(
                             if pair not in kinds:
                                 edge = Edge(0, source.name, 1, sink.name)
                                 try:
-                                    shape = (
-                                        Derivation(
-                                            Region((members[p], members[c]), (edge,)),
-                                            recording,
-                                            device,
-                                        )
-                                        .analysis()
-                                        .hand_off[edge]
+                                    pair_of = Derivation(
+                                        Region((members[p], members[c]), (edge,)),
+                                        recording,
+                                        device,
                                     )
+                                    shape = pair_of.analysis().hand_off[edge]
                                 except NotImplementedError:
                                     kinds[pair] = EdgeKind.STAGED
                                 except ValueError:
                                     kinds[pair] = None
                                 else:
+                                    sizes = (
+                                        pair_of.obj_elements[0].get(source.name),
+                                        pair_of.obj_elements[1].get(sink.name),
+                                    )
                                     kinds[pair] = (
                                         EdgeKind.STREAM
                                         if shape in (HandOff.EQUAL, HandOff.BROADCAST)
+                                        and sizes[0] == sizes[1]
                                         else EdgeKind.STAGED
                                     )
                             if kinds[pair] is not None:
@@ -625,13 +628,12 @@ def fit(
                 or region.runtime is not None
                 or not all(isinstance(part, Member) for part in region.parts)
                 or any(e.depth is not None for e in region.edges)
-                or len(kinds) > 1
                 or not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED}
             ):
                 unplaceable.append(
                     "placing a region the composer does not build yet (inflows, "
                     "shared workers, chosen phases or depths, a runtime plan, "
-                    "nesting, or edges of several kinds or of DDR or the cascade)"
+                    "nesting, or edges of DDR or the cascade)"
                 )
             if "sequential" not in placements:
                 unplaceable.append(
@@ -651,7 +653,15 @@ def fit(
             with set_current_device(device):
                 refused = group_fit_verdict(
                     derivation.ops,
-                    kind=FusionKind(kinds.pop().value) if kinds else None,
+                    kind=(
+                        (
+                            FusionKind.STAGED
+                            if EdgeKind.STAGED in kinds
+                            else FusionKind.STREAM
+                        )
+                        if kinds
+                        else None
+                    ),
                     edges=[
                         (e.producer, e.output, e.consumer, e.input)
                         for e in region.edges

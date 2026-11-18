@@ -70,19 +70,7 @@ def test_window_entry_round_trips_through_the_profile(window, tmp_path):
     )
 
 
-@pytest.mark.parametrize(
-    "window",
-    [
-        # A GEMV's 2-element output objects into a 256-element multiply: the
-        # composer gives a fifo one object size.
-        (
-            pytest.param(w, marks=unbuilt)
-            if w in ("fan_in", "outside_reader_and_final_output")
-            else w
-        )
-        for w in sorted(WINDOWS)
-    ],
-)
+@pytest.mark.parametrize("window", sorted(WINDOWS))
 @pytest.mark.supported_devices("npu2")
 def test_window_is_bit_identical_to_its_steps_run_apart(window):
     """A window's output is bit-identical to the same steps run apart, at its recorded size."""

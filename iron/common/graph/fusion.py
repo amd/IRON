@@ -316,15 +316,16 @@ def composed(
     At every match (``Recording.occurrences``) of a region of steps, the
     first entry naming a step wins. A member's tunables are its step's. A
     region of consecutive steps runs as one stream or staged fusion where
-    its edges are all of that kind, and as a pack where it has none.
+    its edges are all streams, as one staged fusion where any is staged (its
+    stream edges fed as they are), and as a pack where it has none.
 
     Raises:
         NotImplementedError: What the composer does not build yet: a
             profile's schedules, variants, bindings or state layouts, or an
             entry rooted at a configuration or a step, with nested regions,
             inflows, shared workers, chosen phases, a runtime plan, a chosen
-            depth, fission, a self-loop over a carried buffer, edges of
-            several kinds or of DDR or the cascade, matching steps that are not consecutive, steps with no
+            depth, fission, a self-loop over a carried buffer, edges of DDR
+            or the cascade, matching steps that are not consecutive, steps with no
             edge that depend through memory, or an edge the composer does not
             build as its kind (``admits``). An edge out of a buffer steps past
             the region or the host also read keeps its drain to host (a tee,
@@ -356,12 +357,11 @@ def composed(
             or any(e.depth is not None for e in root.edges)
             or any(m.part is not None for m in root.steps())
             or any(e.producer == e.consumer for e in root.edges)
-            or len(kinds) > 1
             or not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED}
         ):
             raise NotImplementedError(
                 f"building {entry} is not built yet: the composer builds a "
-                f"region of steps whose edges are all stream or all staged, "
+                f"region of steps whose edges are stream or staged, "
                 f"with no chosen depth, phase, worker, inflow, runtime plan or "
                 f"self-loop"
             )
@@ -414,7 +414,11 @@ def composed(
                 fused.append(
                     Fusion(
                         (
-                            FusionKind(next(iter(kinds)).value)
+                            (
+                                FusionKind.STAGED
+                                if EdgeKind.STAGED in kinds
+                                else FusionKind.STREAM
+                            )
                             if kinds
                             else FusionKind.PACK
                         ),

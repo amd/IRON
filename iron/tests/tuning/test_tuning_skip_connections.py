@@ -93,7 +93,6 @@ def test_a_residual_skip_is_bit_identical_for_every_way_of_holding_it(held):
     assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu2")
 def test_a_reconvergent_diamond_is_bit_identical():
     """The Q/K/V diamond is bit-identical to the norm, the two projections and the merge run apart."""

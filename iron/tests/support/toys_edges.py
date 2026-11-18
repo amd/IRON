@@ -124,7 +124,11 @@ def fan_in_gate_up_mul(size=256):
     recording = Recording.of_steps("toy_fan_in", steps, ["Wg", "Wu", "x"], ["out"])
     region = Region(
         (member(gate), member(up), member(mul)),
-        (Edge(0, "C", 2, "a"), Edge(1, "C", 2, "b")),
+        # The GEMVs' 2-element output objects restage into the multiply's 256.
+        (
+            Edge(0, "C", 2, "a", kind=EdgeKind.STAGED),
+            Edge(1, "C", 2, "b", kind=EdgeKind.STAGED),
+        ),
     )
     return recording, region
 
@@ -172,7 +176,12 @@ def window_with_outside_reader(size=256):
     recording = Recording.of_steps(
         "toy_outside_reader", steps, ["a", "b", "W"], ["out"]
     )
-    forward_edges = (Edge(0, "y", 1, "x"), Edge(1, "y", 2, "B"), Edge(2, "C", 3, "a"))
+    # The projection's 2-element output objects restage into the add's 256.
+    forward_edges = (
+        Edge(0, "y", 1, "x"),
+        Edge(1, "y", 2, "B"),
+        Edge(2, "C", 3, "a", kind=EdgeKind.STAGED),
+    )
     return (
         recording,
         (member(add), member(norm), member(proj), member(add2)),
@@ -267,8 +276,9 @@ def diamond_qkv_merge(size=256):
         (
             Edge(0, "y", 1, "B"),
             Edge(0, "y", 2, "B"),
-            Edge(1, "C", 3, "a"),
-            Edge(2, "C", 3, "b"),
+            # The projections' 2-element output objects restage into the add's.
+            Edge(1, "C", 3, "a", kind=EdgeKind.STAGED),
+            Edge(2, "C", 3, "b", kind=EdgeKind.STAGED),
         ),
     )
     return recording, region
