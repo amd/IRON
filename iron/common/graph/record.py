@@ -19,7 +19,7 @@ from aie.utils import bfp
 from aie.utils.compile.jit.params import OperatorParam
 
 from ..declare import Operator, Value
-from ..declare.composition import Configuration, Entry, Member, Region
+from ..declare.composition import Entry
 from ..declare.operand import concrete
 from ..declare.operator import graph_recorder
 from ..declare.profile import Profile, Version
@@ -207,36 +207,6 @@ def _take_views(cls, operands, kwargs, values):
     return out
 
 
-def _steps_of(node: Configuration | Region | Member) -> list[Member]:
-    """Return the steps of a composition ``node``, depth-first."""
-    if isinstance(node, Member):
-        return [node]
-    return [m for part in node.parts for m in _steps_of(part)]
-
-
-def _links_of(
-    node: Configuration | Region | Member, first: int
-) -> tuple[list[tuple[int, str, int, str]], list[tuple[str, int, str]]]:
-    """Return every edge and inflow under ``node``, by step index in the whole tree, its first step being ``first``."""
-    edges: list[tuple[int, str, int, str]] = []
-    inflows: list[tuple[str, int, str]] = []
-    if isinstance(node, Member):
-        return edges, inflows
-    if isinstance(node, Region):
-        edges += [
-            (first + e.producer, e.output, first + e.consumer, e.input)
-            for e in node.edges
-        ]
-        inflows += [(i.buffer, first + i.consumer, i.input) for i in node.inflows]
-    at = first
-    for part in node.parts:
-        part_edges, part_inflows = _links_of(part, at)
-        edges += part_edges
-        inflows += part_inflows
-        at += len(_steps_of(part))
-    return edges, inflows
-
-
 def version_key(inputs: Mapping[str, tuple[tuple[int, ...], Any]]) -> Version:
     """Return the key of a graph's version for ``inputs`` (each input's shape and dtype, by name, in the order its body takes them)."""
     return tuple(
@@ -311,8 +281,10 @@ class Recording:
             and self.version not in entry.scope.versions
         ):
             return ()
-        members = _steps_of(entry.root)
-        edges, inflows = _links_of(entry.root, 0)
+        members = entry.root.steps()
+        wired, fed = entry.root.wiring()
+        edges = [(p, e.output, c, e.input) for e, p, c in wired]
+        inflows = [(i.buffer, c, i.input) for i, c in fed]
         names = [
             {b.name: ref.root for ref, b in zip(step.refs(), step.op.buffers)}
             for step in self.steps

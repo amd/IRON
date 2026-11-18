@@ -64,6 +64,16 @@ class Member:
     runs_on: Literal["npu", "host"] = "npu"
     part: tuple[str, int, int] | None = None
 
+    def steps(self) -> tuple[Member, ...]:
+        """Return this step, the one a tree of steps names it as."""
+        return (self,)
+
+    def wiring(
+        self, first: int = 0
+    ) -> tuple[tuple[tuple[Edge, int, int], ...], tuple[tuple[Inflow, int], ...]]:
+        """Return no edges and no inflows: one step wires nothing."""
+        return (), ()
+
 
 @dataclass(frozen=True)
 class RuntimePlan:
@@ -132,6 +142,32 @@ class Region:
     phases: tuple[int, ...] | None = None
     runtime: RuntimePlan | None = None
 
+    def steps(self) -> tuple[Member, ...]:
+        """Return its steps depth-first through nested regions, the order its indices name them in."""
+        return tuple(m for part in self.parts for m in part.steps())
+
+    def wiring(
+        self, first: int = 0
+    ) -> tuple[tuple[tuple[Edge, int, int], ...], tuple[tuple[Inflow, int], ...]]:
+        """Return every edge and inflow under it, each with its steps' indices in the whole tree.
+
+        Args:
+            first: The index of its first step in the whole tree.
+
+        Returns:
+            Each edge with its producer's and consumer's indices, and each
+            inflow with its consumer's.
+        """
+        edges = tuple((e, first + e.producer, first + e.consumer) for e in self.edges)
+        inflows = tuple((i, first + i.consumer) for i in self.inflows)
+        at = first
+        for part in self.parts:
+            part_edges, part_inflows = part.wiring(at)
+            edges += part_edges
+            inflows += part_inflows
+            at += len(part.steps())
+        return edges, inflows
+
 
 @dataclass(frozen=True)
 class Configuration:
@@ -152,6 +188,32 @@ class Configuration:
     columns: int | None = None
     concurrent: int | None = None
     switch: Switch | None = None
+
+    def steps(self) -> tuple[Member, ...]:
+        """Return its steps depth-first through its parts."""
+        return tuple(m for part in self.parts for m in part.steps())
+
+    def wiring(
+        self, first: int = 0
+    ) -> tuple[tuple[tuple[Edge, int, int], ...], tuple[tuple[Inflow, int], ...]]:
+        """Return every edge and inflow in its regions, each with its steps' indices in the whole tree.
+
+        Args:
+            first: The index of its first step in the whole tree.
+
+        Returns:
+            Each edge with its producer's and consumer's indices, and each
+            inflow with its consumer's.
+        """
+        edges: tuple[tuple[Edge, int, int], ...] = ()
+        inflows: tuple[tuple[Inflow, int], ...] = ()
+        at = first
+        for part in self.parts:
+            part_edges, part_inflows = part.wiring(at)
+            edges += part_edges
+            inflows += part_inflows
+            at += len(part.steps())
+        return edges, inflows
 
 
 @dataclass(frozen=True)
