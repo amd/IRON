@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Any
 
@@ -30,6 +30,7 @@ from aie.iron.trace import Access, Scope, record
 from aie.iron.trace import Recording as Recorded
 from aie.utils import set_current_device
 
+from ..declare import Operator
 from ..declare.composition import Entry, Region
 from ..design import BuiltArray, OperatorDesign
 from ..image.step import BufferRef, Edge, HandOff
@@ -233,6 +234,9 @@ class Analysis:
             in a call.
         min_depth: The smallest depth per edge that cannot deadlock.
         why: The deadlock or imbalance, where there is one.
+        flow: The call's actors and channels.
+        channels: Per edge, the channels its depth sizes.
+        fixed: The channels an operator's own build holds at a depth.
     """
 
     tokens: dict[Edge, tuple[tuple[int, ...], tuple[int, ...]]]
@@ -243,6 +247,22 @@ class Analysis:
     repetition: dict[int, int]
     min_depth: dict[Edge, int]
     why: str | None
+    flow: Flow = field(repr=False, compare=False)
+    channels: dict[Edge, list[int]] = field(repr=False, compare=False)
+    fixed: dict[int, int] = field(repr=False, compare=False)
+
+    def deadlock(self, depths: Mapping[Edge, int]) -> str | None:
+        """Return why the region deadlocks with ``depths`` on the edges it names and the minimum on every other, or None where it runs.
+
+        Raises:
+            ValueError: The region cannot run at any depth (``why``).
+        """
+        if self.why is not None:
+            raise ValueError(f"the region cannot run at any depth: {self.why}")
+        held = dict(self.fixed)
+        for edge, es in self.channels.items():
+            held.update((e, depths.get(edge, self.min_depth[edge])) for e in es)
+        return self.flow.minimum_depths(held)[1]
 
     @property
     def knee_depth(self) -> dict[Edge, int]:
@@ -304,21 +324,22 @@ class Derivation:
         self.region = region
         self.device = device
         self.wired, _ = region.wiring()
+        self.ops: list[Operator] = []
         self.recorded: list[tuple[Any, Recorded]] = []
         self.refs: list[dict[str, BufferRef]] = []
-        for s in matches[0]:
+        for s, member in zip(matches[0], region.steps()):
             step = recording.steps[s]
-            if step.op.bound_extents:
+            op = step.op.replace(**(member.tunables or {}))
+            if op.bound_extents:
                 raise NotImplementedError(
-                    f"{type(step.op).__name__} is bounded per call "
-                    f"({', '.join(step.op.bound_extents)}); analysing a call at "
+                    f"{type(op).__name__} is bounded per call "
+                    f"({', '.join(op.bound_extents)}); analysing a call at "
                     f"its own values is not modelled yet"
                 )
-            self.refs.append(
-                {b.name: ref for ref, b in zip(step.refs(), step.op.buffers)}
-            )
+            self.ops.append(op)
+            self.refs.append({b.name: ref for ref, b in zip(step.refs(), op.buffers)})
             with set_current_device(device), record() as recorded:
-                array = BuiltArray(OperatorDesign(step.op))
+                array = BuiltArray(OperatorDesign(op))
                 array.program().resolve_program()
             self.recorded.append((array, recorded))
         self.carried = set(recording.feedback) | {
@@ -736,6 +757,15 @@ class Derivation:
                     f"{edge}: {source.name}'s {source.elements} elements and "
                     f"{sink.name}'s {sink.elements} are not one buffer"
                 )
+            if (
+                sizes[1] is not None
+                and all(f in self.objects for f in ins)
+                and sum(self.objects[f] for f in ins) != sink.elements // sizes[1]
+            ):
+                raise NotImplementedError(
+                    f"{edge}: {sink.name}'s fifos carry another buffer's objects "
+                    f"too (it rides them); an edge into it is not modelled yet"
+                )
             produced, consumed = self._streams(source), self._streams(sink)
             if (
                 len(outs) != len(ins)
@@ -838,6 +868,9 @@ class Derivation:
                 if depths
             },
             why=why or deadlock,
+            flow=flow,
+            channels=edge_channels,
+            fixed=fixed,
         )
 
 

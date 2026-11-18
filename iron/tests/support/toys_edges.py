@@ -281,13 +281,13 @@ def wide_mlp_window(cols=(8, 8, 8, 8)):
 
     At Llama decode's recorded widths this window demands 40 cores, 24
     shim-in and 8 shim-out channels, and fits only at 4 columns; this toy
-    keeps the same shape (gate, up, SiLU, multiply) at those widths, wide
-    enough on a small device that its member counts alone are already past
-    npu2's columns.
+    keeps the same shape (gate, up, SiLU, multiply), the GEMVs at two
+    channels a column, so at eight columns each its members take 48 cores,
+    past npu2's 32.
     """
     gc, uc, sc, mc = cols
-    gate = GEMV(M=2048, K=2048, num_aie_columns=gc, feed_b=True)
-    up = GEMV(M=2048, K=2048, num_aie_columns=uc, feed_b=True)
+    gate = GEMV(M=2048, K=2048, num_aie_columns=gc, num_channels=2)
+    up = GEMV(M=2048, K=2048, num_aie_columns=uc, num_channels=2)
     silu = SiLU(size=2048, num_aie_columns=sc, tile_size=256)
     mul = ElementwiseMul(size=2048, num_aie_columns=mc, tile_size=256)
     steps = sequences.steps(
@@ -311,41 +311,24 @@ def wide_mlp_window(cols=(8, 8, 8, 8)):
 # ---------------------------------------------------------------------------
 
 
-def _row_view(rows: int, row: int) -> TensorAccessPattern:
-    return TensorAccessPattern((rows * row,), 0, [1, 1, 1, row], [0, 0, 0, 1])
-
-
 def kv_write_then_read(position: int, table_rows: int = 8, row: int = 8):
-    """Return a write of row ``position`` into a cache, then a read of rows ``0..position``, sharing that cache buffer.
+    """Return a write of row ``position`` into a cache, then a read of its first ``n`` rows, sharing that cache buffer.
 
-    Both are ``Copy``: the write scatters one row at ``position``'s offset,
-    the read gathers every row up to and including it, bounded per call by
-    ``dst_bound``/``src_bound``.
+    Both are ``Copy``: the write puts one row at ``position``, and the read,
+    bounded per call, gathers the rows written so far (``n`` is
+    ``position + 1`` in a decode).
     """
-    write = Copy(
-        input_buffer_size=row,
-        src=TensorAccessPattern((row,), 0, [1, 1, 1, row], [0, 0, 0, 1]),
-        output_buffer_size=table_rows * row,
-        dst=TensorAccessPattern(
-            (table_rows * row,), position * row, [1, 1, 1, row], [0, 0, 0, 1]
-        ),
-        dtype=np.int32,
+    cache = iron.state((table_rows, row), np.int32, name="cache")
+
+    class _KV(iron.Graph):
+        def body(self, new_row, *, n: Scratchpad[np.int32]):
+            Copy.step(new_row, cache[position : position + 1], dtype=np.int32)
+            return Copy.step(cache[:n], dtype=np.int32)
+
+    recording = dataclasses.replace(
+        _KV().record(new_row=((1, row), np.int32)), name="toy_kv_write_read"
     )
-    read = Copy(
-        input_buffer_size=table_rows * row,
-        src=_row_view(table_rows, row),
-        src_bound=(position + 1) * row,
-        output_buffer_size=table_rows * row,
-        dst=_row_view(table_rows, row),
-        dst_bound=(position + 1) * row,
-        dtype=np.int32,
-    )
-    steps = sequences.steps((write, "new_row", "cache"), (read, "cache", "out"))
-    recording = Recording.of_steps(
-        "toy_kv_write_read", steps, ["new_row", "cache"], ["out"]
-    )
-    members = (member(write), member(read))
-    return recording, members
+    return recording, tuple(member(s.op) for s in recording.steps)
 
 
 def interleaved_kv_write(position: int, table_rows: int = 8, row: int = 8):
@@ -389,17 +372,22 @@ def scan_state_cycle(heads=2, head_dim=16, state_size=16):
     derives.
     """
     scan = SelectiveScan(rows=4, heads=heads, head_dim=head_dim, state_size=state_size)
-    size = heads * head_dim
+    size = scan.rows * heads * head_dim
     mul = ElementwiseMul(size=size, num_aie_columns=1, tile_size=size)
     steps = sequences.steps(
-        (scan, "xbc", "head", "dt", "state", "y", "final"), (mul, "y", "up", "out")
+        (scan, "xbc", "head", "dt", "state", "y", "state"), (mul, "y", "up", "out")
     )
     recording = Recording.of_steps(
-        "toy_scan_cycle", steps, ["xbc", "head", "dt", "state", "up"], ["final", "out"]
+        "toy_scan_cycle",
+        steps,
+        ["xbc", "head", "dt", "up"],
+        ["state", "out"],
+        feedback=["state"],
     )
     members = (member(scan), member(mul))
     cycle = Edge(0, "final", 0, "state")
-    forward = (Edge(0, "y", 1, "a"),)
+    # The scan's lanes join into the multiply's one, through a memtile.
+    forward = (Edge(0, "y", 1, "a", kind=EdgeKind.STAGED),)
     return recording, members, forward, cycle
 
 

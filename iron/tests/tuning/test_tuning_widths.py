@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import pytest
 from aie.dialects.aie import get_target_model
 
 from iron.common.declare.composition import Edge as CompositionEdge
@@ -14,6 +15,7 @@ from iron.common.image.step import EdgeKind
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
+from iron.tests.support import toys_dataflow as toys
 from iron.tests.support import toys_schedule
 from iron.tests.support.fusable import gemv_silu_mul_recording
 from iron.tests.support.tools import DEVICES
@@ -28,7 +30,7 @@ _ARRAY_COLUMNS = get_target_model(DEVICE.resolve()).columns()
 _SIZE = 2048  # divides evenly into 64-element tiles at 1, 2, 4 or 8 columns
 
 
-def _window(columns, channels=1):
+def _window(columns, channels=1, kind=EdgeKind.STREAM):
     gemv = GEMV(
         M=_SIZE,
         K=_SIZE,
@@ -45,8 +47,8 @@ def _window(columns, channels=1):
         Member(type(mul), {"size": mul.size}, {"num_aie_columns": columns}),
     )
     edges = (
-        CompositionEdge(0, "C", 1, "x", kind=EdgeKind.STREAM),
-        CompositionEdge(1, "y", 2, "a", kind=EdgeKind.STREAM),
+        CompositionEdge(0, "C", 1, "x", kind=kind),
+        CompositionEdge(1, "y", 2, "a", kind=kind),
     )
     region = Region(parts=members, edges=edges)
     recording = gemv_silu_mul_recording(
@@ -95,14 +97,15 @@ def test_tuner_keeps_widths_that_pay_and_bounds_builds():
     assert len(PLACEMENTS) > 1
 
 
-@unbuilt
 def test_a_width_over_the_arrays_columns_is_refused_by_counts():
-    """A window whose three members each want the array's full width is refused by counts, before any build.
+    """A GEMM at the array's full width, four cores a column, with a norm beside it, is refused by counts, before any build.
 
-    Each member alone is a legal design; the array has no cores left once the
-    first claims every column, so the window as a whole does not fit.
+    Each member alone is a legal design; the GEMM claims every core, so the
+    window as a whole does not fit.
     """
-    region, recording = _window(columns=_ARRAY_COLUMNS)
+    gemm, norm = toys.gemm_rowwise(M=256, N=512, cols=_ARRAY_COLUMNS)
+    region = toys.gemm_rowwise_region(gemm, norm)
+    recording = toys.gemm_rowwise_recording("full_width", gemm, norm)
     profile = Profile()
     profile.add_entry(Entry(root=region))
     result = fit(profile, [Timed(recording)], DEVICE)
@@ -114,7 +117,7 @@ def test_a_width_over_the_arrays_columns_is_refused_by_counts():
 @unbuilt
 def test_a_width_over_a_streams_budget_is_refused_by_counts():
     """C's narrow window (4 cores, 4 streams) wanting more DDR streams than npu2's shim channels have is refused by counts."""
-    region, recording = _window(columns=4, channels=4)
+    region, recording = _window(columns=4, channels=4, kind=EdgeKind.STAGED)
     profile = Profile()
     profile.add_entry(Entry(root=region))
     result = fit(profile, [Timed(recording)], DEVICE)
@@ -139,7 +142,10 @@ def test_a_by_shape_entry_claiming_fewer_runs_than_iron_applies_is_refused():
     assert "every run" in (result.why or "") or "shape" in (result.why or "")
 
 
-@unbuilt
+@pytest.mark.skip(
+    reason="no witness toy yet: each window the placer refuses so far, the counts "
+    "refuse first"
+)
 def test_counts_the_fit_accepts_but_the_placer_refuses_need_a_witness():
     """Counts that fit the array but the placer refuses need a witness placement before they count.
 

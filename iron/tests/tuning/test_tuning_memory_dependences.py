@@ -6,9 +6,7 @@
 A KV-style write (a ``Copy`` at a per-call position) and a read of the cache
 share one buffer in the recording; the dataflow analysis is what derives
 their order (no ``Region`` field names it). Every check calls the
-composition contract before any compile, build or device use; ``candidates``,
-``fit``, ``check`` and ``search`` all raise ``NotImplementedError`` (not built
-yet), so every test is ``@unbuilt``.
+composition contract before any compile, build or device use; a test is ``@unbuilt`` while what it calls raises ``NotImplementedError`` (not built yet).
 """
 
 from __future__ import annotations

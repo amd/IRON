@@ -355,7 +355,7 @@ def test_members_running_at_once_sharing_written_data_is_refused():
         Member(type(gemv), {"M": gemv.M, "K": gemv.K}),
         Member(type(silu), {"size": silu.size}),
     )
-    # A stream edge between concurrent members: they are not independent, so
+    # An edge between concurrent members: they are not independent, so
     # running them "at once" with no edge (PACK's rule) is a hazard.
     configuration = Configuration(parts=members, concurrent=1)
     recording = gemv_silu_mul_recording("config_shared_concurrent", gemv, silu, mul)
@@ -365,7 +365,7 @@ def test_members_running_at_once_sharing_written_data_is_refused():
         Entry(
             root=Region(
                 parts=members,
-                edges=(CompositionEdge(0, "C", 1, "x", kind=EdgeKind.STREAM),),
+                edges=(CompositionEdge(0, "C", 1, "x", kind=EdgeKind.STAGED),),
             )
         )
     )

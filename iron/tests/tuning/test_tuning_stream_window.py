@@ -5,8 +5,7 @@
 
 Every check calls the composition contract (``candidates``, ``fit``, ``check``,
 ``search``) before any compile, build or device use, so nothing here touches
-the NPU; the contract's entry points raise ``NotImplementedError`` (not
-built yet), so every test is ``@unbuilt``.
+the NPU; a test is ``@unbuilt`` while what it calls raises ``NotImplementedError`` (not built yet).
 """
 
 from __future__ import annotations
@@ -116,7 +115,6 @@ def test_tuner_proposes_and_keeps_a_window_on_its_own_toy(window):
     assert any(isinstance(e.root, Region) and e.root.edges for e in found.entries())
 
 
-@unbuilt
 def test_a_window_over_the_arrays_cores_is_refused_before_any_build():
     """A window demanding more cores than the array holds is refused by ``fit``, counts before the placer.
 
@@ -137,7 +135,6 @@ def test_a_window_over_the_arrays_cores_is_refused_before_any_build():
 @unbuilt
 def test_a_window_over_the_shim_channels_is_refused_before_any_build():
     """A window whose members fit the array's cores but outrun its shim channels is refused before any build."""
-    recording, region = wide_mlp_window(cols=(1, 1, 1, 1))
     wide_recording, wide_region = fan_out_norm_qkv(columns=(8, 8, 8))
     profile = Profile()
     profile.add_entry(Entry(wide_region))

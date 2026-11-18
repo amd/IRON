@@ -30,7 +30,7 @@ def test_a_deep_buffer_within_the_memtile_budget_is_counted_and_fits():
             Member(cls=GEMV, dims={"M": gemv.M, "K": gemv.K}),
             Member(cls=ElementwiseAdd, dims={"size": add.size}),
         ),
-        edges=(Edge(0, "C", 1, "a", kind=EdgeKind.STAGED, depth=4),),
+        edges=(Edge(0, "C", 1, "b", kind=EdgeKind.STAGED, depth=4),),
     )
     profile = Profile()
     profile.add_entry(Entry(root=region))
@@ -58,7 +58,6 @@ def test_a_strided_token_pattern_counts_its_buffer_descriptors():
     assert result.ok
 
 
-@unbuilt
 def test_more_buffer_descriptors_than_a_tile_holds_is_refused_before_any_build():
     """A buffer descriptor count past the target model's per-tile limit.
 
@@ -72,7 +71,7 @@ def test_more_buffer_descriptors_than_a_tile_holds_is_refused_before_any_build()
             Member(cls=GEMV, dims={"M": gemv.M, "K": gemv.K}),
             Member(cls=ElementwiseAdd, dims={"size": add.size}),
         ),
-        edges=(Edge(0, "C", 1, "a", kind=EdgeKind.STAGED, depth=1 << 16),),
+        edges=(Edge(0, "C", 1, "b", kind=EdgeKind.STAGED, depth=1 << 16),),
     )
     profile = Profile()
     profile.add_entry(Entry(root=region))
@@ -97,7 +96,7 @@ def test_resource_limits_come_from_the_target_model_not_a_constant():
             Member(cls=GEMV, dims={"M": gemv.M, "K": gemv.K}),
             Member(cls=ElementwiseAdd, dims={"size": add.size}),
         ),
-        edges=(Edge(0, "C", 1, "a", kind=EdgeKind.STAGED, depth=4),),
+        edges=(Edge(0, "C", 1, "b", kind=EdgeKind.STAGED, depth=4),),
     )
     profile = Profile()
     profile.add_entry(Entry(root=region))

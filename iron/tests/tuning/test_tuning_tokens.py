@@ -3,16 +3,20 @@
 
 """Each edge end's token size and element order, row vs column tiles."""
 
+import dataclasses
+
 import pytest
 
 from iron import Precision
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Member, Region
+from iron.common.graph.record import Recording
 from iron.common.graph.sdf import analyze
 from iron.common.image.step import Edge, EdgeKind, HandOff
 from iron.operators.gemm import GEMM
 from iron.operators.rms_norm import RMSNorm
 from iron.tests.support import toys_dataflow as toys
+from iron.tests.support import toys_edges
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import fit
@@ -56,38 +60,45 @@ def test_row_tiles_into_a_rowwise_consumer_fit_as_is():
     assert analysis.hand_off[region.edges[0]] == HandOff.EQUAL
 
 
+def _tiles_into_rows(kind: EdgeKind) -> tuple[Recording, Region]:
+    recording, region = toys_edges.layout_transpose()
+    (edge,) = region.edges
+    return recording, dataclasses.replace(
+        region, edges=(dataclasses.replace(edge, kind=kind),)
+    )
+
+
 @unbuilt
 def test_column_tiles_into_a_rowwise_consumer_are_restaged_by_layout():
-    """``GEMM``'s column-major ``C`` feeding ``RMSNorm``, which reads rows, over a staged edge.
+    """``GEMM``'s 32x32 ``C`` tiles feeding ``RMSNorm``, which reads whole rows, over a staged edge.
 
-    The mismatched order is restaged through the memtile the staged edge
-    allows, the analysis deriving ``HandOff.LAYOUT``, and it fits.
+    A tile narrower than a row is restaged through the memtile the staged
+    edge allows, the analysis deriving ``HandOff.LAYOUT``, and it fits.
     """
-    region, gemm, norm = _gemm_into_rows(b_col_maj=True, kind=EdgeKind.STAGED)
-    profile = Profile()
-    profile.add_entry(Entry(root=region))
-    recording = toys.gemm_rowwise_recording("cols", gemm, norm)
-    result = fit(profile, [Timed(recording)], toys.NPU2)
-    assert result.ok
+    recording, region = _tiles_into_rows(EdgeKind.STAGED)
     analysis = analyze(region, recording, toys.NPU2)
     assert analysis.hand_off[region.edges[0]] == HandOff.LAYOUT
-
-
-@unbuilt
-def test_column_tiles_with_no_restage_are_refused():
-    """The same column-major ``C`` into ``RMSNorm``, over a plain stream edge.
-
-    A stream edge's lanes meet directly, core to core, with no memtile
-    to restage through: refused by ``fit`` at stage ``"counts"``, before
-    any build, not silently transposed.
-    """
-    region, gemm, norm = _gemm_into_rows(b_col_maj=True, kind=EdgeKind.STREAM)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    recording = toys.gemm_rowwise_recording("cols-refused", gemm, norm)
+    result = fit(profile, [Timed(recording)], toys.NPU2)
+    assert result.ok, result.why
+
+
+def test_column_tiles_with_no_restage_are_refused():
+    """The same tiles into ``RMSNorm``, over a plain stream edge.
+
+    A stream edge's lanes meet as they are, core to core, with no memtile
+    to restage through: the analysis derives the layout hand-off, so
+    ``fit`` refuses it at stage ``"analysis"``, before any build, not
+    silently transposed.
+    """
+    recording, region = _tiles_into_rows(EdgeKind.STREAM)
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
     result = fit(profile, [Timed(recording)], toys.NPU2)
     assert not result.ok
-    assert result.stage == "counts"
+    assert result.stage == "analysis"
+    assert "layout" in (result.why or "")
 
 
 @unbuilt

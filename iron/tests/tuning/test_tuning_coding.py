@@ -49,13 +49,13 @@ def _coded_region(M: int, K: int, rows: int, num_aie_columns: int) -> Region:
         parts=(
             Member(
                 cls=Decode,
-                dims=dict(M=M, K=K, rows=rows, num_aie_columns=num_aie_columns),
+                dims=dict(M=M, K=K),
+                tunables=dict(rows=rows, num_aie_columns=num_aie_columns),
             ),
             Member(
                 cls=GEMV,
-                dims=dict(
-                    M=M,
-                    K=K,
+                dims=dict(M=M, K=K),
+                tunables=dict(
                     num_aie_columns=num_aie_columns,
                     tile_size_input=1,
                     tile_size_output=M // num_aie_columns,
@@ -226,12 +226,9 @@ def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed()
             _coded_region(M=2048, K=8192, rows=1, num_aie_columns=8),
             Member(
                 cls=GEMV,
-                dims=dict(
-                    M=2048,
-                    K=8192,
-                    num_aie_columns=8,
-                    tile_size_input=1,
-                    tile_size_output=256,
+                dims=dict(M=2048, K=8192),
+                tunables=dict(
+                    num_aie_columns=8, tile_size_input=1, tile_size_output=256
                 ),
             ),
         )

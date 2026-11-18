@@ -7,19 +7,19 @@ Every ``HandOff`` value, both directions where a direction is meaningful, over
 the stream window's chains. A toy realizes its named shape with real lane
 counts; the dataflow analysis is what derives that the hand-off is this
 shape (``Analysis.hand_off``), never the toy. Every check calls the
-composition contract before any compile, build or device use; ``candidates``,
-``fit``, ``check`` and ``search`` all raise ``NotImplementedError`` (not
-built yet), so every test is ``@unbuilt``.
+composition contract before any compile, build or device use; a test is ``@unbuilt`` while what it calls raises ``NotImplementedError`` (not built yet).
 """
 
 from __future__ import annotations
+
+import dataclasses
 
 import pytest
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement, Region
 from iron.common.graph.sdf import analyze
-from iron.common.image.step import HandOff
+from iron.common.image.step import EdgeKind, HandOff
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     broadcast_weight_to_columns,
@@ -138,10 +138,14 @@ def test_tuner_keeps_the_shape_that_pays_against_narrowing_to_equal_lanes():
     assert any(isinstance(e.root, Region) and e.root.edges for e in found.entries())
 
 
-@unbuilt
 def test_a_restage_over_a_memtiles_memory_is_refused_before_any_build():
-    """A restage whose joined lanes overrun a memtile's memory is refused before any build."""
-    recording, region = join_8_into_4(size=1 << 18)
+    """A join restaged through a memtile and held deeper than the memtile's memory is refused before any build."""
+    recording, region = join_8_into_4()
+    (edge,) = region.edges
+    region = dataclasses.replace(
+        region,
+        edges=(dataclasses.replace(edge, kind=EdgeKind.STAGED, depth=1 << 10),),
+    )
     profile = Profile()
     profile.add_entry(Entry(region))
     result = fit(profile, [Timed(recording)], DEVICE)

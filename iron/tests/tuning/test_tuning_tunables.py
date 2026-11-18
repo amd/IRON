@@ -135,7 +135,6 @@ def test_search_keeps_the_fastest_setting_it_measured_on_the_one_operator_toy():
     assert measure(tuned, start, calls, NPU2_DEVICE).ratio < 1.05
 
 
-@unbuilt
 def test_a_setting_the_array_cannot_hold_is_refused_before_any_build():
     """A setting the array can't hold (more columns than the device) is refused by ``fit`` before any build."""
     op = GEMV(M=128, K=128).resolved(NPU2_DEVICE)

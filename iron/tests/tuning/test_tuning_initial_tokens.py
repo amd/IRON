@@ -91,7 +91,6 @@ def test_feedback_cycle_analysis_reports_its_carried_objects():
     assert analysis.why is None
 
 
-@unbuilt
 def test_a_cycle_without_enough_initial_values_is_refused_before_any_build():
     """The same cycle with ``acc`` not carried across calls.
 

@@ -8,6 +8,7 @@ import pytest
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement
 from iron.common.graph.sdf import analyze
+from iron.common.image.step import HandOff
 from iron.tests.support import toys_dataflow as toys
 from iron.tests.support import toys_edges
 from iron.tests.support.tuning import unbuilt
@@ -17,17 +18,34 @@ from iron.tune.search import check, fit, measure, search
 pytestmark = pytest.mark.usefixtures("npu2")
 
 
+def _held_where_it_can_be(role, shape, depth, rate):
+    """Return the combination toy, its distinguished edge held in L1 where its derived hand-off streams as is, else in a memtile, and the edge's minimum depth.
+
+    A stream edge's lanes meet as they are, so only an equal or broadcast
+    hand-off can be held in L1; the analysis, not the toy's name, says which.
+    """
+    _, recording, region, index = toys_edges.combination_toy(
+        shape, role, "l1", depth, rate, "recorded"
+    )
+    analysis = analyze(region, recording, toys.NPU2)
+    if analysis.hand_off[region.edges[index]] not in (
+        HandOff.EQUAL,
+        HandOff.BROADCAST,
+    ):
+        _, recording, region, index = toys_edges.combination_toy(
+            shape, role, "memtile", depth, rate, "recorded"
+        )
+        analysis = analyze(region, recording, toys.NPU2)
+    return recording, region, index, analysis.min_depth[region.edges[index]]
+
+
 @unbuilt
 @pytest.mark.parametrize("rate", toys_edges.RATES)
 @pytest.mark.parametrize("shape", toys_edges.SHAPES)
 @pytest.mark.parametrize("role", toys_edges.ROLES)
 def test_minimum_depth_runs_bit_identical(role, shape, rate):
     """Every role, shape and rate, at its distinguished edge's minimum depth: ``check`` holds it bit-identical to the steps run apart."""
-    _, recording, region, index = toys_edges.combination_toy(
-        shape, role, "l1", "min", rate, "recorded"
-    )
-    analysis = analyze(region, recording, toys.NPU2)
-    minimum = analysis.min_depth[region.edges[index]]
+    recording, region, index, minimum = _held_where_it_can_be(role, shape, "min", rate)
     region = toys_edges.with_resolved_depth(region, index, minimum)
     profile = Profile()
     profile.add_entry(Entry(root=region))
@@ -35,26 +53,33 @@ def test_minimum_depth_runs_bit_identical(role, shape, rate):
     assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.parametrize("rate", toys_edges.RATES)
 @pytest.mark.parametrize("shape", toys_edges.SHAPES)
 @pytest.mark.parametrize("role", toys_edges.ROLES)
 def test_depth_below_minimum_is_refused_before_any_build(role, shape, rate):
-    """Every role, shape and rate, one short of the minimum: ``fit`` refuses it at stage ``"analysis"``, before any build."""
-    _, recording, region, index = toys_edges.combination_toy(
-        shape, role, "l1", "min_minus_one", rate, "recorded"
+    """Every role, shape and rate, one short of the minimum: ``fit`` refuses it at stage ``"analysis"``, before any build, and at the minimum it does not."""
+    recording, region, index, minimum = _held_where_it_can_be(
+        role, shape, "min_minus_one", rate
     )
-    analysis = analyze(region, recording, toys.NPU2)
-    minimum = analysis.min_depth[region.edges[index]]
-    region = toys_edges.with_resolved_depth(region, index, minimum - 1)
+    at_minimum = Profile()
+    at_minimum.add_entry(
+        Entry(root=toys_edges.with_resolved_depth(region, index, minimum))
+    )
+    try:
+        result = fit(at_minimum, [Timed(recording)], toys.NPU2)
+        assert result.ok, result.why
+    except NotImplementedError:
+        pass  # Not built yet, which is no refusal.
     profile = Profile()
-    profile.add_entry(Entry(root=region))
+    profile.add_entry(
+        Entry(root=toys_edges.with_resolved_depth(region, index, minimum - 1))
+    )
     result = fit(profile, [Timed(recording)], toys.NPU2)
     assert not result.ok
     assert result.stage == "analysis"
+    assert "deadlock" in (result.why or "")
 
 
-@unbuilt
 @pytest.mark.parametrize("role", toys_edges.ROLES)
 def test_depth_over_l1_or_memtile_is_refused(role):
     """Every role, at an implausibly deep hold: ``fit`` refuses it at stage ``"counts"``, before any build."""
@@ -89,7 +114,6 @@ def test_skip_diamond_minimum_depth_runs_bit_identical():
     assert result.ok, result.why
 
 
-@unbuilt
 def test_skip_diamond_depth_two_is_refused_before_any_build():
     """The same window two objects deep (the depth that hangs): ``fit`` refuses it at stage ``"analysis"``, before any build."""
     region, first, norm, second = toys.broadcast_skip(depth=2)

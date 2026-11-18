@@ -4,9 +4,7 @@
 """Skip connections and reconvergent paths (diamonds).
 
 Every check calls the composition contract before any compile, build or
-device use, so nothing here touches the NPU; ``candidates``, ``fit``,
-``check`` and ``search`` all raise ``NotImplementedError`` (not built yet),
-so every test is ``@unbuilt``.
+device use, so nothing here touches the NPU; a test is ``@unbuilt`` while what it calls raises ``NotImplementedError`` (not built yet).
 """
 
 from __future__ import annotations

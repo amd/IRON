@@ -9,8 +9,7 @@ A cycle's initial tokens are the recording's and the operators' own, which
 the dataflow analysis derives; the edge that carries a cycle names only the
 self-loop (its ``producer`` and ``consumer`` the same part). Every check
 calls the composition contract before any compile, build or device use;
-``candidates``, ``fit``, ``check`` and ``search`` all raise
-``NotImplementedError`` (not built yet), so every test is ``@unbuilt``.
+a test is ``@unbuilt`` while what it calls raises ``NotImplementedError`` (not built yet).
 """
 
 from __future__ import annotations
@@ -118,7 +117,6 @@ def test_tuner_keeps_the_cycle_where_it_pays():
     )
 
 
-@unbuilt
 def test_a_cycle_without_enough_initial_values_is_refused_before_any_build():
     """A cycle whose recording carries no initial value for the accumulator is refused before any build: the deadlock the analysis catches."""
     recording, region = _running_accumulator(carried=False)

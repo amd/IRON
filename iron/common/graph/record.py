@@ -273,15 +273,23 @@ class Recording:
         its shape it names.
 
         Raises:
-            ValueError: An edge or an inflow names an operand its step's
-                class does not have.
+            ValueError: A step's dims name one of its class's tunables, or
+                an edge or an inflow names an operand its step's class does
+                not have.
         """
+        members = entry.root.steps()
+        for m in members:
+            named = sorted(m.dims.keys() & set(m.cls.declaration.tunables))
+            if named:
+                raise ValueError(
+                    f"{m.cls.__name__}'s dims name its tunables {named}; an "
+                    f"entry sets those in tunables"
+                )
         if (
             entry.scope.versions is not None
             and self.version not in entry.scope.versions
         ):
             return ()
-        members = entry.root.steps()
         wired, fed = entry.root.wiring()
         edges = [(p, e.output, c, e.input) for e, p, c in wired]
         inflows = [(i.buffer, c, i.input) for i, c in fed]
