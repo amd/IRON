@@ -346,6 +346,8 @@ def composed(
     readers, _ = recording.users()
     for entry in profile.entries():
         root = entry.root
+        if isinstance(root, Region) and root.workers:
+            continue  # a fold (fold.composed_folds), applied before these
         kinds = {e.kind for e in root.edges} if isinstance(root, Region) else set()
         if (
             not isinstance(root, Region)

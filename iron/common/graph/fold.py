@@ -15,6 +15,7 @@ import dataclasses
 from collections import Counter
 from collections.abc import Sequence
 
+from ..declare.composition import Member, Region
 from ..declare.operator import Operator, Unresolvable
 from ..declare.profile import Profile
 from ..image.step import Edge, Fusion, FusionKind
@@ -155,6 +156,75 @@ def chosen_folds(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
     other fusion kinds (``fusion.fusions``).
     """
     return named(recording, profile, fold_candidates(recording))
+
+
+def composed_folds(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
+    """Return the folds ``profile``'s composition entries with shared workers name in ``recording``.
+
+    A region whose one worker holds all its steps in order, its edges a chain
+    from each step's output into the next's input, runs as the fold IRON
+    admits for those steps (``fold_candidates``), at every match
+    (``Recording.occurrences``); the first entry naming a step wins.
+
+    Raises:
+        ValueError: IRON folds the steps, but the fold does not resolve here
+            (it does not fit a core, say): the operator's own reason.
+        NotImplementedError: A region with shared workers that is not such a
+            chain, or whose steps IRON does not fold (``Operator.fold``
+            refuses), sets tunables, or has inflows, phases, a runtime plan,
+            chosen depths, nesting or fission.
+    """
+    admitted = {(f.steps, f.edges): f for f in fold_candidates(recording)}
+    found: list[Fusion] = []
+    taken: set[int] = set()
+    for entry in profile.entries():
+        root = entry.root
+        if not isinstance(root, Region) or not root.workers:
+            continue
+        n = len(root.parts)
+        chain = tuple((i, i + 1) for i in range(n - 1))
+        if (
+            root.workers != (tuple(range(n)),)
+            or tuple((e.producer, e.consumer) for e in root.edges) != chain
+            or not all(isinstance(part, Member) for part in root.parts)
+            or any(m.tunables or m.part is not None for m in root.parts)
+            or root.inflows
+            or root.phases is not None
+            or root.runtime is not None
+            or any(e.depth is not None for e in root.edges)
+        ):
+            raise NotImplementedError(
+                f"building {entry} is not built yet: shared workers build as a "
+                f"fold, one worker holding a chain of steps, each into the next"
+            )
+        for match in recording.occurrences(entry):
+            if taken & set(match):
+                continue
+            edges = tuple(
+                Edge(match[e.producer], e.output, match[e.consumer], e.input)
+                for e in root.edges
+            )
+            fold = admitted.get((match, edges))
+            if fold is None:
+                current = recording.steps[match[0]].op
+                for edge in edges:
+                    consumer = recording.steps[edge.consumer].op
+                    at = next(
+                        k for k, b in enumerate(consumer.inputs) if b.name == edge.input
+                    )
+                    fused = current.fold(consumer, at)
+                    if fused is None:
+                        break
+                    # Where the fold is IRON's but does not resolve, its reason.
+                    fused.resolved(fused.dev)
+                    current = fused
+                raise NotImplementedError(
+                    f"one worker for steps {match} is not built yet: IRON does not "
+                    f"fold them (Operator.fold)"
+                )
+            found.append(fold)
+            taken.update(match)
+    return tuple(found)
 
 
 def apply_folds(recording: Recording, folds: Sequence[Fusion]) -> Recording:

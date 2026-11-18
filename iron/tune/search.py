@@ -30,6 +30,7 @@ from aie.utils import set_current_device
 
 from ..common.declare import Profile
 from ..common.declare.composition import Entry, Member, Refinement, Region
+from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
 from ..common.graph.fusion import composed
 from ..common.graph.sdf import Derivation
 from ..common.image.step import Edge, EdgeKind, FusionKind, HandOff
@@ -38,6 +39,8 @@ from .fusions import (
     Applied,
     Compared,
     NotBitIdentical,
+    _gather_table_rows,
+    _random_tensor,
     compare_graphs,
     group_fit_verdict,
 )
@@ -97,7 +100,7 @@ _NOT_GENERATED = (
     "chosen depths",
     "DDR and cascade edges",
     "inflows",
-    "shared workers",
+    "shared workers past IRON's folds",
     "chosen phases",
     "runtime plans",
     "nested regions",
@@ -183,7 +186,8 @@ def candidates(
     edit composes with an edit of the same steps' tunables. Each region
     follows at every other column count its members' domains share, every
     member at it, whatever its call gave (a region's widths override those, as a
-    fusion's tunables do). Then each shape's tunables: a one-member region per setting
+    fusion's tunables do). Then each fold IRON admits (``fold_candidates``),
+    its steps on one worker. Then each shape's tunables: a one-member region per setting
     ``autotune.settings`` resolves (the recorded one first), touching every
     step of that shape. Each entry is yielded once, from the first call that
     admits it.
@@ -318,6 +322,23 @@ def candidates(
                     if widened not in proposed:
                         proposed.append(widened)
                         yield AddEntry(widened, touches)
+        with set_current_device(device):
+            folds = fold_candidates(recording)
+        for fold in folds:
+            lo = fold.steps[0]
+            entry = Entry(
+                Region(
+                    tuple(members[s] for s in fold.steps),
+                    tuple(
+                        Edge(e.producer - lo, e.output, e.consumer - lo, e.input)
+                        for e in fold.edges
+                    ),
+                    workers=(tuple(range(len(fold.steps))),),
+                )
+            )
+            if entry not in proposed:
+                proposed.append(entry)
+                yield AddEntry(entry, frozenset(fold.steps))
         shapes: dict[int, list[int]] = {}
         for i, m in enumerate(members):
             first = next(k for k in range(i + 1) if members[k] == m)
@@ -349,8 +370,10 @@ def fit(
     Each call's steps are first tuned as the profile's tunable entries name;
     a setting its operator cannot resolve or validate is refused by the
     counts, as is a region member's, and one that resolves is placed alone.
-    Each region entry, at its first match in each call's recording, then
-    passes three stages in turn. The counts are
+    A region whose steps share one worker is IRON's fold of them
+    (``composed_folds``), placed as the one operator it folds into. Each other
+    region entry, at its first match in each call's recording, then passes
+    three stages in turn. The counts are
     lower bounds from the target model, so they never refuse what fits: the
     cores its steps record (steps sharing a worker counted once, at the most
     any of them takes), and each edge held at a chosen depth against one
@@ -498,6 +521,29 @@ def fit(
                     "IRON applies an entry to every run"
                 )
                 continue
+            if region.workers:
+                alone = Profile()
+                alone.add_entry(entry)
+                try:
+                    with set_current_device(device):
+                        fold, *_ = composed_folds(recording, alone)
+                except NotImplementedError:
+                    # Not a fold: counted and analysed below, its placing waits.
+                    fold = None
+                except ValueError as e:  # IRON's fold, unresolvable here
+                    return Fit(False, "counts", f"the fold of its steps: {e}")
+                if fold is not None:
+                    folded = apply_folds(recording, [fold]).steps[fold.steps[0]].op
+                    with set_current_device(device):
+                        refused = refusal(folded)
+                    if refused is not None and set(placements) != {"sequential"}:
+                        waiting.append(
+                            f"the sequential placer refuses the fold ({refused}); "
+                            f"trying the others is not built yet"
+                        )
+                    elif refused is not None:
+                        return Fit(False, "placer", refused)
+                    continue
             for s, m in zip(found[0], region.steps()):
                 if not m.tunables:
                     continue
@@ -699,7 +745,8 @@ def check(
     same seeded inputs and states at its values and at each of its bounds
     halved; every output within its bound, carried buffer and state must be
     bit-identical (``compare_graphs``, every point marked known so nothing
-    is timed).
+    is timed). Calls that hold state run in order instead, each side's
+    states carried into its next call (``_in_order``).
 
     Args:
         profile: The profile checked.
@@ -714,9 +761,8 @@ def check(
         ValueError: ``profile`` does not fit, an entry matches none of the
             calls (``fit``), or a call leaves the host nothing to compare.
         NotImplementedError: What is not checked yet: a no-worse rule (against
-            the operators' references), state carried from one call into the
-            next, and what ``fit`` or the composer (``composed``) does not
-            take yet.
+            the operators' references), and what ``fit`` or the composer
+            (``composed``) does not take yet.
     """
     if refinement is not Refinement.EXACT:
         raise NotImplementedError(
@@ -733,14 +779,12 @@ def check(
                 f"{recording.name} leaves the host no output, carried buffer or "
                 f"state to compare"
             )
-    if len(calls) > 1 and any(c.recording.states for c in calls):
-        raise NotImplementedError(
-            "carrying state from one call into the next is not built yet: each "
-            "call is checked on states of its own"
-        )
     olds = {
         c.recording.version: c for c in (calls if base_calls is None else base_calls)
     }
+    if len(calls) > 1 and any(c.recording.states for c in calls):
+        why = _in_order(profile, base, calls, olds, device)
+        return Check(why is None, refinement, why)
     for call in calls:
         old = olds[call.recording.version]
         with set_current_device(device):
@@ -761,6 +805,89 @@ def check(
             except NotBitIdentical as e:
                 return Check(False, refinement, str(e))
     return Check(True, refinement)
+
+
+def _in_order(
+    profile: Profile,
+    base: Profile,
+    calls: Sequence[Timed],
+    olds: dict,
+    device: Device,
+) -> str | None:
+    """Run ``calls`` in order built under ``profile`` and under ``base``, each side's states carried into its next call; return the first difference, or None.
+
+    Each version is built once each way, so a repeated call keeps what it
+    carries. The calls start from one set of seeded states, shared by name
+    across versions, and each takes seeded inputs at its own values; after
+    each, every output within its bound, carried buffer and state must be
+    bit-identical.
+    """
+    rng = np.random.default_rng(0)
+    seeded: dict[str, np.ndarray] = {}
+    for call in calls:
+        for _, h in call.recording.states.values():
+            seeded.setdefault(h.name, _random_tensor(h, rng))
+    sides = [dict(seeded), dict(seeded)]
+    built: dict = {}
+    try:
+        for k, call in enumerate(calls):
+            recording = call.recording
+            version = recording.version
+            if version not in built:
+                with set_current_device(device):
+                    built[version] = (
+                        Applied.of(olds[version], base, device).built(device),
+                        Applied.of(call, profile, device).built(device),
+                    )
+            graphs = built[version]
+            rows = _gather_table_rows(recording)
+            inputs = [
+                (
+                    rng.integers(0, rows[h.name], h.shape).astype(h.dtype)
+                    if h.name in rows
+                    else _random_tensor(h, rng)
+                )
+                for h in recording.inputs
+            ]
+            owns = [{h.name: s for s, h in g.recording.states.values()} for g in graphs]
+            for graph, own, states in zip(graphs, owns, sides):
+                for name, state in own.items():
+                    graph.write(state, states[name])
+                graph(*inputs, **call.values)
+            before, after = graphs
+            carried = [
+                h
+                for step in recording.steps
+                for h in step.slots
+                if h.ref().root in recording.feedback and h.ref().nbytes is None
+            ]
+            differ = [
+                h.name
+                for h in recording.outputs
+                if not np.array_equal(
+                    before.read(h)[h.valid_index(call.values)],
+                    after.read(h)[h.valid_index(call.values)],
+                )
+            ] + [
+                h.name
+                for h in carried
+                if not np.array_equal(before.read(h), after.read(h))
+            ]
+            for graph, own, states in zip(graphs, owns, sides):
+                states.update((n, graph.read(s).copy()) for n, s in own.items())
+            differ += [
+                n for n in owns[0] if not np.array_equal(sides[0][n], sides[1][n])
+            ]
+            if differ:
+                return (
+                    f"{recording.name}, call {k} of {len(calls)}: "
+                    f"{', '.join(dict.fromkeys(differ))} not bit-identical"
+                )
+    finally:
+        for graphs in built.values():
+            for graph in graphs:
+                graph.release()
+    return None
 
 
 def measure(
@@ -824,9 +951,11 @@ def search(
     (``fit``; one that waits or is refused is passed over) and measured in
     place against ``start`` (``measure``); one under ``GAINS`` gains, and one
     that does not build, or builds wrong, is refused and logged. The gainers are
-    then taken best first, each touching no step a taken one
-    touches: a take is checked bit-identical against ``start`` (``check``)
-    and measured against the profile so far, and kept where it still gains.
+    then taken best first, each applied to the profile so far (a region and
+    a tunable edit of the same steps compose; a region over steps an earlier
+    one holds gives way to it): a take is checked bit-identical against
+    ``start`` (``check``) and measured against the profile so far, and kept
+    where it still gains.
     Pricing stops at ``budget_s``.
 
     Args:
@@ -882,10 +1011,7 @@ def search(
         if ratio < GAINS:
             priced.append((ratio, edit))
     incumbent = start
-    taken: set[int] = set()
     for ratio, edit in sorted(priced, key=lambda pair: pair[0]):
-        if taken & edit.touches:
-            continue
         edited = edit.apply(incumbent)
         checked = check(edited, start, calls, device, edit.refinement)
         if not checked.ok:
@@ -894,5 +1020,4 @@ def search(
         if measure(edited, incumbent, calls, device, timing=PRICING).ratio >= GAINS:
             continue
         incumbent = edited
-        taken |= edit.touches
     return incumbent

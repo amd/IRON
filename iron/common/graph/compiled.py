@@ -47,7 +47,7 @@ from ..image.sequence import Image
 from ..image.step import BufferRef, Fusion
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .coded import CodedWeight, Source
-from .fold import apply_folds, chosen_folds
+from .fold import apply_folds, chosen_folds, composed_folds
 from .fusion import composed
 from .fusion import fusions as graph_fusions
 from .fusion_tunables import apply as apply_fusion_tunables
@@ -808,6 +808,10 @@ def apply_profile(
     A fusion entry's fusion overlapping a composed region gives way to it.
     """
     folds = chosen_folds(recording, profile)
+    folded = {s for f in folds for s in f.steps}
+    folds += tuple(
+        f for f in composed_folds(recording, profile) if not folded & set(f.steps)
+    )
     if folds:
         recording = apply_folds(recording, folds)
     tunables, regions = composed(recording, profile)

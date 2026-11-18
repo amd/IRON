@@ -20,10 +20,8 @@ from iron.common.declare.profile import Profile
 from iron.common.graph.record import Recording
 from iron.operators import (
     GEMV,
-    Decode,
     ElementwiseAdd,
     ElementwiseMul,
-    RMSNorm,
     SiLU,
     Softmax,
 )
@@ -38,25 +36,9 @@ pytestmark = pytest.mark.usefixtures("npu2")
 
 M = 64
 
+
 # (producer dims, consumer dims), producer output, consumer input: the fold hook
 # replacements, each its own toy (``iron.tests.support.toys_composition.PAIR_TOYS``).
-PAIR_REGIONS = {
-    "gemv_silu": (Member(GEMV, dict(M=M, K=M)), Member(SiLU, dict(size=M))),
-    "decode_gemv": (
-        Member(Decode, dict(M=256, K=192)),
-        Member(GEMV, dict(M=256, K=192)),
-    ),
-    "add_softmax": (
-        Member(ElementwiseAdd, dict(size=32 * 64)),
-        Member(Softmax, dict(rows=32, cols=64)),
-    ),
-    "rmsnorm_mul": (
-        Member(RMSNorm, dict(rows=1)),
-        Member(ElementwiseMul, dict(size=M)),
-    ),
-}
-
-
 def _joined_region(
     producer: Member, consumer: Member, output: str, input: str
 ) -> Region:
@@ -68,15 +50,21 @@ def _joined_region(
 
 
 def _named_region_and_recording(name: str) -> tuple[Region, object]:
-    producer, consumer = PAIR_REGIONS[name]
     pair_fn, recording_fn, output, input = toys.PAIR_TOYS[name]
-    region = _joined_region(producer, consumer, output, input)
-    recording = recording_fn(name, *pair_fn())
+    producer, consumer = pair_fn()
+    region = _joined_region(member(producer), member(consumer), output, input)
+    recording = recording_fn(name, producer, consumer)
     return region, recording
 
 
-@unbuilt
-@pytest.mark.parametrize("name", list(PAIR_REGIONS))
+@pytest.mark.parametrize(
+    "name",
+    [
+        # IRON folds neither of these pairs (Operator.fold refuses them).
+        (pytest.param(n, marks=unbuilt) if n in ("decode_gemv", "add_softmax") else n)
+        for n in toys.PAIR_TOYS
+    ],
+)
 def test_two_actors_on_one_core_round_trip_as_an_entry(name, tmp_path, npu2):
     region, recording = _named_region_and_recording(name)
     entry = Entry(root=region)
@@ -129,9 +117,15 @@ def test_every_topology_is_proposed_on_its_producer_s_core(
     )
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("name", list(PAIR_REGIONS))
+@pytest.mark.parametrize(
+    "name",
+    [
+        # IRON folds neither of these pairs (Operator.fold refuses them).
+        (pytest.param(n, marks=unbuilt) if n in ("decode_gemv", "add_softmax") else n)
+        for n in toys.PAIR_TOYS
+    ],
+)
 def test_two_actors_on_one_core_is_bit_identical_to_the_steps_run_apart(name, npu2):
     region, recording = _named_region_and_recording(name)
     profile, base = Profile(), Profile()
@@ -161,7 +155,7 @@ def test_a_per_call_size_below_the_recorded_one_still_runs_on_one_core(npu2):
 @pytest.mark.extensive
 @unbuilt
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("name", list(PAIR_REGIONS))
+@pytest.mark.parametrize("name", list(toys.PAIR_TOYS))
 def test_search_keeps_the_pair_joined_where_it_pays(name, npu2):
     region, recording = _named_region_and_recording(name)
     entry = Entry(root=region)
@@ -179,17 +173,16 @@ def test_search_keeps_the_pair_joined_where_it_pays(name, npu2):
     assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu2")
 def test_a_pair_over_a_core_s_memory_is_refused(npu2):
     """A GEMV and a SiLU that each fit a core's memory alone, but not together on one worker.
 
-    On one worker the GEMV's 1024-element output tiles are the SiLU's input,
-    so they meet as they are. The GEMV alone holds 62720 of npu2's 65536
-    bytes (one A tile of 4 rows of 5760, a line, its double-buffered
-    output and the stack); the SiLU's double-buffered output adds 4096.
+    On one worker the SiLU folds into the GEMV, its kernel run on each
+    1024-element output tile. The GEMV alone holds 64640 of npu2's 65536
+    bytes (one A tile of 4 rows of 5952, a line, its double-buffered output
+    and the stack) and builds; the fold's scratch tile adds 2048.
     """
-    gemv = GEMV(M=6144, K=5760, tile_size_input=4, tile_size_output=1024)
+    gemv = GEMV(M=6144, K=5952, tile_size_input=4, tile_size_output=1024)
     silu = SiLU(size=6144, tile_size=1024)
     region = _joined_region(member(gemv), member(silu), "C", "x")
     profile = Profile()
