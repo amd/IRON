@@ -142,6 +142,7 @@ def test_a_partial_order_of_independent_regions_round_trips(tmp_path, npu2):
 
 
 @unbuilt
+@pytest.mark.extensive
 def test_a_whole_graph_partition_drops_no_step(npu2):
     """Every step of a small decoder layer is in exactly one region or alone; a recomputed copy is the only duplicate."""
     model = small()
@@ -154,6 +155,7 @@ def test_a_whole_graph_partition_drops_no_step(npu2):
 
 
 @unbuilt
+@pytest.mark.extensive
 def test_llama_1b_decode_s_region_count_is_an_a_expectation(npu2):
     """Llama 1B decode's region count, as what a cheap, device-free candidate generator should reach."""
     model = small()

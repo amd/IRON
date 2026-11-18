@@ -3,11 +3,14 @@
 
 """Transformation tests for operator tunables, every operator in the catalog at a small size."""
 
+import itertools
+
 import pytest
 from aie.iron.device import NPU2
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Refinement, refinement
+from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
 from iron.common.image.step import BufferRef, SequenceStep
 from iron.operators.gemm import GEMM
@@ -46,10 +49,15 @@ def _dims_only(cls, kwargs):
     return {name: value for name, value in kwargs.items() if name not in tunables}
 
 
-@unbuilt
 @pytest.mark.parametrize("cls,case", _PARAMS)
 def test_declared_domains_are_resolvable_candidates(cls, case, tmp_path):
-    """Every resolvable combination of an operator's declared domains is a candidate."""
+    """Every distinct design an operator's declared domains resolve to is a candidate.
+
+    The designs are found here by brute force over the domains' product:
+    each combination that resolves and whose transfers fit their
+    descriptors, kept once per design. A domain value no combination
+    resolves at this shape is no design, so it is not asked for.
+    """
     op = cls(**_dims_only(cls, case.kwargs)).resolved(NPU2_DEVICE)
     recording = Recording.of_step(op)
     domains = op._domains(NPU2_DEVICE)
@@ -62,18 +70,25 @@ def test_declared_domains_are_resolvable_candidates(cls, case, tmp_path):
         loaded = Profile.load(path)
         assert loaded.tunables_for(cls, _dims_only(cls, case.kwargs)) == given
         profile = loaded
-    found = list(candidates([Timed(recording)], profile, NPU2_DEVICE))
-    for name, values in domains.items():
-        for value in values:
-            matching = [
-                e
-                for e in found
-                if e.touches == frozenset({0})
-                and vars(e.apply(profile).entries()[-1].root.parts[0])[name] == value
-            ]
-            assert (
-                matching
-            ), f"{cls.__name__}.{name}={value} is not among the candidates"
+    designs = set()
+    for combo in itertools.product(*domains.values()):
+        try:
+            moved = op._with_tunables(**dict(zip(domains, combo))).resolved(NPU2_DEVICE)
+            if not moved.has_sequence_override():
+                for buf in moved.buffers:
+                    buf.transfers()
+        except ValueError:
+            continue
+        designs.add(OperatorDesign(moved).identity)
+    remaining = set(designs)
+    for edit in candidates([Timed(recording)], profile, NPU2_DEVICE):
+        root = edit.apply(profile).entries()[-1].root
+        if edit.touches == frozenset({0}) and len(root.parts) == 1:
+            tuned = op._with_tunables(**(root.parts[0].tunables or {}))
+            remaining.discard(OperatorDesign(tuned.resolved(NPU2_DEVICE)).identity)
+        if not remaining:
+            break
+    assert not remaining, f"{len(remaining)} of {len(designs)} designs not proposed"
 
 
 @unbuilt

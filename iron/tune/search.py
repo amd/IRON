@@ -29,7 +29,7 @@ from ..common.declare import Profile, Unresolvable
 from ..common.declare.composition import Entry, Member, Refinement, Region
 from ..common.graph.sdf import Derivation
 from ..common.image.step import Edge, EdgeKind, FusionKind, HandOff
-from .autotune import Timed, refusal
+from .autotune import Timed, refusal, settings
 from .fusions import group_fit_verdict
 
 
@@ -84,7 +84,7 @@ _NOT_GENERATED = (
     "runtime plans",
     "nested regions",
     "configurations",
-    "widths and other tunables",
+    "widths differing between a region's members",
     "fission",
     "substitution",
     "scopes",
@@ -160,8 +160,13 @@ def candidates(
     where the analysis does not model the pair yet; whether the composer
     builds it is ``fit``'s to say, not this. Each member names its step's shape
     and nothing else (``Profile.dims`` of it, tunables None), so a region
-    edit composes with an edit of the same steps' tunables. Each entry is
-    yielded once, from the first call that admits it.
+    edit composes with an edit of the same steps' tunables. Each region
+    follows at every column count its members' domains share, every member
+    at it, whatever its call gave (a region's widths override those, as a
+    fusion's tunables do). Then each shape's tunables: a one-member region per setting
+    ``autotune.settings`` resolves (the recorded one first), touching every
+    step of that shape. Each entry is yielded once, from the first call that
+    admits it.
 
     Args:
         calls: The graph's calls, every version.
@@ -184,6 +189,14 @@ def candidates(
             for step in steps
         ]
         kinds: dict[tuple[int, str, int, str], EdgeKind | None] = {}
+        columns = []
+        for step in steps:
+            # A region's widths override what a call gave, as a fusion's
+            # tunables do, so the domain is the unpinned one.
+            with set_current_device(device):
+                unpinned = step.op.replace(pinned=frozenset()).resolved(device)
+                domains = unpinned._domains(device)
+            columns.append(set(domains.get("num_aie_columns", ())))
         for lo in range(len(steps)):
             for hi in range(lo + 1, min(lo + cores, len(steps))):
                 if recording.crosses_host(lo, hi):
@@ -262,7 +275,37 @@ def candidates(
                 if entry in proposed:
                     continue
                 proposed.append(entry)
-                yield AddEntry(entry, frozenset(range(lo, hi + 1)))
+                touches = frozenset(range(lo, hi + 1))
+                yield AddEntry(entry, touches)
+                for width in sorted(set.intersection(*columns[lo : hi + 1])):
+                    widened = Entry(
+                        Region(
+                            tuple(
+                                dataclasses.replace(
+                                    m, tunables={"num_aie_columns": width}
+                                )
+                                for m in members[lo : hi + 1]
+                            ),
+                            entry.root.edges,
+                        )
+                    )
+                    if widened not in proposed:
+                        proposed.append(widened)
+                        yield AddEntry(widened, touches)
+        shapes: dict[int, list[int]] = {}
+        for i, m in enumerate(members):
+            first = next(k for k in range(i + 1) if members[k] == m)
+            shapes.setdefault(first, []).append(i)
+        for first, at in shapes.items():
+            with set_current_device(device):
+                found = settings(steps[first].op, device)
+            for setting in found:
+                entry = Entry(
+                    Region((dataclasses.replace(members[first], tunables=setting),))
+                )
+                if entry not in proposed:
+                    proposed.append(entry)
+                    yield AddEntry(entry, frozenset(at))
     raise NotImplementedError(
         "candidates does not generate yet: " + ", ".join(_NOT_GENERATED)
     )

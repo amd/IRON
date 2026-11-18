@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from aie.dialects.aie import get_target_model
 
@@ -19,6 +21,7 @@ from iron.tests.support import toys_dataflow as toys
 from iron.tests.support import toys_schedule
 from iron.tests.support.fusable import gemv_silu_mul_recording
 from iron.tests.support.tools import DEVICES
+from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import PLACEMENTS, candidates, check, fit, search
@@ -41,10 +44,9 @@ def _window(columns, channels=1, kind=EdgeKind.STREAM):
     )
     silu = SiLU(size=_SIZE, tile_size=64, num_aie_columns=columns)
     mul = ElementwiseMul(size=_SIZE, tile_size=64, num_aie_columns=columns)
-    members = (
-        Member(type(gemv), {"M": gemv.M, "K": gemv.K}, {"num_aie_columns": columns}),
-        Member(type(silu), {"size": silu.size}, {"num_aie_columns": columns}),
-        Member(type(mul), {"size": mul.size}, {"num_aie_columns": columns}),
+    members = tuple(
+        dataclasses.replace(member(op), tunables={"num_aie_columns": columns})
+        for op in (gemv, silu, mul)
     )
     edges = (
         CompositionEdge(0, "C", 1, "x", kind=kind),
@@ -57,7 +59,6 @@ def _window(columns, channels=1, kind=EdgeKind.STREAM):
     return region, recording
 
 
-@unbuilt
 def test_per_member_width_counts_round_trip_and_are_proposed(tmp_path):
     """A window's per-member column counts round-trip through a profile and are a candidate, ordered by the cost model."""
     region, recording = _window(columns=2)
