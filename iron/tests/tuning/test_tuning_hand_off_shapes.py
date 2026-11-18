@@ -58,9 +58,9 @@ _REALIZES = {
     "layout_transpose": HandOff.LAYOUT,
 }
 
-# The hand-offs the analysis derives today; the rest need memtile restaging
-# or a slice's objects modelled, and stay strict xfail.
-_DERIVED = {"broadcast", "join_8_into_4"}
+# The hand-offs the analysis derives today; a slice's objects are not
+# modelled yet, so its case stays strict xfail.
+_DERIVED = set(SHAPES) - {"slices_qkv"}
 
 # Any ratio and broadcast are representable gaps today (operand.py:260-299):
 # searchable, strict xfail, compiler-failure entries once the hardware could

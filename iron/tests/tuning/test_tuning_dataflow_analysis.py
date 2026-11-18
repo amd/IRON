@@ -54,10 +54,10 @@ def test_known_multi_rate_edge_minimum_buffer():
     At ``M = 384`` both GEMMs resolve npu2's four core rows, so each
     firing really moves ``tile_m * n_aie_rows`` rows: 128 and 192.
     Repetition ``(3, 2)`` (``192 / gcd(128, 192)``, ``128 / gcd(128,
-    192)``). A memtile restages whole objects in whole rounds, and the
-    smallest round both sides divide is ``lcm(128, 192) = 384`` rows, the
-    whole call, so the producer's side holds all three of its objects, not
-    the ``128 + 192 - gcd(128, 192)`` rows a shared row-by-row buffer would.
+    192)``). A memtile restages the edge: it takes each 128-row object as
+    it comes, so the producer's side holds one object, and its own storage
+    holds the rows the consumer's 192-row objects need, rather than the two
+    sharing the ``128 + 192 - gcd(128, 192)`` rows of one buffer.
     """
     producer, consumer = toys.gemm_into_gemm(
         M=384, width=64, producer_tile=32, consumer_tile=48
@@ -69,4 +69,4 @@ def test_known_multi_rate_edge_minimum_buffer():
     analysis = analyze(region, recording, toys.NPU2)
     assert analysis.consistent
     assert analysis.repetition == {0: 3, 1: 2}
-    assert analysis.min_depth[region.edges[0]] == 3
+    assert analysis.min_depth[region.edges[0]] == 1

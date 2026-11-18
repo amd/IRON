@@ -54,24 +54,18 @@ def test_gemm_tiles_into_rowwise_op_is_a_multi_rate_edge():
     assert analysis.min_depth[region.edges[0]] == 1
 
 
-@unbuilt
 def test_limbs_expansion_is_a_real_six_to_one_multi_rate_edge():
-    """``Limbs`` writes six bf16 planes a row (``tile_size = 6 * line``) into a plane-sized consumer.
+    """``Limbs`` writes six bf16 planes a row into a plane-sized consumer: one object a firing into six.
 
-    A real 6 : 1 edge, repetition ``(1, 6)``, minimum buffer
-    ``6 + 1 - gcd(6, 1) = 6``.
-
-    No catalogued operator pair gives a clean 2 : 1 pooling or 1 : 2
-    upsampling edge (no pooling or upsampling operator exists, and
-    ``Resample``/``ResampleTaps`` change row count by a declared
-    ``in_size``/``out_size`` ratio as a whole-call anti-aliased resize
-    governed by a filter window, not a fixed per-firing streaming rate);
-    ``Limbs``' row-to-six-planes expansion is the real multi-rate edge this
-    toy builds instead.
+    ``Limbs`` fires once a row and writes one object of six planes; the
+    consumer reads one plane an object, so it fires six times a ``Limbs``
+    firing over the same 61,440 elements. A memtile re-chunks each six-plane
+    object into planes, so the producer's side holds one object.
     """
     limbs = Limbs(rows=64, line=160, num_aie_columns=1)
+    planes = 6 * limbs.rows
     consumer = ElementwiseAdd(
-        size=limbs.rows * limbs.line, tile_size=limbs.line, num_aie_columns=1
+        size=planes * limbs.line, tile_size=limbs.line, num_aie_columns=1
     )
     edge = Edge(0, "y", 1, "a")
     region = Region(
@@ -85,8 +79,9 @@ def test_limbs_expansion_is_a_real_six_to_one_multi_rate_edge():
     recording = Recording.of_steps("limbs-expansion", steps, ["x", "w"], ["out"])
     analysis = analyze(region, recording, toys.NPU2)
     assert analysis.consistent
-    assert analysis.repetition == {0: 1, 1: 6}
-    assert analysis.min_depth[edge] == 6
+    assert analysis.repetition == {0: limbs.rows, 1: planes}
+    assert analysis.tokens[edge] == ((1,), (1,))
+    assert analysis.min_depth[edge] == 1
 
 
 @unbuilt

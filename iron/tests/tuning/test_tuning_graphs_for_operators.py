@@ -188,9 +188,13 @@ def test_every_known_mha_mapping_composes_as_the_graph(npu2):
     )
 
 
-@unbuilt
-def test_prefill_s_scores_edge_is_float32_where_gemm_sets_it(npu2):
-    """GEMM can round ``Q K^T`` to float32 scores (``output_dtype``); the dataflow analysis derives that edge's type from it, not a composition annotation."""
+def test_prefill_s_float32_scores_do_not_fit_the_bf16_mask_add(npu2):
+    """GEMM can keep ``Q K^T`` in float32 (``output_dtype``), but the mask's ElementwiseAdd reads only bf16.
+
+    The two ends are then not one buffer, which the analysis refuses: the
+    prefill graph cannot keep its scores in float32 into the mask until an
+    elementwise operator reads float32.
+    """
     qk = GEMM(
         M=SEQ,
         K=HEAD_DIM,
@@ -204,8 +208,8 @@ def test_prefill_s_scores_edge_is_float32_where_gemm_sets_it(npu2):
         "prefill_f32_scores", qk, add_mask, softmax, pv
     )
     region = _prefill_region(SEQ, KV_LEN, HEAD_DIM, scores_dtype=np.float32)
-    analysis = analyze(region, recording, npu2)
-    assert analysis.dtype[region.edges[0]] == "float32"
+    with pytest.raises(ValueError, match="not one buffer"):
+        analyze(region, recording, npu2)
 
 
 @pytest.mark.supported_devices("npu2")

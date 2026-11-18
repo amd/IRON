@@ -31,7 +31,6 @@ from aie.iron.trace import Recording as Recorded
 from aie.utils import set_current_device
 
 from ..declare.composition import Entry, Region
-from ..declare.operand import Staging
 from ..design import BuiltArray, OperatorDesign
 from ..image.step import BufferRef, Edge, HandOff
 from .record import Recording
@@ -293,7 +292,8 @@ class Derivation:
             run-time branch or a ``forever_`` in a core, a per-call count, a
             slice, a restaging IRON's ``Staging`` cannot plan, or a loop no
             fifo's objects settle.
-        ValueError: The region matches none of the recording's steps.
+        ValueError: The region matches none of the recording's steps, or
+            an edge's two ends are not one buffer.
     """
 
     def __init__(self, region: Region, recording: Recording, device: Device) -> None:
@@ -472,114 +472,146 @@ class Derivation:
         writing: int,
         reading: int,
         phase: int,
-        searched: bool,
+        producer_side: bool,
     ) -> int:
-        """Add a channel from actor ``writing`` to ``reading`` in ``built``, part of ``edge``'s searched depth where ``searched``, and return it."""
-        channels, edge_channels = built[1], built[5]
+        """Add a channel from actor ``writing`` to ``reading``, and return it.
+
+        A channel on the producer's side is the edge's own depth, objects in
+        flight from its producer; a memtile's storage and its channels out
+        are part of the restaging, not the edge's depth.
+        """
+        channels, edge_channels = built[1], built[4]
         channels.append(Channel(writing, reading, phase=phase))
-        if searched:
+        if producer_side:
             edge_channels.setdefault(edge, []).append(len(channels) - 1)
         return len(channels) - 1
+
+    def _streams(self, operand: Any) -> list[np.ndarray]:
+        """Return each of ``operand``'s lanes' elements, in the order the lane moves them."""
+        taps = {lane: tap for lane, tap, _, _ in operand.transfers()}
+        index = np.arange(operand.elements)
+        return [taps[lane].gather(index) for lane in range(operand.lanes)]
 
     def _restaged(
         self,
         edge: Edge,
-        p: int,
-        c: int,
+        sizes: tuple[int, int],
+        streams: tuple[list[np.ndarray], list[np.ndarray]],
+        lanes: tuple[list[ObjectFifo], list[ObjectFifo]],
         phase: int,
         built: tuple,
         ends: tuple[dict[ObjectFifo, int], dict[ObjectFifo, list[int]]],
     ) -> HandOff:
-        """Model ``edge``'s memtile restaging as an actor, as IRON's ``Staging`` plans it, and return its hand-off.
+        """Model ``edge``'s memtile restaging, and return its hand-off.
 
-        A join takes, each round, its slot from every producer lane it joins and
-        writes one memtile object to the consumer lane, at the depth ``Staging``
-        gives that memtile; a split takes one producer object a round and
-        writes each consumer lane its slot. The producer's channels into the
-        memtile, and a split's out of it, are the edge's searched depth.
-
-        Raises:
-            NotImplementedError: ``Staging`` cannot restage the edge (a lane
-                taking parts of two, an order no join or split gives), or a
-                slot is not whole objects at both ends.
+        Each element is in one producer lane's object and one consumer lane's
+        object. A memtile takes each producer lane's objects once, an ingest
+        actor a lane, passing each object on to the consumer lanes whose
+        elements it holds; an emit actor a consumer lane, for each object it
+        writes, holds the objects passed to it that hold its elements (in
+        order, so every one up to the last it needs), writes the object, and
+        frees what no later object of its lane needs. A memtile must do that
+        much for any restaging; IRON's ``Staging`` plans the whole-lane joins
+        and splits among them, and whether IRON builds one is a capability of
+        its own. The producer's channels into the memtile are the edge's depth.
         """
-        programs, channels, fixed, writes, reads, edge_channels = built
+        programs, _, writes, reads, _ = built
         writer, readers = ends
-        source = next(
-            b for b in self.recorded[p][0].op.buffers if b.name == edge.output
-        )
-        sink = next(b for b in self.recorded[c][0].op.buffers if b.name == edge.input)
-        outs, ins = self.lanes[p][edge.output], self.lanes[c][edge.input]
-        produce, consume = math.prod(source.obj_shape), math.prod(sink.obj_shape)
-        with set_current_device(self.device):
-            try:
-                staging = Staging(source, sink)
-            except ValueError as e:
-                raise NotImplementedError(
-                    f"{edge}: restaging it is not modelled yet: {e}"
-                ) from e
-        if (
-            any(s % produce for _, slots in staging.joins for s in slots)
-            or any(sum(slots) % consume for _, slots in staging.joins)
-            or any(s % consume for _, slots in staging.splits for s in slots)
-        ):
-            raise NotImplementedError(
-                f"{edge}: a restaging slot that is not whole objects at both ends "
-                f"is not modelled yet"
-            )
-
-        for j, (group, slots) in enumerate(staging.joins):
-            actor = len(programs)
-            memtile = (edge, "join", j)
-            each = sum(slots) // consume
-            rounds = self.objects[ins[j]] // each
-            takes = [(outs[k], s // produce) for k, s in zip(group, slots)]
-            programs.append(
-                (
-                    [(fifo, False, True, n) for fifo, n in takes]
-                    + [(memtile, True, True, each)]
-                    + [(fifo, False, False, n) for fifo, n in takes]
-                    + [(memtile, True, False, each)]
-                )
-                * rounds
-            )
-            for fifo, _ in takes:
-                e = self._channel(built, edge, writer[fifo], actor, phase, True)
-                writes.setdefault(fifo, []).append(e)
-                reads[(fifo, actor)] = e
-            depth = 2 if 2 * sum(slots) * staging.item <= staging.capacity else 1
-            for reader in readers[ins[j]]:
-                e = self._channel(built, edge, actor, reader, phase, False)
-                writes.setdefault(memtile, []).append(e)
-                reads[(ins[j], reader)] = e
-                fixed[e] = depth * each
-        for i, (group, slots) in enumerate(staging.splits):
-            actor = len(programs)
-            parts = [
-                ((edge, "split", i, j), s // consume) for j, s in zip(group, slots)
+        produce, consume = sizes
+        produced, consumed = streams
+        outs, ins = lanes
+        lane_of = np.empty(sum(len(s) for s in produced), dtype=np.int64)
+        obj_of = np.empty_like(lane_of)
+        for lane, stream in enumerate(produced):
+            lane_of[stream] = lane
+            obj_of[stream] = np.arange(len(stream)) // produce
+        # Per consumer lane, per producer lane, the producer objects it takes, in order.
+        taken = [
+            {
+                lane: np.unique(obj_of[stream][lane_of[stream] == lane])
+                for lane in np.unique(lane_of[stream]).tolist()
+            }
+            for stream in consumed
+        ]
+        for lane, out in enumerate(outs):
+            ingest = len(programs)
+            to = [j for j, t in enumerate(taken) if lane in t]
+            passed = {j: set(taken[j][lane].tolist()) for j in to}
+            events: list[tuple[Any, bool, bool, int]] = []
+            for k in range(len(produced[lane]) // produce):
+                gets = [j for j in to if k in passed[j]]
+                events.append((out, False, True, 1))
+                events += [((edge, lane, j), True, True, 1) for j in gets]
+                events.append((out, False, False, 1))
+                events += [((edge, lane, j), True, False, 1) for j in gets]
+            programs.append(events)
+            e = self._channel(built, edge, writer[out], ingest, phase, True)
+            writes.setdefault(out, []).append(e)
+            reads[(out, ingest)] = e
+        ingests = {lane: len(programs) - len(outs) + lane for lane in range(len(outs))}
+        for j, stream in enumerate(consumed):
+            emit = len(programs)
+            rank = {
+                lane: {int(k): r for r, k in enumerate(objs)}
+                for lane, objs in taken[j].items()
+            }
+            objects = stream.reshape(-1, consume)
+            needs = [
+                {
+                    lane: rank[lane][int(obj_of[o][lane_of[o] == lane].max())]
+                    for lane in np.unique(lane_of[o]).tolist()
+                }
+                for o in objects
             ]
-            programs.append(
-                (
-                    [(outs[i], False, True, 1)]
-                    + [(key, True, True, n) for key, n in parts]
-                    + [(outs[i], False, False, 1)]
-                    + [(key, True, False, n) for key, n in parts]
-                )
-                * self.objects[outs[i]]
+            firsts = [
+                {
+                    lane: rank[lane][int(obj_of[o][lane_of[o] == lane].min())]
+                    for lane in np.unique(lane_of[o]).tolist()
+                }
+                for o in objects
+            ]
+            later: list[dict[int, int]] = [{} for _ in needs]
+            for k in range(len(needs) - 2, -1, -1):
+                later[k] = dict(later[k + 1])
+                for lane, first in firsts[k + 1].items():
+                    later[k][lane] = min(later[k].get(lane, first), first)
+            released = dict.fromkeys(taken[j], 0)
+            held_to = dict.fromkeys(taken[j], -1)
+            events = []
+            for k, need in enumerate(needs):
+                for lane, last in need.items():
+                    held_to[lane] = max(held_to[lane], last)
+                    count = held_to[lane] + 1 - released[lane]
+                    events.append(((edge, lane, j), False, True, count))
+                events.append(((edge, "emit", j), True, True, 1))
+                for lane in need:
+                    keep = later[k].get(lane, held_to[lane] + 1)
+                    if keep > released[lane]:
+                        count = keep - released[lane]
+                        events.append(((edge, lane, j), False, False, count))
+                        released[lane] = keep
+                events.append(((edge, "emit", j), True, False, 1))
+            programs.append(events)
+            for lane in taken[j]:
+                e = self._channel(built, edge, ingests[lane], emit, phase, False)
+                writes.setdefault((edge, lane, j), []).append(e)
+                reads[((edge, lane, j), emit)] = e
+            for reader in readers[ins[j]]:
+                e = self._channel(built, edge, emit, reader, phase, False)
+                writes.setdefault((edge, "emit", j), []).append(e)
+                reads[(ins[j], reader)] = e
+        fed = [set(t) for t in taken]
+        feeds = [sum(lane in f for f in fed) for lane in range(len(produced))]
+        if all(len(f) == 1 for f in fed) and all(n == 1 for n in feeds):
+            in_order = len(produced) == len(consumed) and all(
+                np.array_equal(a, b) for a, b in zip(produced, consumed)
             )
-            e = self._channel(built, edge, writer[outs[i]], actor, phase, True)
-            writes.setdefault(outs[i], []).append(e)
-            reads[(outs[i], actor)] = e
-            for (key, _), j in zip(parts, group):
-                for reader in readers[ins[j]]:
-                    e = self._channel(built, edge, actor, reader, phase, True)
-                    writes.setdefault(key, []).append(e)
-                    reads[(ins[j], reader)] = e
-        if any(len(group) > 1 for group, _ in staging.joins):
+            return HandOff.EQUAL if in_order else HandOff.LAYOUT
+        if all(n == 1 for n in feeds):
             return HandOff.JOIN
-        if any(len(group) > 1 for group, _ in staging.splits):
+        if all(len(f) == 1 for f in fed):
             return HandOff.SPLIT
-        return HandOff.EQUAL
+        return HandOff.RATIO
 
     def analysis(self) -> Analysis:
         """Return what the call's actors and channels say about the region's edges.
@@ -637,13 +669,30 @@ class Derivation:
                     f"{edge}: reading part of what its producer makes (slices) "
                     f"is not modelled yet"
                 )
-            if len(outs) != len(ins) or sizes[0] != sizes[1]:
+            source = next(
+                b for b in self.recorded[p][0].op.buffers if b.name == edge.output
+            )
+            sink = next(
+                b for b in self.recorded[c][0].op.buffers if b.name == edge.input
+            )
+            if source.elements != sink.elements or source.dtype != sink.dtype:
+                raise ValueError(
+                    f"{edge}: {source.name}'s {source.elements} elements and "
+                    f"{sink.name}'s {sink.elements} are not one buffer"
+                )
+            produced, consumed = self._streams(source), self._streams(sink)
+            if (
+                len(outs) != len(ins)
+                or sizes[0] != sizes[1]
+                or not all(np.array_equal(a, b) for a, b in zip(produced, consumed))
+            ):
                 hand_off[edge] = self._restaged(
                     edge,
-                    p,
-                    c,
+                    (sizes[0], sizes[1]),
+                    (produced, consumed),
+                    (outs, ins),
                     phases[n] if phases else 0,
-                    (programs, channels, fixed, writes, reads, edge_channels),
+                    (programs, channels, writes, reads, edge_channels),
                     (writer, readers),
                 )
                 continue
