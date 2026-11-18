@@ -82,10 +82,10 @@ def test_the_tuner_prices_both_versions_jointly_and_keeps_one_layout_for_both():
     assert measure(tuned, start, calls, NPU2_DEVICE).ratio < 1.05
 
 
-@unbuilt
 def test_two_layouts_naming_one_buffer_are_refused(tmp_path):
-    """``StateLayout`` has no scope of its own: two layouts naming the same buffer are refused on save, naming the buffer."""
+    """Two layouts naming one persistent buffer are refused on save, naming the buffer: every version shares one."""
     profile = Profile()
     profile.add_state_layout(StateLayout(buffer="kv", order=("position", "element")))
     profile.add_state_layout(StateLayout(buffer="kv", order=("element", "position")))
-    profile.save(tmp_path / "profile.json")
+    with pytest.raises(ValueError, match="'kv'"):
+        profile.save(tmp_path / "profile.json")

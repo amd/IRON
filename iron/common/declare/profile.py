@@ -12,14 +12,39 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import types
+import typing
 from dataclasses import MISSING
 from enum import Enum
 from pathlib import Path
 from types import FunctionType
-from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping, Sequence, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Iterable,
+    Iterator,
+    Literal,
+    Mapping,
+    Sequence,
+    TypeVar,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
+
+import numpy as np
+from aie.helpers.taplib import TensorAccessPattern
 
 from ..image.step import FusionKind
-from .composition import Binding, Entry, Schedule, StateLayout, Variants
+from .composition import (
+    Binding,
+    Entry,
+    Member,
+    Schedule,
+    StateLayout,
+    Variants,
+    Version,
+)
 
 if TYPE_CHECKING:
     from .operator import Operator
@@ -28,7 +53,6 @@ _Op = TypeVar("_Op", bound="Operator")
 
 # A graph version's key (``Recording.version``, ``Graph.versions``): each
 # input's name, shape and dtype name, in the order its body takes them.
-Version = tuple[tuple[str, tuple[int, ...], str], ...]
 
 _FusionStep = (
     tuple[type, Mapping[str, Any] | None]
@@ -106,6 +130,172 @@ def _with_enum_fields(cls: type, fields: dict[str, Any]) -> dict[str, Any]:
         if key in fields and isinstance(domain, type) and issubclass(domain, Enum):
             fields[key] = domain(fields[key])
     return fields
+
+
+_COMPOSITION_KEYS = (
+    "compositions",
+    "schedules",
+    "variants",
+    "bindings",
+    "state_layouts",
+)
+
+
+def _composition_to_json(value: Any, hint: Any, names: Mapping[type, str]) -> Any:
+    """Return ``value``, of type ``hint``, in JSON's form.
+
+    A dataclass is an object of its fields that differ from their defaults; an
+    operator class its catalog name; an enum its value; a tuple or frozenset a
+    list; one of several dataclasses an object naming its ``kind``.
+
+    Raises:
+        ValueError: A member's operator is not in the catalog.
+    """
+    origin, args = get_origin(hint), get_args(hint)
+    if value is None:
+        return None
+    if hint is type:
+        if value not in names:
+            raise ValueError(f"{value.__qualname__} is not in iron.operators.CATALOG")
+        return names[value]
+    if origin in (typing.Union, types.UnionType):
+        options = [a for a in args if a is not type(None)]
+        if len(options) == 1:
+            return _composition_to_json(value, options[0], names)
+        return {
+            "kind": type(value).__name__,
+            **_composition_to_json(value, type(value), names),
+        }
+    if origin is tuple:
+        each = args[:-1] * len(value) if args[-1:] == (...,) else args
+        return [_composition_to_json(v, h, names) for v, h in zip(value, each)]
+    if origin is frozenset:
+        return sorted(_composition_to_json(v, args[0], names) for v in value)
+    if origin is dict:
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, Enum):
+        return value.value
+    if dataclasses.is_dataclass(value):
+        hints = get_type_hints(type(value))
+        out = {}
+        for f in dataclasses.fields(value):
+            held = vars(value)[f.name]
+            default = (
+                f.default_factory() if f.default_factory is not MISSING else f.default
+            )
+            if held != default:
+                out[f.name] = _composition_to_json(held, hints[f.name], names)
+        return out
+    return value
+
+
+def _plain(value: Any) -> Any:
+    """Return a dim's or a tunable's ``value`` JSON-safe: an enum its value, a tuple a list, a numpy type or an access pattern an object naming it.
+
+    Raises:
+        ValueError: An access pattern whose sizes are symbolic.
+    """
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, tuple):
+        return [_plain(v) for v in value]
+    if isinstance(value, type) and issubclass(value, np.generic):
+        return {"dtype": np.dtype(value).name}
+    if isinstance(value, TensorAccessPattern):
+        if value.is_symbolic:
+            raise ValueError(f"{value} is symbolic: a profile names concrete shapes")
+        return {
+            "TensorAccessPattern": [
+                list(value.tensor_dims),
+                value.offset,
+                list(value.sizes),
+                list(value.strides),
+            ]
+        }
+    return value
+
+
+def _live(value: Any) -> Any:
+    """Return a dim or a tunable as ``_plain`` wrote it, live: a list a tuple, a dtype's or an access pattern's object the type or the pattern."""
+    if isinstance(value, list):
+        return tuple(_live(v) for v in value)
+    if isinstance(value, dict) and set(value) == {"dtype"}:
+        return np.dtype(value["dtype"]).type
+    if isinstance(value, dict) and set(value) == {"TensorAccessPattern"}:
+        return TensorAccessPattern(*value["TensorAccessPattern"])
+    return value
+
+
+def _composition_from_json(data: Any, hint: Any, catalog: Mapping[str, type]) -> Any:
+    """Return ``data``, JSON's form of a ``hint``, as the live value ``_composition_to_json`` took.
+
+    Raises:
+        ValueError: An operator not in the catalog, a ``kind`` not among
+            the field's types, or a field the type does not have.
+    """
+    origin, args = get_origin(hint), get_args(hint)
+    if data is None:
+        return None
+    if hint is type:
+        if data not in catalog:
+            raise ValueError(f"no operator {data!r} in iron.operators")
+        return catalog[data]
+    if origin in (typing.Union, types.UnionType):
+        options = [a for a in args if a is not type(None)]
+        if len(options) == 1:
+            return _composition_from_json(data, options[0], catalog)
+        fields = dict(data)
+        kind = fields.pop("kind", None)
+        chosen = [a for a in options if a.__name__ == kind]
+        if not chosen:
+            raise ValueError(
+                f"a {kind!r} is none of {', '.join(a.__name__ for a in options)}"
+            )
+        return _composition_from_json(fields, chosen[0], catalog)
+    if origin is tuple:
+        each = args[:-1] * len(data) if args[-1:] == (...,) else args
+        return tuple(_composition_from_json(d, h, catalog) for d, h in zip(data, each))
+    if origin is frozenset:
+        return frozenset(_composition_from_json(d, args[0], catalog) for d in data)
+    if origin is dict:
+        return {k: _live(v) for k, v in data.items()}
+    if origin is Literal:
+        return data
+    if isinstance(hint, type) and issubclass(hint, Enum):
+        return hint(data)
+    if isinstance(hint, type) and dataclasses.is_dataclass(hint):
+        hints = get_type_hints(hint)
+        unknown = set(data) - set(hints)
+        if unknown:
+            raise ValueError(f"a {hint.__name__} has no {', '.join(sorted(unknown))}")
+        fields = {
+            name: _composition_from_json(value, hints[name], catalog)
+            for name, value in data.items()
+        }
+        if hint is Member:
+            fields["dims"] = _with_enum_fields(fields["cls"], fields["dims"])
+            if fields.get("tunables") is not None:
+                fields["tunables"] = _with_enum_fields(
+                    fields["cls"], fields["tunables"]
+                )
+        return hint(**fields)
+    return data
+
+
+def _one_layout_a_buffer(layouts: Sequence[StateLayout]) -> None:
+    """Refuse two layouts naming one persistent buffer.
+
+    Raises:
+        ValueError: Two layouts name one buffer.
+    """
+    seen = set()
+    for layout in layouts:
+        if layout.buffer in seen:
+            raise ValueError(
+                f"two layouts name the persistent buffer {layout.buffer!r}: "
+                f"every version that touches it shares one"
+            )
+        seen.add(layout.buffer)
 
 
 class Profile:
@@ -472,6 +662,7 @@ class Profile:
             "entries",
             "fusions",
             "packings",
+            *_COMPOSITION_KEYS,
         }:
             raise ValueError(f"{path}: a profile is {{'entries': [...]}}")
         profile = cls()
@@ -537,29 +728,39 @@ class Profile:
             profile.add_packing(
                 members(packing["members"]), _load_versions(packing.get("versions"))
             )
+        try:
+            for entry in data.get("compositions", ()):
+                profile.add_entry(_composition_from_json(entry, Entry, CATALOG))
+            for schedule in data.get("schedules", ()):
+                profile.add_schedule(
+                    _composition_from_json(schedule, Schedule, CATALOG)
+                )
+            for variants in data.get("variants", ()):
+                profile.add_variants(
+                    _composition_from_json(variants, Variants, CATALOG)
+                )
+            for binding in data.get("bindings", ()):
+                profile.add_binding(_composition_from_json(binding, Binding, CATALOG))
+            for layout in data.get("state_layouts", ()):
+                profile.add_state_layout(
+                    _composition_from_json(layout, StateLayout, CATALOG)
+                )
+            _one_layout_a_buffer(profile._state_layouts)
+        except ValueError as e:
+            raise ValueError(f"{path}: {e}") from e
         return profile
 
     def save(self, path: str | Path) -> None:
-        """Write the profile as JSON, one entry to a line, then its fusions where there are any.
+        """Write the profile as JSON, one entry to a line, then its fusions, packings and compositions where there are any.
 
         Raises:
             ValueError: An entry's or a fusion step's operator is not in
                 ``iron.operators.CATALOG``.
-            NotImplementedError: The profile holds composition entries,
-                schedules, variants, bindings or state layouts, whose JSON
-                form is not written yet.
+            ValueError: Two state layouts name one buffer.
         """
         from ...operators import CATALOG  # the operators import this module
 
-        if (
-            self._compositions
-            or self._schedules
-            or self._variants
-            or self._bindings
-            or self._state_layouts
-        ):
-            raise NotImplementedError("a profile's compositions have no JSON form yet")
-
+        _one_layout_a_buffer(self._state_layouts)
         names = {cls: name for name, cls in CATALOG.items()}
 
         def members(entries) -> list[dict[str, Any]]:
@@ -611,6 +812,20 @@ class Profile:
         if packing_lines:
             body += ',\n"packings": [' + ",".join(f"\n  {s}" for s in packing_lines)
             body += "\n]"
+        held = (
+            ("compositions", Entry, self._compositions),
+            ("schedules", Schedule, self._schedules),
+            ("variants", Variants, self._variants),
+            ("bindings", Binding, self._bindings),
+            ("state_layouts", StateLayout, self._state_layouts),
+        )
+        for key, hint, values in held:
+            if values:
+                rows = [
+                    json.dumps(_composition_to_json(v, hint, names)) for v in values
+                ]
+                body += f',\n"{key}": [' + ",".join(f"\n  {s}" for s in rows)
+                body += "\n]"
         with open(path, "w") as f:
             f.write(body + "}\n")
 

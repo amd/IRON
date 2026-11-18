@@ -13,7 +13,7 @@ from iron.common.declare.composition import (
     Refinement,
 )
 from iron.common.declare.profile import Profile
-from iron.operators import GEMM, GEMV, RMSNorm, Softmax
+from iron.operators import GEMM, GEMV, ElementwiseAdd
 from iron.tests.support import toys_composition as toys
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
@@ -64,7 +64,7 @@ def test_a_cascade_chain_round_trips_as_an_entry(
 @pytest.mark.parametrize("splits", [2, 4, 8])
 def test_a_fan_in_to_a_reducer_round_trips_as_an_entry(splits, tmp_path, npu2):
     members = _gemv_members(splits)
-    reducer = Member(type("Reducer", (), {}), dict())
+    reducer = Member(ElementwiseAdd, dict(size=M))
     region = toys.fan_in_reducer_region(members, reducer, "C", "a", "b")
     entry = Entry(root=region)
     profile = Profile()
@@ -78,25 +78,6 @@ def test_a_fan_in_to_a_reducer_round_trips_as_an_entry(splits, tmp_path, npu2):
         entry in edit.apply(Profile()).entries()
         for edit in candidates(calls, Profile(), npu2)
     )
-
-
-@unbuilt
-@pytest.mark.parametrize(
-    "cls, dim_name",
-    [(Softmax, "cols"), (RMSNorm, "tile_size")],
-    ids=["softmax", "rmsnorm"],
-)
-def test_a_row_sum_reduction_shape_round_trips_as_an_entry(cls, dim_name, tmp_path):
-    """Neither operator exposes a partial-sum output to fan a split into, so this names the shape, not a working recording (a reported gap)."""
-    splits = 4
-    members = [Member(cls, {dim_name: 64 // splits}) for _ in range(splits)]
-    reducer = Member(type("Reducer", (), {}), dict())
-    region = toys.fan_in_reducer_region(members, reducer, "y", "a", "b")
-    profile = Profile()
-    profile.add_entry(Entry(root=region))
-    profile.save(tmp_path / "profile.json")
-    loaded = Profile.load(tmp_path / "profile.json")
-    assert loaded.entries() == profile.entries()
 
 
 @unbuilt

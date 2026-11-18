@@ -60,6 +60,11 @@ def test_calls_overlapped_round_trips_and_is_proposed(tmp_path):
     profile.save(tmp_path / "calls_overlapped.json")
     loaded = Profile.load(tmp_path / "calls_overlapped.json")
     assert loaded.schedules() == [schedule]
+    start = Profile()
+    assert any(
+        schedule in edit.apply(start).schedules()
+        for edit in candidates([Timed(recording)], start, DEVICE)
+    )
 
 
 @unbuilt
@@ -67,12 +72,17 @@ def test_interleave_with_decode_and_prefill_round_trips_and_is_proposed(tmp_path
     """``Schedule.interleave_with`` (decode interleaved with prefill) round-trips and is a candidate."""
     decode = _decode_recording()
     prefill = _decode_recording()
-    schedule = Schedule(version=decode.version, interleave_with=(str(prefill.version),))
+    schedule = Schedule(version=decode.version, interleave_with=(prefill.version,))
     profile = Profile()
     profile.add_schedule(schedule)
     profile.save(tmp_path / "interleave.json")
     loaded = Profile.load(tmp_path / "interleave.json")
     assert loaded.schedules() == [schedule]
+    start = Profile()
+    assert any(
+        schedule in edit.apply(start).schedules()
+        for edit in candidates([Timed(decode), Timed(prefill)], start, DEVICE)
+    )
 
 
 @unbuilt
@@ -85,6 +95,11 @@ def test_derived_size_merging_two_calls_round_trips_and_is_proposed(tmp_path):
     profile.save(tmp_path / "derived_size.json")
     loaded = Profile.load(tmp_path / "derived_size.json")
     assert loaded.schedules() == [schedule]
+    start = Profile()
+    assert any(
+        schedule in edit.apply(start).schedules()
+        for edit in candidates([Timed(recording)], start, DEVICE)
+    )
 
 
 @unbuilt

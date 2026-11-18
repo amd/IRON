@@ -32,7 +32,6 @@ from iron.operators.sample import Sample
 from iron.operators.selective_scan import SelectiveScan
 from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
-from iron.tests.support.tuning import unbuilt
 
 N = 2048
 
@@ -265,9 +264,10 @@ PATTERNS = {
 def _profile(entry: Entry) -> Profile:
     profile = Profile()
     profile.add_entry(entry)
-    profile.add_schedule(Schedule("decode", order=((0, 1),), calls_per_command=2))
+    decode = (("x", (1, N), "bfloat16"),)
+    profile.add_schedule(Schedule(decode, order=((0, 1),), calls_per_command=2))
     profile.add_variants(
-        Variants(("kv_valid",), (((1, 256),), entry), (((257, N),), entry))
+        Variants(("kv_valid",), ((((1, 256),), entry), (((257, N),), entry)))
     )
     profile.add_binding(Binding("kv_valid", "runtime"))
     return profile
@@ -281,7 +281,6 @@ def test_every_coverage_pattern_is_an_entry_a_profile_holds(name: str) -> None:
     assert profile.bindings() == [Binding("kv_valid", "runtime")]
 
 
-@unbuilt
 @pytest.mark.parametrize("name", sorted(PATTERNS))
 def test_every_coverage_pattern_round_trips_through_a_saved_profile(
     name: str, tmp_path: Path

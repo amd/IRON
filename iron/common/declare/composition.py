@@ -23,6 +23,8 @@ from typing import Any, Literal
 
 from ..image.step import Edge, EdgeKind
 
+Version = tuple[tuple[str, tuple[int, ...], str], ...]
+
 
 class Switch(Enum):
     """How a call enters a configuration: a full ``RELOAD``, only the ``CHANGED_CORES``, or ``OVERLAPPED`` with compute."""
@@ -162,16 +164,16 @@ class Scope:
         device_part: The device part it is limited to; None for every part.
     """
 
-    versions: frozenset[Any] | None = None
+    versions: frozenset[Version] | None = None
     occurrences: tuple[int, ...] | None = None
     device_part: str | None = None
 
 
 @dataclass(frozen=True)
 class Entry:
-    """A profile's composition entry: a tree of configurations, regions and steps."""
+    """A profile's composition entry: a tree of configurations, regions and steps, or one step."""
 
-    root: Configuration | Region
+    root: Configuration | Region | Member
     scope: Scope = field(default_factory=Scope)
 
 
@@ -191,13 +193,13 @@ class Schedule:
         packaging: One full ELF, or an xclbin per step; None for the device's default.
     """
 
-    version: str
+    version: Version
     order: tuple[tuple[int, int], ...] = ()
     recompute: tuple[int, ...] = ()
     calls_per_command: int = 1
     calls_overlapped: int = 0
     commands_in_flight: int = 1
-    interleave_with: tuple[str, ...] = ()
+    interleave_with: tuple[Version, ...] = ()
     size: str | None = None
     packaging: Literal["full_elf", "xclbin"] | None = None
 

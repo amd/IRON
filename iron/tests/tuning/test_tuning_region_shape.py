@@ -65,15 +65,23 @@ def test_a_convex_non_contiguous_set_round_trips_reordered(tmp_path, npu2):
 
 
 @unbuilt
-def test_recomputation_round_trips_in_a_schedule(tmp_path):
-    profile = Profile()
+def test_recomputation_round_trips_in_a_schedule(tmp_path, npu2):
+    """A schedule running a step again inside a later part round-trips and is proposed."""
+    recording = toys.qkv_among_rope_recording("qkv_recompute")
     entry = Entry(root=_qkv_region())
+    schedule = Schedule(version=recording.version, recompute=(0,))
+    profile = Profile()
     profile.add_entry(entry)
-    schedule = Schedule(version=(), recompute=(0,))
     profile.add_schedule(schedule)
-    assert profile.entries() == [entry]
-    assert profile.schedules() == [schedule]
     profile.save(tmp_path / "profile.json")
+    loaded = Profile.load(tmp_path / "profile.json")
+    assert loaded.entries() == [entry]
+    assert loaded.schedules() == [schedule]
+    start = Profile()
+    assert any(
+        schedule in edit.apply(start).schedules()
+        for edit in candidates([Timed(recording)], start, npu2)
+    )
 
 
 @unbuilt

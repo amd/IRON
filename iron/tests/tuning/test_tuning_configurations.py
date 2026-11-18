@@ -20,11 +20,12 @@ from iron.common.declare.composition import (
     Edge as CompositionEdge,
 )
 from iron.common.declare.profile import Profile
+from iron.common.graph.record import Recording
 from iron.common.image.step import EdgeKind
 from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
-from iron.tests.support import toys_schedule
+from iron.tests.support import sequences, toys_schedule
 from iron.tests.support.fusable import gemv_silu_mul, gemv_silu_mul_recording
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
@@ -125,12 +126,27 @@ def test_several_regions_in_one_packing_round_trip_and_are_proposed(tmp_path):
     profile.save(tmp_path / "several_regions.json")
     loaded = Profile.load(tmp_path / "several_regions.json")
     assert loaded.entries() == [entry]
+    recording = gemv_silu_mul_recording("config_several_regions", gemv1, silu1, mul1)
+    start = Profile()
+    assert any(
+        entry in edit.apply(start).entries()
+        for edit in candidates([Timed(recording)], start, DEVICE)
+    )
 
 
 @unbuilt
 def test_nesting_a_region_inside_a_region_round_trips_and_is_proposed(tmp_path):
     """A region nested inside a region (the Alternating toy's two halves grouped, then wrapped) round-trips and is a candidate."""
     size = 2048
+    first = ReLU(size=size, num_aie_columns=8)
+    middle = Tanh(size=size, num_aie_columns=8)
+    last = ReLU(size=size, num_aie_columns=8)
+    recording = Recording.of_steps(
+        "config_nested",
+        sequences.steps((first, "x", "a"), (middle, "a", "b"), (last, "b", "y")),
+        ["x"],
+        ["y"],
+    )
     inner = Region(
         parts=(
             Member(ReLU, {"size": size}, {"num_aie_columns": 8}),
@@ -144,6 +160,11 @@ def test_nesting_a_region_inside_a_region_round_trips_and_is_proposed(tmp_path):
     profile.save(tmp_path / "nested_region.json")
     loaded = Profile.load(tmp_path / "nested_region.json")
     assert loaded.entries() == [entry]
+    start = Profile()
+    assert any(
+        entry in edit.apply(start).entries()
+        for edit in candidates([Timed(recording)], start, DEVICE)
+    )
 
 
 @unbuilt
