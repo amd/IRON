@@ -16,6 +16,7 @@ limit comes from the device's target model.
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
@@ -31,7 +32,7 @@ from aie.utils import set_current_device
 
 from ..declare.composition import Entry, Region
 from ..design import BuiltArray, OperatorDesign
-from ..image.step import Edge, HandOff
+from ..image.step import BufferRef, Edge, HandOff
 from .record import Recording
 
 
@@ -301,11 +302,11 @@ class Derivation:
         self.region = region
         self.wired, _ = region.wiring()
         self.recorded: list[tuple[Any, Recorded]] = []
-        self.roots: list[dict[str, str]] = []
+        self.refs: list[dict[str, BufferRef]] = []
         for s in matches[0]:
             step = recording.steps[s]
-            self.roots.append(
-                {b.name: ref.root for ref, b in zip(step.refs(), step.op.buffers)}
+            self.refs.append(
+                {b.name: ref for ref, b in zip(step.refs(), step.op.buffers)}
             )
             with set_current_device(device), record() as recorded:
                 array = BuiltArray(OperatorDesign(step.op))
@@ -484,14 +485,20 @@ class Derivation:
             for link in recorded.links:
                 programs.append(self._link_events(link))
         writer: dict[ObjectFifo, int] = {}
-        reader: dict[ObjectFifo, int] = {}
+        readers: dict[ObjectFifo, list[int]] = {}
         for actor, program in enumerate(programs):
             for fifo, producer, _, _ in program:
-                (writer if producer else reader)[fifo] = actor
+                if producer:
+                    writer[fifo] = actor
+                elif actor not in readers.setdefault(fifo, []):
+                    readers[fifo].append(actor)
         channels: list[Channel] = []
         fixed: dict[int, int] = {}
-        of: dict[tuple[ObjectFifo, bool], list[int]] = {}
+        writes: dict[ObjectFifo, list[int]] = {}
+        reads: dict[tuple[ObjectFifo, int], int] = {}
         edge_channels: dict[Edge, list[int]] = {}
+        hand_off: dict[Edge, HandOff] = {}
+        feeds = Counter((p, edge.output) for edge, p, _ in self.wired)
         phases = self.region.phases
         for n, (edge, p, c) in enumerate(self.wired):
             outs = self.lanes[p].get(edge.output, [])
@@ -500,44 +507,60 @@ class Derivation:
                 self.obj_elements[p].get(edge.output),
                 self.obj_elements[c].get(edge.input),
             )
+            made, read = self.refs[p][edge.output], self.refs[c][edge.input]
+            if (read.start, read.nbytes) != (made.start, made.nbytes):
+                raise NotImplementedError(
+                    f"{edge}: reading part of what its producer makes (slices) "
+                    f"is not modelled yet"
+                )
             if len(outs) != len(ins) or sizes[0] != sizes[1]:
                 raise NotImplementedError(
                     f"{edge}: {len(outs)} lanes of {sizes[0]} elements into "
                     f"{len(ins)} of {sizes[1]} needs the memtile restaging the "
                     f"analysis does not model yet"
                 )
-            carried = self.roots[p][edge.output] in self.carried
+            shared = feeds[(p, edge.output)] > 1 or any(
+                len(readers.get(inp, [])) > 1 for inp in ins
+            )
+            hand_off[edge] = HandOff.BROADCAST if shared else HandOff.EQUAL
+            carried = made.root in self.carried
             for out, inp in zip(outs, ins):
-                channels.append(
-                    Channel(
-                        writer[out],
-                        reader[inp],
-                        initial=self.objects[inp] if carried else 0,
-                        phase=phases[n] if phases else 0,
+                for actor in readers[inp]:
+                    channels.append(
+                        Channel(
+                            writer[out],
+                            actor,
+                            initial=self.objects[inp] if carried else 0,
+                            phase=phases[n] if phases else 0,
+                        )
                     )
-                )
-                e = len(channels) - 1
-                of.setdefault((out, True), []).append(e)
-                of.setdefault((inp, False), []).append(e)
-                edge_channels.setdefault(edge, []).append(e)
-        for fifo in writer.keys() & reader.keys():
-            if (fifo, True) in of or (fifo, False) in of:
+                    e = len(channels) - 1
+                    writes.setdefault(out, []).append(e)
+                    reads[(inp, actor)] = e
+                    edge_channels.setdefault(edge, []).append(e)
+        for fifo in writer.keys() & readers.keys():
+            if fifo in writes or any((fifo, a) in reads for a in readers[fifo]):
                 continue
-            channels.append(Channel(writer[fifo], reader[fifo]))
-            e = len(channels) - 1
-            of[(fifo, True)] = [e]
-            of[(fifo, False)] = [e]
-            if fifo.depth is not None:
-                fixed[e] = fifo.depth
+            for actor in readers[fifo]:
+                channels.append(Channel(writer[fifo], actor))
+                e = len(channels) - 1
+                writes.setdefault(fifo, []).append(e)
+                reads[(fifo, actor)] = e
+                if fifo.depth is not None:
+                    fixed[e] = fifo.depth
         flow = Flow(
             channels,
             [
                 [
                     Event(e, producer, acquire, count)
                     for fifo, producer, acquire, count in program
-                    for e in of.get((fifo, producer), [])
+                    for e in (
+                        writes.get(fifo, [])
+                        if producer
+                        else [reads[(fifo, actor)]] if (fifo, actor) in reads else []
+                    )
                 ]
-                for program in programs
+                for actor, program in enumerate(programs)
             ],
         )
         why = flow.balance()
@@ -560,7 +583,7 @@ class Derivation:
             )
         return Analysis(
             tokens=tokens,
-            hand_off={edge: HandOff.EQUAL for edge in edge_channels},
+            hand_off=hand_off,
             dtype={
                 edge: np.dtype(
                     next(

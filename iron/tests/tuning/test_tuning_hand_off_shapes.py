@@ -58,6 +58,10 @@ _REALIZES = {
     "layout_transpose": HandOff.LAYOUT,
 }
 
+# The hand-offs the analysis derives today; the rest need memtile restaging
+# or a slice's objects modelled, and stay strict xfail.
+_DERIVED = {"broadcast"}
+
 # Any ratio and broadcast are representable gaps today (operand.py:260-299):
 # searchable, strict xfail, compiler-failure entries once the hardware could
 # run them and the compiler refuses.
@@ -82,8 +86,14 @@ def test_a_hand_off_shape_round_trips_through_the_profile(shape, tmp_path):
     )
 
 
-@unbuilt
-@pytest.mark.parametrize("shape", sorted(SHAPES))
+@pytest.mark.usefixtures("npu2")
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param(name, marks=() if name in _DERIVED else unbuilt)
+        for name in sorted(SHAPES)
+    ],
+)
 def test_the_analysis_derives_the_named_hand_off(shape):
     """The dataflow analysis derives every edge of each toy as the hand-off its lane counts realize; the toy never states it."""
     recording, region = SHAPES[shape]()

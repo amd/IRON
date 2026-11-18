@@ -12,13 +12,14 @@ from typing import Any, Mapping
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
+from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
 from iron.common.declare import Profile
 from iron.common.declare.composition import Member, Region
 from iron.common.graph.record import Recording
-from iron.common.image.step import Edge, EdgeKind, HandOff
+from iron.common.image.step import BufferRef, Edge, EdgeKind, HandOff
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -473,8 +474,23 @@ def broadcast_weight_to_columns(size=2048, cols=4):
 
 
 def slices_qkv(size=2048):
-    """One buffer split at element offsets into Q, K and V: realizes ``HandOff.SLICES``."""
-    return fan_out_norm_qkv(size=size)
+    """One GEMV computing ``[q|k|v]`` into one buffer, each third read by its own consumer: realizes ``HandOff.SLICES``."""
+    qkv = GEMV(M=3 * size, K=size, num_aie_columns=1, feed_b=True)
+    third = size * np.dtype(bfloat16).itemsize
+    readers = [SiLU(size=size, num_aie_columns=1) for _ in range(3)]
+    steps = sequences.steps(
+        (qkv, "A", "x", "qkv"),
+        *(
+            (silu, BufferRef("qkv", k * third, third), name)
+            for k, (silu, name) in enumerate(zip(readers, ("q", "k", "v")))
+        ),
+    )
+    recording = Recording.of_steps("toy_slices", steps, ["A", "x"], ["q", "k", "v"])
+    region = Region(
+        tuple(member(s.op) for s in recording.steps),
+        tuple(Edge(0, "C", k, "x") for k in (1, 2, 3)),
+    )
+    return recording, region
 
 
 def ratio_4_into_6(size=288):
