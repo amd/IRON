@@ -35,13 +35,12 @@ class Switch(Enum):
 class Refinement(Enum):
     """How a change relates to the untuned build.
 
-    ``EXACT`` changes are bit-identical; ``REASSOCIATION`` and ``NO_WORSE``
-    changes are admitted only where no input is worse than the untuned
-    build's against the operator's reference.
+    ``EXACT`` changes are bit-identical; ``NO_WORSE`` changes (a regrouped
+    sum, a rounding moved) are admitted only where no input is worse than
+    the untuned build's against the operator's reference.
     """
 
     EXACT = "exact"
-    REASSOCIATION = "reassociation"
     NO_WORSE = "no_worse"
 
 
@@ -244,7 +243,10 @@ class StateLayout:
 def refinement(cls: type, tunable: str) -> Refinement:
     """Return how moving ``cls``'s ``tunable`` off its value relates to the untuned build.
 
+    ``EXACT`` unless the tunable is declared ``tunable(exact=False)``.
+
     Raises:
-        NotImplementedError: Not built yet: a tunable does not declare it.
+        NotImplementedError: Not built yet: the pinned mlir-aie's ``tunable()``
+            takes no ``exact=``.
     """
-    raise NotImplementedError("a tunable's refinement is not declared yet")
+    raise NotImplementedError("tunable(exact=) is not in the pinned mlir-aie yet")

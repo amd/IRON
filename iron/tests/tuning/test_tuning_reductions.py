@@ -108,7 +108,7 @@ def test_a_split_gemv_is_no_worse_than_its_own_untuned_build(splits, npu2):
     region = toys.cascade_region(_gemv_members(splits), "C", "B")
     profile, base = Profile(), Profile()
     profile.add_entry(Entry(root=region))
-    result = check(profile, base, [Timed(recording)], npu2, Refinement.REASSOCIATION)
+    result = check(profile, base, [Timed(recording)], npu2, Refinement.NO_WORSE)
     assert result.ok, result.why
 
 
@@ -148,7 +148,7 @@ def test_search_keeps_the_split_and_mechanism_that_pay(splits, npu2):
         assert entry in tuned.entries()
     if ratio > 1.05:
         assert entry not in tuned.entries()
-    result = check(tuned, start, calls, npu2, Refinement.REASSOCIATION)
+    result = check(tuned, start, calls, npu2, Refinement.NO_WORSE)
     assert result.ok, result.why
 
 

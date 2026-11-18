@@ -93,7 +93,7 @@ def test_recomputation_round_trips_in_a_schedule(tmp_path):
                 Member(GEMV, dict(M=M, K=M), part=("K", 0, M // 2)),
                 Member(GEMV, dict(M=M, K=M), part=("K", M // 2, M)),
             ),
-            Refinement.REASSOCIATION,
+            Refinement.NO_WORSE,
             toys.gemv_fan_in_recording("fission_reduction", M, M, 2),
         ),
     ],
@@ -167,7 +167,7 @@ def test_a_reordered_region_is_bit_identical_to_the_recorded_order(npu2):
 
 @unbuilt
 @pytest.mark.supported_devices("npu2")
-def test_fission_of_a_reduction_is_no_worse_by_reassociation(npu2):
+def test_fission_of_a_reduction_is_no_worse(npu2):
     region = Region(
         parts=(
             Member(GEMV, dict(M=M, K=M), part=("K", 0, M // 2)),
@@ -177,7 +177,7 @@ def test_fission_of_a_reduction_is_no_worse_by_reassociation(npu2):
     recording = toys.gemv_fan_in_recording("fission_reduction_check", M, M * 2, 2)
     profile, base = Profile(), Profile()
     profile.add_entry(Entry(root=region))
-    result = check(profile, base, [Timed(recording)], npu2, Refinement.REASSOCIATION)
+    result = check(profile, base, [Timed(recording)], npu2, Refinement.NO_WORSE)
     assert result.ok, result.why
 
 
