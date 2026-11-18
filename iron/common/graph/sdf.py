@@ -31,6 +31,7 @@ from aie.iron.trace import Recording as Recorded
 from aie.utils import set_current_device
 
 from ..declare.composition import Entry, Region
+from ..declare.operand import Staging
 from ..design import BuiltArray, OperatorDesign
 from ..image.step import BufferRef, Edge, HandOff
 from .record import Recording
@@ -289,9 +290,9 @@ class Derivation:
 
     Raises:
         NotImplementedError: What the analysis does not model yet: a
-            run-time branch or a ``forever_`` in a core, a hand-off whose
-            lanes or objects differ (memtile restaging), or a loop no fifo's
-            objects settle.
+            run-time branch or a ``forever_`` in a core, a per-call count, a
+            slice, a restaging IRON's ``Staging`` cannot plan, or a loop no
+            fifo's objects settle.
         ValueError: The region matches none of the recording's steps.
     """
 
@@ -300,11 +301,18 @@ class Derivation:
         if not matches:
             raise ValueError("the region matches none of the recording's steps")
         self.region = region
+        self.device = device
         self.wired, _ = region.wiring()
         self.recorded: list[tuple[Any, Recorded]] = []
         self.refs: list[dict[str, BufferRef]] = []
         for s in matches[0]:
             step = recording.steps[s]
+            if step.op.bound_extents:
+                raise NotImplementedError(
+                    f"{type(step.op).__name__} is bounded per call "
+                    f"({', '.join(step.op.bound_extents)}); analysing a call at "
+                    f"its own values is not modelled yet"
+                )
             self.refs.append(
                 {b.name: ref for ref, b in zip(step.refs(), step.op.buffers)}
             )
@@ -457,6 +465,122 @@ class Derivation:
                 events += [(f, True, False, 1) for f in dsts]
         return events
 
+    def _channel(
+        self,
+        built: tuple,
+        edge: Edge,
+        writing: int,
+        reading: int,
+        phase: int,
+        searched: bool,
+    ) -> int:
+        """Add a channel from actor ``writing`` to ``reading`` in ``built``, part of ``edge``'s searched depth where ``searched``, and return it."""
+        channels, edge_channels = built[1], built[5]
+        channels.append(Channel(writing, reading, phase=phase))
+        if searched:
+            edge_channels.setdefault(edge, []).append(len(channels) - 1)
+        return len(channels) - 1
+
+    def _restaged(
+        self,
+        edge: Edge,
+        p: int,
+        c: int,
+        phase: int,
+        built: tuple,
+        ends: tuple[dict[ObjectFifo, int], dict[ObjectFifo, list[int]]],
+    ) -> HandOff:
+        """Model ``edge``'s memtile restaging as an actor, as IRON's ``Staging`` plans it, and return its hand-off.
+
+        A join takes, each round, its slot from every producer lane it joins and
+        writes one memtile object to the consumer lane, at the depth ``Staging``
+        gives that memtile; a split takes one producer object a round and
+        writes each consumer lane its slot. The producer's channels into the
+        memtile, and a split's out of it, are the edge's searched depth.
+
+        Raises:
+            NotImplementedError: ``Staging`` cannot restage the edge (a lane
+                taking parts of two, an order no join or split gives), or a
+                slot is not whole objects at both ends.
+        """
+        programs, channels, fixed, writes, reads, edge_channels = built
+        writer, readers = ends
+        source = next(
+            b for b in self.recorded[p][0].op.buffers if b.name == edge.output
+        )
+        sink = next(b for b in self.recorded[c][0].op.buffers if b.name == edge.input)
+        outs, ins = self.lanes[p][edge.output], self.lanes[c][edge.input]
+        produce, consume = math.prod(source.obj_shape), math.prod(sink.obj_shape)
+        with set_current_device(self.device):
+            try:
+                staging = Staging(source, sink)
+            except ValueError as e:
+                raise NotImplementedError(
+                    f"{edge}: restaging it is not modelled yet: {e}"
+                ) from e
+        if (
+            any(s % produce for _, slots in staging.joins for s in slots)
+            or any(sum(slots) % consume for _, slots in staging.joins)
+            or any(s % consume for _, slots in staging.splits for s in slots)
+        ):
+            raise NotImplementedError(
+                f"{edge}: a restaging slot that is not whole objects at both ends "
+                f"is not modelled yet"
+            )
+
+        for j, (group, slots) in enumerate(staging.joins):
+            actor = len(programs)
+            memtile = (edge, "join", j)
+            each = sum(slots) // consume
+            rounds = self.objects[ins[j]] // each
+            takes = [(outs[k], s // produce) for k, s in zip(group, slots)]
+            programs.append(
+                (
+                    [(fifo, False, True, n) for fifo, n in takes]
+                    + [(memtile, True, True, each)]
+                    + [(fifo, False, False, n) for fifo, n in takes]
+                    + [(memtile, True, False, each)]
+                )
+                * rounds
+            )
+            for fifo, _ in takes:
+                e = self._channel(built, edge, writer[fifo], actor, phase, True)
+                writes.setdefault(fifo, []).append(e)
+                reads[(fifo, actor)] = e
+            depth = 2 if 2 * sum(slots) * staging.item <= staging.capacity else 1
+            for reader in readers[ins[j]]:
+                e = self._channel(built, edge, actor, reader, phase, False)
+                writes.setdefault(memtile, []).append(e)
+                reads[(ins[j], reader)] = e
+                fixed[e] = depth * each
+        for i, (group, slots) in enumerate(staging.splits):
+            actor = len(programs)
+            parts = [
+                ((edge, "split", i, j), s // consume) for j, s in zip(group, slots)
+            ]
+            programs.append(
+                (
+                    [(outs[i], False, True, 1)]
+                    + [(key, True, True, n) for key, n in parts]
+                    + [(outs[i], False, False, 1)]
+                    + [(key, True, False, n) for key, n in parts]
+                )
+                * self.objects[outs[i]]
+            )
+            e = self._channel(built, edge, writer[outs[i]], actor, phase, True)
+            writes.setdefault(outs[i], []).append(e)
+            reads[(outs[i], actor)] = e
+            for (key, _), j in zip(parts, group):
+                for reader in readers[ins[j]]:
+                    e = self._channel(built, edge, actor, reader, phase, True)
+                    writes.setdefault(key, []).append(e)
+                    reads[(ins[j], reader)] = e
+        if any(len(group) > 1 for group, _ in staging.joins):
+            return HandOff.JOIN
+        if any(len(group) > 1 for group, _ in staging.splits):
+            return HandOff.SPLIT
+        return HandOff.EQUAL
+
     def analysis(self) -> Analysis:
         """Return what the call's actors and channels say about the region's edges.
 
@@ -514,11 +638,15 @@ class Derivation:
                     f"is not modelled yet"
                 )
             if len(outs) != len(ins) or sizes[0] != sizes[1]:
-                raise NotImplementedError(
-                    f"{edge}: {len(outs)} lanes of {sizes[0]} elements into "
-                    f"{len(ins)} of {sizes[1]} needs the memtile restaging the "
-                    f"analysis does not model yet"
+                hand_off[edge] = self._restaged(
+                    edge,
+                    p,
+                    c,
+                    phases[n] if phases else 0,
+                    (programs, channels, fixed, writes, reads, edge_channels),
+                    (writer, readers),
                 )
+                continue
             shared = feeds[(p, edge.output)] > 1 or any(
                 len(readers.get(inp, [])) > 1 for inp in ins
             )

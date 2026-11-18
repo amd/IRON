@@ -60,7 +60,7 @@ _REALIZES = {
 
 # The hand-offs the analysis derives today; the rest need memtile restaging
 # or a slice's objects modelled, and stay strict xfail.
-_DERIVED = {"broadcast"}
+_DERIVED = {"broadcast", "join_8_into_4"}
 
 # Any ratio and broadcast are representable gaps today (operand.py:260-299):
 # searchable, strict xfail, compiler-failure entries once the hardware could

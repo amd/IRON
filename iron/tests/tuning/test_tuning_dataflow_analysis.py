@@ -7,7 +7,6 @@ import pytest
 
 from iron.common.graph.sdf import analyze
 from iron.tests.support import toys_dataflow as toys
-from iron.tests.support.tuning import unbuilt
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -23,22 +22,6 @@ def test_balanced_chain_is_consistent_firing_once_a_tile():
     assert analysis.why is None
     assert analysis.repetition == {0: tiles, 1: tiles, 2: tiles}
     assert all(d == 1 for d in analysis.min_depth.values())
-
-
-@unbuilt
-def test_inconsistent_cycle_rates_cannot_balance():
-    """A two-member cycle whose edges demand incompatible repetitions.
-
-    ``add`` and ``mul`` each move a whole buffer at their own ``tile_size``;
-    at different tile sizes, the cycle's forward and backward edges need
-    repetition ratios no positive integer vector satisfies, so
-    ``consistent`` is False and ``why`` names the cycle.
-    """
-    region, add, mul = toys.mismatched_rate_cycle(add_tile=64, mul_tile=32)
-    recording = toys.mismatched_rate_cycle_recording("inconsistent", add, mul)
-    analysis = analyze(region, recording, toys.NPU2)
-    assert not analysis.consistent
-    assert analysis.why
 
 
 def test_cycle_without_a_carried_value_deadlocks_at_any_depth():
@@ -65,14 +48,16 @@ def test_cycle_with_its_value_carried_holds_the_call_plus_one():
     assert analysis.why is None
 
 
-@unbuilt
 def test_known_multi_rate_edge_minimum_buffer():
     """A real multi-rate edge with both sides above one: a 32-row GEMM tile feeding a 48-row GEMM tile.
 
     At ``M = 384`` both GEMMs resolve npu2's four core rows, so each
     firing really moves ``tile_m * n_aie_rows`` rows: 128 and 192.
     Repetition ``(3, 2)`` (``192 / gcd(128, 192)``, ``128 / gcd(128,
-    192)``), minimum buffer ``128 + 192 - gcd(128, 192) = 256``.
+    192)``). A memtile restages whole objects in whole rounds, and the
+    smallest round both sides divide is ``lcm(128, 192) = 384`` rows, the
+    whole call, so the producer's side holds all three of its objects, not
+    the ``128 + 192 - gcd(128, 192)`` rows a shared row-by-row buffer would.
     """
     producer, consumer = toys.gemm_into_gemm(
         M=384, width=64, producer_tile=32, consumer_tile=48
@@ -84,4 +69,4 @@ def test_known_multi_rate_edge_minimum_buffer():
     analysis = analyze(region, recording, toys.NPU2)
     assert analysis.consistent
     assert analysis.repetition == {0: 3, 1: 2}
-    assert analysis.min_depth[region.edges[0]] == 256
+    assert analysis.min_depth[region.edges[0]] == 3

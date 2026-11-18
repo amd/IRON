@@ -69,7 +69,6 @@ def test_depth_over_l1_or_memtile_is_refused(role):
     assert result.stage == "counts"
 
 
-@unbuilt
 def test_skip_diamond_minimum_depth_is_between_two_and_four():
     """The residual-add skip/broadcast window: held at two objects it deadlocks, at four it runs, so the analysis's minimum falls strictly in between."""
     region, first, norm, second = toys.broadcast_skip(depth=None)

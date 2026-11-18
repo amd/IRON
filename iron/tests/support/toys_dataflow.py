@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import numpy as np
 from aie.iron.device import from_name
 
-from iron import Precision
+import iron
+from iron import Precision, Scratchpad
 from iron.common.declare.composition import Member, Region
 from iron.common.graph.record import Recording
 from iron.common.image.step import Edge
@@ -161,6 +163,27 @@ def gemm_rowwise_recording(name: str, gemm, norm) -> Recording:
     return Recording.of_steps(name, steps, ["A", "B"], ["out"])
 
 
+class BoundedRows(iron.Graph):
+    """A GEMM over the first ``n`` rows of ``a``, each row then normalized: a valid length short of ``a``'s rows.
+
+    Args:
+        tile_m: The GEMM's rows a tile.
+    """
+
+    def __init__(self, tile_m: int) -> None:
+        self.tile_m = tile_m
+
+    def body(self, a, b, *, n: Scratchpad[np.int32]):
+        rows = GEMM.step(
+            a[:n],
+            b,
+            precision=Precision.MEDIUM,
+            num_aie_columns=1,
+            tile_m=self.tile_m,
+        )
+        return RMSNorm.step(rows, num_aie_columns=1)
+
+
 def gemm_into_gemm(
     M: int,
     width: int,
@@ -228,31 +251,6 @@ def gemm_into_gemm_recording(name: str, producer: GEMM, consumer: GEMM) -> Recor
     """Return ``producer`` then ``consumer`` as a recording, over host inputs ``A``, ``B``, ``B2``."""
     steps = sequences.steps((producer, "A", "B", "mid"), (consumer, "mid", "B2", "out"))
     return Recording.of_steps(name, steps, ["A", "B", "B2"], ["out"])
-
-
-def mismatched_rate_cycle(add_tile: int = 64, mul_tile: int = 32, size: int = 128):
-    """Return a two-member cycle, ``add``'s output into ``mul`` and ``mul``'s back into ``add``.
-
-    Both operators move a whole buffer a firing at their own ``tile_size``,
-    so an edge's rate is theirs alone; at ``add_tile != mul_tile`` the two
-    edges of the cycle demand repetitions no positive integer vector
-    satisfies, so no annotation is needed to make the cycle inconsistent.
-    """
-    add = ElementwiseAdd(size=size, tile_size=add_tile, num_aie_columns=1)
-    mul = ElementwiseMul(size=size, tile_size=mul_tile, num_aie_columns=1)
-    members = (
-        _member(add, "size", tile_size=add.tile_size),
-        _member(mul, "size", tile_size=mul.tile_size),
-    )
-    edges = (Edge(0, "y", 1, "a"), Edge(1, "y", 0, "a"))
-    region = Region(parts=members, edges=edges)
-    return region, add, mul
-
-
-def mismatched_rate_cycle_recording(name: str, add, mul) -> Recording:
-    """Return ``add`` and ``mul`` wired as ``mismatched_rate_cycle`` names them, ``x`` carried across calls."""
-    steps = sequences.steps((add, "x", "w", "mid"), (mul, "mid", "x", "x"))
-    return Recording.of_steps(name, steps, ["w"], ["x"], feedback=["x"])
 
 
 def running_sum(size: int = 256, tile: int = 128, cols: int = 1):

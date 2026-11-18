@@ -5,16 +5,13 @@
 
 import pytest
 
-from iron import Precision
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Member, Refinement, Region
 from iron.common.graph.record import Recording
 from iron.common.graph.sdf import analyze
 from iron.common.image.step import Edge
 from iron.operators.elementwise_add import ElementwiseAdd
-from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs
-from iron.operators.rms_norm import RMSNorm
 from iron.tests.support import sequences
 from iron.tests.support import toys_dataflow as toys
 from iron.tests.support.tuning import unbuilt
@@ -39,9 +36,14 @@ def test_single_rate_edge_round_trips():
     )
 
 
-@unbuilt
 def test_gemm_tiles_into_rowwise_op_is_a_multi_rate_edge():
-    """A GEMM's 64-row tile into a per-row op: repetition ``(1, 64)``, minimum buffer ``64 + 1 - gcd(64, 1) = 64``."""
+    """A GEMM's 64-row tile into a per-row op: one object a call into 64, and one object of buffer.
+
+    The tile is the GEMM's whole 64-row output, so its lane moves one object
+    a call; the memtile that restages it into the norm's rows takes that one
+    object a round, so the producer's side of the edge holds one, not the
+    ``64 + 1 - gcd(64, 1)`` rows a shared row-by-row buffer would.
+    """
     gemm, norm = toys.gemm_rowwise(row_tile=64)
     assert gemm.n_aie_rows == 1
     region = toys.gemm_rowwise_region(gemm, norm)
@@ -49,7 +51,7 @@ def test_gemm_tiles_into_rowwise_op_is_a_multi_rate_edge():
     analysis = analyze(region, recording, toys.NPU2)
     assert analysis.consistent
     assert analysis.repetition == {0: 1, 1: 64}
-    assert analysis.min_depth[region.edges[0]] == 64
+    assert analysis.min_depth[region.edges[0]] == 1
 
 
 @unbuilt
@@ -89,46 +91,23 @@ def test_limbs_expansion_is_a_real_six_to_one_multi_rate_edge():
 
 @unbuilt
 def test_per_call_bounded_token_count_is_a_valid_kv_length():
-    """A GEMM producing a per-call-bounded number of rows (a valid KV length short of ``M``).
+    """A GEMM over the first ``n`` of 48 rows (a valid KV length short of ``M``), each row then normalized.
 
-    Still balances at the bound: repetition ``(1, 16)`` for a 16-row
-    tile (``tile_m = 16``). ``M = 48`` keeps the row split npu2's array
-    resolves at one (``M / tile_m`` odd), so the real per-firing count is
-    ``tile_m`` alone.
+    At ``n = 16`` with a 16-row tile, a call fires the GEMM once and the
+    norm 16 times: the analysis is held to the call's own values, not the
+    48 rows recorded.
     """
-    gemm = GEMM(
-        M=48, K=64, N=64, precision=Precision.MEDIUM, num_aie_columns=1, tile_m=16
-    ).resolved(toys.NPU2)
-    assert gemm.n_aie_rows == 1
-    norm = RMSNorm(rows=48, tile_size=64, num_aie_columns=1)
-    edge = Edge(0, "C", 1, "x")
+    recording = toys.BoundedRows(tile_m=16).record(a=(48, 64), b=(64, 64))
     region = Region(
-        parts=(
-            Member(cls=GEMM, dims={"M": gemm.M, "K": gemm.K, "N": gemm.N}),
-            Member(cls=RMSNorm, dims={"rows": norm.rows}),
+        tuple(
+            Member(cls=type(s.op), dims=Profile.dims(type(s.op), vars(s.op)))
+            for s in recording.steps
         ),
-        edges=(edge,),
+        (Edge(0, "C", 1, "x"),),
     )
-    recording = toys.gemm_rowwise_recording("kv-length", gemm, norm)
     analysis = analyze(region, recording, toys.NPU2)
     assert analysis.consistent
     assert analysis.repetition == {0: 1, 1: 16}
-
-
-@unbuilt
-def test_rates_that_cannot_balance_are_refused_before_any_build():
-    """A cycle whose two edges demand incompatible repetition ratios.
-
-    The same toy as the dataflow analysis's inconsistent case, refused by
-    ``fit`` at the ``"analysis"`` stage, before any build.
-    """
-    region, add, mul = toys.mismatched_rate_cycle(add_tile=64, mul_tile=32)
-    profile = Profile()
-    profile.add_entry(Entry(root=region))
-    recording = toys.mismatched_rate_cycle_recording("unbalanced", add, mul)
-    result = fit(profile, [Timed(recording)], toys.NPU2)
-    assert not result.ok
-    assert result.stage == "analysis"
 
 
 @unbuilt

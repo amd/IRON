@@ -15,7 +15,7 @@ from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Scratchpad
+from iron import Precision, Scratchpad
 from iron.common.declare import Profile
 from iron.common.declare.composition import Member, Region
 from iron.common.graph.record import Recording
@@ -23,6 +23,7 @@ from iron.common.image.step import BufferRef, Edge, EdgeKind, HandOff
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.sample import Sample
@@ -504,22 +505,38 @@ def ratio_4_into_6(size=288):
 
 
 def ratio_6_into_4(size=288):
-    """Return the reverse of ``ratio_4_into_6``: a multiply at 6 lanes into a GEMV at 4."""
+    """Return the reverse of ``ratio_4_into_6``: a multiply at 6 lanes into an add at 4, each of whose lanes takes parts of two."""
     mul = ElementwiseMul(size=size, num_aie_columns=6, tile_size=size // 6)
-    gemv = GEMV(M=size, K=size, num_aie_columns=4, feed_b=True)
-    steps = sequences.steps((mul, "a", "b", "mid"), (gemv, "A", "mid", "out"))
-    recording = Recording.of_steps("toy_ratio_reverse", steps, ["a", "b", "A"], ["out"])
-    region = Region((member(mul), member(gemv)), (Edge(0, "y", 1, "B"),))
+    add = ElementwiseAdd(size=size, num_aie_columns=4, tile_size=size // 4)
+    steps = sequences.steps((mul, "a", "b", "mid"), (add, "mid", "c", "out"))
+    recording = Recording.of_steps("toy_ratio_reverse", steps, ["a", "b", "c"], ["out"])
+    region = Region(
+        tuple(member(s.op) for s in recording.steps), (Edge(0, "y", 1, "a"),)
+    )
     return recording, region
 
 
-def layout_transpose(size=256):
-    """RMSNorm's rows fed into a GEMV that reads them as columns: realizes ``HandOff.LAYOUT`` (a transposing memtile transfer)."""
-    norm = RMSNorm(rows=4, tile_size=size)
-    gemv = GEMV(M=size, K=4 * size, feed_b=True, num_aie_columns=1)
-    steps = sequences.steps((norm, "x", "mid"), (gemv, "A", "mid", "out"))
-    recording = Recording.of_steps("toy_layout", steps, ["x", "A"], ["out"])
-    region = Region((member(norm), member(gemv)), (Edge(0, "y", 1, "B"),))
+def layout_transpose(rows=64, cols=128, tile=32):
+    """GEMM's ``tile`` x ``tile`` output tiles read by RMSNorm as whole rows: realizes ``HandOff.LAYOUT``.
+
+    A tile narrower than a row is not a run of whole rows, so the rows a
+    norm reads need the tiles' elements reordered on the way.
+    """
+    gemm = GEMM(
+        M=rows,
+        K=rows,
+        N=cols,
+        precision=Precision.MEDIUM,
+        num_aie_columns=1,
+        tile_m=tile,
+        tile_n=tile,
+    )
+    norm = RMSNorm(rows=rows, tile_size=cols, num_aie_columns=1)
+    steps = sequences.steps((gemm, "A", "B", "mid"), (norm, "mid", "out"))
+    recording = Recording.of_steps("toy_layout", steps, ["A", "B"], ["out"])
+    region = Region(
+        tuple(member(s.op) for s in recording.steps), (Edge(0, "C", 1, "x"),)
+    )
     return recording, region
 
 
