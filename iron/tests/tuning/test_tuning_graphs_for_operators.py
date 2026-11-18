@@ -21,6 +21,7 @@ from iron.common.declare.composition import (
 )
 from iron.common.declare.profile import Profile
 from iron.common.graph.sdf import analyze
+from iron.common.image.step import EdgeKind
 from iron.operators import GEMM, GEMV, ElementwiseAdd, ElementwiseMul, Softmax
 from iron.tests.support import toys_composition as toys
 from iron.tests.support.tuning import unbuilt
@@ -73,10 +74,12 @@ def _prefill_region(
             Member(Softmax, dict(rows=seq, cols=kv_len)),
             Member(GEMM, dict(M=seq, K=kv_len, N=head_dim)),
         ),
+        # The scores' tiles reach the mask in rows (a ratio), and the
+        # softmax's rows join into the GEMM's tiles: both through a memtile.
         edges=(
-            CompositionEdge(0, "C", 1, "a"),
+            CompositionEdge(0, "C", 1, "a", kind=EdgeKind.STAGED),
             CompositionEdge(1, "y", 2, "x"),
-            CompositionEdge(2, "y", 3, "A"),
+            CompositionEdge(2, "y", 3, "A", kind=EdgeKind.STAGED),
         ),
     )
 
@@ -343,7 +346,13 @@ def test_a_bf16_mul_then_add_hand_off_is_refused_against_the_fused_axpy(npu2):
 
 
 @pytest.mark.supported_devices("npu2")
-@unbuilt
+@pytest.mark.xfail(
+    strict=True,
+    raises=ValueError,
+    reason="the decode toy's GEMV writes one query row (128 scores) into a "
+    "32-row softmax; batching the rows through GEMVs that share K needs "
+    "GEMV.B's sequence, which GEMV cannot derive yet",
+)
 def test_search_composes_the_decode_graph_where_it_pays(npu2):
     region = _decode_region()
     entry = Entry(root=region)

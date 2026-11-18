@@ -844,11 +844,17 @@ class Compared:
     Attributes:
         points: Each point's delta and its standard error, unweighted, by the
             point's values as sorted items.
+        medians: Each timed point's two medians, before then after, in
+            microseconds.
+        ratios: Each timed point's median of the paired ratios, after over
+            before.
     """
 
     points: dict[tuple, tuple[float, float | None]] = dataclasses.field(
         default_factory=dict
     )
+    medians: dict[tuple, tuple[float, float]] = dataclasses.field(default_factory=dict)
+    ratios: dict[tuple, float] = dataclasses.field(default_factory=dict)
 
     def weighted(self, call: Timed) -> tuple[float, float | None] | None:
         """Return ``call``'s delta over its points (``Timed.timed_points``) and its standard error; None where a point is not held."""
@@ -1001,6 +1007,13 @@ def compare_graphs(
                 known.points[point] = (
                     statistics.median(paired),
                     standard_error(paired),
+                )
+                known.medians[point] = (
+                    statistics.median(times[0].samples_us),
+                    statistics.median(times[1].samples_us),
+                )
+                known.ratios[point] = statistics.median(
+                    a / b for b, a in zip(times[0].samples_us, times[1].samples_us)
                 )
         finally:
             before.release()

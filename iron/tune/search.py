@@ -142,7 +142,8 @@ class Measured:
     """A profile's time against a base's, from paired runs.
 
     Attributes:
-        ratio: The median of the paired ratios, profile over base.
+        ratio: The median of the paired ratios, profile over base, each
+            point's weighed by the base's time there.
         seconds: The profile's median seconds a run of the calls.
         base_seconds: The base's median seconds a run of the calls.
     """
@@ -714,10 +715,36 @@ def measure(
 ) -> Measured:
     """Time ``calls`` built under ``profile`` against them built under ``base``, in pairs.
 
+    ``profile`` must fit (``fit``). Each call is built both ways and timed
+    interleaved on the NPU at each of its points, checked bit-identical as
+    it goes (``compare_graphs``). A call's time is its points' medians,
+    weighted; ``ratio`` weighs each point's median paired ratio by the
+    base's time there.
+
     Raises:
-        NotImplementedError: Not built yet.
+        ValueError: ``profile`` does not fit.
+        NotBitIdentical: A call is not bit-identical built both ways.
+        NotImplementedError: What ``fit`` or the composer does not take yet.
     """
-    raise NotImplementedError("the paired measurement is not built yet")
+    fitted = fit(profile, calls, device)
+    if not fitted.ok:
+        raise ValueError(f"the profile does not fit ({fitted.stage}): {fitted.why}")
+    seconds = base_seconds = weighted = 0.0
+    for call in calls:
+        known = Compared()
+        with set_current_device(device):
+            before = Applied.of(call, base, device).built(device)
+            after = Applied.of(call, profile, device).built(device)
+            compare_graphs(
+                call, before, after, timing=Timing(), known=known, log=logger.info
+            )
+        for weight, values in call.timed_points():
+            point = tuple(sorted(values.items()))
+            was, now = known.medians[point]
+            base_seconds += weight * was / 1e6
+            seconds += weight * now / 1e6
+            weighted += weight * was * known.ratios[point] / 1e6
+    return Measured(weighted / base_seconds, seconds, base_seconds)
 
 
 def search(
