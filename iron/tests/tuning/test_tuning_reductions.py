@@ -39,7 +39,11 @@ def _gemm_members(splits: int) -> list[Member]:
 @unbuilt
 @pytest.mark.parametrize("splits", [2, 4, 8])
 @pytest.mark.parametrize(
-    "members_fn, kind", [(_gemv_members, "gemv"), (_gemm_members, "gemm")]
+    "members_fn, kind",
+    [
+        pytest.param(_gemv_members, "gemv", id="gemv"),
+        pytest.param(_gemm_members, "gemm", id="gemm"),
+    ],
 )
 def test_a_cascade_chain_round_trips_as_an_entry(
     members_fn, kind, splits, tmp_path, npu2
