@@ -55,14 +55,13 @@ def test_running_max_and_sum_carries_both_accumulators():
         "max-and-sum",
         steps,
         ["x"],
-        ["running_max", "running_sum"],
+        [],
         feedback=["running_max", "running_sum"],
     )
     result = check(profile, Profile(), [Timed(recording)], toys.NPU2, Refinement.EXACT)
     assert result.ok, result.why
 
 
-@unbuilt
 def test_partial_last_token_is_neither_lost_nor_duplicated():
     """128 elements at a 32-element tile, called at a per-call bound of 100.
 

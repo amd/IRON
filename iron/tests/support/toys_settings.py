@@ -85,10 +85,11 @@ def coded_consumer_recording_with_weight(
 
 
 class RangedPair(iron.Graph):
-    """A projection over the first ``rows`` of ``x``, and a copy of the first ``valid`` of ``y``.
+    """A projection over the first ``rows`` of ``x``, and a copy of the first ``valid`` rows of eight of ``y``.
 
     Two per-call values in one call, a 2-D per-call range: ``rows`` bounds the
     projection's input rows, ``valid`` the copy's length, independently of each other.
+    The copy moves rows of eight bf16s: a per-call length counts whole 16-byte units.
     """
 
     def __init__(self, K: int, N: int):
@@ -96,7 +97,7 @@ class RangedPair(iron.Graph):
 
     def body(self, x, w, y, *, rows: Scratchpad[np.int32], valid: Scratchpad[np.int32]):
         projected = GEMM.step(x[:rows], w, b_col_maj=True, precision=Precision.MEDIUM)
-        copied = Copy.step(y[:valid])
+        copied = Copy.step(y.reshape(y.shape[0] // 8, 8)[:valid])
         return projected, copied
 
 

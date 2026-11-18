@@ -230,7 +230,7 @@ def shared_input_two_reads(size=256):
 def scan_with_state_output(heads=2, head_dim=16, state_size=16):
     """SelectiveScan, an operator with two outputs (``y`` and ``final``), into a downstream multiply on ``y``."""
     scan = SelectiveScan(rows=2, heads=heads, head_dim=head_dim, state_size=state_size)
-    size = heads * head_dim
+    size = scan.rows * heads * head_dim
     mul = ElementwiseMul(size=size, num_aie_columns=1, tile_size=size)
     steps = sequences.steps(
         (scan, "xbc", "head", "dt", "state", "y", "final"), (mul, "y", "up", "out")
@@ -238,7 +238,9 @@ def scan_with_state_output(heads=2, head_dim=16, state_size=16):
     recording = Recording.of_steps(
         "toy_scan_output", steps, ["xbc", "head", "dt", "state", "up"], ["final", "out"]
     )
-    region = Region((member(scan), member(mul)), (Edge(0, "y", 1, "a"),))
+    region = Region(
+        (member(scan), member(mul)), (Edge(0, "y", 1, "a", kind=EdgeKind.STAGED),)
+    )
     return recording, region
 
 
@@ -377,7 +379,7 @@ def scan_state_cycle(heads=2, head_dim=16, state_size=16):
         "toy_scan_cycle",
         steps,
         ["xbc", "head", "dt", "up"],
-        ["state", "out"],
+        ["out"],
         feedback=["state"],
     )
     members = (member(scan), member(mul))
@@ -1144,7 +1146,7 @@ def _feedback_combo(shape, held, rate, bounded):
     else:
         steps = sequences.steps((add, "acc", "x", "acc"), (mul, "acc", "up", "out"))
         recording = Recording.of_steps(
-            "combo_feedback", steps, ["x", "up"], ["acc", "out"], feedback=["acc"]
+            "combo_feedback", steps, ["x", "up"], ["out"], feedback=["acc"]
         )
     edges = (Edge(0, "y", 0, "a"), Edge(0, "y", 1, "a"))
     edges, workers, phases = realize_helds(edges, {0: held, 1: _next(HELDS, held)})

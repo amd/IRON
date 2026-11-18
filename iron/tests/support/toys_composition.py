@@ -210,7 +210,7 @@ def add_softmax_recording(
 def rmsnorm_mul_pair(rows: int = 1, size: int = 64) -> tuple[RMSNorm, ElementwiseMul]:
     """Return a norm feeding the weight-row multiply it was pre-multiplied for."""
     rms = RMSNorm(rows=rows, tile_size=size, num_aie_columns=1)
-    mul = ElementwiseMul(size=size, tile_size=32)
+    mul = ElementwiseMul(size=size, tile_size=size)
     return rms, mul
 
 
@@ -389,16 +389,16 @@ def fan_in_reducer_region(
 # ----------------------------------------------------------------- region shape and schedule
 
 
-def qkv_among_rope_recording(name: str, M: int = 64, angle_rows: int = 32) -> Recording:
+def qkv_among_rope_recording(name: str, M: int = 64) -> Recording:
     """Return Q, K, V projections with RoPE interposed between K's and V's: ``{Q, K, V}`` is convex but not consecutive.
 
     Step order is ``GEMV_q, RoPE_q, GEMV_k, RoPE_k, GEMV_v, consumer``; the three
     projections (0, 2, 4) are a convex non-contiguous set a reordering can make consecutive.
     """
     gemv_q = GEMV(M=M, K=M, tile_size_input=4, tile_size_output=32)
-    rope_q = RoPE(rows=angle_rows, cols=M, angle_rows=angle_rows)
+    rope_q = RoPE(rows=1, cols=M, angle_rows=1)
     gemv_k = GEMV(M=M, K=M, tile_size_input=4, tile_size_output=32)
-    rope_k = RoPE(rows=angle_rows, cols=M, angle_rows=angle_rows)
+    rope_k = RoPE(rows=1, cols=M, angle_rows=1)
     gemv_v = GEMV(M=M, K=M, tile_size_input=4, tile_size_output=32)
     consumer = ElementwiseAdd(size=M, tile_size=32)
     steps = sequences.steps(

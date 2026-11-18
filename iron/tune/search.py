@@ -16,6 +16,7 @@ against the incumbent, and keeps the set that gains most.
 from __future__ import annotations
 
 import dataclasses
+import logging
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
@@ -30,7 +31,14 @@ from ..common.declare.composition import Entry, Member, Refinement, Region
 from ..common.graph.sdf import Derivation
 from ..common.image.step import Edge, EdgeKind, FusionKind, HandOff
 from .autotune import Timed, refusal, settings
-from .fusions import group_fit_verdict
+from .fusions import (
+    Applied,
+    Compared,
+    NotBitIdentical,
+    compare_graphs,
+    group_fit_verdict,
+)
+from .measure import Timing
 
 
 class Edit(Protocol):
@@ -72,6 +80,8 @@ class AddEntry:
         edited.add_entry(self.entry)
         return edited
 
+
+logger = logging.getLogger(__name__)
 
 # What candidates does not propose yet, named where it stops.
 _NOT_GENERATED = (
@@ -542,12 +552,11 @@ def fit(
                 continue
             if analysis.why is not None:
                 return Fit(False, "analysis", analysis.why)
-            for edge, _, _ in derivation.wired:
+            for edge, p, c in derivation.wired:
                 shape = analysis.hand_off[edge]
-                if edge.kind is EdgeKind.STREAM and shape not in (
-                    HandOff.EQUAL,
-                    HandOff.BROADCAST,
-                ):
+                if edge.kind is not EdgeKind.STREAM:
+                    continue
+                if shape not in (HandOff.EQUAL, HandOff.BROADCAST):
                     return Fit(
                         False,
                         "analysis",
@@ -559,6 +568,20 @@ def fit(
             )
             if why is not None:
                 return Fit(False, "analysis", f"at its chosen depths, it {why}")
+            for edge, p, c in derivation.wired:
+                made = derivation.obj_elements[p].get(edge.output)
+                taken = derivation.obj_elements[c].get(edge.input)
+                if (
+                    edge.kind is EdgeKind.STREAM
+                    and made is not None
+                    and taken is not None
+                    and made != taken
+                ):
+                    unplaceable.append(
+                        f"{edge}: a stream whose ends' objects differ ({made} "
+                        f"elements and {taken}) is not built yet; the composer "
+                        f"gives a fifo one object size"
+                    )
             kinds = {e.kind for e in region.edges}
             if (
                 region.inflows
@@ -615,21 +638,75 @@ def check(
     refinement: Refinement,
     base_calls: Sequence[Timed] | None = None,
 ) -> Check:
-    """Hold ``calls`` built under ``profile`` to ``base_calls`` built under ``base``, run in order on the same inputs.
+    """Hold ``calls`` built under ``profile`` to ``base_calls`` built under ``base``, run on the NPU on the same inputs.
+
+    ``profile`` must fit first (``fit``). Each call is built both ways
+    (``Applied``, the profile's composition entries included) and run on the
+    same seeded inputs and states at its values and at each of its bounds
+    halved; every output within its bound, carried buffer and state must be
+    bit-identical (``compare_graphs``, every point marked known so nothing
+    is timed).
 
     Args:
         profile: The profile checked.
         base: The profile it is held to.
-        calls: The graph's calls, run in order, state carried between them.
+        calls: The graph's calls.
         device: The device.
         refinement: The rule it is held to.
         base_calls: The calls ``base`` runs, where they are not ``calls``
-            (an operator a graph replaces).
+            (an operator a graph replaces), by version.
 
     Raises:
-        NotImplementedError: Not built yet.
+        ValueError: ``profile`` does not fit, an entry matches none of the
+            calls (``fit``), or a call leaves the host nothing to compare.
+        NotImplementedError: What is not checked yet: a no-worse rule (against
+            the operators' references), state carried from one call into the
+            next, and what ``fit`` or the composer (``composed``) does not
+            take yet.
     """
-    raise NotImplementedError("the correctness check is not built yet")
+    if refinement is not Refinement.EXACT:
+        raise NotImplementedError(
+            "holding a change no worse than the untuned build, against the "
+            "operators' references, is not built yet"
+        )
+    fitted = fit(profile, calls, device)
+    if not fitted.ok:
+        raise ValueError(f"the profile does not fit ({fitted.stage}): {fitted.why}")
+    for call in calls:
+        recording = call.recording
+        if not (recording.outputs or recording.feedback or recording.states):
+            raise ValueError(
+                f"{recording.name} leaves the host no output, carried buffer or "
+                f"state to compare"
+            )
+    if len(calls) > 1 and any(c.recording.states for c in calls):
+        raise NotImplementedError(
+            "carrying state from one call into the next is not built yet: each "
+            "call is checked on states of its own"
+        )
+    olds = {
+        c.recording.version: c for c in (calls if base_calls is None else base_calls)
+    }
+    for call in calls:
+        old = olds[call.recording.version]
+        with set_current_device(device):
+            before = Applied.of(old, base, device).built(device)
+            after = Applied.of(call, profile, device).built(device)
+            known = Compared(
+                {tuple(sorted(v.items())): (0.0, None) for _, v in old.timed_points()}
+            )
+            try:
+                compare_graphs(
+                    old,
+                    before,
+                    after,
+                    timing=Timing(rounds=1, calls=1),
+                    known=known,
+                    log=logger.info,
+                )
+            except NotBitIdentical as e:
+                return Check(False, refinement, str(e))
+    return Check(True, refinement)
 
 
 def measure(

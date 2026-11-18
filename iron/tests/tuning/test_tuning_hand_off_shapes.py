@@ -107,8 +107,14 @@ def test_the_analysis_derives_the_named_hand_off(shape):
     assert all(analysis.hand_off[edge] is _REALIZES[shape] for edge in region.edges)
 
 
-@unbuilt
-@pytest.mark.parametrize("shape", sorted(SHAPES))
+@pytest.mark.parametrize(
+    "shape",
+    [
+        # The rest the composer does not build yet.
+        s if s in ("broadcast", "join_8_into_4") else pytest.param(s, marks=unbuilt)
+        for s in sorted(SHAPES)
+    ],
+)
 @pytest.mark.supported_devices("npu2")
 def test_a_hand_off_shape_is_bit_identical_to_the_steps_run_apart(shape):
     """Each hand-off shape is bit-identical to the same steps run apart."""
@@ -186,7 +192,6 @@ def test_any_ratio_and_broadcast_are_representable_but_unbuilt(shape):
     )
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu2")
 def test_feed_refuses_a_held_input_broadcast_flips_it():
     """Broadcast flips ``test_operand_lanes.py``'s ``feed_refuses_a_held_input``: a replicated input is fed where a plain stream is refused."""

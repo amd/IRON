@@ -28,6 +28,8 @@ from iron.operators.tanh import Tanh
 from iron.tests.support import sequences, toys_schedule
 from iron.tests.support.fusable import gemv_silu_mul, gemv_silu_mul_recording
 from iron.tests.support.tools import DEVICES
+from iron.tests.support.toys_composition import independent_regions_recording
+from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, search
@@ -174,27 +176,26 @@ def test_concurrency_one_after_another_is_bit_identical():
     profile = Profile()
     profile.add_entry(Entry(root=configuration))
     base = Profile()
-    for member in configuration.parts:
-        base.add_entry(Entry(root=Configuration(parts=(member,))))
+    for part in configuration.parts:
+        base.add_entry(Entry(root=Configuration(parts=(part,))))
     result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
 
 @unbuilt
 def test_concurrency_at_once_with_no_shared_data_is_bit_identical():
-    """Independent steps sharing a configuration concurrently (``Configuration.concurrent``) are bit-identical to each loaded alone."""
-    gemv, silu, mul = gemv_silu_mul(M=256, cols=2, tile=64)
-    members = (
-        Member(type(gemv), {"M": gemv.M, "K": gemv.K}),
-        Member(type(mul), {"size": mul.size}),
-    )
+    """Independent steps sharing a configuration concurrently (``Configuration.concurrent``) are bit-identical to each loaded alone.
+
+    The two chains' projections share no data: neither reaches the other.
+    """
+    recording = independent_regions_recording("config_concurrent")
+    members = tuple(member(recording.steps[s].op) for s in (0, 2))
     configuration = Configuration(parts=members, concurrent=1)
     profile = Profile()
     profile.add_entry(Entry(root=configuration))
     base = Profile()
-    for member in members:
-        base.add_entry(Entry(root=Configuration(parts=(member,))))
-    recording = gemv_silu_mul_recording("config_concurrent", gemv, silu, mul)
+    for part in members:
+        base.add_entry(Entry(root=Configuration(parts=(part,))))
     result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 

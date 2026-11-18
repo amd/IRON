@@ -7,7 +7,6 @@ import pytest
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Member, Refinement, Region
-from iron.operators.elementwise_add import ElementwiseAdd
 from iron.tests.support import toys_dataflow as toys
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
@@ -94,8 +93,7 @@ def test_one_actor_split_across_workers_round_trips():
 @unbuilt
 def test_a_qk_softmax_pv_style_pipeline_on_one_core():
     """``Q·K -> softmax step -> P·V`` on one core, a fixed firing order: bit-identical to apart."""
-    silu, mul = toys.add_silu_mul(size=256, tile=128)[1:]
-    add = ElementwiseAdd(size=256, tile_size=128)
+    add, silu, mul = toys.add_silu_mul(size=256, tile=128)
     members = (
         Member(
             cls=type(add),

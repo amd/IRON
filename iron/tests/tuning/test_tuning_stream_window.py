@@ -53,14 +53,7 @@ WINDOWS = {
 }
 
 
-@pytest.mark.parametrize(
-    "window",
-    [
-        # An edge out of a buffer the host also holds is not proposed yet.
-        pytest.param(w, marks=unbuilt) if w == "several_outputs" else w
-        for w in sorted(WINDOWS)
-    ],
-)
+@pytest.mark.parametrize("window", sorted(WINDOWS))
 def test_window_entry_round_trips_through_the_profile(window, tmp_path):
     """A region of stream edges round-trips through the profile, and ``candidates`` proposes a window over its chain."""
     recording, region = WINDOWS[window]()
@@ -77,8 +70,19 @@ def test_window_entry_round_trips_through_the_profile(window, tmp_path):
     )
 
 
-@unbuilt
-@pytest.mark.parametrize("window", sorted(WINDOWS))
+@pytest.mark.parametrize(
+    "window",
+    [
+        # A GEMV's 2-element output objects into a 256-element multiply: the
+        # composer gives a fifo one object size.
+        (
+            pytest.param(w, marks=unbuilt)
+            if w in ("fan_in", "outside_reader_and_final_output")
+            else w
+        )
+        for w in sorted(WINDOWS)
+    ],
+)
 @pytest.mark.supported_devices("npu2")
 def test_window_is_bit_identical_to_its_steps_run_apart(window):
     """A window's output is bit-identical to the same steps run apart, at its recorded size."""
@@ -90,7 +94,6 @@ def test_window_is_bit_identical_to_its_steps_run_apart(window):
     assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu2")
 def test_window_is_bit_identical_at_a_smaller_per_call_size():
     """The chain window, called at a size below the one it was recorded at, stays bit-identical to the steps apart."""

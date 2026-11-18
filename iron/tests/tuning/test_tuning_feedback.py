@@ -58,7 +58,7 @@ def _running_accumulator(carried: bool):
         "toy_running_accumulator",
         steps,
         ["x"],
-        ["acc"],
+        [] if carried else ["acc"],
         feedback=["acc"] if carried else [],
     )
     region = Region((member(add),), (Edge(0, "y", 0, "a"),))
@@ -100,8 +100,26 @@ def test_a_cycle_with_its_initial_values_round_trips(cycle, tmp_path):
     )
 
 
-@unbuilt
-@pytest.mark.parametrize("cycle", sorted(CYCLES))
+@pytest.mark.parametrize(
+    "cycle",
+    [
+        (
+            pytest.param(
+                c,
+                marks=pytest.mark.xfail(
+                    strict=True,
+                    raises=ValueError,
+                    reason="Sample's token reaches the next call's tokens through "
+                    "a carry no step-level recording names, so its self-loop "
+                    "matches no recorded buffer",
+                ),
+            )
+            if c == "sample_drawn_token"
+            else pytest.param(c, marks=unbuilt)
+        )
+        for c in sorted(CYCLES)
+    ],
+)
 @pytest.mark.supported_devices("npu2")
 def test_a_cycle_is_bit_identical_to_the_steps_or_calls_run_apart(cycle):
     """A cycle's output is bit-identical to the same steps, or calls, run apart one after another."""

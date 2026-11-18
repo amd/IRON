@@ -12,7 +12,7 @@ import iron
 from iron import Precision, Scratchpad
 from iron.common.declare.composition import Region
 from iron.common.graph.record import Recording
-from iron.common.image.step import Edge
+from iron.common.image.step import Edge, EdgeKind
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemm import GEMM
@@ -73,7 +73,8 @@ def broadcast_skip(add_cols: int = 2, norm_cols: int = 1, depth: int | None = No
         member(second),
     )
     skip = Edge(0, "y", 2, "b", depth=depth)
-    edges = (Edge(0, "y", 1, "x"), skip)
+    # The add's two lanes join into the norm's one through a memtile.
+    edges = (Edge(0, "y", 1, "x", kind=EdgeKind.STAGED), skip)
     region = Region(parts=members, edges=edges)
     return region, first, norm, second
 
@@ -221,4 +222,6 @@ def running_sum_recording(name: str, add, carried: bool = True) -> Recording:
     """
     steps = sequences.steps((add, "acc", "x", "acc"))
     feedback = ["acc"] if carried else []
-    return Recording.of_steps(name, steps, ["x"], ["acc"], feedback=feedback)
+    return Recording.of_steps(
+        name, steps, ["x"], [] if feedback else ["acc"], feedback=feedback
+    )

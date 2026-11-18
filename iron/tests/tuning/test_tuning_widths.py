@@ -75,7 +75,6 @@ def test_per_member_width_counts_round_trip_and_are_proposed(tmp_path):
     )
 
 
-@unbuilt
 def test_narrowed_window_is_bit_identical_to_full_width():
     """A window narrowed to fit the array is bit-identical to the same window at full width."""
     full_region, recording = _window(columns=min(4, _ARRAY_COLUMNS))
