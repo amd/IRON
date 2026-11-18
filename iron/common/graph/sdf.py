@@ -272,8 +272,9 @@ class Derivation:
     recording: its cores' acquires and releases in program order, its memtile
     links, and which fifo is which operand lane. A loop's trip count is a
     per-call value the build does not hold, so it is solved from what the
-    call moves: the objects each lane moves, through the links to the fifos
-    the cores touch. A region edge joins the producer's output lanes to the
+    call moves: the objects the runtime sequence fills or drains on each
+    fifo (an operand riding another's fifo, GEMV's B in its A, counted with
+    it), carried through the links to the fifos the cores touch. A region edge joins the producer's output lanes to the
     consumer's input lanes as searched channels; a step's own fifos keep the
     depth its build chose; a lane fed from or drained to outside the region
     is unbounded.
@@ -334,9 +335,20 @@ class Derivation:
                     continue
                 lanes[b.name] = [h.object_fifo for h in b.lane_handles]
                 obj_elements[b.name] = math.prod(b.obj_shape)
-                moved = b.moved_per_lane()
-                for lane, fifo in enumerate(lanes[b.name]):
-                    self.objects[fifo] = -(-moved.get(lane, 0) // obj_elements[b.name])
+            moved: dict[ObjectFifo, int] = {}
+            for transfer in recorded.transfers:
+                if transfer.elements is None:
+                    site = transfer.site
+                    raise NotImplementedError(
+                        f"{type(array.op).__name__}'s {transfer.kind} of "
+                        f"{transfer.fifo.name} is sized per call"
+                        + (f" ({site.filename}:{site.line})" if site else "")
+                        + "; analysing a call at its own values is not modelled yet"
+                    )
+                moved[transfer.fifo] = moved.get(transfer.fifo, 0) + -(
+                    -transfer.elements // math.prod(transfer.fifo.shape)
+                )
+            self.objects.update(moved)
             self.lanes.append(lanes)
             self.obj_elements.append(obj_elements)
             self._through_links(recorded.links)
@@ -368,64 +380,108 @@ class Derivation:
     def _trips(self, core: Scope) -> dict[int, int]:
         """Return each loop of ``core``'s trip count, by ``id`` of its scope, solved from the objects its fifos move.
 
+        Each fifo whose objects a call moves is known gives one equation: its
+        releases' counts, each times the trips of the loops it sits in, add
+        to those objects. A loop with every bound an ``int`` is fixed; the
+        rest are solved together, outermost first, each trying the values
+        every equation it is in admits, so a loop no fifo is released in
+        directly (GEMV's batches around its head tiles and rows) is still
+        settled.
+
         Raises:
-            NotImplementedError: A run-time branch or ``forever_``, or a loop
-                no fifo's objects settle.
+            NotImplementedError: A run-time branch or ``forever_``, or loops
+                no assignment, or more than one, settles.
         """
-        loops: list[tuple[Scope, tuple[Scope, ...]]] = []
+        loops: list[Scope] = []
+        releases: list[tuple[Access, tuple[Scope, ...]]] = []
         stack: list[tuple[Scope, tuple[Scope, ...]]] = [(core, ())]
         while stack:
             scope, outer = stack.pop()
-            for node in scope.body:
+            for node in reversed(scope.body):
                 if isinstance(node, Scope):
                     if node.kind != "for":
+                        where = (
+                            f"{node.site.filename}:{node.site.line}"
+                            if node.site
+                            else "a core"
+                        )
                         raise NotImplementedError(
-                            f"a {node.kind} scope in a core (at {node.site}) is "
+                            f"a {node.kind} scope in a core (at {where}) is "
                             f"not modelled yet"
                         )
-                    loops.append((node, outer + (node,)))
-                    stack.append((node, outer + (node,)))
-        trips: dict[int, int] = {}
-        releases: list[tuple[Access, tuple[Scope, ...]]] = []
-        stack = [(core, ())]
-        while stack:
-            scope, outer = stack.pop()
-            for node in scope.body:
-                if isinstance(node, Scope):
+                    loops.append(node)
                     stack.append((node, outer + (node,)))
                 elif node.kind == "release":
                     releases.append((node, outer))
-        for loop, path in sorted(loops, key=lambda lp: len(lp[1])):
-            if loop.owner and all(isinstance(b, int) for b in loop.owner):
-                trips[id(loop)] = len(range(*loop.owner))
+        fixed = {
+            id(loop): len(range(*loop.owner))
+            for loop in loops
+            if loop.owner and all(isinstance(b, int) for b in loop.owner)
+        }
+        equations: list[tuple[int, list[tuple[int, tuple[int, ...]]]]] = [
+            (
+                self.objects[fifo],
+                [
+                    (a.count, tuple(id(s) for s in o))
+                    for a, o in releases
+                    if a.fifo is fifo
+                ],
+            )
+            for fifo in {a.fifo for a, _ in releases}
+            if fifo in self.objects
+        ]
+        free = [id(loop) for loop in loops if id(loop) not in fixed]
+        found: list[dict[int, int]] = []
+        assigned = [dict(fixed)]
+        while assigned and len(found) < 2:
+            trips = assigned.pop()
+            settled = [
+                sum(c * math.prod(trips[s] for s in path) for c, path in terms)
+                == objects
+                for objects, terms in equations
+                if all(s in trips for _, path in terms for s in path)
+            ]
+            if not all(settled):
                 continue
-            for fifo in {a.fifo for a, _ in releases}:
-                if fifo not in self.objects:
-                    continue
-                on = [(a, o) for a, o in releases if a.fifo is fifo]
-                if any(
-                    id(s) not in trips and s is not loop for _, o in on for s in o
-                ) or not any(o and o[-1] is loop for _, o in on):
+            unset = [s for s in free if s not in trips]
+            if not unset:
+                found.append(trips)
+                continue
+            loop = unset[0]
+            values = None
+            for objects, terms in equations:
+                if {s for _, path in terms for s in path if s not in trips} != {loop}:
                     continue
                 known = sum(
-                    a.count * math.prod(trips[id(s)] for s in o)
-                    for a, o in on
-                    if loop not in o
+                    c * math.prod(trips[s] for s in path)
+                    for c, path in terms
+                    if loop not in path
                 )
-                inside = sum(
-                    a.count * math.prod(trips[id(s)] for s in o if s is not loop)
-                    for a, o in on
-                    if loop in o
+                per = sum(
+                    c * math.prod(trips[s] for s in path if s != loop)
+                    for c, path in terms
+                    if loop in path
                 )
-                left = self.objects[fifo] - known
-                if inside and left > 0 and left % inside == 0:
-                    trips[id(loop)] = left // inside
-                    break
-            else:
-                raise NotImplementedError(
-                    f"no fifo's objects settle the loop at {loop.site}"
-                )
-        return trips
+                left = objects - known
+                values = [left // per] if left > 0 and left % per == 0 else []
+                break
+            if values is None:
+                bound = max((objects for objects, _ in equations), default=0)
+                values = range(bound, 0, -1)
+            assigned += [{**trips, loop: v} for v in values]
+        if len(found) != 1:
+            where = (
+                f"{loops[0].site.filename}:{loops[0].site.line}"
+                if loops and loops[0].site
+                else "a core"
+            )
+            raise NotImplementedError(
+                f"no fifo's objects settle the loop at {where}"
+                if not found
+                else f"the objects a call moves settle the loops at {where} more "
+                f"than one way"
+            )
+        return found[0]
 
     def _events(
         self, body: Sequence[Access | Scope], trips: Mapping[int, int]

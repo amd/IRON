@@ -1103,18 +1103,23 @@ def _through_memory_combo(shape, held, rate, bounded):
 def _through_memory_bounded_recording(
     producer: Copy, write: Copy, read: Copy, consumer: Copy
 ) -> Recording:
-    """Return ``producer``, ``write``, ``read`` and ``consumer`` wired as ``_through_memory_combo`` does, the producer's ``src`` bound per call to ``n``."""
+    """Return ``producer``, ``write``, ``read`` and ``consumer`` wired as ``_through_memory_combo`` does, the cache write bound per call to ``n``."""
 
     class _ThroughMemory(iron.Graph):
         def body(self, src, *, n: Scratchpad[np.int32]):
             pre = Copy.step(
-                src[:n],
+                src,
                 input_buffer_size=producer.input_buffer_size,
                 dtype=producer.dtype,
                 num_channels=producer.num_channels,
             )
+            # The bound sits on the one-channel write, over rows of eight: a
+            # copy split over several channels cannot bound the axis it
+            # splits, and a per-call length counts whole 16-byte units.
             cache = Copy.step(
-                pre, input_buffer_size=write.input_buffer_size, dtype=write.dtype
+                pre.reshape(write.input_buffer_size // 8, 8)[:n],
+                input_buffer_size=write.input_buffer_size,
+                dtype=write.dtype,
             )
             post = Copy.step(
                 cache, input_buffer_size=read.input_buffer_size, dtype=read.dtype
