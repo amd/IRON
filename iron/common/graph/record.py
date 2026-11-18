@@ -19,6 +19,7 @@ from aie.utils import bfp
 from aie.utils.compile.jit.params import OperatorParam
 
 from ..declare import Operator, Value
+from ..declare.composition import Configuration, Entry, Member, Region
 from ..declare.operand import concrete
 from ..declare.operator import graph_recorder
 from ..declare.profile import Profile, Version
@@ -206,6 +207,36 @@ def _take_views(cls, operands, kwargs, values):
     return out
 
 
+def _steps_of(node: Configuration | Region | Member) -> list[Member]:
+    """Return the steps of a composition ``node``, depth-first."""
+    if isinstance(node, Member):
+        return [node]
+    return [m for part in node.parts for m in _steps_of(part)]
+
+
+def _links_of(
+    node: Configuration | Region | Member, first: int
+) -> tuple[list[tuple[int, str, int, str]], list[tuple[str, int, str]]]:
+    """Return every edge and inflow under ``node``, by step index in the whole tree, its first step being ``first``."""
+    edges: list[tuple[int, str, int, str]] = []
+    inflows: list[tuple[str, int, str]] = []
+    if isinstance(node, Member):
+        return edges, inflows
+    if isinstance(node, Region):
+        edges += [
+            (first + e.producer, e.output, first + e.consumer, e.input)
+            for e in node.edges
+        ]
+        inflows += [(i.buffer, first + i.consumer, i.input) for i in node.inflows]
+    at = first
+    for part in node.parts:
+        part_edges, part_inflows = _links_of(part, at)
+        edges += part_edges
+        inflows += part_inflows
+        at += len(_steps_of(part))
+    return edges, inflows
+
+
 def version_key(inputs: Mapping[str, tuple[tuple[int, ...], Any]]) -> Version:
     """Return the key of a graph's version for ``inputs`` (each input's shape and dtype, by name, in the order its body takes them)."""
     return tuple(
@@ -259,6 +290,82 @@ class Recording:
     def version(self) -> Version:
         """The key of the graph version this recording compiles to."""
         return version_key({h.name: (h.shape, h.dtype) for h in self.inputs})
+
+    def occurrences(self, entry: Entry) -> tuple[tuple[int, ...], ...]:
+        """Return each match of ``entry`` in this recording: the step each of its steps is, depth-first.
+
+        A match puts the entry's steps, in recorded order, on steps of their
+        classes whose dims they name (their tunables are what the entry sets,
+        not what it matches); each edge's producer writes, through its output,
+        the buffer its consumer reads through its input; and each inflow's
+        consumer reads the inflow's buffer. Overlapping matches are each
+        returned. ``entry.scope`` keeps those of its versions and the runs of
+        its shape it names.
+
+        Raises:
+            ValueError: An edge or an inflow names an operand its step's
+                class does not have.
+        """
+        if (
+            entry.scope.versions is not None
+            and self.version not in entry.scope.versions
+        ):
+            return ()
+        members = _steps_of(entry.root)
+        edges, inflows = _links_of(entry.root, 0)
+        names = [
+            {b.name: ref.root for ref, b in zip(step.refs(), step.op.buffers)}
+            for step in self.steps
+        ]
+        fits = [
+            [
+                s
+                for s, step in enumerate(self.steps)
+                if isinstance(step.op, m.cls)
+                and Profile.matches(m.dims, Profile.dims(type(step.op), vars(step.op)))
+            ]
+            for m in members
+        ]
+        for producer, output, consumer, input in edges:
+            for i, name in ((producer, output), (consumer, input)):
+                if fits[i] and not any(name in names[s] for s in fits[i]):
+                    raise ValueError(
+                        f"{members[i].cls.__name__} has no operand {name!r}"
+                    )
+        found: list[tuple[int, ...]] = []
+        self._extend([], fits, edges, inflows, names, found)
+        if entry.scope.occurrences is None:
+            return tuple(found)
+        return tuple(found[k] for k in entry.scope.occurrences if k < len(found))
+
+    def _extend(
+        self,
+        chosen: list[int],
+        fits: list[list[int]],
+        edges: list[tuple[int, str, int, str]],
+        inflows: list[tuple[str, int, str]],
+        names: list[dict[str, str]],
+        found: list[tuple[int, ...]],
+    ) -> None:
+        """Extend the partial match ``chosen`` by its next step in every way its links allow, adding each whole match to ``found``."""
+        i = len(chosen)
+        if i == len(fits):
+            found.append(tuple(chosen))
+            return
+        after = chosen[-1] if chosen else -1
+        for s in fits[i]:
+            if s <= after:
+                continue
+            at = [*chosen, s]
+            if all(
+                names[at[p]].get(output) is not None
+                and names[at[p]].get(output) == names[at[c]].get(input)
+                for p, output, c, input in edges
+                if max(p, c) == i
+            ) and all(
+                names[s].get(input) == buffer for buffer, c, input in inflows if c == i
+            ):
+                self._extend(at, fits, edges, inflows, names, found)
 
     @property
     def reads(self) -> set[str]:

@@ -4,7 +4,7 @@
 
 Each takes a graph's calls (``Timed``, every version) rather than one
 recording. ``candidates`` yields every edit the calls admit, of every kind;
-``occurrences`` says which steps an entry matches; ``fit`` refuses an edit
+``fit`` refuses an edit
 that cannot fit before any build (counts from the target model, then the
 dataflow analysis, then the placer); ``check`` holds a built edit to the
 untuned build (bit identity, or no input worse against the operators'
@@ -22,8 +22,7 @@ from typing import Literal, Protocol
 from aie.iron.device import Device
 
 from ..common.declare import Profile
-from ..common.declare.composition import Entry, Refinement
-from ..common.graph.record import Recording
+from ..common.declare.composition import Refinement
 from .autotune import Timed
 
 
@@ -105,15 +104,6 @@ def candidates(
         NotImplementedError: Not built yet.
     """
     raise NotImplementedError("the candidate generator is not built yet")
-
-
-def occurrences(entry: Entry, recording: Recording) -> tuple[tuple[int, ...], ...]:
-    """Return each match of ``entry`` in ``recording``: its steps' indices, in the entry's step order.
-
-    Raises:
-        NotImplementedError: Not built yet.
-    """
-    raise NotImplementedError("matching an entry to a recording is not built yet")
 
 
 def fit(
