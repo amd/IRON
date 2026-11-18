@@ -12,16 +12,16 @@ from iron.tests.support.tuning import unbuilt
 pytestmark = pytest.mark.usefixtures("npu2")
 
 
-@unbuilt
-def test_balanced_chain_is_consistent_with_repetition_one():
-    """``add -> SiLU -> mul``, every edge a whole buffer a firing: consistent, repetition vector ``(1, 1, 1)``, minimum depth 1 on each edge."""
+def test_balanced_chain_is_consistent_firing_once_a_tile():
+    """``add -> SiLU -> mul``, a tile an object: consistent, each core firing once a tile in a call, minimum depth 1 on each edge."""
     add, silu, mul = toys.add_silu_mul()
     region = toys.add_silu_mul_region(add, silu, mul)
     recording = toys.add_silu_mul_recording("balanced", add, silu, mul)
     analysis = analyze(region, recording, toys.NPU2)
+    tiles = add.size // add.tile_size
     assert analysis.consistent
     assert analysis.why is None
-    assert analysis.repetition == {0: 1, 1: 1, 2: 1}
+    assert analysis.repetition == {0: tiles, 1: tiles, 2: tiles}
     assert all(d == 1 for d in analysis.min_depth.values())
 
 
@@ -41,23 +41,27 @@ def test_inconsistent_cycle_rates_cannot_balance():
     assert analysis.why
 
 
-@unbuilt
-def test_cycle_without_a_delay_deadlocks_at_depth_zero():
-    """A one-actor accumulate loop with no carried value: the minimum deadlock-free depth is 1, so the uncarried edge is reported as deadlocking."""
+def test_cycle_without_a_carried_value_deadlocks_at_any_depth():
+    """A one-actor accumulate loop with nothing carried: its first read waits on its own write, so no depth runs."""
     region, add = toys.running_sum()
     recording = toys.running_sum_recording("no-delay", add, carried=False)
     analysis = analyze(region, recording, toys.NPU2)
-    assert analysis.min_depth[region.edges[0]] == 1
-    assert analysis.why
+    assert region.edges[0] not in analysis.min_depth
+    assert analysis.why is not None and "deadlocks" in analysis.why
 
 
-@unbuilt
-def test_cycle_with_one_initial_token_runs_at_the_minimum_depth():
-    """The same loop with ``acc`` carried across calls: the minimum depth is met and the analysis reports it deadlock-free."""
+def test_cycle_with_its_value_carried_holds_the_call_plus_one():
+    """The same loop with ``acc`` carried across calls needs the carried objects plus one.
+
+    The edge starts holding every object the last call left, and the core
+    takes a slot for each new one while it still holds the old.
+    """
     region, add = toys.running_sum()
     recording = toys.running_sum_recording("one-delay", add, carried=True)
     analysis = analyze(region, recording, toys.NPU2)
-    assert analysis.min_depth[region.edges[0]] == 1
+    carried = add.size // add.tile_size
+    assert analysis.initial[region.edges[0]] == carried
+    assert analysis.min_depth[region.edges[0]] == carried + 1
     assert analysis.why is None
 
 

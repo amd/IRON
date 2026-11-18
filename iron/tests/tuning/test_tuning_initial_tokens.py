@@ -82,13 +82,12 @@ def test_partial_last_token_is_neither_lost_nor_duplicated():
     assert result.ok, result.why
 
 
-@unbuilt
-def test_feedback_cycle_analysis_reports_delay_needed_to_avoid_deadlock():
-    """``analyze`` on the running-sum cycle: the minimum deadlock-free depth is 1 initial token."""
+def test_feedback_cycle_analysis_reports_its_carried_objects():
+    """``analyze`` on the running-sum cycle: the carried value's objects start on the edge, and with them the cycle runs."""
     region, add = toys.running_sum()
     recording = toys.running_sum_recording("delay-reported", add, carried=True)
     analysis = analyze(region, recording, toys.NPU2)
-    assert analysis.min_depth[region.edges[0]] == 1
+    assert analysis.initial[region.edges[0]] == add.size // add.tile_size
     assert analysis.why is None
 
 

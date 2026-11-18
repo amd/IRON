@@ -97,6 +97,14 @@ def test_varying_one_axis_yields_distinct_toys_for_every_role():
                 seen.append(key)
 
 
+@pytest.mark.usefixtures("npu2")
+@pytest.mark.parametrize("combo", COMBOS, ids=_combo_id)
+def test_each_toys_region_matches_its_own_recording(combo):
+    """Each toy's region matches exactly one run of its own recording's steps, so a test of it tests the steps it names."""
+    _, recording, region, _ = combination_toy(*combo)
+    assert len(recording.occurrences(Entry(region))) == 1
+
+
 @unbuilt
 @pytest.mark.parametrize("combo", COMBOS, ids=_combo_id)
 def test_each_toy_round_trips_through_the_profile_and_is_proposed(combo, tmp_path):

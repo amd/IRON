@@ -150,3 +150,11 @@ def test_a_skip_edge_read_a_phase_later_holds_the_whole_call():
     flow = _diamond(skip_phase=1)
     assert flow.minimum_depths() == ({0: 1, 1: 1, 2: 4, 3: 4}, None)
     assert flow.runs({0: 1, 1: 1, 2: 4, 3: 3}) is not None
+
+
+def test_a_fixed_edge_is_held_at_its_depth_and_not_searched():
+    """An operator's own fifo, held at the depth its build chose, is left out of the search and constrains the rest."""
+    flow = _diamond(skip_phase=1)
+    assert flow.minimum_depths(fixed={3: 4}) == ({0: 1, 1: 1, 2: 4}, None)
+    depths, why = flow.minimum_depths(fixed={3: 3})
+    assert depths == {} and why is not None

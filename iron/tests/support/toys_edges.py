@@ -684,7 +684,7 @@ def _fan_out_combo(shape, held, rate, bounded):
         Edge(0, "y", 1, "B"),
         Edge(0, "y", 2, "B"),
         Edge(0, "y", 3, "B"),
-        Edge(1, "y", 4, "a"),
+        Edge(1, "C", 4, "a"),
     )
     other = _next(HELDS, held)
     edges, workers, phases = realize_helds(
@@ -1059,7 +1059,7 @@ def _through_memory_combo(shape, held, rate, bounded):
     edges = (Edge(0, "y", 1, "x"), Edge(2, "y", 3, "x"))
     edges, workers, phases = realize_helds(edges, {0: held, 1: _next(HELDS, held)})
     region = Region(
-        (member(producer), member(write), member(read), member(consumer)),
+        tuple(member(s.op) for s in recording.steps),
         edges,
         workers=workers,
         phases=phases,
@@ -1123,29 +1123,34 @@ def _feedback_combo(shape, held, rate, bounded):
 
 
 def _feedback_bounded_recording(add: ElementwiseAdd, mul: ElementwiseMul) -> Recording:
-    """Return ``add``'s self-loop into ``mul`` wired as ``_feedback_combo`` does, the multiply's ``up`` bound per call to ``n``."""
+    """Return ``add``'s self-loop into ``mul`` wired as ``_feedback_combo`` does, the multiply's ``up`` bound per call to ``n``.
+
+    The accumulator is state the graph holds, so the add writes back into the
+    buffer it reads, as the unbounded toy's recorded ``acc`` does.
+    """
+    acc = iron.state((add.size,), name="acc")
 
     class _Feedback(iron.Graph):
-        def body(self, acc, x, up, *, n: Scratchpad[np.int32]):
-            new_acc = ElementwiseAdd.step(
+        def body(self, x, up, *, n: Scratchpad[np.int32]):
+            ElementwiseAdd.step(
                 acc,
                 x,
+                acc,
                 size=add.size,
                 num_aie_columns=add.num_aie_columns,
                 tile_size=add.tile_size,
             )
-            out = ElementwiseMul.step(
-                new_acc,
+            return ElementwiseMul.step(
+                acc,
                 up[:n],
                 size=mul.size,
                 num_aie_columns=mul.num_aie_columns,
                 tile_size=mul.tile_size,
             )
-            return new_acc, out
 
-    recording = _Feedback().record(acc=(add.size,), x=(add.size,), up=(mul.size,))
     return dataclasses.replace(
-        recording, name="combo_feedback_bounded", feedback=["acc"]
+        _Feedback().record(x=(add.size,), up=(mul.size,)),
+        name="combo_feedback_bounded",
     )
 
 
