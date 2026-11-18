@@ -951,6 +951,14 @@ class Rowwise(Elementwise):
         obj_shape=(tile_size,),
         per=CORES,
     )
+    # A finish step's other input, on x's one free input channel.
+    finish0 = In(
+        rows,
+        tile_size,
+        obj_shape=(tile_size,),
+        per=CORES,
+        when=Elementwise.uses_extra,
+    )
 
     @property
     def valid_elements(self) -> int:
@@ -1135,6 +1143,12 @@ class WeightedRowwise(Rowwise):
             note="the row's kernel's contract times |weight|, both products' "
             "roundings, then mul_sized's contract",
         )
+
+    def fold(self, consumer: Operator, at: int) -> Self | None:
+        # The weighted build pipelines two cores and runs no finish chain.
+        if self.weighted:
+            return None
+        return super().fold(consumer, at)
 
     def build(self) -> Built:
         if not self.weighted:
