@@ -230,7 +230,6 @@ def test_rate_skip_deadlocks_one_below_its_minimum_opt_in_device_check():
 
 
 @pytest.mark.extensive
-@unbuilt
 def test_tuner_keeps_a_depth_at_or_past_the_minimum():
     """``search``, run on the chain toy alone, keeps a depth at or past the analysis's minimum and passes ``check`` against the start, exact."""
     add, silu, mul = toys.add_silu_mul()
