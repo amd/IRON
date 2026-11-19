@@ -382,13 +382,21 @@ class Recording:
         pinned: Mapping[str, int] | None = None,
         feedback: Iterable[str] = (),
     ) -> Recording:
-        """Build a graph of ``steps`` over buffers known by name alone, as bytes.
+        """Build a graph of ``steps`` over buffers known by name.
 
-        The host writes ``inputs`` and reads ``outputs``, and ``pinned``
-        sizes a buffer a step names only in part or holds at a size of
-        its own.
+        A buffer some step names whole takes that step's declared elements
+        and type; one named only in part is bytes, as many as ``pinned``
+        gives it. The host writes ``inputs`` and reads ``outputs``, and
+        ``pinned`` sizes a buffer a step names only in part or holds at a
+        size of its own.
         """
         pinned = dict(pinned or {})
+        steps = list(steps)
+        typed: dict[str, tuple[tuple[int, ...], Any]] = {}
+        for step in steps:
+            for ref, b in zip(step.buffers, step.op.buffers, strict=True):
+                if ref.nbytes is None:
+                    typed.setdefault(ref.root, ((b.elements,), b.dtype))
         roots: dict[str, Handle] = {}
         recording = []
         for step in steps:
@@ -397,7 +405,9 @@ class Recording:
                 root = roots.setdefault(
                     ref.root,
                     Handle.whole(
-                        (pinned.get(ref.root, 0),), np.uint8, ref.root, "intermediate"
+                        *typed.get(ref.root, ((pinned.get(ref.root, 0),), np.uint8)),
+                        ref.root,
+                        "intermediate",
                     ),
                 )
                 if ref.nbytes is None:
@@ -418,8 +428,16 @@ class Recording:
         return cls(
             name,
             recording,
-            [Handle.whole((), np.uint8, n, "input") for n in inputs],
-            [Handle.whole((), np.uint8, n, "output") for n in outputs],
+            [
+                Handle.whole(*typed.get(n, ((pinned.get(n, 0),), np.uint8)), n, "input")
+                for n in inputs
+            ],
+            [
+                Handle.whole(
+                    *typed.get(n, ((pinned.get(n, 0),), np.uint8)), n, "output"
+                )
+                for n in outputs
+            ],
             pinned,
             feedback=list(feedback),
         )
