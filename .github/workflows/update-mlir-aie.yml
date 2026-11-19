@@ -75,10 +75,10 @@ jobs:
             # max); its commit comes straight from the version string.
             kind=nightly
             version="$requested"
-            available=$(curl -fsSL https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4 \
+            available=$(curl -fsSL https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-5 \
                           | grep -o 'mlir_aie-[^"/]*manylinux[^"/]*x86_64\.whl' | sed 's/^mlir_aie-//; s/-.*//')
             if ! printf '%s\n' "$available" | sort -u | grep -Fxq "$version"; then
-              echo "mlir_aie==$version is not on latest-wheels-4 (it may have aged off the page)."
+              echo "mlir_aie==$version is not on latest-wheels-5 (it may have aged off the page)."
               exit 1
             fi
             tag_with_v="$version"
@@ -102,7 +102,7 @@ jobs:
             peano_ref="$tag_with_v"
           else
             raw_version="$version"
-            find_links_target="latest-wheels-4"
+            find_links_target="latest-wheels-5"
             peano_ref="${version##*+g}"
           fi
 
