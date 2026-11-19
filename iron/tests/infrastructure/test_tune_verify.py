@@ -16,6 +16,7 @@ import iron
 from iron import Profile, Scratchpad
 from iron.common.declare.profile import FusionEntry, PackingEntry
 from iron.common.graph.fold import fold_candidates
+from iron.common.image.compose import CoResidenceError
 from iron.common.image.step import FusionKind
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.relu import ReLU
@@ -29,6 +30,7 @@ from iron.tune.verify import (
     Check,
     Phase,
     Phases,
+    compared,
     entries,
     narrowed,
     touches,
@@ -271,3 +273,33 @@ def test_the_final_verify_times_only_the_points_the_search_did_not():
     assert [(c.__name__, d, t) for c, d, t in kept] == [
         ("ReLU", {"size": LARGE}, {"num_aie_columns": 8})
     ]
+
+
+class Abreast(iron.Graph):
+    """A ReLU and a Tanh, independent, each on every column at two channels."""
+
+    def body(self, x, y):
+        return (
+            ReLU.step(x, num_aie_columns=8, num_channels=2),
+            Tanh.step(y, num_aie_columns=8, num_channels=2),
+        )
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_checked_packing_that_does_not_place_is_refused_not_run_unpacked():
+    """A model runs a packing that no longer places unpacked; a check of the profile naming it refuses it.
+
+    Else the check would time a build the profile does not describe, and a
+    tune keep an entry that never packs.
+    """
+    dev = aie_utils.ensure_current_device()
+    size = 2**16
+    recording = Abreast().record(x=(size,), y=(size,))
+    wide = {"num_aie_columns": 8, "num_channels": 2}
+    packed = Profile()
+    packed.add_packing(
+        [(ReLU, {"size": size}, wide), (Tanh, {"size": size}, wide)],
+        [recording.version],
+    )
+    with pytest.raises(CoResidenceError, match="does not place"):
+        compared(Timed(recording), Timed(recording), dev, Profile(), packed)

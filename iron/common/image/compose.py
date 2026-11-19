@@ -77,6 +77,9 @@ class Packing:
     # Designs whose device routes only as the annealing placer places it; out
     # of the repr, so an image without one keeps its cache key.
     annealed: tuple[str, ...] = dataclasses.field(default=(), repr=False)
+    # A group that does not place refuses the image (CoResidenceError) where
+    # it would otherwise run unpacked: a tuner's check builds what it names.
+    required: bool = dataclasses.field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         seen: set[str] = set()
@@ -566,6 +569,10 @@ class Composition:
                 else:
                     _placed[key] = (SEQUENTIAL, refused)
             placer, refused = _placed[key]
+            if refused is not None and packing.required:
+                raise CoResidenceError(
+                    f"packing {', '.join(kept)} does not place: {refused}"
+                )
             if refused is not None:
                 logger.warning(
                     "packing %s does not place, so it is not packed: %s",
