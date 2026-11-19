@@ -314,7 +314,8 @@ def composed(
     """Return what ``profile``'s composition entries build in ``recording``: each step's tunables, by index, and each region of two or more steps as a fusion.
 
     At every match (``Recording.occurrences``) of a region of steps, the
-    first entry naming a step wins. A member's tunables are its step's. A
+    first entry naming a step wins. A member's tunables are its step's, the
+    first entry naming each one winning. A
     region of consecutive steps runs as one stream or staged fusion where
     its on-chip edges are all streams, as one staged fusion where any is
     staged (its stream edges fed as they are), and as a pack where it has no
@@ -423,9 +424,10 @@ def composed(
                         f"not built yet: the composer builds it "
                         + ("neither way" if built is None else f"only {built.value}")
                     )
-            tunables.update(
-                (s, dict(m.tunables)) for s, m in zip(match, root.parts) if m.tunables
-            )
+            # The first entry naming a step's tunable wins, as for its region.
+            for s, m in zip(match, root.parts):
+                for name, value in (m.tunables or {}).items():
+                    tunables.setdefault(s, {}).setdefault(name, value)
             if len(match) > 1:
                 fused.append(
                     Fusion(

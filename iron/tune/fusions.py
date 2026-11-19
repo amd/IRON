@@ -943,6 +943,7 @@ def compare_graphs(
     lock: NpuLock | None = None,
     known: Compared | None = None,
     cap_s: float = math.inf,
+    exact: bool = True,
 ) -> tuple[float, float | None]:
     """How much longer ``after`` takes than ``before``, two builds of ``call``'s recording.
 
@@ -953,11 +954,11 @@ def compare_graphs(
     not yet timed an equal share of what is left (``sized``).
 
     Raises:
-        NotBitIdentical: ``after``'s outputs, each within its bound (past it
-            an operator may write whole tiles), its carried buffers or its
-            states are not
-            bit-identical to ``before``'s at a point, the call's values or one
-            of its bounds halved (``_bound_points``).
+        NotBitIdentical: ``exact``, and ``after``'s outputs, each within its
+            bound (past it an operator may write whole tiles), its carried
+            buffers or its states are not bit-identical to ``before``'s at a
+            point, the call's values or one of its bounds halved
+            (``_bound_points``).
         CheckTooLong: One call a round would take a point past its share of
             ``cap_s``.
         RuntimeError: A device timeout propagates as it is raised.
@@ -1039,7 +1040,7 @@ def compare_graphs(
                         )
                     ]
                 )
-                if differ:
+                if differ and exact:
                     raise NotBitIdentical(
                         f"{recording.name}: {', '.join(differ)} not bit-identical "
                         f"to it as before at {values}"
@@ -1050,23 +1051,33 @@ def compare_graphs(
                 share_us = (cap_s - (time.perf_counter() - begun)) * 1e6 / untimed
                 untimed -= 1
                 runs = [before.callable, after.callable]
+                fitted = sized(timing, runs, share_us)
+                # Half the rounds each way round: the second run of a round
+                # finds the device warmer, which would favour one side.
+                ahead = -(-fitted.rounds // 2)
                 times = time_interleaved(
-                    runs, sized(timing, runs, share_us), log=log, lock=lock
+                    runs, dataclasses.replace(fitted, rounds=ahead), log=log, lock=lock
                 )
-                paired = [
-                    a - b for b, a in zip(times[0].samples_us, times[1].samples_us)
-                ]
+                samples = [list(times[0].samples_us), list(times[1].samples_us)]
+                if fitted.rounds > ahead:
+                    back = time_interleaved(
+                        runs[::-1],
+                        dataclasses.replace(fitted, rounds=fitted.rounds - ahead),
+                        log=log,
+                        lock=lock,
+                    )
+                    samples[0] += back[1].samples_us
+                    samples[1] += back[0].samples_us
+                paired = [a - b for b, a in zip(*samples)]
                 known.points[point] = (
                     statistics.median(paired),
                     standard_error(paired),
                 )
                 known.medians[point] = (
-                    statistics.median(times[0].samples_us),
-                    statistics.median(times[1].samples_us),
+                    statistics.median(samples[0]),
+                    statistics.median(samples[1]),
                 )
-                known.ratios[point] = statistics.median(
-                    a / b for b, a in zip(times[0].samples_us, times[1].samples_us)
-                )
+                known.ratios[point] = statistics.median(a / b for b, a in zip(*samples))
         finally:
             before.release()
             after.release()

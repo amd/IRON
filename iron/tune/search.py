@@ -29,7 +29,7 @@ from aie.iron.device import Device
 from aie.utils import set_current_device
 
 from ..common.declare import Profile
-from ..common.declare.composition import Entry, Member, Refinement, Region
+from ..common.declare.composition import Entry, Member, Refinement, Region, refinement
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
 from ..common.graph.fusion import composed
 from ..common.graph.sdf import Derivation
@@ -92,7 +92,7 @@ logger = logging.getLogger(__name__)
 # A measured ratio under this gains: past the paired timing's noise.
 GAINS = 0.95
 # How an edit is priced: IRON's verify timing, lighter than measure's own.
-PRICING = Timing(rounds=3, calls=10)
+PRICING = Timing(rounds=4, calls=10)
 
 # The seeded draws a no-worse change is held on, alternately typical and stress.
 NO_WORSE_DRAWS = 4
@@ -352,13 +352,26 @@ def candidates(
         for first, at in shapes.items():
             with set_current_device(device):
                 found = settings(steps[first].op, device)
+            recorded = steps[first].op
             for setting in found:
                 entry = Entry(
                     Region((dataclasses.replace(members[first], tunables=setting),))
                 )
                 if entry not in proposed:
                     proposed.append(entry)
-                    yield AddEntry(entry, frozenset(at))
+                    moved = [n for n, v in setting.items() if vars(recorded)[n] != v]
+                    yield AddEntry(
+                        entry,
+                        frozenset(at),
+                        (
+                            Refinement.NO_WORSE
+                            if any(
+                                refinement(type(recorded), n) is Refinement.NO_WORSE
+                                for n in moved
+                            )
+                            else Refinement.EXACT
+                        ),
+                    )
     raise NotImplementedError(
         "candidates does not generate yet: " + ", ".join(_NOT_GENERATED)
     )
@@ -1074,12 +1087,13 @@ def measure(
     calls: Sequence[Timed],
     device: Device,
     timing: Timing = Timing(),
+    refinement: Refinement = Refinement.EXACT,
 ) -> Measured:
     """Time ``calls`` built under ``profile`` against them built under ``base``, in pairs.
 
     ``profile`` must fit (``fit``). Each call is built both ways and timed
     interleaved on the NPU at each of its points, checked bit-identical as
-    it goes (``compare_graphs``). A call's time is its points' medians,
+    it goes where ``refinement`` is exact (``compare_graphs``). A call's time is its points' medians,
     weighted; ``ratio`` weighs each point's median paired ratio by the
     base's time there.
 
@@ -1089,10 +1103,12 @@ def measure(
         calls: The graph's calls.
         device: The device.
         timing: How long each call is timed.
+        refinement: How ``profile`` relates to ``base``: a no-worse one is
+            timed without holding it bit-identical (``check`` holds it).
 
     Raises:
         ValueError: ``profile`` does not fit.
-        NotBitIdentical: A call is not bit-identical built both ways.
+        NotBitIdentical: An exact call is not bit-identical built both ways.
         NotImplementedError: What ``fit`` or the composer does not take yet.
     """
     fitted = fit(profile, calls, device)
@@ -1105,7 +1121,13 @@ def measure(
             before = Applied.of(call, base, device).built(device)
             after = Applied.of(call, profile, device).built(device)
             compare_graphs(
-                call, before, after, timing=timing, known=known, log=logger.info
+                call,
+                before,
+                after,
+                timing=timing,
+                known=known,
+                log=logger.info,
+                exact=refinement is Refinement.EXACT,
             )
         for weight, values in call.timed_points():
             point = tuple(sorted(values.items()))
@@ -1131,9 +1153,10 @@ def search(
     that does not build, or builds wrong, is refused and logged. The gainers are
     then taken best first, each applied to the profile so far (a region and
     a tunable edit of the same steps compose; a region over steps an earlier
-    one holds gives way to it): a take is checked bit-identical against
-    ``start`` (``check``) and measured against the profile so far, and kept
-    where it still gains.
+    one holds gives way to it, as a tunable an earlier one sets does): one
+    that builds what the profile so far builds is passed over; a take is
+    checked against ``start`` by its refinement (``check``) and measured
+    against the profile so far, and kept where it still gains.
     Pricing stops at ``budget_s``.
 
     Args:
@@ -1171,11 +1194,10 @@ def search(
         if not fitted.ok:
             logger.info("search: refused at %s: %s", fitted.stage, fitted.why)
             continue
-        if edit.refinement is not Refinement.EXACT:
-            logger.info("search: waits: a no-worse edit is not checked yet")
-            continue
         try:
-            ratio = measure(edited, start, calls, device, timing=PRICING).ratio
+            ratio = measure(
+                edited, start, calls, device, timing=PRICING, refinement=edit.refinement
+            ).ratio
         except NotBitIdentical as e:
             logger.warning("search: refused, built wrong: %s: %s", edit, e)
             continue
@@ -1191,11 +1213,29 @@ def search(
     incumbent = start
     for ratio, edit in sorted(priced, key=lambda pair: pair[0]):
         edited = edit.apply(incumbent)
+        with set_current_device(device):
+            same = all(
+                Applied.of(c, edited, device).fingerprint(device)
+                == Applied.of(c, incumbent, device).fingerprint(device)
+                for c in calls
+            )
+        if same:
+            continue  # an earlier take decides what it names
         checked = check(edited, start, calls, device, edit.refinement)
         if not checked.ok:
             logger.info("search: %s is not bit-identical: %s", edit, checked.why)
             continue
-        if measure(edited, incumbent, calls, device, timing=PRICING).ratio >= GAINS:
+        if (
+            measure(
+                edited,
+                incumbent,
+                calls,
+                device,
+                timing=PRICING,
+                refinement=edit.refinement,
+            ).ratio
+            >= GAINS
+        ):
             continue
         incumbent = edited
     return incumbent
