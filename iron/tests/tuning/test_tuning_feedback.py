@@ -29,9 +29,9 @@ from iron.tests.support.toys_edges import (
     sample_token_cycle,
     scan_state_cycle,
 )
-from iron.tests.support.tuning import unbuilt
+from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import candidates, check, fit, search
+from iron.tune.search import check, fit, search
 
 DEVICE = DEVICES["npu2"]()
 
@@ -40,7 +40,8 @@ _ACCUMULATOR_SIZE = 256
 
 def _scan_region():
     recording, members, forward, cycle = scan_state_cycle()
-    return recording, Region(members, forward + (cycle,))
+    # By producer, then consumer: the self-loop first.
+    return recording, Region(members, (cycle,) + forward)
 
 
 def _sample_region():
@@ -72,20 +73,9 @@ CYCLES = {
 }
 
 
-@pytest.mark.parametrize(
-    "cycle",
-    [
-        # A self-loop over a carried buffer is not proposed yet.
-        (
-            pytest.param(c, marks=unbuilt)
-            if c in ("sample_drawn_token", "scan_running_state")
-            else c
-        )
-        for c in sorted(CYCLES)
-    ],
-)
+@pytest.mark.parametrize("cycle", sorted(CYCLES))
 def test_a_cycle_with_its_initial_values_round_trips(cycle, tmp_path):
-    """A cycle with its initial values round-trips through the profile, and ``candidates`` proposes it."""
+    """A cycle with its initial values round-trips through the profile, and composing ``candidates``' edits reaches it."""
     recording, region = CYCLES[cycle]()
     entry = Entry(region)
     profile = Profile()
@@ -93,11 +83,8 @@ def test_a_cycle_with_its_initial_values_round_trips(cycle, tmp_path):
     profile.save(tmp_path / f"feedback_{cycle}.json")
     loaded = Profile.load(tmp_path / f"feedback_{cycle}.json")
     assert loaded.entries() == [entry]
-    start = Profile()
-    assert any(
-        entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, DEVICE)
-    )
+    reached = reached_by_candidates(region, [Timed(recording)], DEVICE)
+    assert reached.entries() == [entry]
 
 
 @pytest.mark.parametrize(

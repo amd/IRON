@@ -17,7 +17,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Precision, Scratchpad
 from iron.common.declare import Profile
-from iron.common.declare.composition import Member, Region
+from iron.common.declare.composition import Hold, Member, Region
 from iron.common.graph.record import Recording
 from iron.common.image.step import BufferRef, Edge, EdgeKind, HandOff
 from iron.operators.copy import Copy
@@ -45,56 +45,14 @@ def realize_helds(
 ) -> tuple[tuple[Edge, ...], tuple[tuple[int, ...], ...], tuple[int, ...] | None]:
     """Return ``edges`` with each named index's held place realized, plus the region's ``workers`` and ``phases``.
 
-    ``helds`` maps an edge's index to where its value waits: ``"memtile"``
-    (``kind=STAGED``), ``"ddr"`` (``kind=DDR``), ``"later_phase"`` (staged, and
-    read a phase after the rest) or ``"l1"`` (its two steps share one worker,
-    so no stream kind is needed between them). An index ``helds`` leaves out
-    keeps its edge's given ``kind``. The region runs in one phase (``phases``
-    None) unless an edge waits a phase: then its consumer reads in phase 1, as
-    does every step downstream of it, and the rest in phase 0.
+    ``helds`` maps an edge's index to where its value waits, a ``Hold``'s
+    value, each applied by ``Region.held``; an index it leaves out keeps its
+    edge's given ``kind``.
     """
-    kinds = {
-        "l1": EdgeKind.STREAM,
-        "memtile": EdgeKind.STAGED,
-        "ddr": EdgeKind.DDR,
-        "later_phase": EdgeKind.STAGED,
-    }
-    new_edges = tuple(
-        dataclasses.replace(e, kind=kinds[helds[i]]) if i in helds else e
-        for i, e in enumerate(edges)
-    )
-    later = [helds.get(i) == "later_phase" for i in range(len(new_edges))]
-    # A step reading a phase later runs then, and so does all it feeds.
-    stepped: dict[int, int] = {}
-    for i, e in sorted(enumerate(new_edges), key=lambda pair: pair[1].consumer):
-        if e.producer == e.consumer:
-            continue
-        stepped[e.consumer] = max(
-            stepped.get(e.consumer, 0), stepped.get(e.producer, 0), int(later[i])
-        )
-    phases = (
-        tuple(stepped.get(e.consumer, 0) for e in new_edges) if any(later) else None
-    )
-    parent: dict[int, int] = {}
-
-    def find(x: int) -> int:
-        parent.setdefault(x, x)
-        while parent[x] != x:
-            x = parent[x]
-        return x
-
-    for i, e in enumerate(new_edges):
-        find(e.producer)
-        find(e.consumer)
-        if helds.get(i) == "l1" and e.producer != e.consumer:
-            ra, rb = find(e.producer), find(e.consumer)
-            if ra != rb:
-                parent[ra] = rb
-    groups: dict[int, list[int]] = {}
-    for step in parent:
-        groups.setdefault(find(step), []).append(step)
-    workers = tuple(sorted(tuple(sorted(g)) for g in groups.values() if len(g) > 1))
-    return new_edges, workers, phases
+    region = Region((), edges)
+    for index, place in helds.items():
+        region = region.held(index, Hold(place))
+    return region.edges, region.workers, region.phases
 
 
 # ---------------------------------------------------------------------------
@@ -410,8 +368,10 @@ def scan_state_cycle(heads=2, head_dim=16, state_size=16):
 def sample_token_cycle(size=256, vocab=256):
     """Return a projection into ``Sample``, the drawn token fed back as the next call's record: the token across decode steps.
 
-    ``Sample``'s own ``tokens``/``token`` is the cross-call carry; the edge's
-    ``producer`` and ``consumer`` are again the same part.
+    ``Sample``'s own ``tokens``, read and written, is the cross-call carry;
+    the edge's ``producer`` and ``consumer`` are again the same part. GEMV's
+    tiles of ``C`` are not Sample's chunks of ``logits``, so the analysis
+    stages that edge.
     """
     proj = GEMV(M=vocab, K=size, feed_b=True, num_aie_columns=1)
     sample = Sample(vocab=vocab, k_max=4, cores=1)
@@ -422,8 +382,8 @@ def sample_token_cycle(size=256, vocab=256):
         "toy_sample_cycle", steps, ["A", "x", "draws"], ["tokens", "token"]
     )
     members = (member(proj), member(sample))
-    cycle = Edge(1, "token", 1, "tokens")
-    forward = (Edge(0, "C", 1, "logits"),)
+    cycle = Edge(1, "tokens", 1, "tokens")
+    forward = (Edge(0, "C", 1, "logits", kind=EdgeKind.STAGED),)
     return recording, members, forward, cycle
 
 
@@ -902,13 +862,17 @@ def _skip_combo(shape, held, rate, bounded):
         recording = Recording.of_steps(
             "combo_skip", steps, ["a", "b", "W", "tail_in"], ["out"]
         )
-    forward = (Edge(0, "y", 1, "x"), Edge(1, "y", 2, "B"), Edge(2, "C", 3, "a"))
-    skip = Edge(0, "y", 3, "b")
-    tail_edge = Edge(3, "y", 4, "a")
+    # By producer, then consumer, as candidates orders a region's edges.
+    edges = (
+        Edge(0, "y", 1, "x"),
+        Edge(0, "y", 3, "b"),
+        Edge(1, "y", 2, "B"),
+        Edge(2, "C", 3, "a"),
+        Edge(3, "y", 4, "a"),
+    )
     other = _next(HELDS, held)
-    edges = forward + (skip, tail_edge)
     edges, workers, phases = realize_helds(
-        edges, {0: other, 1: other, 2: other, 3: held, 4: other}
+        edges, {0: other, 1: held, 2: other, 3: other, 4: other}
     )
     region = Region(
         (member(add), member(norm), member(proj), member(add2), member(tail)),
@@ -916,7 +880,7 @@ def _skip_combo(shape, held, rate, bounded):
         workers=workers,
         phases=phases,
     )
-    return recording, region, 3
+    return recording, region, 1
 
 
 def _skip_bounded_recording(

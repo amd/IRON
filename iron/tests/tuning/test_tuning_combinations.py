@@ -18,9 +18,9 @@ from iron.tests.support.toys_edges import (
     depth_from_bounds,
     with_resolved_depth,
 )
-from iron.tests.support.tuning import unbuilt
+from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import candidates, check, fit, search
+from iron.tune.search import check, fit, search
 
 DEVICE = DEVICES["npu2"]()
 
@@ -105,11 +105,14 @@ def test_each_toys_region_matches_its_own_recording(combo):
     assert len(recording.occurrences(Entry(region))) == 1
 
 
-@unbuilt
 @pytest.mark.parametrize("combo", COMBOS, ids=_combo_id)
-def test_each_toy_round_trips_through_the_profile_and_is_proposed(combo, tmp_path):
-    """Each toy's region round-trips through the profile, and ``candidates`` yields an edit that produces it."""
-    shape, role, held, depth, rate, size = combo
+def test_each_toy_round_trips_and_is_reached_by_candidate_edits(combo, tmp_path):
+    """Each toy's region round-trips through the profile, and composing ``candidates``' edits reaches it.
+
+    First the region's own edit, every hand-off an edge of the analysis's
+    kind, then one edge's hold at a time, each an edit ``candidates`` yields
+    for the profile as it then stands.
+    """
     _, recording, region, _ = combination_toy(*combo)
     entry = Entry(region)
     profile = Profile()
@@ -117,11 +120,8 @@ def test_each_toy_round_trips_through_the_profile_and_is_proposed(combo, tmp_pat
     profile.save(tmp_path / "combination.json")
     loaded = Profile.load(tmp_path / "combination.json")
     assert loaded.entries() == [entry]
-    start = Profile()
-    assert any(
-        entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, DEVICE)
-    )
+    reached = reached_by_candidates(region, [Timed(recording)], DEVICE)
+    assert reached.entries() == [entry]
 
 
 @unbuilt

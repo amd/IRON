@@ -17,13 +17,30 @@ never tiles or channels.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Literal
 
 from ..image.step import Edge, EdgeKind
 
 Version = tuple[tuple[str, tuple[int, ...], str], ...]
+
+
+class Hold(Enum):
+    """Where an edge's value waits between its producer and its consumer.
+
+    ``L1``: in the consumer's core, the two steps on one worker; ``MEMTILE``:
+    staged through a memtile; ``DDR``: in host memory, a phase wait;
+    ``LATER_PHASE``: staged, its consumer and all it feeds a phase later;
+    ``MEMORY``: no edge at all, the value left where its producer writes it,
+    a dependence the analysis derives.
+    """
+
+    L1 = "l1"
+    MEMTILE = "memtile"
+    DDR = "ddr"
+    LATER_PHASE = "later_phase"
+    MEMORY = "memory"
 
 
 class Switch(Enum):
@@ -145,6 +162,62 @@ class Region:
     def steps(self) -> tuple[Member, ...]:
         """Return its steps depth-first through nested regions, the order its indices name them in."""
         return tuple(m for part in self.parts for m in part.steps())
+
+    def held(self, index: int, place: Hold) -> Region:
+        """Return this region with edge ``index`` held at ``place``.
+
+        ``L1`` makes the edge a stream and puts its two steps on one worker,
+        with any each already shares one with. ``MEMTILE`` and
+        ``LATER_PHASE`` make it staged, ``DDR`` a DDR edge. ``LATER_PHASE``
+        runs its consumer, and every step downstream of it, in phase 1: a
+        step's phase is the largest of its producers' and 1 where a later
+        edge feeds it. ``MEMORY`` drops the edge (and its phase), so the
+        edges after it move down one index.
+        """
+        if place is Hold.MEMORY:
+            return replace(
+                self,
+                edges=self.edges[:index] + self.edges[index + 1 :],
+                phases=(
+                    None
+                    if self.phases is None
+                    else self.phases[:index] + self.phases[index + 1 :]
+                ),
+            )
+        kinds = {
+            Hold.L1: EdgeKind.STREAM,
+            Hold.MEMTILE: EdgeKind.STAGED,
+            Hold.DDR: EdgeKind.DDR,
+            Hold.LATER_PHASE: EdgeKind.STAGED,
+        }
+        edge = self.edges[index]
+        edges = tuple(
+            replace(e, kind=kinds[place]) if i == index else e
+            for i, e in enumerate(self.edges)
+        )
+        workers = self.workers
+        if place is Hold.L1 and edge.producer != edge.consumer:
+            joined = {edge.producer, edge.consumer}
+            apart = []
+            for group in self.workers:
+                if joined & set(group):
+                    joined |= set(group)
+                else:
+                    apart.append(group)
+            workers = tuple(sorted([*apart, tuple(sorted(joined))]))
+        phases = self.phases
+        if place is Hold.LATER_PHASE:
+            step = {e.consumer: p for e, p in zip(self.edges, self.phases or ())}
+            # A self-loop's later read is its step's next firing, not a phase.
+            if edge.producer != edge.consumer:
+                step[edge.consumer] = max(step.get(edge.consumer, 0), 1)
+            for e in sorted(self.edges, key=lambda e: e.consumer):
+                if e.producer != e.consumer:
+                    step[e.consumer] = max(
+                        step.get(e.consumer, 0), step.get(e.producer, 0)
+                    )
+            phases = tuple(step.get(e.consumer, 0) for e in edges)
+        return replace(self, edges=edges, workers=workers, phases=phases)
 
     def wiring(
         self, first: int = 0
