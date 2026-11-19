@@ -379,12 +379,15 @@ def test_one_side_bounded_is_refused():
 
 
 def test_a_length_no_bound_names_is_refused():
-    """Copy of SiLU's whole output cut to ``n`` rows moves ``n`` a call against SiLU's every element, with no bound on either side to compare."""
+    """Copy of SiLU's whole output cut to ``n`` rows moves ``n`` a call against SiLU's every element, with no bound on either side to compare.
+
+    Rows of eight bf16s: a per-call length counts whole 16-byte units.
+    """
 
     class Tail(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
             y = SiLU.step(x, tile_size=2048, num_aie_columns=8)
-            return Copy.step(y[:n])
+            return Copy.step(y.reshape(BOUNDED_SIZE // 8, 8)[:n])
 
     recording = Tail().record(x=(BOUNDED_SIZE,))
     silu, copy = (s.op.resolved() for s in recording.steps)
