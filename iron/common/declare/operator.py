@@ -441,18 +441,25 @@ class Operator(jit.Operator, library=True):
         unknown = [n for n in names if expected[n] is None]
         if unknown:
             raise ValueError(f"{type(self).__name__}: no expected result for {unknown}")
-        bound = None
+        bounds: tuple = (None,) * len(names)
         if tolerance.kind == "bound":
             assert tolerance.bound is not None, "kind == 'bound' iff bound is set"
             bound = tolerance.bound(*(inputs[b.name] for b in self.inputs))
+            # Several outputs' bounds come as a tuple, one each, in order.
+            bounds = bound if isinstance(bound, tuple) else (bound,) * len(names)
+            if len(bounds) != len(names):
+                raise ValueError(
+                    f"{type(self).__name__} writes {names}; its bound gives "
+                    f"{len(bounds)} bounds"
+                )
         return {
             n: compare(
                 np.reshape(written[n], np.shape(expected[n])),
                 expected[n],
                 tolerance,
-                bound=bound,
+                bound=b,
             )
-            for n in names
+            for n, b in zip(names, bounds)
         }
 
     def sequence(self, rt) -> None:
