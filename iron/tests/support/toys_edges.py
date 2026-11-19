@@ -578,24 +578,13 @@ def depth_from_bounds(depth: str, minimum: int, knee: int) -> int:
 
 
 def with_resolved_depth(region: Region, index: int, depth: int) -> Region:
-    """Return ``region`` with its edge at ``index`` set to the concrete depth ``depth``.
+    """Return ``region`` with its edge at ``index`` set to the concrete depth ``depth`` (``Region.deepened``).
 
     Used once a test has resolved a combination toy's symbolic depth name
     (min−1, min, knee, more) against ``iron.common.graph.sdf.analyze``'s real
     ``min_depth``/``knee_depth`` for that edge.
     """
-    edges = tuple(
-        e if i != index else Edge(**{**vars(e), "depth": depth})
-        for i, e in enumerate(region.edges)
-    )
-    return Region(
-        region.parts,
-        edges,
-        region.inflows,
-        region.workers,
-        region.phases,
-        region.runtime,
-    )
+    return region.deepened(index, depth)
 
 
 def _chain_combo(shape, held, rate, bounded):

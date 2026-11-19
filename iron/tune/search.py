@@ -123,6 +123,41 @@ class HoldEdge:
         return edited
 
 
+@dataclass(frozen=True)
+class DepthEdge:
+    """An edit holding one edge of a region the profile composes at another depth (``Region.deepened``).
+
+    Attributes:
+        entry: The entry, as the profile holds it.
+        index: The edge, by its index in the entry's root region.
+        depth: The objects it holds.
+        touches: The steps the region composes, by index in the recording it
+            was found in.
+        refinement: How the edited build relates to the untuned build.
+    """
+
+    entry: Entry
+    index: int
+    depth: int
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with ``entry`` replaced by itself, the edge ``depth`` deep."""
+        edited = profile.copy()
+        root = self.entry.root
+        assert isinstance(root, Region), "candidates yields it for regions alone"
+        deepened = dataclasses.replace(
+            self.entry, root=root.deepened(self.index, self.depth)
+        )
+        edited.replace_entry(self.entry, deepened)
+        return edited
+
+
+# A chosen depth is an edge's minimum times a power of two up to this many
+# doublings, beside its knee; past what a core or memtile holds, fit refuses.
+DEPTH_DOUBLINGS = 4
+
 logger = logging.getLogger(__name__)
 
 # A measured ratio under this gains: past the paired timing's noise.
@@ -139,7 +174,6 @@ NO_WORSE_QUANTILE = 0.999
 # What candidates does not propose yet, named where it stops.
 _NOT_GENERATED = (
     "regions of steps that are not consecutive",
-    "chosen depths",
     "cascade edges",
     "inflows",
     "runtime plans",
@@ -233,9 +267,10 @@ def candidates(
     ``autotune.settings`` resolves (the recorded one first), touching every
     step of that shape. Each entry is yielded once, from the first call that
     admits it. First, for each region ``profile`` composes that a call's
-    recording runs, each edge held at each other place (``HoldEdge``): one
-    edge an edit, so the search composes several; the analysis's own kind is
-    the region edit's.
+    recording runs, each edge held at each other place (``HoldEdge``) and at
+    each chosen depth, its analysis minimum times 2 to 2**DEPTH_DOUBLINGS
+    and its knee (``DepthEdge``): one edge an edit, so the search composes
+    several; the analysis's own kind and minimum are the region edit's.
 
     Args:
         calls: The graph's calls, every version.
@@ -248,6 +283,7 @@ def candidates(
     """
     proposed: list[Entry] = []
     holds: list[tuple[Entry, int, Hold]] = []
+    deepened: list[tuple[Entry, int, int]] = []
     cores = device.cols * len(device.core_rows)
     for timed in calls:
         recording = timed.recording
@@ -267,6 +303,24 @@ def candidates(
                         continue
                     holds.append((entry, index, place))
                     yield HoldEdge(entry, index, place, touches)
+            try:
+                analysis = Derivation(root, recording, device).analysis()
+            except (NotImplementedError, ValueError):
+                continue  # depths wait on the analysis modelling the region
+            for index, edge in enumerate(root.edges):
+                least = analysis.min_depth.get(edge)
+                if least is None:
+                    continue
+                depths = [least << k for k in range(1, DEPTH_DOUBLINGS + 1)]
+                try:
+                    depths.append(analysis.knee_depth[edge])
+                except (NotImplementedError, KeyError):
+                    pass  # no knee yet: the doublings alone
+                for depth in sorted(set(depths)):
+                    if depth == edge.depth or (entry, index, depth) in deepened:
+                        continue
+                    deepened.append((entry, index, depth))
+                    yield DepthEdge(entry, index, depth, touches)
         steps = recording.steps
         _, writers = recording.users()
         held = recording.held

@@ -163,6 +163,14 @@ class Region:
         """Return its steps depth-first through nested regions, the order its indices name them in."""
         return tuple(m for part in self.parts for m in part.steps())
 
+    def deepened(self, index: int, depth: int | None) -> Region:
+        """Return this region with edge ``index`` held ``depth`` objects deep; None, the analysis's minimum."""
+        edges = tuple(
+            replace(e, depth=depth) if i == index else e
+            for i, e in enumerate(self.edges)
+        )
+        return replace(self, edges=edges)
+
     def held(self, index: int, place: Hold) -> Region:
         """Return this region with edge ``index`` held at ``place``.
 

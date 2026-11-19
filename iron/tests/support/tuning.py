@@ -16,7 +16,7 @@ from aie.iron.device import Device
 from iron.common.declare import Profile
 from iron.common.declare.composition import Hold, Region
 from iron.tune.autotune import Timed
-from iron.tune.search import AddEntry, HoldEdge, candidates
+from iron.tune.search import AddEntry, DepthEdge, HoldEdge, candidates
 
 unbuilt = pytest.mark.xfail(
     strict=True,
@@ -55,8 +55,9 @@ def reached_by_candidates(
 
     First the plain region edit of ``region``'s members (no shared workers,
     one phase), every hand-off an edge of the analysis's kind; then one
-    edge's hold at a time, each an edit ``candidates`` yields for the profile
-    as it then stands. ``candidates`` raises where it yields no such edit.
+    edge's hold at a time, then one edge's chosen depth at a time, each an
+    edit ``candidates`` yields for the profile as it then stands.
+    ``candidates`` raises where it yields no such edit.
     """
     reached = Profile()
     for edit in candidates(calls, reached, device):
@@ -71,12 +72,27 @@ def reached_by_candidates(
             break
     (current,) = reached.entries()
     assert isinstance(current.root, Region)
-    for index, place in _holds_reaching(current.root, region):
+    shallow = region
+    for index in range(len(region.edges)):
+        shallow = shallow.deepened(index, None)
+    for index, place in _holds_reaching(current.root, shallow):
         for edit in candidates(calls, reached, device):
             if (
                 isinstance(edit, HoldEdge)
                 and edit.entry == current
                 and (edit.index, edit.place) == (index, place)
+            ):
+                reached = edit.apply(reached)
+                break
+        (current,) = reached.entries()
+    for index, edge in enumerate(region.edges):
+        if edge.depth is None:
+            continue
+        for edit in candidates(calls, reached, device):
+            if (
+                isinstance(edit, DepthEdge)
+                and edit.entry == current
+                and (edit.index, edit.depth) == (index, edge.depth)
             ):
                 reached = edit.apply(reached)
                 break
