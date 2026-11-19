@@ -295,18 +295,12 @@ def test_decode_graph_is_no_worse_than_the_fused_mha_it_replaces(npu2):
 
 
 @pytest.mark.supported_devices("npu2")
-@waits_on_a_kernel  # float32 scores into the mask: no elementwise kernel reads float32
+@unbuilt  # GEMM's float32 scores staged into the mask add
 def test_prefill_graph_is_no_worse_than_the_fused_mha_it_replaces(npu2):
     """Held to the fused ``MHA`` operator it replaces, scores matched to its own float32 setting, the graph is no worse."""
-    qk = GEMM(
-        M=SEQ,
-        K=HEAD_DIM,
-        N=KV_LEN,
-        b_col_maj=True,
-        precision=Precision.MEDIUM,
-        output_dtype=np.float32,
+    qk, add_mask, softmax, pv = toys.prefill_attention_ops(
+        SEQ, KV_LEN, HEAD_DIM, scores=np.float32
     )
-    _, add_mask, softmax, pv = toys.prefill_attention_ops(SEQ, KV_LEN, HEAD_DIM)
     graph_recording = toys.prefill_attention_recording(
         "prefill_vs_mha", qk, add_mask, softmax, pv
     )

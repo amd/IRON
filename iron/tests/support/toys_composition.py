@@ -11,7 +11,10 @@ as ``iron/tests/support/fusable.py`` does), the profile-layer trees
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
+from ml_dtypes import bfloat16
 
 from iron import Precision
 from iron.common.declare.composition import Configuration, Entry, Member, Region
@@ -91,12 +94,19 @@ def decode_attention_recording(
 
 
 def prefill_attention_ops(
-    seq: int = 32, kv_len: int = 128, head_dim: int = 64
+    seq: int = 32, kv_len: int = 128, head_dim: int = 64, scores: Any = bfloat16
 ) -> tuple[GEMM, ElementwiseAdd, Softmax, GEMM]:
-    """Return prefill MHA's graph, small: ``Q K^T -> + causal mask -> Softmax -> P . V``."""
-    qk = GEMM(M=seq, K=head_dim, N=kv_len, b_col_maj=True, precision=Precision.MEDIUM)
-    add_mask = ElementwiseAdd(size=seq * kv_len, tile_size=kv_len)
-    softmax = Softmax(rows=seq, cols=kv_len)
+    """Return prefill MHA's graph, small: ``Q K^T -> + causal mask -> Softmax -> P . V``, its scores of type ``scores`` up to the softmax."""
+    qk = GEMM(
+        M=seq,
+        K=head_dim,
+        N=kv_len,
+        b_col_maj=True,
+        precision=Precision.MEDIUM,
+        output_dtype=scores,
+    )
+    add_mask = ElementwiseAdd(size=seq * kv_len, tile_size=kv_len, dtype=scores)
+    softmax = Softmax(rows=seq, cols=kv_len, input_dtype=scores)
     pv = GEMM(M=seq, K=kv_len, N=head_dim, b_col_maj=True, precision=Precision.MEDIUM)
     return qk, add_mask, softmax, pv
 

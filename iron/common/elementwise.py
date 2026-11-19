@@ -851,22 +851,29 @@ class BinaryElementwise(Elementwise):
 
     test = Testing(Sweep(channels=None))
     size: int = param()
+    # Its inputs' and output's type: one its kernel reads (``dtypes``).
+    dtype: Any = param(default=bfloat16, repr=False)
     valid = per_call(bounds=size)
+
+    dtypes: ClassVar[tuple[Any, ...]] = (bfloat16,)
 
     a = In(
         size,
         obj_shape=(Elementwise.tile_size,),
         per=CORES,
+        dtype=dtype,
     )
     b = In(
         size,
         obj_shape=(Elementwise.tile_size,),
         per=CORES,
+        dtype=dtype,
     )
     y = Out(
         like=a,
         obj_shape=(Elementwise.tile_size,),
         per=CORES,
+        dtype=dtype,
     )
     # A finish step's other input: a and b already hold both of a core's
     # input channels, so it rides a's instead of streaming of its own.
@@ -882,6 +889,20 @@ class BinaryElementwise(Elementwise):
         return self.valid
 
     over = UnaryElementwise.over
+
+    def validate(self) -> None:
+        super().validate()
+        if np.dtype(self.dtype) not in {np.dtype(t) for t in self.dtypes}:
+            raise ValueError(
+                f"{type(self).__name__}: its kernel reads "
+                f"{[np.dtype(t).name for t in self.dtypes]}, not "
+                f"{np.dtype(self.dtype).name}"
+            )
+        if self.finish and np.dtype(self.dtype) != np.dtype(bfloat16):
+            raise ValueError(
+                f"{type(self).__name__}: a finish chain's kernels read bfloat16, "
+                f"not {np.dtype(self.dtype).name}"
+            )
 
     def sequence(self, rt) -> None:
         """Fill every input and drain every output: the derived sequence.
