@@ -6,6 +6,8 @@
 A version's arrays grouped into shared device configurations (``iron.tune.packings``).
 """
 
+import time
+
 import aie.utils as aie_utils
 import numpy as np
 import pytest
@@ -663,7 +665,9 @@ def test_a_spent_budget_keeps_what_the_first_round_found(tmp_path):
     cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     recording = Alternating().record(x=(SIZE,))
     logged = []
-    budget = Budget(0, logged.append)
+    # Past its reserve before the search starts, its check share still whole.
+    budget = Budget(2, logged.append)
+    time.sleep(1.3)
     profile = price_packings(
         [Timed(recording)],
         dev,

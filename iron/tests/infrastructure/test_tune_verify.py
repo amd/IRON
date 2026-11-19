@@ -261,7 +261,8 @@ def test_the_final_verify_times_only_the_points_the_search_did_not():
         bounded, dev, base, wider, timing=timing, memo=memo, log=logged.append
     )
     assert known.points[point] is first and len(known.points) == 2
-    assert sum("CPU wait" in line for line in logged) == 1, logged
+    # One point timed, each way round: two sessions.
+    assert sum("CPU wait" in line for line in logged) == 2, logged
     [check] = checks.values()
     assert check.delta_us == pytest.approx(
         0.5 * first[0] + 0.5 * known.points[(("n", LARGE),)][0]
