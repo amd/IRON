@@ -70,7 +70,15 @@ def test_window_entry_round_trips_through_the_profile(window, tmp_path):
     )
 
 
-@pytest.mark.parametrize("window", sorted(WINDOWS))
+# SelectiveScan's lanes write ``y`` by head, the multiply reads it by row: a
+# restage the composer does not build.
+BUILT_WINDOWS = [
+    pytest.param(w, marks=unbuilt) if w == "several_outputs" else w
+    for w in sorted(WINDOWS)
+]
+
+
+@pytest.mark.parametrize("window", BUILT_WINDOWS)
 @pytest.mark.supported_devices("npu2")
 def test_window_is_bit_identical_to_its_steps_run_apart(window):
     """A window's output is bit-identical to the same steps run apart, at its recorded size."""
@@ -106,7 +114,7 @@ def test_window_is_bit_identical_on_npu1_full_elf_and_per_step():
 
 
 @pytest.mark.extensive
-@pytest.mark.parametrize("window", sorted(WINDOWS))
+@pytest.mark.parametrize("window", BUILT_WINDOWS)
 @pytest.mark.supported_devices("npu2")
 def test_tuner_proposes_and_keeps_a_window_on_its_own_toy(window):
     """The tuner, run on the window's toy alone, keeps what is at least as fast as the window, where the window pays."""

@@ -19,6 +19,8 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Rtp, Unresolvable
+from iron.common.declare import Operand
+from iron.common.declare.operator import LaneTransfers
 from iron.common.testing import Case, Testing
 from iron.operators.state_slices import (
     SLICE,
@@ -312,43 +314,77 @@ class SelectiveScan(Operator):
         """Every row of ``xbc`` and ``dt`` once a slice, for every core.
 
         Per core, its heads' parameters and states, and its slices of ``y``
-        and ``final``.
+        and ``final``, each as ``lane_transfers`` describes it.
         """
+        tg = TaskGroup()
+        for operand in (self.xbc, self.dt, self.head, self.state):
+            for lane, tap, _, _ in self.lane_transfers(operand):
+                operand.fill(tap, lane=lane, group=tg)
+        for (lane, y, _, _), (_, final, _, _) in zip(
+            self.lane_transfers(self.y), self.lane_transfers(self.final), strict=True
+        ):
+            self.y.drain(y, lane=lane, group=tg, wait=True)
+            self.final.drain(final, lane=lane, group=tg, wait=True)
+        tg.finish()
+
+    def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
+        """``xbc`` and ``dt`` whole once a slice; per core, its heads' parameters, states and finals a slice at a time, and its heads' columns of ``y``."""
         R, H, W, d_inner = self.rows, self.heads, self.width, self.inner
         P, SN = self.head_dim, SLICE * self.state_size
         S, heads = self.core_slices, H // self.columns
         per, states, run = S // heads, H * P * self.state_size, S * SN
-        # A core's heads' states, a slice of each head in turn.
-        slices = [
-            TensorAccessPattern(
-                (states,), k * run, [per, heads, SN], [SN, P * self.state_size, 1]
-            )
-            for k in range(self.columns)
-        ]
-        tg = TaskGroup()
-        self.xbc.fill(TensorAccessPattern((R, W), 0, [S, R, W], [0, W, 1]), group=tg)
-        self.dt.fill(TensorAccessPattern((R, H), 0, [S, R, H], [0, H, 1]), group=tg)
-        for k in range(self.columns):
-            self.head.fill(
-                TensorAccessPattern((H, 3), 3 * k * heads, [per, heads, 3], [0, 3, 1]),
-                lane=k,
-                group=tg,
-            )
-            self.state.fill(slices[k], lane=k, group=tg)
-        for k in range(self.columns):
-            self.y.drain(
-                TensorAccessPattern(
-                    (R, d_inner),
-                    k * heads * P,
-                    [per, heads, R, SLICE],
-                    [SLICE, P, d_inner, 1],
-                ),
-                lane=k,
-                group=tg,
-                wait=True,
-            )
-            self.final.drain(slices[k], lane=k, group=tg, wait=True)
-        tg.finish()
+        if operand is self.xbc:
+            return [
+                (0, TensorAccessPattern((R, W), 0, [S, R, W], [0, W, 1]), None, None)
+            ]
+        if operand is self.dt:
+            return [
+                (0, TensorAccessPattern((R, H), 0, [S, R, H], [0, H, 1]), None, None)
+            ]
+        if operand is self.head:
+            return [
+                (
+                    k,
+                    TensorAccessPattern(
+                        (H, 3), 3 * k * heads, [per, heads, 3], [0, 3, 1]
+                    ),
+                    None,
+                    None,
+                )
+                for k in range(self.columns)
+            ]
+        if operand is self.state or operand is self.final:
+            # A core's heads' states, a slice of each head in turn.
+            return [
+                (
+                    k,
+                    TensorAccessPattern(
+                        (states,),
+                        k * run,
+                        [per, heads, SN],
+                        [SN, P * self.state_size, 1],
+                    ),
+                    None,
+                    None,
+                )
+                for k in range(self.columns)
+            ]
+        if operand is self.y:
+            return [
+                (
+                    k,
+                    TensorAccessPattern(
+                        (R, d_inner),
+                        k * heads * P,
+                        [per, heads, R, SLICE],
+                        [SLICE, P, d_inner, 1],
+                    ),
+                    None,
+                    None,
+                )
+                for k in range(self.columns)
+            ]
+        return None
 
     def tolerance(self):
         return Tolerance.relative(
