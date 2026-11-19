@@ -80,6 +80,7 @@ def test_per_member_width_counts_round_trip_and_are_proposed(tmp_path):
     )
 
 
+@pytest.mark.supported_devices("npu2")
 def test_narrowed_window_is_bit_identical_to_full_width():
     """A window narrowed to fit the array is bit-identical to the same window at full width."""
     full_region, recording = _window(columns=min(4, _ARRAY_COLUMNS))
@@ -93,6 +94,7 @@ def test_narrowed_window_is_bit_identical_to_full_width():
 
 
 @pytest.mark.extensive
+@pytest.mark.supported_devices("npu2")
 def test_tuner_keeps_widths_that_pay_and_bounds_builds():
     """The tuner keeps the width setting that pays, builds stay bounded, and several placements are tried."""
     _, recording = _window(columns=2)
@@ -107,6 +109,7 @@ def test_tuner_keeps_widths_that_pay_and_bounds_builds():
     assert len(PLACEMENTS) > 1
 
 
+@pytest.mark.usefixtures("npu2")
 def test_a_width_over_the_arrays_columns_is_refused_by_counts():
     """A GEMM at the array's full width, four cores a column, with a norm beside it, is refused by counts, before any build.
 

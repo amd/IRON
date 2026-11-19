@@ -21,6 +21,7 @@ pytestmark = pytest.mark.usefixtures("npu2")
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_running_sum_with_one_initial_token_loses_nothing_over_several_calls():
     """A running-sum loop (``acc`` carried across calls) over several calls: ``check`` holds it to the same accumulation run one call at a time."""
     region, add = toys.running_sum()
@@ -32,6 +33,7 @@ def test_running_sum_with_one_initial_token_loses_nothing_over_several_calls():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_running_max_and_sum_carries_both_accumulators():
     """Two parallel carried accumulators (running max, running sum) on one edge pair, both carried: neither is lost or doubled."""
     maxacc = ElementwiseAdd(size=128, tile_size=128)
@@ -62,6 +64,7 @@ def test_running_max_and_sum_carries_both_accumulators():
     assert result.ok, result.why
 
 
+@pytest.mark.supported_devices("npu2")
 def test_partial_last_token_is_neither_lost_nor_duplicated():
     """128 elements at a 32-element tile, called at a per-call bound of 100.
 

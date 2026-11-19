@@ -119,6 +119,7 @@ def test_buffer_below_the_computed_minimum_is_refused():
 
 @pytest.mark.extensive
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_tuner_picks_token_sizes_that_pay():
     """``search``, run on the multi-rate toy alone, keeps a depth at or past the analysis's minimum and passes ``check`` against the start, exact."""
     gemm, norm = toys.gemm_rowwise(M=48, row_tile=16)

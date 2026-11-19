@@ -18,6 +18,7 @@ _REPEATS = 3
 
 
 @pytest.mark.parametrize("depth", [1, 2, 4])
+@pytest.mark.supported_devices("npu2")
 def test_chain_is_bit_identical_at_every_legal_depth(depth):
     """``add -> SiLU -> mul`` at every depth from the minimum to well past the knee: every repeated ``check`` passes, not only at one depth."""
     add, silu, mul = toys.add_silu_mul()
@@ -32,6 +33,7 @@ def test_chain_is_bit_identical_at_every_legal_depth(depth):
         assert result.ok, result.why
 
 
+@pytest.mark.supported_devices("npu2")
 def test_skip_diamond_is_bit_identical_under_its_one_legal_firing_order():
     """The residual-add skip/broadcast window, checked repeatedly at its one legal order.
 
@@ -50,6 +52,7 @@ def test_skip_diamond_is_bit_identical_under_its_one_legal_firing_order():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_running_sum_is_bit_identical_at_its_one_legal_initial_token_count():
     """The running-sum loop with ``acc`` carried across calls (the one count a self-loop edge's carry supports): every repeated ``check`` passes.
 

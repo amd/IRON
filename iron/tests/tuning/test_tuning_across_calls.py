@@ -105,6 +105,7 @@ def test_derived_size_merging_two_calls_round_trips_and_is_proposed(tmp_path):
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_several_calls_per_command_are_bit_identical_to_one_per_command():
     """Two and four calls per command are bit-identical to the same calls run one per command, one command at a time."""
     recording = _decode_recording()
@@ -120,6 +121,7 @@ def test_several_calls_per_command_are_bit_identical_to_one_per_command():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_a_merge_into_a_larger_shape_is_no_worse_where_it_reorders_a_reduction():
     """Two decode steps merged into one larger GEMV call (GEMV becoming GEMM-shaped) is no-worse against the reference.
 
@@ -135,6 +137,7 @@ def test_a_merge_into_a_larger_shape_is_no_worse_where_it_reorders_a_reduction()
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_residency_across_calls_is_bit_identical_to_reloading():
     """State (KV tail) kept resident across calls is bit-identical to reloading it each call."""
     recording = _kv_recording()
@@ -147,6 +150,7 @@ def test_residency_across_calls_is_bit_identical_to_reloading():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_per_call_parameters_updated_inside_one_command_are_bit_identical():
     """Per-call parameters (position, valid length) updated between calls inside one command, no new dispatch, are bit-identical to a dispatch each."""
     recording = _kv_recording()
@@ -159,6 +163,7 @@ def test_per_call_parameters_updated_inside_one_command_are_bit_identical():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_commands_in_flight_are_bit_identical_to_one_at_a_time():
     """1, 2 and 3 commands in flight from the host are bit-identical to one command finishing before the next is submitted."""
     recording = _decode_recording()
@@ -179,6 +184,7 @@ def test_commands_in_flight_are_bit_identical_to_one_at_a_time():
     raises=AssertionError,
     reason="candidates does not propose schedules yet",
 )
+@pytest.mark.supported_devices("npu2")
 def test_tuner_keeps_the_call_schedule_that_pays():
     """The tuner, on the decode-step toy alone, keeps the call schedule that pays."""
     recording = _decode_recording()

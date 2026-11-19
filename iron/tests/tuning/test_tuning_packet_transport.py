@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from iron.common.declare.composition import Entry, Member, Refinement, Region
 from iron.common.declare.profile import Profile
 from iron.common.image.step import Edge, EdgeKind
@@ -41,6 +43,7 @@ def _packet_window():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_the_4x2_window_builds_with_packet_transport_and_is_bit_identical():
     """The 4x2 window, built requesting packet transport on the placer's channel verdict, is bit-identical to its steps apart.
 
@@ -60,6 +63,7 @@ def test_the_4x2_window_builds_with_packet_transport_and_is_bit_identical():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_the_4x2_window_is_bit_identical_across_repeated_runs():
     """Repeated runs of the packet-transport window agree bit for bit with each other, not only with the reference."""
     region, recording = _packet_window()

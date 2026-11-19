@@ -26,6 +26,7 @@ pytestmark = pytest.mark.usefixtures("npu2")
 MEASURED = 1 << 18
 
 
+@pytest.mark.supported_devices("npu2")
 def test_unbalanced_pipeline_period_is_the_bottleneck_actors():
     """``add -> SiLU -> mul`` at uneven widths, SiLU at one column against the others' two: a positive period, bounded by the narrower, slower actor."""
     add = ElementwiseAdd(size=512, tile_size=128, num_aie_columns=2)
@@ -39,6 +40,7 @@ def test_unbalanced_pipeline_period_is_the_bottleneck_actors():
     assert analysis.period > 0
 
 
+@pytest.mark.supported_devices("npu2")
 def test_narrowing_the_bottleneck_actor_raises_the_period():
     """Narrowing SiLU, the bottleneck (several times add's cycles a call), from two columns to one raises the period."""
     add = ElementwiseAdd(size=512, tile_size=128, num_aie_columns=2)
@@ -56,6 +58,7 @@ def test_narrowing_the_bottleneck_actor_raises_the_period():
     assert narrow_period > wide_period
 
 
+@pytest.mark.supported_devices("npu2")
 def test_widening_a_non_bottleneck_actor_leaves_the_period_unchanged():
     """Widening ``add``, which is not the bottleneck, from one column to two leaves the period unchanged; SiLU alone still bounds it."""
     narrow_add = ElementwiseAdd(size=512, tile_size=128, num_aie_columns=1)
@@ -111,6 +114,7 @@ def test_measured_seconds_a_call_tracks_the_analyzed_period():
     assert measured.seconds > measured.base_seconds
 
 
+@pytest.mark.supported_devices("npu2")
 def test_feedback_loop_period_is_one_trip_around_the_cycle():
     """The running-sum loop: a positive period, the time one trip around the cycle takes, independent of how many cycles the call runs."""
     region, add = toys.running_sum()

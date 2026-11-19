@@ -171,6 +171,7 @@ def test_nesting_a_region_inside_a_region_round_trips_and_is_proposed(tmp_path):
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_concurrency_one_after_another_is_bit_identical():
     """The Alternating toy's eight steps, loaded one after another, are bit-identical to every step in a configuration of its own."""
     configuration, recording = _alternating_configuration()
@@ -184,6 +185,7 @@ def test_concurrency_one_after_another_is_bit_identical():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_concurrency_at_once_with_no_shared_data_is_bit_identical():
     """Independent steps sharing a configuration concurrently (``Configuration.concurrent``) are bit-identical to each loaded alone.
 
@@ -202,6 +204,7 @@ def test_concurrency_at_once_with_no_shared_data_is_bit_identical():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_disjoint_columns_concurrency_is_bit_identical():
     """Two designs on disjoint columns at once (``Configuration.concurrent`` with a ``columns`` width each) are bit-identical to each alone."""
     gemv, silu, mul = gemv_silu_mul(M=256, cols=2, tile=64)
@@ -229,6 +232,7 @@ def test_disjoint_columns_concurrency_is_bit_identical():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_width_partial_columns_is_bit_identical():
     """``Configuration.columns`` (a partial width) is bit-identical to the full-width configuration."""
     gemv, silu, mul = gemv_silu_mul(M=256, cols=4, tile=64)
@@ -247,6 +251,7 @@ def test_width_partial_columns_is_bit_identical():
 
 @pytest.mark.extensive
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_switch_kinds_are_bit_identical_and_priced_per_core():
     """Every ``Switch`` kind (RELOAD, CHANGED_CORES, OVERLAPPED) is bit-identical; (c) the tuner prices the switch per core and keeps what pays."""
     configuration, recording = _alternating_configuration()
@@ -269,6 +274,7 @@ def test_switch_kinds_are_bit_identical_and_priced_per_core():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_teardown_true_and_false_are_bit_identical():
     """``Configuration.teardown`` (True or False) is bit-identical to the build's own default."""
     configuration, recording = _alternating_configuration()
@@ -284,6 +290,7 @@ def test_teardown_true_and_false_are_bit_identical():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_residency_keeps_a_buffer_on_chip_and_is_bit_identical():
     """``Configuration.resident`` (weights kept on chip into the next configuration) is bit-identical to reloading them."""
     gemv, silu, mul = gemv_silu_mul(M=256, cols=4, tile=64)
@@ -313,6 +320,7 @@ def test_residency_keeps_a_buffer_on_chip_and_is_bit_identical():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_packaging_full_elf_and_xclbin_per_step_are_bit_identical():
     """A configuration built as a full ELF and as an xclbin per step are bit-identical."""
     configuration, recording = _alternating_configuration()
@@ -332,6 +340,7 @@ def test_packaging_full_elf_and_xclbin_per_step_are_bit_identical():
     raises=AssertionError,
     reason="candidates does not propose configurations yet",
 )
+@pytest.mark.supported_devices("npu2")
 def test_tuner_keeps_the_configuration_that_pays():
     """The tuner, on the Wide toy alone, keeps the configuration (narrowed to co-reside) that pays."""
     _, recording = _wide_configuration()

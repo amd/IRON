@@ -214,6 +214,7 @@ def test_phase_boundaries_round_trip_and_are_proposed(tmp_path):
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_window_schedule_is_bit_identical_with_no_hang():
     """The window at every ``RuntimePlan`` setting is bit-identical to the steps run apart, and does not hang."""
     base_region, recording = _window_region()
@@ -230,6 +231,7 @@ def test_window_schedule_is_bit_identical_with_no_hang():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_skip_phases_are_bit_identical_with_no_hang():
     """The skip toy at a phase boundary past its held edge is bit-identical to the steps run apart, and does not hang."""
     base_region, recording = _skip_region()
@@ -248,6 +250,7 @@ def test_skip_phases_are_bit_identical_with_no_hang():
     raises=AssertionError,
     reason="candidates does not propose runtime plans yet",
 )
+@pytest.mark.supported_devices("npu2")
 def test_tuner_keeps_the_schedule_that_pays():
     """The tuner, on the window toy alone, keeps the ``RuntimePlan`` setting that pays."""
     _, recording = _window_region()

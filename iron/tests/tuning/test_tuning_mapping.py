@@ -40,6 +40,7 @@ def _three_on_one_worker(order: tuple[int, ...]) -> tuple[Region, tuple]:
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_a_valid_firing_order_runs_bit_identical():
     """``add``, ``SiLU``, ``mul`` on one worker, in their dependence order: bit-identical to apart."""
     region, (add, silu, mul) = _three_on_one_worker((0, 1, 2))
@@ -90,6 +91,7 @@ def test_one_actor_split_across_workers_round_trips():
 
 
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_a_qk_softmax_pv_style_pipeline_on_one_core():
     """``Q·K -> softmax step -> P·V`` on one core, a fixed firing order: bit-identical to apart."""
     add, silu, mul = toys.add_silu_mul(size=256, tile=128)
@@ -124,6 +126,7 @@ def test_a_qk_softmax_pv_style_pipeline_on_one_core():
 
 @pytest.mark.extensive
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_tuner_keeps_the_mapping_that_pays():
     """``search``, run on the three-actor toy alone, keeps a dependence-respecting order.
 

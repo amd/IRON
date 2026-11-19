@@ -76,6 +76,7 @@ REPRESENTABLE_GAPS = {"ratio_4_into_6", "ratio_6_into_4", "broadcast"}
         for s in sorted(SHAPES)
     ],
 )
+@pytest.mark.usefixtures("npu2")
 def test_a_hand_off_shape_round_trips_through_the_profile(shape, tmp_path):
     """Each hand-off shape round-trips through the profile, and ``candidates`` proposes it."""
     recording, region = SHAPES[shape]()

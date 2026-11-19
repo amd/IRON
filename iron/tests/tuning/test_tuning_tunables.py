@@ -170,6 +170,7 @@ def test_each_tunable_moved_alone_is_held_to_its_own_refinement(cls, case):
 
 
 @pytest.mark.extensive
+@pytest.mark.supported_devices("npu2")
 def test_search_keeps_the_fastest_setting_it_measured_on_the_one_operator_toy():
     """The tuner, on the one-operator toy, keeps the fastest setting it measured, never asserting which one."""
     op = GEMV(M=128, K=128).resolved(NPU2_DEVICE)
@@ -208,6 +209,7 @@ def _logits_into_sample(precision: Precision) -> Recording:
     )
 
 
+@pytest.mark.supported_devices("npu2")
 def test_a_no_worse_change_upstream_of_a_selection_step_is_refused():
     """A GEMM's logits moved from ``MEDIUM`` to ``HIGHEST`` precision, upstream of a ``Sample``: refused, since the logits it selects from differ.
 

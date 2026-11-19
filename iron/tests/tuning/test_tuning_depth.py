@@ -104,6 +104,7 @@ _BUILT_MINIMUMS = {
         for rate in toys_edges.RATES
     ],
 )
+@pytest.mark.supported_devices("npu2")
 def test_minimum_depth_runs_bit_identical(role, shape, rate):
     """Every role, shape and rate, at its distinguished edge's minimum depth: ``check`` holds it bit-identical to the steps run apart."""
     recording, region, index, minimum = _held_where_it_can_be(role, shape, "min", rate)
@@ -169,6 +170,7 @@ def test_skip_diamond_minimum_depth_is_one():
     assert analysis.min_depth[skip_edge] == 1
 
 
+@pytest.mark.supported_devices("npu2")
 def test_skip_diamond_minimum_depth_runs_bit_identical():
     """The residual-add skip/broadcast window, its skip at its minimum: ``check`` holds it bit-identical to the steps run apart."""
     region, first, norm, second = toys.broadcast_skip(depth=1)
@@ -195,6 +197,7 @@ def _run_rate_skip(depth: int) -> None:
         graph.release()
 
 
+@pytest.mark.supported_devices("npu2")
 def test_rate_skip_runs_bit_identical_at_its_minimum():
     """A skip around a norm that takes four of its producer's tiles a row: the analysis's minimum (four) is safe, the window bit-identical there."""
     region, recording = toys.rate_skip()
@@ -236,6 +239,7 @@ def test_rate_skip_deadlocks_one_below_its_minimum_opt_in_device_check():
 
 
 @pytest.mark.extensive
+@pytest.mark.supported_devices("npu2")
 def test_tuner_keeps_a_depth_at_or_past_the_minimum():
     """``search``, run on the chain toy alone, keeps a depth at or past the analysis's minimum and passes ``check`` against the start, exact."""
     add, silu, mul = toys.add_silu_mul()
