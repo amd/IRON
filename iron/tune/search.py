@@ -94,6 +94,12 @@ GAINS = 0.95
 # How an edit is priced: IRON's verify timing, lighter than measure's own.
 PRICING = Timing(rounds=3, calls=10)
 
+# The seeded draws a no-worse change is held on, alternately typical and stress.
+NO_WORSE_DRAWS = 4
+
+# The |e| quantile a no-worse check compares beside the mean square.
+NO_WORSE_QUANTILE = 0.999
+
 # What candidates does not propose yet, named where it stops.
 _NOT_GENERATED = (
     "regions of steps that are not consecutive",
@@ -770,7 +776,9 @@ def check(
     halved; every output within its bound, carried buffer and state must be
     bit-identical (``compare_graphs``, every point marked known so nothing
     is timed). Calls that hold state run in order instead, each side's
-    states carried into its next call (``_in_order``).
+    states carried into its next call (``_in_order``). Held to ``NO_WORSE``,
+    each call is instead no worse than the base's against its reference
+    (``_no_worse``).
 
     Args:
         profile: The profile checked.
@@ -784,15 +792,10 @@ def check(
     Raises:
         ValueError: ``profile`` does not fit, an entry matches none of the
             calls (``fit``), or a call leaves the host nothing to compare.
-        NotImplementedError: What is not checked yet: a no-worse rule (against
-            the operators' references), and what ``fit`` or the composer
+        NotImplementedError: What is not checked yet: a no-worse call that
+            carries state (``_no_worse``), and what ``fit`` or the composer
             (``composed``) does not take yet.
     """
-    if refinement is not Refinement.EXACT:
-        raise NotImplementedError(
-            "holding a change no worse than the untuned build, against the "
-            "operators' references, is not built yet"
-        )
     fitted = fit(profile, calls, device)
     if not fitted.ok:
         raise ValueError(f"the profile does not fit ({fitted.stage}): {fitted.why}")
@@ -806,6 +809,12 @@ def check(
     olds = {
         c.recording.version: c for c in (calls if base_calls is None else base_calls)
     }
+    if refinement is Refinement.NO_WORSE:
+        for call in calls:
+            why = _no_worse(profile, base, call, olds[call.recording.version], device)
+            if why is not None:
+                return Check(False, refinement, why)
+        return Check(True, refinement)
     if len(calls) > 1 and any(c.recording.states for c in calls):
         why = _in_order(profile, base, calls, olds, device)
         return Check(why is None, refinement, why)
@@ -829,6 +838,104 @@ def check(
             except NotBitIdentical as e:
                 return Check(False, refinement, str(e))
     return Check(True, refinement)
+
+
+def _no_worse(
+    profile: Profile, base: Profile, call: Timed, old: Timed, device: Device
+) -> str | None:
+    """Return why ``call`` under ``profile`` is worse than ``old`` under ``base`` against the recording's reference, or None where it is no worse.
+
+    A change upstream of a step that ``selects`` is refused: an error there,
+    however small, can flip a choice. Otherwise, on each of
+    ``NO_WORSE_DRAWS`` seeded draws (odd ones stress, their floats scaled
+    over four decades), each returned output's error against
+    ``Recording.reference`` must be no larger than ``old``'s in mean square
+    and in its ``NO_WORSE_QUANTILE`` quantile of |e|, and finite; a
+    bit-identical output ties. The reference is ``old``'s recording's, the
+    untuned build's.
+
+    Raises:
+        NotImplementedError: The call carries a buffer or a state to the
+            next, which this does not compare yet.
+    """
+    recording = call.recording
+    if recording.states or recording.feedback:
+        raise NotImplementedError(
+            "holding a call that carries state to no-worse is not built yet"
+        )
+    with set_current_device(device):
+        before, after = Applied.of(old, base, device), Applied.of(call, profile, device)
+        olds, news = before.fingerprint(device), after.fingerprint(device)
+    if old.recording is recording:
+        changed = {
+            i for i, (a, b) in enumerate(zip(olds[0], news[0], strict=True)) if a != b
+        } | {i for f in set(olds[1]) ^ set(news[1]) for i in f.steps}
+    else:
+        changed = set(range(len(recording.steps)))
+    readers, _ = recording.users()
+    reached = set(changed)
+    frontier = list(changed)
+    while frontier:
+        for root in recording.steps[frontier.pop()].roots()[1]:
+            for j in readers.get(root, []):
+                if j >= 0 and j not in reached:
+                    reached.add(j)
+                    frontier.append(j)
+    selecting = sorted(j for j in reached if recording.steps[j].op.selects)
+    if selecting:
+        return (
+            f"{recording.name}: a no-worse change reaches step {selecting[0]} "
+            f"({type(recording.steps[selecting[0]].op).__name__}), which selects; "
+            f"upstream of a selection only an exact change is taken"
+        )
+    values = dict(call.values)
+    with set_current_device(device):
+        graphs = before.built(device), after.built(device)
+    try:
+        for draw in range(NO_WORSE_DRAWS):
+            rng = np.random.default_rng(draw)
+            tensors = {h.name: _random_tensor(h, rng) for h in recording.inputs}
+            if draw % 2:
+                for h in recording.inputs:
+                    if np.dtype(h.dtype).kind == "f" or np.dtype(h.dtype).name == (
+                        "bfloat16"
+                    ):
+                        scale = 10.0 ** rng.uniform(-2, 2, h.shape)
+                        tensors[h.name] = (
+                            tensors[h.name].astype(np.float64) * scale
+                        ).astype(h.dtype)
+            want, _ = old.recording.reference(tensors, values)
+            got = []
+            for graph, side in zip(graphs, (old, call), strict=True):
+                graph(*(tensors[h.name] for h in side.recording.inputs), **values)
+                got.append(
+                    {
+                        h.name: np.array(graph.read(h)[h.valid_index(values)])
+                        for h in side.recording.returned
+                    }
+                )
+            for h, ref in zip(old.recording.returned, want, strict=True):
+                u, t = got[0][h.name], got[1][h.name]
+                if np.array_equal(u.view(np.uint8), t.view(np.uint8)):
+                    continue
+                exact = np.asarray(ref, dtype=np.float64)
+                errors = [np.abs(x.astype(np.float64) - exact) for x in (u, t)]
+                ms = [float(np.mean(e**2)) for e in errors]
+                tail = [float(np.quantile(e, NO_WORSE_QUANTILE)) for e in errors]
+                if (
+                    not np.isfinite([*ms, *tail]).all()
+                    or ms[1] > ms[0]
+                    or tail[1] > tail[0]
+                ):
+                    return (
+                        f"{recording.name}: {h.name} is worse than before on draw "
+                        f"{draw}: mean square {ms[1]:.3g} against {ms[0]:.3g}, "
+                        f"{NO_WORSE_QUANTILE} |e| {tail[1]:.3g} against {tail[0]:.3g}"
+                    )
+    finally:
+        for graph in graphs:
+            graph.release()
+    return None
 
 
 def _in_order(

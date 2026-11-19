@@ -3,13 +3,14 @@
 
 """Transformation tests for operator tunables, every operator in the catalog at a small size."""
 
+import dataclasses
 import itertools
 
 import pytest
 from aie.iron.device import NPU2
 
 from iron.common.declare import Profile
-from iron.common.declare.composition import Refinement, refinement
+from iron.common.declare.composition import Entry, Refinement, Region, refinement
 from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
 from iron.common.image.step import BufferRef, SequenceStep
@@ -17,6 +18,7 @@ from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.sample import Sample
 from iron.tests.support.declared import declared
+from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.packings import width_tunables
@@ -122,7 +124,7 @@ def test_a_resolve_derived_tunable_is_never_a_width():
 @pytest.mark.parametrize("cls,case", _PARAMS_WITH_TUNABLES)
 @pytest.mark.supported_devices("npu2")
 def test_each_tunable_moved_alone_is_held_to_its_own_refinement(cls, case):
-    """Each declared tunable moved alone off the recorded setting is held to its own ``refinement``, and the tuner's pick fits the device."""
+    """Each tunable moved alone off the recorded setting, where the others take it, is held to its own ``refinement``; the tuner's pick fits."""
     recorded = cls(**case.kwargs).resolved(NPU2_DEVICE)
     recording = Recording.of_step(recorded)
     given = {n: vars(recorded)[n] for n in cls.declaration.tunables}
@@ -135,7 +137,15 @@ def test_each_tunable_moved_alone_is_held_to_its_own_refinement(cls, case):
             if value == given.get(name):
                 continue
             moved = Profile()
-            moved.add(cls, **{**given, name: value})
+            moved.add_entry(
+                Entry(
+                    Region(
+                        (dataclasses.replace(member(recorded), tunables={name: value}),)
+                    )
+                )
+            )
+            if not fit(moved, [Timed(recording)], NPU2_DEVICE).ok:
+                continue  # refused beside the recorded others: no setting
             result = check(
                 moved, base, [Timed(recording)], NPU2_DEVICE, refinement=rule
             )
@@ -170,7 +180,6 @@ def test_a_setting_the_array_cannot_hold_is_refused_before_any_build():
     assert result.stage == "counts"
 
 
-@unbuilt
 def test_a_no_worse_change_upstream_of_a_selection_step_is_refused():
     """A no-worse change upstream of a ``Sample`` step (the selection slice) is refused."""
     gemv = GEMV(M=128, K=128).resolved(NPU2_DEVICE)
@@ -186,7 +195,7 @@ def test_a_no_worse_change_upstream_of_a_selection_step_is_refused():
         "gemv_into_sample", steps, ["A", "B", "draws"], ["tokens", "token"]
     )
     profile = Profile()
-    profile.add(GEMV, M=128, K=128, kernel_vector_size=8)
+    profile.add(GEMV, M=128, K=128, kernel_vector_size=32)
     result = check(
         profile,
         Profile(),

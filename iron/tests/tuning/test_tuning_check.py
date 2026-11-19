@@ -63,6 +63,41 @@ def test_a_build_computing_something_else_is_caught():
     assert "out" in (result.why or "")
 
 
+def test_a_window_bit_identical_to_its_steps_is_no_worse():
+    """The stream window, held to no-worse: every output ties the steps apart on each draw."""
+    recording, region = chain()
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    result = check(profile, Profile(), [Timed(recording)], DEVICE, Refinement.NO_WORSE)
+    assert result.ok, result.why
+
+
+def test_a_build_computing_something_else_is_worse_against_the_reference():
+    """A chain ending in a multiply, held no-worse to one ending in an add: against the add's reference its ``out`` is worse, and the check names it."""
+    recording, _ = chain()
+    add = ElementwiseAdd(size=256, num_aie_columns=1, tile_size=256)
+    norm = RMSNorm(rows=1, tile_size=256, num_aie_columns=1)
+    last = ElementwiseAdd(size=256, num_aie_columns=1, tile_size=256)
+    other = Recording.of_steps(
+        "toy_chain",
+        sequences.steps(
+            (add, "a", "b", "h"), (norm, "h", "n"), (last, "n", "up", "out")
+        ),
+        ["a", "b", "up"],
+        ["out"],
+    )
+    result = check(
+        Profile(),
+        Profile(),
+        [Timed(recording)],
+        DEVICE,
+        Refinement.NO_WORSE,
+        base_calls=[Timed(other)],
+    )
+    assert not result.ok
+    assert "out is worse" in (result.why or "")
+
+
 def test_a_build_measured_against_itself_takes_about_as_long():
     """The same build timed in pairs against itself: the median paired ratio is near one."""
     recording, _ = chain()

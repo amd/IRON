@@ -106,6 +106,8 @@ def _logits(op: "Sample") -> dict:
 class Sample(Operator):
     """Draw the next token from a row of logits (exact temperature/top-k)."""
 
+    selects = True
+
     # A token id; anything but exact is wrong.
     test = Testing(
         [

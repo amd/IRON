@@ -388,7 +388,7 @@ class Recording:
         and type; one named only in part is bytes, as many as ``pinned``
         gives it. The host writes ``inputs`` and reads ``outputs``, and
         ``pinned`` sizes a buffer a step names only in part or holds at a
-        size of its own.
+        size of its own; what it reads is what a call returns.
         """
         pinned = dict(pinned or {})
         steps = list(steps)
@@ -425,6 +425,10 @@ class Recording:
                     [h for h, b in declared if b.drains],
                 )
             )
+        returned = [
+            Handle.whole(*typed.get(n, ((pinned.get(n, 0),), np.uint8)), n, "output")
+            for n in outputs
+        ]
         return cls(
             name,
             recording,
@@ -432,14 +436,10 @@ class Recording:
                 Handle.whole(*typed.get(n, ((pinned.get(n, 0),), np.uint8)), n, "input")
                 for n in inputs
             ],
-            [
-                Handle.whole(
-                    *typed.get(n, ((pinned.get(n, 0),), np.uint8)), n, "output"
-                )
-                for n in outputs
-            ],
+            returned,
             pinned,
             feedback=list(feedback),
+            returned=list(returned),
         )
 
     @classmethod
