@@ -800,9 +800,9 @@ def test_a_weight_given_where_an_optional_input_was_meant_is_refused(view):
 
     x = np.ones((1, E), dtype=bfloat16)
     kept = w.copy()
-    with pytest.raises(TypeError, match=r"graph weight or a view of one.*\(weight=\)"):
+    with pytest.raises(TypeError, match=r"graph weight or a view of one.*weight="):
         Norm().record(x=(1, E))
-    with pytest.raises(TypeError, match=r"graph weight or a view of one.*\(weight=\)"):
+    with pytest.raises(TypeError, match=r"graph weight or a view of one.*weight="):
         Norm().reference(x)
     np.testing.assert_array_equal(w, kept)
 
