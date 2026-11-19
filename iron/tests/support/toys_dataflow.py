@@ -12,7 +12,7 @@ import iron
 from iron import Precision, Scratchpad
 from iron.common.declare.composition import Region
 from iron.common.graph.record import Recording
-from iron.common.image.step import Edge
+from iron.common.image.step import Edge, EdgeKind
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemm import GEMM
@@ -88,6 +88,32 @@ def broadcast_skip_recording(name: str, first, norm, second) -> Recording:
         (second, "normed", "h", "out"),
     )
     return Recording.of_steps(name, steps, ["a", "r"], ["out"])
+
+
+def rate_skip(
+    tile: int = 64, row: int = 256, size: int = 2048, depth: int | None = None
+) -> tuple[Region, Recording]:
+    """Return an add whose ``tile``-element output a norm reads as ``row``-element rows, the add's output also skipped to a second add.
+
+    The add's tiles restage into the norm's rows through a memtile, so the
+    norm takes ``row // tile`` of them before it writes a row, and the second
+    add, which reads the skip and the norm's rows tile by tile, waits on the
+    norm meanwhile: the skip must hold those tiles, its minimum ``row //
+    tile``, and below it the window deadlocks. ``depth`` is the skip's.
+    """
+    first = ElementwiseAdd(size=size, num_aie_columns=1, tile_size=tile)
+    norm = RMSNorm(rows=size // row, tile_size=row, num_aie_columns=1)
+    second = ElementwiseAdd(size=size, num_aie_columns=1, tile_size=tile)
+    steps = sequences.steps(
+        (first, "a", "r", "h"), (norm, "h", "n"), (second, "n", "h", "out")
+    )
+    recording = Recording.of_steps("rate_skip", steps, ["a", "r"], ["out"])
+    edges = (
+        Edge(0, "y", 1, "x", kind=EdgeKind.STAGED),
+        Edge(0, "y", 2, "b", depth=depth),
+        Edge(1, "y", 2, "a", kind=EdgeKind.STAGED),
+    )
+    return Region(tuple(member(s.op) for s in recording.steps), edges), recording
 
 
 def gemm_rowwise(

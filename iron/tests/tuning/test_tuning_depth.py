@@ -3,7 +3,11 @@
 
 """The depth family: the minimum deadlock-free depth, below it, and past the knee, for every edge role, hand-off shape and rate."""
 
+import multiprocessing
+
+import numpy as np
 import pytest
+from aie.utils import set_current_device
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement
@@ -13,6 +17,7 @@ from iron.tests.support import toys_dataflow as toys
 from iron.tests.support import toys_edges
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
+from iron.tune.fusions import Applied
 from iron.tune.search import check, fit, measure, search
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -118,15 +123,60 @@ def test_skip_diamond_minimum_depth_runs_bit_identical():
     assert result.ok, result.why
 
 
-@pytest.mark.skip(
-    reason="this window runs at every skip depth down to one on npu2, so it "
-    "has no deadlocking depth to confirm; the tightness check needs a window "
-    "whose minimum exceeds one (a diamond through a whole-call reader)"
+_HANG_S = 60
+
+
+def _run_rate_skip(depth: int) -> None:
+    """Build ``toys.rate_skip`` at skip depth ``depth`` and run it once on npu2: the target a hang-safe child runs."""
+    region, recording = toys.rate_skip(depth=depth)
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    rng = np.random.default_rng(0)
+    inputs = [rng.standard_normal(h.shape).astype(h.dtype) for h in recording.inputs]
+    with set_current_device(toys.NPU2):
+        graph = Applied.of(Timed(recording), profile, toys.NPU2).built(toys.NPU2)
+        graph(*inputs)
+        graph.release()
+
+
+def test_rate_skip_runs_bit_identical_at_its_minimum():
+    """A skip around a norm that takes four of its producer's tiles a row: the analysis's minimum (four) is safe, the window bit-identical there."""
+    region, recording = toys.rate_skip()
+    minimum = analyze(region, recording, toys.NPU2).min_depth[region.edges[1]]
+    assert minimum == 4
+    region, recording = toys.rate_skip(depth=minimum)
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    result = check(profile, Profile(), [Timed(recording)], toys.NPU2, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="the analysis counts a reading end alone, not its producer's own "
+    "buffers: on npu2 this skip runs read three deep and hangs at two, one "
+    "below the analysis's minimum of four",
 )
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
-def test_skip_diamond_deadlock_below_its_minimum_opt_in_device_check():
-    """A depth below the analysis's minimum really deadlocks on the device, confirming the analysis is tight and not merely safe."""
+def test_rate_skip_deadlocks_one_below_its_minimum_opt_in_device_check():
+    """One below the analysis's minimum really deadlocks on the device, confirming the analysis is tight and not merely safe.
+
+    Run in a spawned child killed past ``_HANG_S``: the deliberate exception
+    to "a hang always fails a test".
+    """
+    region, recording = toys.rate_skip()
+    minimum = analyze(region, recording, toys.NPU2).min_depth[region.edges[1]]
+    child = multiprocessing.get_context("spawn").Process(
+        target=_run_rate_skip, args=(minimum - 1,)
+    )
+    child.start()
+    child.join(_HANG_S)
+    hung = child.is_alive()
+    if hung:
+        child.kill()
+    assert hung, f"skip depth {minimum - 1} ran; the analysis's minimum is {minimum}"
 
 
 @pytest.mark.extensive
