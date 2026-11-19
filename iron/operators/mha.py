@@ -381,7 +381,9 @@ class MHA(Operator):
     packed: bool = param(
         derive=lambda op: op.seq_len == 1, repr=False, array=True, init=False
     )
-    B_q: int = tunable(domain=block_sizes)
+    # Another query block regroups the online softmax over KV blocks: not
+    # bit-identical on npu2 (64 against 32 or 16).
+    B_q: int = tunable(domain=block_sizes, exact=False)
     B_kv: int = tunable(repr=False, init=False)
     num_pipelines: int = tunable(default=1, domain=widths)
     # Filled by resolve.
