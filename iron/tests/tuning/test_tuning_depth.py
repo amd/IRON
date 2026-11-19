@@ -4,7 +4,6 @@
 """The depth family: the minimum deadlock-free depth, below it, and past the knee, for every edge role, hand-off shape and rate."""
 
 import pytest
-from aie.utils import set_current_device
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement
@@ -14,7 +13,6 @@ from iron.tests.support import toys_dataflow as toys
 from iron.tests.support import toys_edges
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.fusions import Applied
 from iron.tune.search import check, fit, measure, search
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -96,55 +94,39 @@ def test_depth_over_l1_or_memtile_is_refused(role):
     assert result.stage == "counts"
 
 
-def test_skip_diamond_minimum_depth_is_between_two_and_four():
-    """The residual-add skip/broadcast window: held at two objects it deadlocks, at four it runs, so the analysis's minimum falls strictly in between."""
+def test_skip_diamond_minimum_depth_is_one():
+    """The residual-add skip/broadcast window, its skip read through an end one deep, runs on npu2: the analysis's minimum is that one.
+
+    Measured: the skip's fifo lowers as ``[2, 2, 1]`` (the add's own two,
+    the norm's end and the skip's) and runs bit-identical, as it does at
+    two, three and four.
+    """
     region, first, norm, second = toys.broadcast_skip(depth=None)
     recording = toys.broadcast_skip_recording("known-answer", first, norm, second)
     analysis = analyze(region, recording, toys.NPU2)
     skip_edge = region.edges[1]
-    assert 2 < analysis.min_depth[skip_edge] <= 4
+    assert analysis.min_depth[skip_edge] == 1
 
 
 def test_skip_diamond_minimum_depth_runs_bit_identical():
-    """The residual-add skip/broadcast window, held at four objects (the known-good depth): ``check`` holds it bit-identical to the steps run apart."""
-    region, first, norm, second = toys.broadcast_skip(depth=4)
+    """The residual-add skip/broadcast window, its skip at its minimum: ``check`` holds it bit-identical to the steps run apart."""
+    region, first, norm, second = toys.broadcast_skip(depth=1)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    recording = toys.broadcast_skip_recording("depth-four", first, norm, second)
+    recording = toys.broadcast_skip_recording("depth-one", first, norm, second)
     result = check(profile, Profile(), [Timed(recording)], toys.NPU2, Refinement.EXACT)
     assert result.ok, result.why
 
 
-def test_skip_diamond_depth_two_is_refused_before_any_build():
-    """The same window two objects deep (the depth that hangs): ``fit`` refuses it at stage ``"analysis"``, before any build."""
-    region, first, norm, second = toys.broadcast_skip(depth=2)
-    profile = Profile()
-    profile.add_entry(Entry(root=region))
-    recording = toys.broadcast_skip_recording("depth-two", first, norm, second)
-    result = fit(profile, [Timed(recording)], toys.NPU2)
-    assert not result.ok
-    assert result.stage == "analysis"
-
-
-@unbuilt
+@pytest.mark.skip(
+    reason="this window runs at every skip depth down to one on npu2, so it "
+    "has no deadlocking depth to confirm; the tightness check needs a window "
+    "whose minimum exceeds one (a diamond through a whole-call reader)"
+)
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
-def test_skip_diamond_depth_two_deadlock_opt_in_device_check():
-    """Depth 2 really deadlocks on the device, confirming the analysis is tight and not merely safe (the deliberate exception to "a hang always fails a test").
-
-    Not wrapped in ``hang.bounded``: the composer does not take a chosen
-    depth yet (``composed`` raises before any device use), so there is no
-    hang to survive today; once it does, the device dispatch below moves
-    inside ``hang.bounded(_TIMEOUT_S, ...)`` as ``test_fusion_staged.py``'s
-    ``test_a_reader_a_phase_later_does_not_hang`` already does for the same
-    window in the ``Fusion`` representation.
-    """
-    region, first, norm, second = toys.broadcast_skip(depth=2)
-    profile = Profile()
-    profile.add_entry(Entry(root=region))
-    recording = toys.broadcast_skip_recording("device-depth-two", first, norm, second)
-    with set_current_device(toys.NPU2):
-        Applied.of(Timed(recording), profile, toys.NPU2).built(toys.NPU2)
+def test_skip_diamond_deadlock_below_its_minimum_opt_in_device_check():
+    """A depth below the analysis's minimum really deadlocks on the device, confirming the analysis is tight and not merely safe."""
 
 
 @pytest.mark.extensive

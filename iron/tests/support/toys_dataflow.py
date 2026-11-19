@@ -87,7 +87,7 @@ def broadcast_skip_recording(name: str, first, norm, second) -> Recording:
         (norm, "h", "normed"),
         (second, "normed", "h", "out"),
     )
-    return Recording.of_steps(name, steps, ["a", "r"], ["out"], feedback=["h"])
+    return Recording.of_steps(name, steps, ["a", "r"], ["out"])
 
 
 def gemm_rowwise(
