@@ -153,9 +153,15 @@ def test_a_per_call_size_below_the_recorded_one_still_runs_on_one_core(npu2):
 
 
 @pytest.mark.extensive
-@unbuilt
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("name", list(toys.PAIR_TOYS))
+@pytest.mark.parametrize(
+    "name",
+    [
+        # IRON folds neither of these pairs (Operator.fold refuses them).
+        (pytest.param(n, marks=unbuilt) if n in ("decode_gemv", "add_softmax") else n)
+        for n in toys.PAIR_TOYS
+    ],
+)
 def test_search_keeps_the_pair_joined_where_it_pays(name, npu2):
     region, recording = _named_region_and_recording(name)
     entry = Entry(root=region)

@@ -106,19 +106,7 @@ def test_window_is_bit_identical_on_npu1_full_elf_and_per_step():
 
 
 @pytest.mark.extensive
-@pytest.mark.parametrize(
-    "window",
-    [
-        # A GEMV's 2-element output objects into a 256-element multiply: the
-        # composer gives a fifo one object size.
-        (
-            pytest.param(w, marks=unbuilt)
-            if w in ("fan_in", "outside_reader_and_final_output")
-            else w
-        )
-        for w in sorted(WINDOWS)
-    ],
-)
+@pytest.mark.parametrize("window", sorted(WINDOWS))
 @pytest.mark.supported_devices("npu2")
 def test_tuner_proposes_and_keeps_a_window_on_its_own_toy(window):
     """The tuner, run on the window's toy alone, keeps what is at least as fast as the window, where the window pays."""

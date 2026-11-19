@@ -65,7 +65,11 @@ def test_the_layout_holds_end_to_end_over_prefill_then_decode():
 
 
 @pytest.mark.extensive
-@unbuilt
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="candidates does not propose state layouts yet",
+)
 def test_the_tuner_prices_both_versions_jointly_and_keeps_one_layout_for_both():
     """The tuner, searching over the prefill and decode calls together, keeps one ``StateLayout`` for ``kv``.
 

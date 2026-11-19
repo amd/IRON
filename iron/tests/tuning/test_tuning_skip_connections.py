@@ -105,11 +105,6 @@ def test_a_reconvergent_diamond_is_bit_identical():
 
 
 @pytest.mark.extensive
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="candidates does not propose a skip held in DDR, a later phase or one worker yet",
-)
 @pytest.mark.supported_devices("npu2")
 def test_tuner_picks_the_way_of_holding_that_pays():
     """The tuner, on the residual toy alone, picks the held place that pays."""
