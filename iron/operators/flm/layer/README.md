@@ -7,14 +7,15 @@ SPDX-License-Identifier: Apache-2.0
 
 Ported from the `layer` overlay of [FastFlowLM](https://github.com/ROCm/FastFlowLM)'s Gemma 4 engine.
 
-> Note: This operator uses hand-written DMA programs, packet routes and kernel lock ids.
+> Note: This operator uses hand-written DMA programs, packet routes and lock handshakes.
 > As a result it is less portable and less idiomatic than most of the other operators
 > in this repository. If your goal is to learn IRON operator programming,
 > other operators are likely better examples.
 
 The operator runs one Gemma 4 decoder layer for one token on the whole NPU2
 array. It reproduces FastFlowLM's fused decode layer and its runtime sequence.
-The kernels come from mlir-aie's `flm_gemma4_decode_*` factories.
+The kernels come from mlir-aie's `flm_gemma4_decode_*` factories. Each core's
+body calls their compute steps and takes the locks of its DMA channels.
 
 ```python
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
