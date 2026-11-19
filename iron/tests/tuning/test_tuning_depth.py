@@ -44,10 +44,60 @@ def _held_where_it_can_be(role, shape, depth, rate):
     return recording, region, index, analysis.min_depth[region.edges[index]]
 
 
-@unbuilt
-@pytest.mark.parametrize("rate", toys_edges.RATES)
-@pytest.mark.parametrize("shape", toys_edges.SHAPES)
-@pytest.mark.parametrize("role", toys_edges.ROLES)
+# Each role, shape and rate whose toy the composer builds at its minimum.
+_BUILT_MINIMUMS = {
+    ("chain", HandOff.SPLIT, "same"),
+    ("chain", HandOff.BROADCAST, "same"),
+    ("chain", HandOff.SLICES, "same"),
+    ("chain", HandOff.LAYOUT, "same"),
+    ("chain", HandOff.LAYOUT, "different"),
+    *(
+        ("fan_out", shape, rate)
+        for shape in (
+            HandOff.EQUAL,
+            HandOff.JOIN,
+            HandOff.SPLIT,
+            HandOff.RATIO,
+            HandOff.LAYOUT,
+        )
+        for rate in toys_edges.RATES
+    ),
+    ("fan_in", HandOff.JOIN, "same"),
+    ("fan_in", HandOff.JOIN, "different"),
+    ("fan_in", HandOff.SPLIT, "same"),
+    ("fan_in", HandOff.BROADCAST, "same"),
+    ("fan_in", HandOff.SLICES, "same"),
+    ("fan_in", HandOff.LAYOUT, "same"),
+    ("fan_in", HandOff.LAYOUT, "different"),
+    ("skip", HandOff.BROADCAST, "same"),
+    ("skip", HandOff.SLICES, "same"),
+    ("skip", HandOff.LAYOUT, "same"),
+    ("skip", HandOff.LAYOUT, "different"),
+    ("diamond", HandOff.JOIN, "same"),
+    ("diamond", HandOff.JOIN, "different"),
+    ("diamond", HandOff.SPLIT, "same"),
+    ("diamond", HandOff.BROADCAST, "same"),
+    ("diamond", HandOff.SLICES, "same"),
+    ("diamond", HandOff.LAYOUT, "same"),
+    ("diamond", HandOff.LAYOUT, "different"),
+}
+
+
+@pytest.mark.parametrize(
+    ("role", "shape", "rate"),
+    [
+        pytest.param(
+            role,
+            shape,
+            rate,
+            id=f"role_{role}-shape_{shape}-rate_{rate}",
+            marks=() if (role, shape, rate) in _BUILT_MINIMUMS else unbuilt,
+        )
+        for role in toys_edges.ROLES
+        for shape in toys_edges.SHAPES
+        for rate in toys_edges.RATES
+    ],
+)
 def test_minimum_depth_runs_bit_identical(role, shape, rate):
     """Every role, shape and rate, at its distinguished edge's minimum depth: ``check`` holds it bit-identical to the steps run apart."""
     recording, region, index, minimum = _held_where_it_can_be(role, shape, "min", rate)

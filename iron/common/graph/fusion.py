@@ -316,20 +316,22 @@ def composed(
     At every match (``Recording.occurrences``) of a region of steps, the
     first entry naming a step wins. A member's tunables are its step's. A
     region of consecutive steps runs as one stream or staged fusion where
-    its edges are all streams, as one staged fusion where any is staged (its
-    stream edges fed as they are), and as a pack where it has none.
+    its on-chip edges are all streams, as one staged fusion where any is
+    staged (its stream edges fed as they are), and as a pack where it has no
+    edge. A DDR edge's consumer reads what its producer wrote to host memory
+    a phase or more later (a phased fusion, ``Fusion.waits``).
 
     Raises:
         NotImplementedError: What the composer does not build yet: a
             profile's schedules, variants, bindings or state layouts, or an
             entry rooted at a configuration or a step, with nested regions,
             inflows, shared workers, chosen phases, a runtime plan,
-            fission, a self-loop over a carried buffer, edges of DDR
-            or the cascade, matching steps that are not consecutive, steps with no
-            edge that depend through memory, or an edge the composer does not
-            build as its kind (``admits``). An edge out of a buffer steps past
-            the region or the host also read keeps its drain to host (a tee,
-            ``Fusion.kept``).
+            fission, a self-loop over a carried buffer, cascade edges, a DDR
+            edge's chosen depth, matching steps that are not consecutive,
+            members that depend through memory with no edge between them, or
+            an edge the composer does not build as its kind (``admits``). An edge out of a buffer steps past
+            the region, a DDR edge or the host also read keeps its drain to
+            host (a tee, ``Fusion.kept``).
     """
     for kind, kept in (
         ("schedules", profile.schedules()),
@@ -358,13 +360,19 @@ def composed(
             or root.runtime is not None
             or any(m.part is not None for m in root.steps())
             or any(e.producer == e.consumer for e in root.edges)
-            or not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED}
+            or not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED, EdgeKind.DDR}
         ):
             raise NotImplementedError(
                 f"building {entry} is not built yet: the composer builds a "
-                f"region of steps whose edges are stream or staged, "
+                f"region of steps whose edges are stream, staged or DDR, "
                 f"with no chosen phase, worker, inflow, runtime plan or self-loop"
             )
+        if any(e.kind is EdgeKind.DDR and e.depth is not None for e in root.edges):
+            raise NotImplementedError(
+                f"building {entry} is not built yet: a DDR edge's chosen depth"
+            )
+        on_chip = [e for e in root.edges if e.kind is not EdgeKind.DDR]
+        through_memory = [e for e in root.edges if e.kind is EdgeKind.DDR]
         for match in recording.occurrences(entry):
             if taken & set(match):
                 continue
@@ -373,15 +381,19 @@ def composed(
                     f"building a region of steps {match}, which are not "
                     f"consecutive, is not built yet"
                 )
-            if not root.edges and any(
-                (a, b) in conflicts for a in match for b in match if a < b
+            joined = {(match[e.producer], match[e.consumer]) for e in root.edges}
+            if any(
+                (a, b) in conflicts and (a, b) not in joined
+                for a in match
+                for b in match
+                if a < b
             ):
                 raise NotImplementedError(
                     f"building steps {match} at once, which depend through memory "
                     f"with no edge between them, is not built yet"
                 )
             kept: list[tuple[int, str]] = []
-            for e in root.edges:
+            for e in on_chip:
                 made = recording.steps[match[e.producer]]
                 (root_name,) = {
                     ref.root
@@ -391,6 +403,10 @@ def composed(
                 if (
                     set(readers.get(root_name, [])) - set(match)
                     or root_name in recording.held
+                    or any(
+                        (d.producer, d.output) == (e.producer, e.output)
+                        for d in through_memory
+                    )
                 ) and (match[e.producer], e.output) not in kept:
                     kept.append((match[e.producer], e.output))
                 p, c = (
@@ -431,9 +447,14 @@ def composed(
                                 e.input,
                                 depth=e.depth,
                             )
-                            for e in root.edges
+                            for e in on_chip
                         ),
+                        phased=bool(through_memory),
                         kept=tuple(kept),
+                        waits=tuple(
+                            (match[e.producer], match[e.consumer])
+                            for e in through_memory
+                        ),
                     )
                 )
                 taken.update(match)

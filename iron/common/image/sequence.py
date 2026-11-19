@@ -105,7 +105,8 @@ class Image:
                 # A member no edge touches runs beside the chain, not fed by or
                 # feeding it: independent of every other member, the same hazard
                 # a pack's own members must clear, since nothing elides their
-                # host transfers into one another.
+                # host transfers into one another. A pair that waits on host
+                # memory (``Fusion.waits``) runs a phase apart.
                 edged = {e.producer for e in fusion.edges} | {
                     e.consumer for e in fusion.edges
                 }
@@ -114,7 +115,9 @@ class Image:
                 }
                 uses = [(i, *self.steps[i].roots()) for i in fusion.steps]
                 for (i, ri, wi), (k, rk, wk) in itertools.combinations(uses, 2):
-                    if (i in edged and k in edged) and (i, k) in direct:
+                    if (i, k) in fusion.waits or (
+                        (i in edged and k in edged) and (i, k) in direct
+                    ):
                         continue
                     if set(wi) & {*rk, *wk} or set(wk) & set(ri):
                         raise ValueError(

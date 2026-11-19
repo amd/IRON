@@ -35,7 +35,7 @@ from aie.utils import set_current_device
 from ..declare import Operator
 from ..declare.composition import Entry, Region
 from ..design import BuiltArray, OperatorDesign
-from ..image.step import BufferRef, Edge, HandOff
+from ..image.step import BufferRef, Edge, EdgeKind, HandOff
 from .clock import kernel_cycles
 from .record import Recording
 
@@ -295,6 +295,11 @@ class Flow:
 @dataclass(frozen=True)
 class Analysis:
     """What the dataflow analysis finds for one region.
+
+    A DDR edge's consumer reads in host memory what its producer wrote there,
+    a phase later: its channel runs from the shim, which fills the consumer's
+    end from host memory as fast as it frees, not from the producer, and
+    ``hand_off`` names only the on-chip edges.
 
     Attributes:
         tokens: Per edge, the objects each firing moves at the producer and
@@ -867,6 +872,32 @@ class Derivation:
         feeds = Counter((p, edge.output) for edge, p, _ in self.wired)
         phases = self.region.phases
         for n, (edge, p, c) in enumerate(self.wired):
+            if edge.kind is EdgeKind.DDR:
+                for inp in self.lanes[c].get(edge.input, []):
+                    if inp not in self.objects or not readers.get(inp):
+                        raise NotImplementedError(
+                            f"{edge}: a DDR edge into {inp.name}, whose objects a "
+                            f"call moves or whose reader the build does not settle, "
+                            f"is not modelled yet"
+                        )
+                    source = len(programs)
+                    programs.append(
+                        [
+                            (inp, True, acquire, 1)
+                            for _ in range(self.objects[inp])
+                            for acquire in (True, False)
+                        ]
+                    )
+                    writer[inp] = source
+                    for actor in readers[inp]:
+                        channels.append(
+                            Channel(source, actor, phase=phases[n] if phases else 0)
+                        )
+                        e = len(channels) - 1
+                        writes.setdefault(inp, []).append(e)
+                        reads[(inp, actor)] = e
+                        edge_channels.setdefault(edge, []).append(e)
+                continue
             outs = self.lanes[p].get(edge.output, [])
             ins = self.lanes[c].get(edge.input, [])
             sizes = (

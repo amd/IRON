@@ -261,7 +261,9 @@ def phases(fusion: Fusion, arrays: Mapping[int, BuiltArray]) -> dict[int, int]:
     reader, whose end holds the lane's call (``Operand.reader``), which may run a
     phase or more after its producer. Any other edge, a lane's first reader taking
     several objects, keeps producer and consumer in one phase: where the consumer
-    runs later for another input, its producer runs later with it.
+    runs later for another input, its producer runs later with it. A member that
+    reads what another writes to host memory (``Fusion.waits``) runs a phase or
+    more after it.
 
     Raises:
         ValueError: The edges' demands contradict (an edge that must start a phase
@@ -286,8 +288,10 @@ def phases(fusion: Fusion, arrays: Mapping[int, BuiltArray]) -> dict[int, int]:
     phase = dict.fromkeys(fusion.steps, 0)
     while True:
         before = dict(phase)
-        for e in starts:
-            phase[e.consumer] = max(phase[e.consumer], phase[e.producer] + 1)
+        for producer, consumer in [(e.producer, e.consumer) for e in starts] + list(
+            fusion.waits
+        ):
+            phase[consumer] = max(phase[consumer], phase[producer] + 1)
         for e in holds:
             phase[e.consumer] = max(phase[e.consumer], phase[e.producer])
         for e in joins:

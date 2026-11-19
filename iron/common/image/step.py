@@ -121,7 +121,10 @@ class Fusion:
     stream or staged fusion's edges run forward, producer before consumer.
     ``kept`` names each edge's ``(producer, output)`` whose buffer a step
     past the fusion or the host also reads: its drain to host is kept beside
-    its on-chip readers (a tee).
+    its on-chip readers (a tee). ``waits`` names each ``(producer, consumer)``
+    of members where the consumer reads, in host memory, what the producer
+    writes there (a DDR edge): a phased fusion runs the consumer a phase or
+    more after the producer.
     """
 
     kind: FusionKind
@@ -129,6 +132,7 @@ class Fusion:
     edges: tuple[Edge, ...] = ()
     phased: bool = False
     kept: tuple[tuple[int, str], ...] = ()
+    waits: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         if len(self.steps) < 2:
@@ -163,6 +167,18 @@ class Fusion:
                     f"step {edge.consumer}'s input {edge.input!r} is fed twice"
                 )
             fed.add((edge.consumer, edge.input))
+        if self.waits and not self.phased:
+            raise ValueError(
+                f"fusion {self.steps} waits on host memory, which only a phased "
+                f"fusion's later phase can"
+            )
+        for producer, consumer in self.waits:
+            if not (
+                producer in members and consumer in members and producer < consumer
+            ):
+                raise ValueError(
+                    f"wait ({producer}, {consumer}) is no forward pair of {self.steps}"
+                )
         made = {(e.producer, e.output) for e in self.edges}
         for producer, output in self.kept:
             if (producer, output) not in made:
@@ -221,6 +237,9 @@ class Fusion:
             f"#{self.steps.index(e.producer)}:{e.output}={e.depth}"
             for e in self.edges
             if e.depth is not None
+        )
+        wiring += "".join(
+            f"~{self.steps.index(p)}>{self.steps.index(c)}" for p, c in self.waits
         )
         kind = f"{self.kind.value}/phased" if self.phased else self.kind.value
         digest = hashlib.sha256(

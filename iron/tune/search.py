@@ -573,8 +573,14 @@ def fit(
                     f"its steps take {needed} cores; {device.resolve()} has "
                     f"{cores_on_array}",
                 )
-            on_chip = {(p, e.output) for e, p, _ in derivation.wired} | {
-                (c, e.input) for e, _, c in derivation.wired
+            on_chip = {
+                (p, e.output)
+                for e, p, _ in derivation.wired
+                if e.kind is not EdgeKind.DDR
+            } | {
+                (c, e.input)
+                for e, _, c in derivation.wired
+                if e.kind is not EdgeKind.DDR
             }
             moved = set()
             for s, ((_, recorded), lanes) in enumerate(
@@ -628,9 +634,9 @@ def fit(
             if analysis.why is not None:
                 return Fit(False, "analysis", analysis.why)
             for edge, p, c in derivation.wired:
-                shape = analysis.hand_off[edge]
                 if edge.kind is not EdgeKind.STREAM:
                     continue
+                shape = analysis.hand_off[edge]
                 if shape not in (HandOff.EQUAL, HandOff.BROADCAST):
                     return Fit(
                         False,
@@ -647,9 +653,17 @@ def fit(
                 {
                     (p, edge.output)
                     for edge, p, _ in derivation.wired
-                    if set(readers.get(derivation.refs[p][edge.output].root, []))
-                    - inside
-                    or derivation.refs[p][edge.output].root in recording.held
+                    if edge.kind is not EdgeKind.DDR
+                    and (
+                        set(readers.get(derivation.refs[p][edge.output].root, []))
+                        - inside
+                        or derivation.refs[p][edge.output].root in recording.held
+                        or any(
+                            (d.producer, d.output) == (edge.producer, edge.output)
+                            and d.kind is EdgeKind.DDR
+                            for d in region.edges
+                        )
+                    )
                 }
             )
             for edge, p, c in derivation.wired:
@@ -673,12 +687,12 @@ def fit(
                 or region.phases is not None
                 or region.runtime is not None
                 or not all(isinstance(part, Member) for part in region.parts)
-                or not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED}
+                or not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED, EdgeKind.DDR}
             ):
                 unplaceable.append(
                     "placing a region the composer does not build yet (inflows, "
                     "shared workers, chosen phases, a runtime plan, nesting, or "
-                    "edges of DDR or the cascade)"
+                    "cascade edges)"
                 )
             if "sequential" not in placements:
                 unplaceable.append(
@@ -710,13 +724,19 @@ def fit(
                     edges=[
                         (e.producer, e.output, e.consumer, e.input)
                         for e in region.edges
+                        if e.kind is not EdgeKind.DDR
                     ],
                     kept=kept,
                     depths={
                         (e.producer, e.output): e.depth
                         for e in region.edges
-                        if e.depth is not None
+                        if e.depth is not None and e.kind is not EdgeKind.DDR
                     },
+                    waits=[
+                        (e.producer, e.consumer)
+                        for e in region.edges
+                        if e.kind is EdgeKind.DDR
+                    ],
                 )
             if refused is not None and set(placements) != {"sequential"}:
                 waiting.append(
