@@ -805,3 +805,13 @@ def test_a_float32_gemv_folds_no_finish_step(npu2):
         output_dtype=np.float32,
     )
     assert gemv.fold(ElementwiseAdd(size=2048, tile_size=512), 1) is None
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [dict(), dict(input_dtype=np.float32, soft_cap=30.0)],
+    ids=["bf16", "capped"],
+)
+def test_softmax_stats_are_the_uncapped_float_path_s(extra):
+    with pytest.raises(ValueError, match="stats are the uncapped"):
+        Softmax(rows=16, cols=128, has_stats=True, **extra).resolved()
