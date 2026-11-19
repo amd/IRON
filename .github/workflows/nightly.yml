@@ -53,6 +53,15 @@ jobs:
         with:
           env_name: ci_env
 
+      - name: Configure NPU command timeout
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "options amdxdna tdr_timeout_ms=150000" | sudo tee /etc/modprobe.d/amdxdna-tdr.conf
+          sudo modprobe -r amdxdna
+          sudo modprobe amdxdna
+          test "$(cat /sys/module/amdxdna/parameters/tdr_timeout_ms)" = "150000"
+
       - name: Run every application test
         id: test
         continue-on-error: true
