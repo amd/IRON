@@ -319,6 +319,7 @@ def _composed_module(
     kept: Sequence[tuple[int, str]] = (),
     depths: Mapping[tuple[int, str], int] | None = None,
     waits: Sequence[tuple[int, int]] = (),
+    workers: Sequence[tuple[int, ...]] = (),
 ) -> ir.Module:
     """Return the one module ``fits`` places ``designs`` as, built the same way it does.
 
@@ -346,6 +347,7 @@ def _composed_module(
             phased=bool(waits),
             kept=tuple(kept),
             waits=tuple(waits),
+            workers=tuple(workers),
         )
         configured, _ = fused_configuration("fused", fusion, list(designs.values()))
     return Program.compose([configured], entry=configured.runtimes[0]).resolve_program()
@@ -365,12 +367,14 @@ def group_fit_verdict(
     kept: Sequence[tuple[int, str]] = (),
     depths: Mapping[tuple[int, str], int] | None = None,
     waits: Sequence[tuple[int, int]] = (),
+    workers: Sequence[tuple[int, ...]] = (),
 ) -> str | None:
     """Why the placer refuses ``ops``' resolved designs sharing one device configuration (plain, or as ``kind``'s fusion wires ``edges``).
 
     Each output ``kept`` drains to the host too (``Fusion.kept``), each
     output ``depths`` names is built at that depth, and each of ``waits``
-    runs its consumer a phase after its producer (``Fusion.waits``).
+    runs its consumer a phase after its producer (``Fusion.waits``); each of
+    ``workers`` shares its members' cores (``Fusion.workers``).
 
     Or None if they co-reside; kept under ``fit_cache``, keyed on the composed module's
     own text (``_composed_module``) and each design's build (``artifact_hash``, as
@@ -379,7 +383,7 @@ def group_fit_verdict(
     The placer runs in a process of its own (``failures.place``): a compiler crash
     refuses the group, recorded in ``ledger`` where one is given.
     """
-    found = _fit_record(ops, fit_cache, kind, edges, kept, depths, waits)
+    found = _fit_record(ops, fit_cache, kind, edges, kept, depths, waits, workers)
     if isinstance(found, str):
         return found  # composing itself refused; no placement pass to cache
     text, record = found
@@ -429,11 +433,12 @@ def _fit_record(
     kept: Sequence[tuple[int, str]] = (),
     depths: Mapping[tuple[int, str], int] | None = None,
     waits: Sequence[tuple[int, int]] = (),
+    workers: Sequence[tuple[int, ...]] = (),
 ) -> tuple[str, Path] | str:
     """``ops`` composed into one module, its text and its verdict's file under ``fit_cache``; or why composing them refused."""
     designs = {str(i): OperatorDesign(op.resolved()) for i, op in enumerate(ops)}
     try:
-        module = _composed_module(designs, kind, edges, kept, depths, waits)
+        module = _composed_module(designs, kind, edges, kept, depths, waits, workers)
     except (ValueError, RuntimeError, ir.MLIRError) as e:
         return str(e)
     text = str(module)

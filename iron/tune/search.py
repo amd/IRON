@@ -545,12 +545,11 @@ def fit(
                 alone.add_entry(entry)
                 try:
                     with set_current_device(device):
-                        fold, *_ = composed_folds(recording, alone)
-                except NotImplementedError:
-                    # Not a fold: counted and analysed below, its placing waits.
-                    fold = None
+                        folds = composed_folds(recording, alone)
                 except ValueError as e:  # IRON's fold, unresolvable here
                     return Fit(False, "counts", f"the fold of its steps: {e}")
+                # Not a fold: the composer joins its cores, counted below.
+                fold = folds[0] if folds else None
                 if fold is not None:
                     folded = apply_folds(recording, [fold]).steps[fold.steps[0]].op
                     with set_current_device(device):
@@ -704,7 +703,6 @@ def fit(
             kinds = {e.kind for e in region.edges}
             if (
                 region.inflows
-                or region.workers
                 or region.phases is not None
                 or region.runtime is not None
                 or not all(isinstance(part, Member) for part in region.parts)
@@ -712,8 +710,7 @@ def fit(
             ):
                 unplaceable.append(
                     "placing a region the composer does not build yet (inflows, "
-                    "shared workers, chosen phases, a runtime plan, nesting, or "
-                    "cascade edges)"
+                    "chosen phases, a runtime plan, nesting, or cascade edges)"
                 )
             if "sequential" not in placements:
                 unplaceable.append(
@@ -758,6 +755,7 @@ def fit(
                         for e in region.edges
                         if e.kind is EdgeKind.DDR
                     ],
+                    workers=region.workers,
                 )
             if refused is not None and set(placements) != {"sequential"}:
                 waiting.append(

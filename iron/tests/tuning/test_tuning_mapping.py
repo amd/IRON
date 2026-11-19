@@ -50,7 +50,6 @@ def test_a_valid_firing_order_runs_bit_identical():
     assert result.ok, result.why
 
 
-@unbuilt
 def test_an_invalid_firing_order_is_refused_statically():
     """The same three actors fired out of dependence order.
 

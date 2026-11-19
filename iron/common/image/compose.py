@@ -23,7 +23,7 @@ from aie.dialects import memref
 from aie.extras.dialects.arith import constant
 from aie.helpers.npdtypes import np_ndarray_type_get_dtype, np_ndarray_type_get_shape
 from aie.helpers.util import np_ndarray_type_to_memref_type
-from aie.iron import DeviceConfiguration, Program, Runtime
+from aie.iron import DeviceConfiguration, Program, Runtime, Worker
 from aie.passmanager import PassManager
 from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
@@ -206,6 +206,19 @@ def fused_configuration(
     for e in sorted(fusion.edges, key=lambda e: fusion.steps.index(e.consumer)):
         first_reader.setdefault((e.producer, e.output), e)
     kept = set(fusion.kept)
+    # Each edge's depth: its chosen one; within one core, where none is chosen,
+    # a call's objects a lane, since the producer's body runs through before
+    # its reader's (``share``).
+    chosen = {e: e.depth for e in fusion.edges if e.depth is not None}
+    for e in fusion.edges:
+        if e in chosen or not any(
+            {e.producer, e.consumer} <= set(group) for group in fusion.workers
+        ):
+            continue
+        made = designs[fusion.steps.index(e.producer)].op
+        (source,) = [b for b in made.buffers if b.name == e.output]
+        per_object = math.prod(source.obj_shape)
+        chosen[e] = max(-(-n // per_object) for n in source.moved_per_lane().values())
     arrays: dict[int, BuiltArray] = {}
     scalars = [None] * len(designs) if dispatch is None else dispatch
     for design, j, own in zip(designs, fusion.steps, scalars, strict=True):
@@ -221,19 +234,23 @@ def fused_configuration(
             staged=fusion.kind is FusionKind.STAGED,
             depths={
                 **{
-                    e.output: e.depth
+                    e.output: chosen[e]
                     for (p, _), e in first_reader.items()
-                    if p == j and e.depth is not None and (p, e.output) not in kept
+                    if p == j and e in chosen and (p, e.output) not in kept
                 },
-                **{
-                    e.input: e.depth for e in incoming.get(j, ()) if e.depth is not None
-                },
+                **{e.input: chosen[e] for e in incoming.get(j, ()) if e in chosen},
             },
         )
         for producer, output in fusion.kept:
             if producer == j:
                 (kept,) = [b for b in arrays[j].op.buffers if b.name == output]
                 kept.keeps_host = True
+    for group in fusion.workers:
+        share(
+            group,
+            [e for e in fusion.edges if {e.producer, e.consumer} <= set(group)],
+            arrays,
+        )
     grouped: dict[int, list[str]] = {}
     if fusion.phased:
         for j, p in phases(fusion, arrays).items():
@@ -248,6 +265,70 @@ def fused_configuration(
         phases=[grouped[p] for p in sorted(grouped)],
     )
     return configured, [arrays[j] for j in fusion.steps]
+
+
+def share(
+    group: Sequence[int], edges: Sequence[Edge], arrays: Mapping[int, BuiltArray]
+) -> None:
+    """Make ``group``'s members' cores one a lane (``Worker.join``): each lane's core runs the members' bodies in turn, in the group's (firing) order.
+
+    ``edges`` pair a producer's core with its consumer's, lane by lane: the
+    one writing a lane's fifo with the one reading it. The first member's
+    array takes the joined workers; the others' take none.
+
+    Raises:
+        NotImplementedError: The members' cores do not pair one to one
+            through ``edges``, or ``Worker.join`` refuses them (traced,
+            pinned or looping otherwise than a partner): joining those is not
+            built yet.
+    """
+    joined: dict[int, set[int]] = {
+        id(w): {id(w)} for j in group for w in arrays[j].workers
+    }
+    for e in edges:
+        (made,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
+        for lane, fifo in enumerate(made.lane_fifos):
+            ends = [
+                [
+                    w
+                    for w in arrays[j].workers
+                    if any(h.object_fifo is fifo for h in w.fifos)
+                ]
+                for j in (e.producer, e.consumer)
+            ]
+            if any(len(found) != 1 for found in ends):
+                raise NotImplementedError(
+                    f"one core for steps {tuple(group)} is not built yet: lane "
+                    f"{lane} of {e.output} is not one core's into one core's"
+                )
+            merged = joined[id(ends[0][0])] | joined[id(ends[1][0])]
+            for w in merged:
+                joined[w] = merged
+    workers = {id(w): (j, w) for j in group for w in arrays[j].workers}
+    if len(workers) != len(group) * len(arrays[group[0]].workers):
+        raise NotImplementedError(
+            f"one core for steps {tuple(group)} is not built yet: they place "
+            f"{[len(arrays[j].workers) for j in group]} cores, not one a lane each"
+        )
+    cores: list[Worker] = []
+    for lead in arrays[group[0]].workers:
+        ordered = sorted(
+            (workers[w] for w in joined[id(lead)]), key=lambda jw: group.index(jw[0])
+        )
+        if [j for j, _ in ordered] != list(group):
+            raise NotImplementedError(
+                f"one core for steps {tuple(group)} is not built yet: their cores "
+                f"do not pair one a lane ({[j for j, _ in ordered]} on one)"
+            )
+        try:
+            cores.append(Worker.join([w for _, w in ordered]))
+        except ValueError as e:  # joining what mlir-aie does not join
+            raise NotImplementedError(
+                f"one core for steps {tuple(group)} is not built yet: {e}"
+            ) from e
+    arrays[group[0]].workers = cores
+    for j in group[1:]:
+        arrays[j].workers = []
 
 
 def phases(fusion: Fusion, arrays: Mapping[int, BuiltArray]) -> dict[int, int]:

@@ -830,9 +830,12 @@ class Derivation:
         programs: list[list[tuple[ObjectFifo, bool, bool, int]]] = []
         actor_kernels: list[tuple[ExternalFunction, ...]] = []
         repetition: dict[int, int] = {}
+        # Per actor, the step whose core it is; None for a link.
+        actor_step: list[int | None] = []
         for i, (_, recorded) in enumerate(self.recorded):
             for k, core in enumerate(recorded.cores):
                 trips = self._trips(core)
+                actor_step.append(i)
                 actor_kernels.append(
                     tuple(
                         f for f in core.owner.fn_args if isinstance(f, ExternalFunction)
@@ -854,6 +857,7 @@ class Derivation:
                     repetition[i] = trips[id(outermost[0])] if outermost else 1
             for link in recorded.links:
                 actor_kernels.append(())
+                actor_step.append(None)
                 programs.append(self._link_events(link))
         writer: dict[ObjectFifo, int] = {}
         readers: dict[ObjectFifo, list[int]] = {}
@@ -863,6 +867,53 @@ class Derivation:
                     writer[fifo] = actor
                 elif actor not in readers.setdefault(fifo, []):
                     readers[fifo].append(actor)
+        # Steps on one worker: each lane's producer core and its reader are one
+        # actor, running their programs in the worker's firing order.
+        lead: dict[int, int] = {}
+        for group in self.region.workers:
+            for edge, p, c in self.wired:
+                if p not in group or c not in group:
+                    continue
+                outs = self.lanes[p].get(edge.output, [])
+                ins = self.lanes[c].get(edge.input, [])
+                if (
+                    len(outs) != len(ins)
+                    or any(len(readers.get(f, [])) != 1 for f in ins)
+                    or any(actor_step[writer[f]] is None for f in outs)
+                    or any(actor_step[readers[f][0]] is None for f in ins)
+                ):
+                    raise NotImplementedError(
+                        f"{edge}: steps on one core whose lanes do not pair one "
+                        f"core to one core are not modelled yet"
+                    )
+                for out, inp in zip(outs, ins):
+                    first = writer[out]
+                    while first in lead:
+                        first = lead[first]
+                    lead[readers[inp][0]] = first
+        joined: dict[int, list[int]] = {}
+        for actor in sorted(lead):
+            first = actor
+            while first in lead:
+                first = lead[first]
+            joined.setdefault(first, [first]).append(actor)
+        firing = {s: k for group in self.region.workers for k, s in enumerate(group)}
+        for first, members in joined.items():
+            ordered = sorted(members, key=lambda a: firing[actor_step[a]])
+            programs[first] = [event for a in ordered for event in programs[a]]
+            actor_kernels[first] = tuple(f for a in ordered for f in actor_kernels[a])
+            for a in members:
+                if a != first:
+                    programs[a] = []
+                    actor_kernels[a] = ()
+        if lead:
+            writer, readers = {}, {}
+            for actor, program in enumerate(programs):
+                for fifo, producer, _, _ in program:
+                    if producer:
+                        writer[fifo] = actor
+                    elif actor not in readers.setdefault(fifo, []):
+                        readers[fifo].append(actor)
         channels: list[Channel] = []
         fixed: dict[int, int] = {}
         writes: dict[ObjectFifo, list[int]] = {}

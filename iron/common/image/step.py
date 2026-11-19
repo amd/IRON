@@ -124,7 +124,9 @@ class Fusion:
     its on-chip readers (a tee). ``waits`` names each ``(producer, consumer)``
     of members where the consumer reads, in host memory, what the producer
     writes there (a DDR edge): a phased fusion runs the consumer a phase or
-    more after the producer.
+    more after the producer. ``workers`` names each group of members whose
+    cores are one, in firing order: each lane's core runs the group's
+    members' bodies in turn, the edges among them fifos within its tile.
     """
 
     kind: FusionKind
@@ -133,6 +135,7 @@ class Fusion:
     phased: bool = False
     kept: tuple[tuple[int, str], ...] = ()
     waits: tuple[tuple[int, int], ...] = ()
+    workers: tuple[tuple[int, ...], ...] = ()
 
     def __post_init__(self) -> None:
         if len(self.steps) < 2:
@@ -179,6 +182,17 @@ class Fusion:
                 raise ValueError(
                     f"wait ({producer}, {consumer}) is no forward pair of {self.steps}"
                 )
+        grouped = [s for group in self.workers for s in group]
+        if self.workers and (
+            self.kind is not FusionKind.STREAM
+            or len(grouped) != len(set(grouped))
+            or not set(grouped) <= members
+            or any(len(group) < 2 for group in self.workers)
+        ):
+            raise ValueError(
+                f"fusion {self.steps}: workers {self.workers} are not disjoint "
+                f"groups of two or more of its members, in a stream fusion"
+            )
         made = {(e.producer, e.output) for e in self.edges}
         for producer, output in self.kept:
             if (producer, output) not in made:
@@ -240,6 +254,10 @@ class Fusion:
         )
         wiring += "".join(
             f"~{self.steps.index(p)}>{self.steps.index(c)}" for p, c in self.waits
+        )
+        wiring += "".join(
+            "@" + "+".join(str(self.steps.index(s)) for s in group)
+            for group in self.workers
         )
         kind = f"{self.kind.value}/phased" if self.phased else self.kind.value
         digest = hashlib.sha256(

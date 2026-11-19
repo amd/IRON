@@ -121,8 +121,8 @@ def test_every_topology_is_proposed_on_its_producer_s_core(
 @pytest.mark.parametrize(
     "name",
     [
-        # IRON folds neither of these pairs (Operator.fold refuses them).
-        (pytest.param(n, marks=unbuilt) if n in ("decode_gemv", "add_softmax") else n)
+        # Decode's A rides another buffer's fifos: an edge into it waits.
+        (pytest.param(n, marks=unbuilt) if n == "decode_gemv" else n)
         for n in toys.PAIR_TOYS
     ],
 )
@@ -134,7 +134,6 @@ def test_two_actors_on_one_core_is_bit_identical_to_the_steps_run_apart(name, np
     assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu2")
 def test_a_per_call_size_below_the_recorded_one_still_runs_on_one_core(npu2):
     """A valid KV length or a partial prompt chunk below the recorded size still joins."""
@@ -157,8 +156,8 @@ def test_a_per_call_size_below_the_recorded_one_still_runs_on_one_core(npu2):
 @pytest.mark.parametrize(
     "name",
     [
-        # IRON folds neither of these pairs (Operator.fold refuses them).
-        (pytest.param(n, marks=unbuilt) if n in ("decode_gemv", "add_softmax") else n)
+        # Decode's A rides another buffer's fifos: an edge into it waits.
+        (pytest.param(n, marks=unbuilt) if n == "decode_gemv" else n)
         for n in toys.PAIR_TOYS
     ],
 )

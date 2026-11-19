@@ -349,14 +349,11 @@ def composed(
     readers, _ = recording.users()
     for entry in profile.entries():
         root = entry.root
-        if isinstance(root, Region) and root.workers:
-            continue  # a fold (fold.composed_folds), applied before these
         kinds = {e.kind for e in root.edges} if isinstance(root, Region) else set()
         if (
             not isinstance(root, Region)
             or not all(isinstance(part, Member) for part in root.parts)
             or root.inflows
-            or root.workers
             or root.phases is not None
             or root.runtime is not None
             or any(m.part is not None for m in root.steps())
@@ -366,7 +363,12 @@ def composed(
             raise NotImplementedError(
                 f"building {entry} is not built yet: the composer builds a "
                 f"region of steps whose edges are stream, staged or DDR, "
-                f"with no chosen phase, worker, inflow, runtime plan or self-loop"
+                f"with no chosen phase, inflow, runtime plan or self-loop"
+            )
+        if root.workers and kinds - {EdgeKind.STREAM}:
+            raise NotImplementedError(
+                f"building {entry} is not built yet: steps on one core joined "
+                f"by edges other than streams"
             )
         if any(e.kind is EdgeKind.DDR and e.depth is not None for e in root.edges):
             raise NotImplementedError(
@@ -456,6 +458,9 @@ def composed(
                         waits=tuple(
                             (match[e.producer], match[e.consumer])
                             for e in through_memory
+                        ),
+                        workers=tuple(
+                            tuple(match[i] for i in group) for group in root.workers
                         ),
                     )
                 )

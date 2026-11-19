@@ -27,20 +27,24 @@ def _held_where_it_can_be(role, shape, depth, rate):
     """Return the combination toy, its distinguished edge held in L1 where its derived hand-off streams as is, else in a memtile, and the edge's minimum depth.
 
     A stream edge's lanes meet as they are, so only an equal or broadcast
-    hand-off can be held in L1; the analysis, not the toy's name, says which.
+    hand-off can be held in L1; the analysis, not the toy's name, says which,
+    read off the memtile-held toy (the hand-off is the operators' lanes', not
+    where the value waits). An L1 hold the analysis does not model yet stays
+    in the memtile.
     """
-    _, recording, region, index = toys_edges.combination_toy(
-        shape, role, "l1", depth, rate, "recorded"
-    )
+    staged = toys_edges.combination_toy(shape, role, "memtile", depth, rate, "recorded")
+    _, recording, region, index = staged
     analysis = analyze(region, recording, toys.NPU2)
-    if analysis.hand_off[region.edges[index]] not in (
-        HandOff.EQUAL,
-        HandOff.BROADCAST,
-    ):
-        _, recording, region, index = toys_edges.combination_toy(
-            shape, role, "memtile", depth, rate, "recorded"
+    if analysis.hand_off[region.edges[index]] in (HandOff.EQUAL, HandOff.BROADCAST):
+        _, held, joined, at = toys_edges.combination_toy(
+            shape, role, "l1", depth, rate, "recorded"
         )
-        analysis = analyze(region, recording, toys.NPU2)
+        try:
+            analysis = analyze(joined, held, toys.NPU2)
+        except NotImplementedError:
+            pass  # held in the memtile instead
+        else:
+            recording, region, index = held, joined, at
     return recording, region, index, analysis.min_depth[region.edges[index]]
 
 
@@ -58,6 +62,8 @@ _BUILT_MINIMUMS = {
             HandOff.JOIN,
             HandOff.SPLIT,
             HandOff.RATIO,
+            HandOff.BROADCAST,
+            HandOff.SLICES,
             HandOff.LAYOUT,
         )
         for rate in toys_edges.RATES

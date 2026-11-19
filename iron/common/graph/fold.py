@@ -164,15 +164,13 @@ def composed_folds(recording: Recording, profile: Profile) -> tuple[Fusion, ...]
     A region whose one worker holds all its steps in order, its edges a chain
     from each step's output into the next's input, runs as the fold IRON
     admits for those steps (``fold_candidates``), at every match
-    (``Recording.occurrences``); the first entry naming a step wins.
+    (``Recording.occurrences``); the first entry naming a step wins. Any
+    other region with shared workers is left to the composer, which joins
+    its members' cores (``fusion.composed``).
 
     Raises:
         ValueError: IRON folds the steps, but the fold does not resolve here
             (it does not fit a core, say): the operator's own reason.
-        NotImplementedError: A region with shared workers that is not such a
-            chain, or whose steps IRON does not fold (``Operator.fold``
-            refuses), sets tunables, or has inflows, phases, a runtime plan,
-            chosen depths, nesting or fission.
     """
     admitted = {(f.steps, f.edges): f for f in fold_candidates(recording)}
     found: list[Fusion] = []
@@ -193,10 +191,7 @@ def composed_folds(recording: Recording, profile: Profile) -> tuple[Fusion, ...]
             or root.runtime is not None
             or any(e.depth is not None for e in root.edges)
         ):
-            raise NotImplementedError(
-                f"building {entry} is not built yet: shared workers build as a "
-                f"fold, one worker holding a chain of steps, each into the next"
-            )
+            continue  # not a fold's shape: the composer joins its cores
         for match in recording.occurrences(entry):
             if taken & set(match):
                 continue
@@ -218,10 +213,7 @@ def composed_folds(recording: Recording, profile: Profile) -> tuple[Fusion, ...]
                     # Where the fold is IRON's but does not resolve, its reason.
                     fused.resolved(fused.dev)
                     current = fused
-                raise NotImplementedError(
-                    f"one worker for steps {match} is not built yet: IRON does not "
-                    f"fold them (Operator.fold)"
-                )
+                continue  # IRON does not fold them: the composer joins their cores
             found.append(fold)
             taken.update(match)
     return tuple(found)
