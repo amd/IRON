@@ -102,8 +102,9 @@ class Operator(jit.Operator, library=True):
         bound_values: The graph expression bound to each per-call value, by name.
         pinned: The tunables its caller gave, which the tuner holds; it may
             move a profile's and ``resolve()``'s.
-        given: The dimensions (``param()`` fields) its caller gave, which a
-            profile entry matches on (``Profile.dims``).
+        given: The dimensions (``param()`` fields) its caller gave a value,
+            which a profile entry matches on (``Profile.dims``); one that
+            ``replace`` resets to ``None`` is no longer given.
     """
 
     _external: ClassVar[Any] = None
@@ -172,7 +173,9 @@ class Operator(jit.Operator, library=True):
         self.pinned = pinned
         params = self.declaration.params
         self.given = frozenset(
-            n for n in given if n in params and not params[n].tunable
+            n
+            for n, v in given.items()
+            if n in params and not params[n].tunable and v is not None
         )
         self._check_complete()
 
@@ -523,7 +526,12 @@ class Operator(jit.Operator, library=True):
         bound_values = changes.pop("bound_values", self.bound_values)
         pinned = changes.pop("pinned", self.pinned)
         new = super().replace(**changes)
-        new.bound_values, new.pinned, new.given = bound_values, pinned, self.given
+        reset = {n for n, v in changes.items() if v is None}
+        new.bound_values, new.pinned, new.given = (
+            bound_values,
+            pinned,
+            self.given - reset,
+        )
         new._check_complete()
         return new
 
