@@ -158,15 +158,16 @@ class BuiltArray:
         fed: Input name -> the built output it is fed on-chip (``Operand.feed``).
         staged: A fed input whose lanes do not meet its source's is staged
             through memtiles rather than refused.
-        depths: Output name -> the depth a composition chose for its lane
-            fifos (``Operand.chosen_depth``).
+        depths: Operand name -> the depth a composition chose for an edge's
+            reading end (``Operand.chosen_depth``): a fed input's own end, or
+            the end an output's lanes bind for their first on-chip reader.
 
     Raises:
         ValueError: A full ELF is asked to carry a ``DispatchTime`` value, an
             xclbin is given no scalar for a value, a trace would reuse an
             output a full ELF consolidates, or ``Operand.feed`` refuses.
-        NotImplementedError: A chosen depth names an output whose build makes
-            its fifos itself, not through ``Operand.fifos``.
+        NotImplementedError: A chosen depth names an output whose build binds
+            its lanes itself, not through ``Operand.fifos``.
     """
 
     def __init__(
@@ -213,12 +214,16 @@ class BuiltArray:
             built.chosen_depth = (depths or {}).get(mine.name)
         self.built = view.build()
         for mine, built in zip(op.buffers, view.buffers):
-            if built.chosen_depth is not None and (
-                not built.lane_fifos
-                or any(f.depth != built.chosen_depth for f in built.lane_fifos)
+            if (
+                built.drains
+                and built.chosen_depth is not None
+                and (
+                    not built.lane_fifos
+                    or any(h.depth != built.chosen_depth for h in built.lane_handles)
+                )
             ):
                 raise NotImplementedError(
-                    f"{type(op).__name__}.{mine.name} at a chosen depth of "
+                    f"{type(op).__name__}.{mine.name} read at a chosen depth of "
                     f"{built.chosen_depth} is not built yet: its build makes its "
                     f"fifos itself"
                 )

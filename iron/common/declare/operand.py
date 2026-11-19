@@ -47,8 +47,10 @@ class Operand:
     A fed input reads ``fed_from``'s lanes, or ``staged`` fifos where ``Staging``
     restaged them; an output lists every input it ``feeds``, and one that
     ``keeps_host`` drains to the host too, its inputs reading ends of their own.
-    An output's ``chosen_depth``, where a composition chose one, is its lane
-    fifos' depth whatever its build asks.
+    Where a composition chose an edge's depth, which names the edge's reading
+    end, ``chosen_depth`` holds it: on a fed input, the depth of the end it
+    reads through; on an output, that of the end its lanes bind for their
+    first on-chip reader.
     """
 
     def __init__(self, member: Any, op: Operator) -> None:
@@ -203,9 +205,14 @@ class Operand:
         if source is not None:
             if tiles is not None:
                 return list(source.lane_fifos if staged is None else staged)
+            exact = self.chosen_depth is not None
+            reading = self.chosen_depth if exact else depth
             ends = [
                 (
-                    [source.reader(lane, depth) for _ in range(readers or 1)]
+                    [
+                        source.reader(lane, reading, exact=exact)
+                        for _ in range(readers or 1)
+                    ]
                     if staged is None
                     else [
                         staged[lane].cons(self.l1_depth if depth is None else depth)
@@ -221,8 +228,6 @@ class Operand:
                 f"lane, not an output's own"
             )
         depth = self.l1_depth if depth is None else depth
-        if self.drains and self.chosen_depth is not None:
-            depth = self.chosen_depth
         obj_type = self.obj_type if obj_type is None else obj_type
         lane_tiles = [None] * self.lanes if tiles is None else tiles
         if len(lane_tiles) != self.lanes:
@@ -235,7 +240,9 @@ class Operand:
         ]
         self.lane_fifos = made
         if self.drains:
-            self.bind([f.cons(tile=t) for f, t in zip(made, lane_tiles)])
+            self.bind(
+                [f.cons(self.chosen_depth, tile=t) for f, t in zip(made, lane_tiles)]
+            )
             if tiles is not None:
                 return made
             return [f.prod() for f in made]
@@ -328,7 +335,7 @@ class Operand:
             moved[lane] = moved.get(lane, 0) + int(n)
         return moved
 
-    def reader(self, lane: int, depth: int | None = None) -> Any:
+    def reader(self, lane: int, depth: int | None = None, exact: bool = False) -> Any:
         """Return a consumer end of output lane ``lane`` for an on-chip reader.
 
         The first call returns the end bound for the lane's drain; later calls return
@@ -337,7 +344,9 @@ class Operand:
         on what an earlier one computes from the same stream (a residual add read by a
         norm and, past the projections, by the next add), and a broadcast advances at
         its slowest reader: with fewer buffers the writer stalls before the earlier
-        reader has its input, and the array deadlocks.
+        reader has its input, and the array deadlocks. ``exact`` takes ``depth`` as
+        it is: a composition's chosen depth, which the dataflow analysis has held
+        free of that deadlock.
 
         Raises:
             ValueError: The lane has a reader already and its build bound the
@@ -354,6 +363,8 @@ class Operand:
         fifo = self.lane_fifos[lane]
         moved = self.moved_per_lane().get(lane, 0)
         whole = -(-moved // math.prod(self.obj_shape))
+        if exact:
+            return fifo.cons(depth)
         own = fifo.depth if depth is None else depth
         return fifo.cons(max(whole, own or 1))
 

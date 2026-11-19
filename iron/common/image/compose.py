@@ -200,6 +200,12 @@ def fused_configuration(
     incoming: dict[int, list[Edge]] = {}
     for e in fusion.edges:
         incoming.setdefault(e.consumer, []).append(e)
+    # The lanes' bound ends go to their first on-chip reader (by consumer in
+    # step order), unless the host's drain keeps them (a tee).
+    first_reader: dict[tuple[int, str], Edge] = {}
+    for e in sorted(fusion.edges, key=lambda e: fusion.steps.index(e.consumer)):
+        first_reader.setdefault((e.producer, e.output), e)
+    kept = set(fusion.kept)
     arrays: dict[int, BuiltArray] = {}
     scalars = [None] * len(designs) if dispatch is None else dispatch
     for design, j, own in zip(designs, fusion.steps, scalars, strict=True):
@@ -214,9 +220,14 @@ def fused_configuration(
             fed=fed,
             staged=fusion.kind is FusionKind.STAGED,
             depths={
-                e.output: e.depth
-                for e in fusion.edges
-                if e.producer == j and e.depth is not None
+                **{
+                    e.output: e.depth
+                    for (p, _), e in first_reader.items()
+                    if p == j and e.depth is not None and (p, e.output) not in kept
+                },
+                **{
+                    e.input: e.depth for e in incoming.get(j, ()) if e.depth is not None
+                },
             },
         )
         for producer, output in fusion.kept:
