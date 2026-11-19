@@ -42,16 +42,16 @@ def member(op: Any) -> Member:
 
 def realize_helds(
     edges: tuple[Edge, ...], helds: Mapping[int, str]
-) -> tuple[tuple[Edge, ...], tuple[tuple[int, ...], ...], tuple[int, ...]]:
+) -> tuple[tuple[Edge, ...], tuple[tuple[int, ...], ...], tuple[int, ...] | None]:
     """Return ``edges`` with each named index's held place realized, plus the region's ``workers`` and ``phases``.
 
     ``helds`` maps an edge's index to where its value waits: ``"memtile"``
     (``kind=STAGED``), ``"ddr"`` (``kind=DDR``), ``"later_phase"`` (staged, and
-    given a phase past where the edges' consumer order alone would put it) or
-    ``"l1"`` (its two steps share one worker, so no stream kind is needed
-    between them). An index ``helds`` leaves out keeps its edge's given
-    ``kind`` and a phase at its consumer's place in that order; every edge
-    always gets a phase, so the returned ``phases`` is always complete.
+    read a phase after the rest) or ``"l1"`` (its two steps share one worker,
+    so no stream kind is needed between them). An index ``helds`` leaves out
+    keeps its edge's given ``kind``. The region runs in one phase (``phases``
+    None) unless an edge waits a phase: then its consumer reads in phase 1, as
+    does every step downstream of it, and the rest in phase 0.
     """
     kinds = {
         "l1": EdgeKind.STREAM,
@@ -63,9 +63,17 @@ def realize_helds(
         dataclasses.replace(e, kind=kinds[helds[i]]) if i in helds else e
         for i, e in enumerate(edges)
     )
-    phases = tuple(
-        max(0, e.consumer - 1) + (1 if helds.get(i) == "later_phase" else 0)
-        for i, e in enumerate(new_edges)
+    later = [helds.get(i) == "later_phase" for i in range(len(new_edges))]
+    # A step reading a phase later runs then, and so does all it feeds.
+    stepped: dict[int, int] = {}
+    for i, e in sorted(enumerate(new_edges), key=lambda pair: pair[1].consumer):
+        if e.producer == e.consumer:
+            continue
+        stepped[e.consumer] = max(
+            stepped.get(e.consumer, 0), stepped.get(e.producer, 0), int(later[i])
+        )
+    phases = (
+        tuple(stepped.get(e.consumer, 0) for e in new_edges) if any(later) else None
     )
     parent: dict[int, int] = {}
 
