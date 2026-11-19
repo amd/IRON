@@ -39,9 +39,9 @@ from .fusions import (
     Applied,
     Compared,
     NotBitIdentical,
-    _gather_table_rows,
     _random_tensor,
     compare_graphs,
+    drawn_inputs,
     group_fit_verdict,
 )
 from .measure import Timing
@@ -632,29 +632,31 @@ def fit(
                         f"{edge} holds {edge.depth} objects, a buffer descriptor "
                         f"each; {tile} has {bds}",
                     )
-            try:
-                analysis = derivation.analysis()
-            except NotImplementedError as e:
-                waiting.append(str(e))
-                continue
-            if analysis.why is not None:
-                return Fit(False, "analysis", analysis.why)
-            for edge, p, c in derivation.wired:
-                if edge.kind is not EdgeKind.STREAM:
+            # A region with no edge hands nothing on-chip: nothing to analyse.
+            if region.edges:
+                try:
+                    analysis = derivation.analysis()
+                except NotImplementedError as e:
+                    waiting.append(str(e))
                     continue
-                shape = analysis.hand_off[edge]
-                if shape not in (HandOff.EQUAL, HandOff.BROADCAST):
-                    return Fit(
-                        False,
-                        "analysis",
-                        f"{edge} is a stream, whose lanes meet as they are; its "
-                        f"{shape.value} hand-off needs a restage",
-                    )
-            why = analysis.deadlock(
-                {e: e.depth for e, _, _ in derivation.wired if e.depth is not None}
-            )
-            if why is not None:
-                return Fit(False, "analysis", f"at its chosen depths, it {why}")
+                if analysis.why is not None:
+                    return Fit(False, "analysis", analysis.why)
+                for edge, p, c in derivation.wired:
+                    if edge.kind is not EdgeKind.STREAM:
+                        continue
+                    shape = analysis.hand_off[edge]
+                    if shape not in (HandOff.EQUAL, HandOff.BROADCAST):
+                        return Fit(
+                            False,
+                            "analysis",
+                            f"{edge} is a stream, whose lanes meet as they are; its "
+                            f"{shape.value} hand-off needs a restage",
+                        )
+                why = analysis.deadlock(
+                    {e: e.depth for e, _, _ in derivation.wired if e.depth is not None}
+                )
+                if why is not None:
+                    return Fit(False, "analysis", f"at its chosen depths, it {why}")
             kept = sorted(
                 {
                     (p, edge.output)
@@ -819,25 +821,34 @@ def check(
         why = _in_order(profile, base, calls, olds, device)
         return Check(why is None, refinement, why)
     for call in calls:
-        old = olds[call.recording.version]
-        with set_current_device(device):
-            before = Applied.of(old, base, device).built(device)
-            after = Applied.of(call, profile, device).built(device)
-            known = Compared(
-                {tuple(sorted(v.items())): (0.0, None) for _, v in old.timed_points()}
-            )
-            try:
-                compare_graphs(
-                    old,
-                    before,
-                    after,
-                    timing=Timing(rounds=1, calls=1),
-                    known=known,
-                    log=logger.info,
-                )
-            except NotBitIdentical as e:
-                return Check(False, refinement, str(e))
+        why = _bit_identical(profile, base, call, olds[call.recording.version], device)
+        if why is not None:
+            return Check(False, refinement, why)
     return Check(True, refinement)
+
+
+def _bit_identical(
+    profile: Profile, base: Profile, call: Timed, old: Timed, device: Device
+) -> str | None:
+    """Return how ``call`` under ``profile`` first differs from ``old`` under ``base`` (``compare_graphs``), or None."""
+    with set_current_device(device):
+        before = Applied.of(old, base, device).built(device)
+        after = Applied.of(call, profile, device).built(device)
+        known = Compared(
+            {tuple(sorted(v.items())): (0.0, None) for _, v in old.timed_points()}
+        )
+        try:
+            compare_graphs(
+                old,
+                before,
+                after,
+                timing=Timing(rounds=1, calls=1),
+                known=known,
+                log=logger.info,
+            )
+        except NotBitIdentical as e:
+            return str(e)
+    return None
 
 
 def _no_worse(
@@ -845,8 +856,9 @@ def _no_worse(
 ) -> str | None:
     """Return why ``call`` under ``profile`` is worse than ``old`` under ``base`` against the recording's reference, or None where it is no worse.
 
-    A change upstream of a step that ``selects`` is refused: an error there,
-    however small, can flip a choice. Otherwise, on each of
+    A change upstream of a step that ``selects`` is held bit-identical
+    instead, in what the selecting step reads as in every output: an error
+    there, however small, can flip a choice. Otherwise, on each of
     ``NO_WORSE_DRAWS`` seeded draws (odd ones stress, their floats scaled
     over four decades), each returned output's error against
     ``Recording.reference`` must be no larger than ``old``'s in mean square
@@ -856,12 +868,23 @@ def _no_worse(
 
     Raises:
         NotImplementedError: The call carries a buffer or a state to the
-            next, which this does not compare yet.
+            next, or the host writes coded rows, which this does not hold
+            yet.
     """
     recording = call.recording
     if recording.states or recording.feedback:
         raise NotImplementedError(
             "holding a call that carries state to no-worse is not built yet"
+        )
+    hosted = {h.ref().root for h in recording.inputs}
+    if any(
+        b.coded and h.ref().root in hosted
+        for step in recording.steps
+        for b, h in zip(step.op.buffers, step.slots, strict=True)
+    ):
+        raise NotImplementedError(
+            "holding coded rows the host writes to no-worse (drawn as codes, "
+            "their reference decoding them) is not built yet"
         )
     with set_current_device(device):
         before, after = Applied.of(old, base, device), Applied.of(call, profile, device)
@@ -882,19 +905,28 @@ def _no_worse(
                     reached.add(j)
                     frontier.append(j)
     selecting = sorted(j for j in reached if recording.steps[j].op.selects)
-    if selecting:
-        return (
-            f"{recording.name}: a no-worse change reaches step {selecting[0]} "
-            f"({type(recording.steps[selecting[0]].op).__name__}), which selects; "
-            f"upstream of a selection only an exact change is taken"
+    # Each buffer a selecting step reads, by root: held bit-identical, as
+    # every output then is.
+    watched = {
+        slot.ref().root
+        for j in selecting
+        for b, slot in zip(
+            recording.steps[j].op.buffers, recording.steps[j].slots, strict=True
         )
+        if b.fills
+    }
     values = dict(call.values)
     with set_current_device(device):
         graphs = before.built(device), after.built(device)
     try:
         for draw in range(NO_WORSE_DRAWS):
             rng = np.random.default_rng(draw)
-            tensors = {h.name: _random_tensor(h, rng) for h in recording.inputs}
+            tensors = {
+                h.name: t
+                for h, t in zip(
+                    recording.inputs, drawn_inputs(recording, draw), strict=True
+                )
+            }
             if draw % 2:
                 for h in recording.inputs:
                     if np.dtype(h.dtype).kind == "f" or np.dtype(h.dtype).name == (
@@ -904,16 +936,39 @@ def _no_worse(
                         tensors[h.name] = (
                             tensors[h.name].astype(np.float64) * scale
                         ).astype(h.dtype)
-            want, _ = old.recording.reference(tensors, values)
             got = []
             for graph, side in zip(graphs, (old, call), strict=True):
                 graph(*(tensors[h.name] for h in side.recording.inputs), **values)
-                got.append(
-                    {
-                        h.name: np.array(graph.read(h)[h.valid_index(values)])
-                        for h in side.recording.returned
-                    }
+                read = {
+                    h.name: np.array(graph.read(h)[h.valid_index(values)])
+                    for h in side.recording.returned
+                }
+                for step in side.recording.steps:
+                    for slot in step.slots:
+                        if slot.ref().root in watched and slot.ref().nbytes is None:
+                            read.setdefault(
+                                f"{slot.ref().root} (selected from)",
+                                np.array(graph.read(slot)),
+                            )
+                got.append(read)
+            if watched:
+                differ = sorted(
+                    name
+                    for name in got[0].keys() | got[1].keys()
+                    if name not in got[0]
+                    or name not in got[1]
+                    or got[0][name].view(np.uint8).tobytes()
+                    != got[1][name].view(np.uint8).tobytes()
                 )
+                if differ:
+                    return (
+                        f"{recording.name}: the change reaches step {selecting[0]} "
+                        f"({type(recording.steps[selecting[0]].op).__name__}), "
+                        f"which selects, so only an exact change is taken there; "
+                        f"on draw {draw} {', '.join(differ)} differ"
+                    )
+                continue
+            want, _ = old.recording.reference(tensors, values)
             for h, ref in zip(old.recording.returned, want, strict=True):
                 u, t = got[0][h.name], got[1][h.name]
                 if np.array_equal(u.view(np.uint8), t.view(np.uint8)):
@@ -971,15 +1026,7 @@ def _in_order(
                         Applied.of(call, profile, device).built(device),
                     )
             graphs = built[version]
-            rows = _gather_table_rows(recording)
-            inputs = [
-                (
-                    rng.integers(0, rows[h.name], h.shape).astype(h.dtype)
-                    if h.name in rows
-                    else _random_tensor(h, rng)
-                )
-                for h in recording.inputs
-            ]
+            inputs = drawn_inputs(recording, k)
             owns = [{h.name: s for s, h in g.recording.states.values()} for g in graphs]
             for graph, own, states in zip(graphs, owns, sides):
                 for name, state in own.items():

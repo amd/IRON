@@ -53,6 +53,7 @@ from iron.common.graph.record import Recording
 from iron.common.image.compose import Packing, fused_configuration, unvalued
 from iron.common.image.packaging import plan
 from iron.common.image.step import Edge, Fusion, FusionKind
+from iron.common.testing import draws
 
 from .autotune import (
     CONFIDENCE,
@@ -741,6 +742,44 @@ def select_rewrites(
     return taken
 
 
+def drawn_inputs(recording: Recording, seed: int) -> list[np.ndarray]:
+    """Return each of ``recording``'s inputs, drawn as the first step reading it whole draws it.
+
+    That step's operator's own test draw (``testing.draws`` with its
+    ``test.draw``), so an input with preconditions meets them (a draw row's
+    temperature and top-k); a gather's ids in its table's rows; any other,
+    or one whose draw is not its shape and type, seeded random bytes
+    (``_random_tensor``).
+    """
+    rng = np.random.default_rng(seed)
+    table_rows = _gather_table_rows(recording)
+    out = []
+    for h in recording.inputs:
+        if h.name in table_rows:
+            out.append(rng.integers(0, table_rows[h.name], h.shape).astype(h.dtype))
+            continue
+        reader = next(
+            (
+                (step.op, b)
+                for step in recording.steps
+                for b, slot in zip(step.op.buffers, step.slots, strict=True)
+                if b.fills
+                and slot.ref().root == h.ref().root
+                and slot.ref().nbytes is None
+            ),
+            None,
+        )
+        if reader is not None:
+            op, b = reader
+            spec = {} if op.test is None or op.test.draw is None else op.test.draw(op)
+            t = draws(op, seed=seed, **spec)[b.name]
+            if t.size == math.prod(h.shape) and np.dtype(t.dtype) == np.dtype(h.dtype):
+                out.append(t.reshape(h.shape))
+                continue
+        out.append(_random_tensor(h, rng))
+    return out
+
+
 def _random_tensor(handle, rng: np.random.Generator) -> np.ndarray:
     """Return ``handle``'s shape and dtype, filled with ``rng``'s bytes.
 
@@ -928,16 +967,8 @@ def compare_graphs(
     known = Compared() if known is None else known
     begun = time.perf_counter()
     recording = call.recording
-    rng = np.random.default_rng(seed)
-    table_rows = _gather_table_rows(recording)
-    inputs = [
-        (
-            rng.integers(0, table_rows[h.name], h.shape).astype(h.dtype)
-            if h.name in table_rows
-            else _random_tensor(h, rng)
-        )
-        for h in recording.inputs
-    ]
+    inputs = drawn_inputs(recording, seed)
+    rng = np.random.default_rng(seed + 1)
     states = {h.name: _random_tensor(h, rng) for _, h in recording.states.values()}
     # Two recordings of one call (under two profiles) hold their own States.
     own = [{h.name: s for s, h in g.recording.states.values()} for g in (before, after)]

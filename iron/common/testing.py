@@ -101,7 +101,27 @@ def vectors(
     centered: Iterable[Operand] = (),
     given: Mapping[Operand, np.ndarray | tuple[int, ...]] | None = None,
 ) -> Vectors:
-    """Random inputs for ``op``'s declared buffers, and ``op.reference()``'s outputs.
+    """Random inputs for ``op``'s declared buffers (``draws``), and ``op.reference()``'s outputs.
+
+    Raises:
+        ValueError: An operand named is not one of ``op``'s inputs.
+    """
+    inputs = draws(
+        op, seed=seed, scale=scale, normal=normal, centered=centered, given=given
+    )
+    return Vectors(inputs, op._call_reference(inputs))
+
+
+def draws(
+    op: Operator,
+    *,
+    seed: int = 42,
+    scale: float = 4.0,
+    normal: Iterable[Operand] = (),
+    centered: Iterable[Operand] = (),
+    given: Mapping[Operand, np.ndarray | tuple[int, ...]] | None = None,
+) -> dict[str, np.ndarray]:
+    """Random inputs for ``op``'s declared buffers, by name: what ``op.test.draw`` asks for, its preconditions met.
 
     Args:
         op: The operator whose declared buffers are drawn for.
@@ -143,7 +163,7 @@ def vectors(
             if b.name in centered_names:
                 t = (t.astype(np.float32) - scale / 2).astype(dtype)
         inputs[b.name] = t
-    return Vectors(inputs, op._call_reference(inputs))
+    return inputs
 
 
 def _report(buf_name: str, verdict: Verdict, tolerance: Tolerance) -> None:

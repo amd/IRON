@@ -384,8 +384,8 @@ class Recording:
     ) -> Recording:
         """Build a graph of ``steps`` over buffers known by name.
 
-        A buffer some step names whole takes that step's declared elements
-        and type; one named only in part is bytes, as many as ``pinned``
+        A buffer some step names whole takes that step's declared shape and
+        type (a block float's, its bytes); one named only in part is bytes, as many as ``pinned``
         gives it. The host writes ``inputs`` and reads ``outputs``, and
         ``pinned`` sizes a buffer a step names only in part or holds at a
         size of its own; what it reads is what a call returns.
@@ -396,7 +396,14 @@ class Recording:
         for step in steps:
             for ref, b in zip(step.buffers, step.op.buffers, strict=True):
                 if ref.nbytes is None:
-                    typed.setdefault(ref.root, ((b.elements,), b.dtype))
+                    typed.setdefault(
+                        ref.root,
+                        (
+                            ((b.nbytes,), np.uint8)
+                            if bfp.is_bfp(b.dtype)
+                            else (b.shape, b.dtype)
+                        ),
+                    )
         roots: dict[str, Handle] = {}
         recording = []
         for step in steps:

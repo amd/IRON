@@ -14,7 +14,7 @@ from iron.common.declare.composition import Entry, Refinement, Region, refinemen
 from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
 from iron.common.image.step import BufferRef, SequenceStep
-from iron.operators.gemm import GEMM
+from iron.operators.gemm import GEMM, Precision
 from iron.operators.gemv import GEMV
 from iron.operators.sample import Sample
 from iron.tests.support.declared import declared
@@ -180,27 +180,35 @@ def test_a_setting_the_array_cannot_hold_is_refused_before_any_build():
     assert result.stage == "counts"
 
 
-def test_a_no_worse_change_upstream_of_a_selection_step_is_refused():
-    """A no-worse change upstream of a ``Sample`` step (the selection slice) is refused."""
-    gemv = GEMV(M=128, K=128).resolved(NPU2_DEVICE)
-    sample = Sample(vocab=128, cores=1, steps=1).resolved(NPU2_DEVICE)
+def _logits_into_sample(precision: Precision) -> Recording:
+    """Return a GEMM at ``precision`` writing 4096 logits, which a ``Sample`` draws a token from."""
+    gemm = GEMM(M=32, K=64, N=128, b_col_maj=True, precision=precision)
+    sample = Sample(vocab=4096, cores=1, steps=1)
     steps = [
-        SequenceStep(gemv, tuple(BufferRef(n) for n in ("A", "B", "logits"))),
+        SequenceStep(gemm, tuple(BufferRef(n) for n in ("A", "B", "logits"))),
         SequenceStep(
             sample,
             tuple(BufferRef(n) for n in ("logits", "draws", "tokens", "token")),
         ),
     ]
-    recording = Recording.of_steps(
-        "gemv_into_sample", steps, ["A", "B", "draws"], ["tokens", "token"]
+    return Recording.of_steps(
+        "logits_into_sample", steps, ["A", "B", "draws"], ["tokens", "token"]
     )
-    profile = Profile()
-    profile.add(GEMV, M=128, K=128, kernel_vector_size=32)
+
+
+def test_a_no_worse_change_upstream_of_a_selection_step_is_refused():
+    """A GEMM's logits moved from ``MEDIUM`` to ``HIGHEST`` precision, upstream of a ``Sample``: refused, since the logits it selects from differ.
+
+    ``MEDIUM`` emulates bf16 through bfp16; ``HIGHEST`` is no worse against
+    the reference, so without the selection no-worse would take it.
+    """
     result = check(
-        profile,
         Profile(),
-        [Timed(recording)],
+        Profile(),
+        [Timed(_logits_into_sample(Precision.HIGHEST))],
         NPU2_DEVICE,
         refinement=Refinement.NO_WORSE,
+        base_calls=[Timed(_logits_into_sample(Precision.MEDIUM))],
     )
     assert not result.ok
+    assert "selects" in (result.why or "")
