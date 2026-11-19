@@ -11,6 +11,7 @@ import pytest
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Region
 from iron.common.graph.sdf import analyze
+from iron.common.image.step import EdgeKind
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.silu import SiLU
@@ -21,13 +22,15 @@ from iron.tune.search import measure
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
+# Elements a measured toy moves: its cores' work, not a call's dispatch, sets its time.
+MEASURED = 1 << 18
 
-@unbuilt
+
 def test_unbalanced_pipeline_period_is_the_bottleneck_actors():
-    """``add -> SiLU -> mul`` at uneven widths, ``mul`` at one column against the others' two: a positive period, bounded by the narrower, slower actor."""
+    """``add -> SiLU -> mul`` at uneven widths, SiLU at one column against the others' two: a positive period, bounded by the narrower, slower actor."""
     add = ElementwiseAdd(size=512, tile_size=128, num_aie_columns=2)
-    silu = SiLU(size=512, tile_size=128, num_aie_columns=2)
-    mul = ElementwiseMul(size=512, tile_size=128, num_aie_columns=1)
+    silu = SiLU(size=512, tile_size=128, num_aie_columns=1)
+    mul = ElementwiseMul(size=512, tile_size=128, num_aie_columns=2)
     region = toys.add_silu_mul_region(add, silu, mul)
     recording = toys.add_silu_mul_recording("bottleneck", add, silu, mul)
     analysis = analyze(region, recording, toys.NPU2)
@@ -36,27 +39,25 @@ def test_unbalanced_pipeline_period_is_the_bottleneck_actors():
     assert analysis.period > 0
 
 
-@unbuilt
 def test_narrowing_the_bottleneck_actor_raises_the_period():
-    """Narrowing ``mul``, the bottleneck, from two columns to one raises the period; it no longer merely has to be positive."""
+    """Narrowing SiLU, the bottleneck (several times add's cycles a call), from two columns to one raises the period."""
     add = ElementwiseAdd(size=512, tile_size=128, num_aie_columns=2)
-    silu = SiLU(size=512, tile_size=128, num_aie_columns=2)
-    wide = ElementwiseMul(size=512, tile_size=128, num_aie_columns=2)
-    narrow = ElementwiseMul(size=512, tile_size=128, num_aie_columns=1)
-    wide_region = toys.add_silu_mul_region(add, silu, wide)
-    narrow_region = toys.add_silu_mul_region(add, silu, narrow)
-    wide_recording = toys.add_silu_mul_recording("wide-bottleneck", add, silu, wide)
+    wide = SiLU(size=512, tile_size=128, num_aie_columns=2)
+    narrow = SiLU(size=512, tile_size=128, num_aie_columns=1)
+    mul = ElementwiseMul(size=512, tile_size=128, num_aie_columns=2)
+    wide_region = toys.add_silu_mul_region(add, wide, mul)
+    narrow_region = toys.add_silu_mul_region(add, narrow, mul)
+    wide_recording = toys.add_silu_mul_recording("wide-bottleneck", add, wide, mul)
     narrow_recording = toys.add_silu_mul_recording(
-        "narrow-bottleneck", add, silu, narrow
+        "narrow-bottleneck", add, narrow, mul
     )
     wide_period = analyze(wide_region, wide_recording, toys.NPU2).period
     narrow_period = analyze(narrow_region, narrow_recording, toys.NPU2).period
     assert narrow_period > wide_period
 
 
-@unbuilt
 def test_widening_a_non_bottleneck_actor_leaves_the_period_unchanged():
-    """Widening ``add``, which is not the bottleneck, from one column to two leaves the period unchanged; ``mul`` alone still bounds it."""
+    """Widening ``add``, which is not the bottleneck, from one column to two leaves the period unchanged; SiLU alone still bounds it."""
     narrow_add = ElementwiseAdd(size=512, tile_size=128, num_aie_columns=1)
     wide_add = ElementwiseAdd(size=512, tile_size=128, num_aie_columns=2)
     silu = SiLU(size=512, tile_size=128, num_aie_columns=1)
@@ -78,21 +79,23 @@ def test_measured_seconds_a_call_tracks_the_analyzed_period():
     ``measure``'s paired runs against a ``base`` profile are how the
     analysis's period is held to a real clock; this is the timing half of
     the bottleneck check above, restored once ``measure`` names what to
-    pair against what.
+    pair against what. Large enough that the cores' work, not the call's
+    dispatch, sets the time a call; staged, as a two-column lane meeting a
+    one-column one needs.
     """
-    add = ElementwiseAdd(size=512, tile_size=128, num_aie_columns=2)
-    silu = SiLU(size=512, tile_size=128, num_aie_columns=2)
-    mul = ElementwiseMul(size=512, tile_size=128, num_aie_columns=2)
+    add = ElementwiseAdd(size=MEASURED, tile_size=128, num_aie_columns=2)
+    silu = SiLU(size=MEASURED, tile_size=128, num_aie_columns=2)
+    mul = ElementwiseMul(size=MEASURED, tile_size=128, num_aie_columns=2)
     recording = toys.add_silu_mul_recording("measured-period", add, silu, mul)
-    wide_region = toys.add_silu_mul_region(add, silu, mul)
+    wide_region = toys.add_silu_mul_region(add, silu, mul, kind=EdgeKind.STAGED)
     narrow_region = Region(
         parts=(
             wide_region.parts[0],
-            wide_region.parts[1],
             dataclasses.replace(
-                wide_region.parts[2],
-                tunables={"num_aie_columns": 1, "tile_size": mul.tile_size},
+                wide_region.parts[1],
+                tunables={"num_aie_columns": 1, "tile_size": silu.tile_size},
             ),
+            wide_region.parts[2],
         ),
         edges=wide_region.edges,
     )
@@ -108,7 +111,6 @@ def test_measured_seconds_a_call_tracks_the_analyzed_period():
     assert measured.seconds > measured.base_seconds
 
 
-@unbuilt
 def test_feedback_loop_period_is_one_trip_around_the_cycle():
     """The running-sum loop: a positive period, the time one trip around the cycle takes, independent of how many cycles the call runs."""
     region, add = toys.running_sum()

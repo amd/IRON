@@ -206,14 +206,16 @@ def test_each_depth_up_to_the_knee_is_measured_against_the_next():
 
     The measured knee (the depth past which a further measured pair gains
     nothing more) is the one ``analyze`` itself reports as ``knee_depth``.
+    One depth names every edge, so its bounds are the deepest edge's. Large
+    enough that the cores' work, not the call's dispatch, sets its time.
     """
-    add, silu, mul = toys.add_silu_mul()
+    add, silu, mul = toys.add_silu_mul(size=1 << 18, cols=2)
     recording = toys.add_silu_mul_recording("measured-depth", add, silu, mul)
     calls = [Timed(recording)]
     base_region = toys.add_silu_mul_region(add, silu, mul)
     analysis = analyze(base_region, recording, toys.NPU2)
-    minimum = min(analysis.min_depth.values())
-    knee = min(analysis.knee_depth.values())
+    minimum = max(analysis.min_depth.values())
+    knee = max(analysis.knee_depth.values())
     for depth in range(minimum, knee):
         shallower = Profile()
         shallower.add_entry(
@@ -226,4 +228,6 @@ def test_each_depth_up_to_the_knee_is_measured_against_the_next():
         measured = measure(deeper, shallower, calls, toys.NPU2)
         assert measured.ratio <= 1.0
     at_knee = toys.add_silu_mul_region(add, silu, mul, depth=knee)
-    assert analyze(at_knee, recording, toys.NPU2).knee_depth == analysis.knee_depth
+    assert list(analyze(at_knee, recording, toys.NPU2).knee_depth.values()) == list(
+        analysis.knee_depth.values()
+    )

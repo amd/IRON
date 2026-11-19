@@ -15,6 +15,7 @@ limit comes from the device's target model.
 
 from __future__ import annotations
 
+import functools
 import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -26,6 +27,7 @@ import numpy as np
 from aie.dialects._aie_enum_gen import ObjectFifoLinkMode, ObjectFifoPort
 from aie.iron.dataflow.objectfifo import ObjectFifo, ObjectFifoLink
 from aie.iron.device import Device
+from aie.iron.kernel import ExternalFunction
 from aie.iron.trace import Access, Scope, record
 from aie.iron.trace import Recording as Recorded
 from aie.utils import set_current_device
@@ -34,6 +36,7 @@ from ..declare import Operator
 from ..declare.composition import Entry, Region
 from ..design import BuiltArray, OperatorDesign
 from ..image.step import BufferRef, Edge, HandOff
+from .clock import kernel_cycles
 from .record import Recording
 
 
@@ -170,6 +173,90 @@ class Flow:
                 ]
                 return "deadlocks: " + ", ".join(waiting)
 
+    def _holds(self) -> dict[int, int]:
+        return {
+            e: max(
+                [c.initial, 1]
+                + [
+                    ev.count
+                    for program in self.programs
+                    for ev in program
+                    if ev.channel == e and ev.acquire
+                ]
+            )
+            for e, c in enumerate(self.channels)
+        }
+
+    def ceiling(self, fixed: Mapping[int, int] | None = None) -> dict[int, int]:
+        """Return each edge's depth past which more cannot matter: all a call writes on it, and what it starts with and holds; ``fixed`` edges at theirs."""
+        fixed = dict(fixed or {})
+        holds = self._holds()
+        return {
+            e: fixed.get(e, c.initial + self.written(e) + holds[e])
+            for e, c in enumerate(self.channels)
+        }
+
+    def period(
+        self,
+        depths: Mapping[int, int],
+        costs: Sequence[Sequence[Fraction]],
+        calls: int = 4,
+    ) -> Fraction | None:
+        """Return the time a call takes in steady state, ``calls`` calls run back to back, or None where they deadlock.
+
+        Each actor spends ``costs[a][i]`` before its access ``i`` (its work
+        before what it releases), and an access waits, besides on its actor,
+        until what it takes is there: an acquire, until the edge last
+        changed. A call's end is its last actor's; the period is the time
+        between the last two calls' ends.
+
+        Raises:
+            NotImplementedError: An edge runs in a later phase.
+        """
+        if any(c.phase for c in self.channels):
+            raise NotImplementedError("a period over phases is not modelled yet")
+        filled = [c.initial for c in self.channels]
+        changed = [Fraction(0)] * len(self.channels)
+        clock = [Fraction(0)] * len(self.programs)
+        at = [0] * len(self.programs)
+        ends = [Fraction(0)] * calls
+        lengths = [len(p) for p in self.programs]
+        while True:
+            best: tuple[Fraction, int] | None = None
+            for a, program in enumerate(self.programs):
+                if at[a] == lengths[a] * calls:
+                    continue
+                i = at[a] % lengths[a]
+                event = program[i]
+                e = event.channel
+                cost = costs[a][i]
+                if event.acquire:
+                    free = (
+                        depths[e] - filled[e] if event.producer else filled[e]
+                    ) >= event.count
+                    if not free:
+                        continue
+                    when = max(clock[a], changed[e]) + cost
+                else:
+                    when = clock[a] + cost
+                if best is None or when < best[0]:
+                    best = (when, a)
+            if best is None:
+                if all(n == length * calls for n, length in zip(at, lengths)):
+                    return ends[-1] - ends[-2] if calls > 1 else ends[-1]
+                return None
+            when, a = best
+            event = self.programs[a][at[a] % lengths[a]]
+            e = event.channel
+            if not event.acquire:
+                filled[e] += event.count if event.producer else -event.count
+                changed[e] = when
+            clock[a] = when
+            at[a] += 1
+            if at[a] % lengths[a] == 0:
+                k = at[a] // lengths[a] - 1
+                ends[k] = max(ends[k], when)
+
     def minimum_depths(
         self, fixed: Mapping[int, int] | None = None
     ) -> tuple[dict[int, int], str | None]:
@@ -185,22 +272,8 @@ class Flow:
                 operator's own fifos, at the depths its build chose).
         """
         fixed = dict(fixed or {})
-        holds = {
-            e: max(
-                [c.initial, 1]
-                + [
-                    ev.count
-                    for program in self.programs
-                    for ev in program
-                    if ev.channel == e and ev.acquire
-                ]
-            )
-            for e, c in enumerate(self.channels)
-        }
-        ceiling = {
-            e: fixed.get(e, c.initial + self.written(e) + holds[e])
-            for e, c in enumerate(self.channels)
-        }
+        holds = self._holds()
+        ceiling = self.ceiling(fixed)
         why = self.runs(ceiling)
         if why is not None:
             return {}, why
@@ -237,6 +310,11 @@ class Analysis:
         flow: The call's actors and channels.
         channels: Per edge, the channels its depth sizes.
         fixed: The channels an operator's own build holds at a depth.
+        kernels: Per actor, the kernels its core calls; none for a memtile
+            link, which takes no time of a core's.
+        work: Per actor, the accesses its work comes before: each output
+            it releases (once, not again for each reader a broadcast writes
+            to), or, where it writes none, each input it frees.
     """
 
     tokens: dict[Edge, tuple[tuple[int, ...], tuple[int, ...]]]
@@ -250,6 +328,8 @@ class Analysis:
     flow: Flow = field(repr=False, compare=False)
     channels: dict[Edge, list[int]] = field(repr=False, compare=False)
     fixed: dict[int, int] = field(repr=False, compare=False)
+    kernels: list[tuple[ExternalFunction, ...]] = field(repr=False, compare=False)
+    work: list[list[int]] = field(repr=False, compare=False)
 
     def deadlock(self, depths: Mapping[Edge, int]) -> str | None:
         """Return why the region deadlocks with ``depths`` on the edges it names and the minimum on every other, or None where it runs.
@@ -264,24 +344,60 @@ class Analysis:
             held.update((e, depths.get(edge, self.min_depth[edge])) for e in es)
         return self.flow.minimum_depths(held)[1]
 
+    @functools.cached_property
+    def costs(self) -> list[list[Fraction]]:
+        """Per actor, the cycles it spends before each access: one call of its kernel, traced alone (``clock.kernel_cycles``), before each access of its work.
+
+        Raises:
+            NotImplementedError: A core calls several kernels, whose calls a
+                firing the recording does not hold.
+        """
+        costs = []
+        for kernels, work, program in zip(
+            self.kernels, self.work, self.flow.programs, strict=True
+        ):
+            if len(kernels) > 1:
+                raise NotImplementedError(
+                    f"pricing a core that calls {len(kernels)} kernels "
+                    f"({', '.join(fn.name for fn in kernels)}) is not modelled yet"
+                )
+            each = Fraction(kernel_cycles(kernels[0]) if kernels else 0)
+            marked = set(work)
+            costs.append(
+                [each if i in marked else Fraction(0) for i in range(len(program))]
+            )
+        return costs
+
+    @functools.cached_property
+    def period(self) -> Fraction:
+        """The cycles a call takes in steady state with every edge as deep as more cannot matter: the bound its slowest actor or cycle sets.
+
+        Raises:
+            ValueError: The region cannot run at any depth (``why``).
+            NotImplementedError: An edge runs in a later phase, or a core
+                calls several kernels (``costs``).
+        """
+        if self.why is not None:
+            raise ValueError(f"the region cannot run at any depth: {self.why}")
+        period = self.flow.period(self.flow.ceiling(self.fixed), self.costs)
+        assert period is not None, "the ceiling depths run"
+        return period
+
     @property
     def knee_depth(self) -> dict[Edge, int]:
-        """The depth per edge past which throughput stops growing.
+        """Per edge, the shallowest depth from its minimum at which a call takes ``period``.
 
         Raises:
-            NotImplementedError: Not built yet: it needs each actor's time.
-        """
-        raise NotImplementedError("the knee needs each actor's time, not modelled yet")
-
-    @property
-    def period(self) -> Fraction:
-        """The time per iteration a cycle bounds, in the device's cycles.
-
-        Raises:
-            NotImplementedError: Not built yet: it needs each actor's time.
+            NotImplementedError: Always, for now: a core-to-core edge also
+                holds what its producer's own end buffers, which the device
+                runs ahead into and the analysis does not count, so a knee
+                over the reading end alone overstates what depth buys
+                (``add -> SiLU -> mul`` at 2**18 elements: depth 2 against 1
+                measures 0.99 to 1.01, where the reading end alone says 0.81).
         """
         raise NotImplementedError(
-            "the period needs each actor's time, not modelled yet"
+            "a knee depth needs the producer end's buffers, which the analysis "
+            "does not count yet"
         )
 
 
@@ -707,10 +823,16 @@ class Derivation:
             NotImplementedError: What the analysis does not model yet (see the class).
         """
         programs: list[list[tuple[ObjectFifo, bool, bool, int]]] = []
+        actor_kernels: list[tuple[ExternalFunction, ...]] = []
         repetition: dict[int, int] = {}
         for i, (_, recorded) in enumerate(self.recorded):
             for k, core in enumerate(recorded.cores):
                 trips = self._trips(core)
+                actor_kernels.append(
+                    tuple(
+                        f for f in core.owner.fn_args if isinstance(f, ExternalFunction)
+                    )
+                )
                 programs.append(
                     [
                         (
@@ -726,6 +848,7 @@ class Derivation:
                     outermost = [s for s in core.body if isinstance(s, Scope)]
                     repetition[i] = trips[id(outermost[0])] if outermost else 1
             for link in recorded.links:
+                actor_kernels.append(())
                 programs.append(self._link_events(link))
         writer: dict[ObjectFifo, int] = {}
         readers: dict[ObjectFifo, list[int]] = {}
@@ -821,21 +944,25 @@ class Derivation:
                 reads[(fifo, actor)] = e
                 if fifo.depth is not None:
                     fixed[e] = fifo.depth
-        flow = Flow(
-            channels,
-            [
-                [
-                    Event(e, producer, acquire, count)
-                    for fifo, producer, acquire, count in program
-                    for e in (
-                        writes.get(fifo, [])
-                        if producer
-                        else [reads[(fifo, actor)]] if (fifo, actor) in reads else []
-                    )
-                ]
-                for actor, program in enumerate(programs)
-            ],
-        )
+        actor_kernels += [()] * (len(programs) - len(actor_kernels))
+        events: list[list[Event]] = []
+        work: list[list[int]] = []
+        for actor, program in enumerate(programs):
+            expanded: list[Event] = []
+            outputs: list[int] = []
+            inputs: list[int] = []
+            for fifo, producer, acquire, count in program:
+                ends = (
+                    writes.get(fifo, [])
+                    if producer
+                    else [reads[(fifo, actor)]] if (fifo, actor) in reads else []
+                )
+                if ends and not acquire:
+                    (outputs if producer else inputs).append(len(expanded))
+                expanded += [Event(e, producer, acquire, count) for e in ends]
+            events.append(expanded)
+            work.append(outputs or inputs)
+        flow = Flow(channels, events)
         why = flow.balance()
         depths, deadlock = flow.minimum_depths(fixed)
         tokens = {}
@@ -881,6 +1008,8 @@ class Derivation:
             flow=flow,
             channels=edge_channels,
             fixed=fixed,
+            kernels=actor_kernels,
+            work=work,
         )
 
 

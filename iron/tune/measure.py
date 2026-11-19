@@ -28,7 +28,6 @@ import os
 import re
 import statistics
 import subprocess
-import tempfile
 import time
 import uuid
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
@@ -37,7 +36,6 @@ from typing import TextIO
 
 import numpy as np
 from aie.iron import Out
-from aie.iron.algorithms.kernel_design import KernelDesign
 from aie.iron.device import Device
 from aie.iron.kernel import ExternalFunction
 from aie.utils import bfp
@@ -47,6 +45,7 @@ from aie.utils.compile import NPU_CACHE_HOME
 from iron.common.declare import Operand, Operator
 from iron.common.declare.value import Value
 from iron.common.design import OperatorDesign
+from iron.common.graph.clock import kernel_cycles
 from iron.common.graph.record import Recording
 from iron.common.image.callable import ImageCallable
 from iron.common.image.compose import Packing
@@ -1547,26 +1546,16 @@ def switch_cost(
     return result
 
 
-# Calls a kernel is traced at: the fewest cycles of them is its figure.
-KERNEL_CALLS = 4
-
-# A traced run's buffer: mlir-aie's kernel checks size it so.
-TRACE_SIZE = 16384
-TRACE_BYTES_PER_INTERVAL = 512
-TRACE_MAX_BYTES = 4 << 20
-
-
 def time_kernels(
     fns: Iterable[ExternalFunction],
     cache: Cache | None = None,
     log: Callable[[str], None] = print,
     lock: NpuLock | None = None,
 ) -> dict[str, int]:
-    """Each of ``fns``' fewest cycles a call on one core, by recipe key.
+    """Each of ``fns``' fewest cycles a call on one core, by recipe key (``clock.kernel_cycles``).
 
-    ``KERNEL_CALLS`` calls traced in one run (mlir-aie's ``KernelDesign.cycles_per_call``),
-    kept in ``cache``. One whose trace fills its largest buffer, or that does not
-    run, is left out and reported to ``log``.
+    Kept in ``cache``. One that is not traced, or that does not run, is left
+    out and reported to ``log``.
     """
     out: dict[str, int] = {}
     todo = []
@@ -1580,28 +1569,13 @@ def time_kernels(
         return out
     log(f"    tracing {len(todo)} kernels' cycles")
     begun = time.perf_counter()
-    with lock or contextlib.nullcontext(), tempfile.TemporaryDirectory() as scratch:
+    with lock or contextlib.nullcontext():
         for fn in todo:
-            harness = KernelDesign(fn, calls=KERNEL_CALLS)
-            inputs = harness.sample_inputs()
-            size = max(
-                TRACE_SIZE, TRACE_BYTES_PER_INTERVAL * harness.traced_intervals()
-            )
             try:
-                while True:
-                    traced = harness.cycles_per_call(
-                        inputs, trace_size=size, workdir=Path(scratch) / fn.recipe_key
-                    )
-                    if not traced.truncated or size >= TRACE_MAX_BYTES:
-                        break
-                    size = min(2 * size, TRACE_MAX_BYTES)
+                out[fn.recipe_key] = kernel_cycles(fn)
             except (RuntimeError, ValueError) as e:
                 log(f"    {fn.name} ({fn.recipe_key}) not traced: {e}")
                 continue
-            if traced.untimed or traced.truncated or not traced.kernel:
-                log(f"    {fn.name} ({fn.recipe_key}) not traced: {traced}")
-                continue
-            out[fn.recipe_key] = min(traced.kernel)
             if cache is not None:
                 cache.put_cycles(fn.recipe_key, out[fn.recipe_key])
     Spent.charge(timing_s=time.perf_counter() - begun)

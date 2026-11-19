@@ -3,6 +3,8 @@
 
 """One call of actors replaying their objectFIFO accesses: balance, deadlock and the smallest depths."""
 
+from fractions import Fraction
+
 from iron.common.graph.sdf import Channel, Event, Flow
 
 
@@ -158,3 +160,41 @@ def test_a_fixed_edge_is_held_at_its_depth_and_not_searched():
     assert flow.minimum_depths(fixed={3: 4}) == ({0: 1, 1: 1, 2: 4}, None)
     depths, why = flow.minimum_depths(fixed={3: 3})
     assert depths == {} and why is not None
+
+
+def _timed_pair(objects: int = 4) -> tuple[Flow, list[list[Fraction]]]:
+    """Return a producer spending two before each object it writes and a consumer spending three before each it frees."""
+    write = [Event(0, True, True, 1), Event(0, True, False, 1)]
+    read = [Event(0, False, True, 1), Event(0, False, False, 1)]
+    flow = Flow([Channel(0, 1)], [write * objects, read * objects])
+    costs = [
+        [Fraction(0), Fraction(2)] * objects,
+        [Fraction(0), Fraction(3)] * objects,
+    ]
+    return flow, costs
+
+
+def test_one_object_deep_the_two_ends_take_turns():
+    """One deep, the producer cannot write the next object until the consumer frees the last: five an object, twenty a call."""
+    flow, costs = _timed_pair()
+    assert flow.period({0: 1}, costs) == 20
+
+
+def test_two_objects_deep_the_slower_end_sets_the_period():
+    """Two deep, the producer works while the consumer does: the consumer's three an object, twelve a call, and no deeper is faster."""
+    flow, costs = _timed_pair()
+    assert flow.period({0: 2}, costs) == 12
+    assert flow.period({0: 4}, costs) == 12
+
+
+def test_a_deadlocking_depth_has_no_period():
+    """A writer acquiring two objects at once on an edge one deep never proceeds."""
+    flow = Flow(
+        [Channel(0, 1)],
+        [
+            [Event(0, True, True, 2), Event(0, True, False, 2)],
+            [Event(0, False, True, 2), Event(0, False, False, 2)],
+        ],
+    )
+    costs = [[Fraction(1), Fraction(1)], [Fraction(1), Fraction(1)]]
+    assert flow.period({0: 1}, costs) is None
