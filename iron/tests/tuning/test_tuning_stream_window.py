@@ -126,7 +126,7 @@ def test_tuner_proposes_and_keeps_a_window_on_its_own_toy(window):
     window_ratio = measure(with_window, start, calls, DEVICE).ratio
     found = search(calls, start, DEVICE, budget_s=60.0)
     if window_ratio < 0.95:
-        assert measure(found, start, calls, DEVICE).ratio < window_ratio * 1.05
+        assert measure(found, with_window, calls, DEVICE).ratio < 1.05
 
 
 def test_a_window_over_the_arrays_cores_is_refused_before_any_build():

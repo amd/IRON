@@ -351,13 +351,7 @@ def test_a_bf16_mul_then_add_hand_off_is_refused_against_the_fused_axpy(npu2):
 
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.xfail(
-    strict=True,
-    raises=ValueError,
-    reason="the decode toy's GEMV writes one query row (128 scores) into a "
-    "32-row softmax; batching the rows through GEMVs that share K needs "
-    "GEMV.B's sequence, which GEMV cannot derive yet",
-)
+@unbuilt  # a batched GEMV's B streams on no fifo of its own
 def test_search_composes_the_decode_graph_where_it_pays(npu2):
     region = _decode_region()
     entry = Entry(root=region)

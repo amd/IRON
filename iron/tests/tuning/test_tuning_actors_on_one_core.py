@@ -171,8 +171,10 @@ def test_search_keeps_the_pair_joined_where_it_pays(name, npu2):
     with_entry.add_entry(entry)
     ratio = measure(with_entry, start, calls, npu2).ratio
     tuned = search(calls, start, npu2)
+    # Where the pair joined pays, what search keeps is at least as fast (it may
+    # join the pair otherwise, as a stream window, and pass this one over).
     if ratio < 0.95:
-        assert entry in tuned.entries()
+        assert measure(tuned, with_entry, calls, npu2).ratio < 1.05
     if ratio > 1.05:
         assert entry not in tuned.entries()
     result = check(tuned, start, calls, npu2, Refinement.EXACT)

@@ -120,11 +120,21 @@ def test_a_resolve_derived_tunable_is_never_a_width():
 
 
 @pytest.mark.extensive
-@unbuilt
-@pytest.mark.parametrize("cls,case", _PARAMS_WITH_TUNABLES)
+@pytest.mark.parametrize(
+    "cls,case",
+    [
+        # Decode's coded rows, written by the host, are not held no-worse yet.
+        pytest.param(*p.values, id=p.id, marks=unbuilt if p.id == "Decode" else ())
+        for p in _PARAMS_WITH_TUNABLES
+    ],
+)
 @pytest.mark.supported_devices("npu2")
 def test_each_tunable_moved_alone_is_held_to_its_own_refinement(cls, case):
-    """Each tunable moved alone off the recorded setting, where the others take it, is held to its own ``refinement``; the tuner's pick fits."""
+    """Each tunable moved alone off the recorded setting, where the others take it, is held to its own ``refinement``; the tuner's pick fits.
+
+    An exact tunable is bit-identical at every value; a move of one declared
+    ``exact=False`` is checked no worse, and taken or refused as worse.
+    """
     recorded = cls(**case.kwargs).resolved(NPU2_DEVICE)
     recording = Recording.of_step(recorded)
     given = {n: vars(recorded)[n] for n in cls.declaration.tunables}
@@ -149,7 +159,10 @@ def test_each_tunable_moved_alone_is_held_to_its_own_refinement(cls, case):
             result = check(
                 moved, base, [Timed(recording)], NPU2_DEVICE, refinement=rule
             )
-            assert result.ok, result.why
+            # An exact tunable holds at every value; another may be worse.
+            assert result.ok or (
+                rule is Refinement.NO_WORSE and "worse" in (result.why or "")
+            ), result.why
     calls = [Timed(recording)]
     tuned = search(calls, base, NPU2_DEVICE, budget_s=1.0)
     assert check(tuned, base, calls, NPU2_DEVICE, refinement=Refinement.NO_WORSE).ok
@@ -157,7 +170,6 @@ def test_each_tunable_moved_alone_is_held_to_its_own_refinement(cls, case):
 
 
 @pytest.mark.extensive
-@unbuilt
 def test_search_keeps_the_fastest_setting_it_measured_on_the_one_operator_toy():
     """The tuner, on the one-operator toy, keeps the fastest setting it measured, never asserting which one."""
     op = GEMV(M=128, K=128).resolved(NPU2_DEVICE)
