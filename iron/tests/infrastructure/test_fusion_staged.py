@@ -35,7 +35,7 @@ from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
-from iron.tests.support import hang, sequences
+from iron.tests.support import hang, sequences, toys_edges
 from iron.tests.support.llama_model import llama_1b
 from iron.tune.measure import Timing, time_interleaved
 
@@ -265,22 +265,22 @@ def test_eight_lanes_join_in_pairs_into_four():
     """Each of RMSNorm's four lanes (two rows) joins two of ElementwiseAdd's eight (a row each), whole, in one round of both rows."""
     add, norm = _add_norm()
     plan = _plan(add, "y", norm, "x")
-    assert plan.joins == [([2 * k, 2 * k + 1], [2048, 2048]) for k in range(4)]
-    assert plan.splits == []
+    assert plan.groups == [
+        ([2 * k, 2 * k + 1], [2048, 2048], [k], [4096]) for k in range(4)
+    ]
 
 
 def test_one_lane_splits_into_four_slots_of_each_object():
     norm, mul = _norm_mul(4)
     plan = _plan(norm, "y", mul, "a")
-    assert plan.joins == []
-    assert plan.splits == [([0, 1, 2, 3], [512] * 4)]
+    assert plan.groups == [([0], [2048], [0, 1, 2, 3], [512] * 4)]
 
 
 def test_a_gather_for_every_core_joins_all_lanes():
     """GEMV's B is one lane of the whole vector: the product's four lanes join into it, every core reading that one fifo."""
     mul, down = _mul_down()
     plan = _plan(mul, "y", down, "B")
-    assert plan.joins == [(list(range(4)), [2048] * 4)]
+    assert plan.groups == [(list(range(4)), [2048] * 4, [0], [8192])]
 
 
 def test_a_tile_mismatch_forwards_in_rounds():
@@ -288,7 +288,7 @@ def test_a_tile_mismatch_forwards_in_rounds():
     silu = SiLU(size=2048, num_aie_columns=1, tile_size=1024)
     mul = ElementwiseMul(size=2048, num_aie_columns=1, tile_size=512)
     plan = _plan(silu, "y", mul, "a")
-    assert plan.joins == [([0], [1024])]
+    assert plan.groups == [([0], [1024], [0], [1024])]
 
 
 def test_eight_lanes_join_in_two_levels():
@@ -296,7 +296,7 @@ def test_eight_lanes_join_in_two_levels():
     add = ElementwiseAdd(size=2048, num_aie_columns=8, tile_size=256)
     norm = RMSNorm(rows=1, tile_size=2048)
     plan = _plan(add, "y", norm, "x")
-    assert plan.joins == [(list(range(8)), [256] * 8)]
+    assert plan.groups == [(list(range(8)), [256] * 8, [0], [2048])]
     recording = Recording.of_steps(
         "join_of_joins",
         sequences.steps((add, "a", "b", "mid"), (norm, "mid", "out")),
@@ -318,12 +318,34 @@ def test_a_round_past_a_memtile_is_refused():
         _plan(add, "y", mul, "a")
 
 
-def test_an_order_neither_a_join_nor_a_split_gives_is_refused():
-    """RMSNorm's two lanes of two rows each into four lanes of one row: each round (a row) feeds one lane of the four, not a slot of each."""
+def test_a_split_whose_lanes_change_by_object_splits_rounds_of_several():
+    """RMSNorm's two lanes of two rows each into four lanes of one row: each row goes whole to one lane, so a round of both rows splits in two."""
     norm = RMSNorm(rows=4, tile_size=2048, num_aie_columns=2)
     add = ElementwiseAdd(size=4 * 2048, num_aie_columns=4, tile_size=2048)
-    with pytest.raises(ValueError, match="neither a join .* nor a split"):
-        _plan(norm, "y", add, "b")
+    plan = _plan(norm, "y", add, "b")
+    assert plan.groups == [
+        ([0], [4096], [0, 1], [2048, 2048]),
+        ([1], [4096], [2, 3], [2048, 2048]),
+    ]
+
+
+def test_lanes_sharing_objects_both_ways_join_then_split():
+    """GEMV's four lanes of 72 into ElementwiseMul's six of 48, some taking parts of two of GEMV's: each two of GEMV's join into a round split into three."""
+    gemv = GEMV(M=288, K=288, num_aie_columns=4, feed_b=True)
+    mul = ElementwiseMul(size=288, num_aie_columns=6, tile_size=48)
+    plan = _plan(gemv, "C", mul, "a")
+    assert plan.groups == [
+        ([0, 1], [72, 72], [0, 1, 2], [48] * 3),
+        ([2, 3], [72, 72], [3, 4, 5], [48] * 3),
+    ]
+
+
+def test_an_order_no_round_gives_is_refused():
+    """GEMM's 32x32 C tiles into RMSNorm's whole rows: within every round the tiles' elements are out of row order, a layout no join or split gives."""
+    recording, _ = toys_edges.layout_transpose()
+    gemm, norm = (s.op.resolved() for s in recording.steps)
+    with pytest.raises(ValueError, match="in their host order"):
+        Staging(gemm.C, norm.x)
 
 
 def _bounded(tile=4096):
@@ -345,7 +367,9 @@ def test_a_bound_moving_whole_rounds_alike_is_staged():
     recording = _bounded().record(x=(BOUNDED_SIZE,), up=(BOUNDED_SIZE,))
     silu, mul = (s.op.resolved() for s in recording.steps)
     plan = Staging(silu.y, mul.a)
-    assert plan.joins == [([2 * k, 2 * k + 1], [2048, 2048]) for k in range(4)]
+    assert plan.groups == [
+        ([2 * k, 2 * k + 1], [2048, 2048], [k], [4096]) for k in range(4)
+    ]
     assert candidates(recording) == (_staged(Edge(0, "y", 1, "a")),)
 
 
