@@ -42,7 +42,7 @@ def _kernel(op, n: int):
     options = dict(input_dtype=op.input_dtype, soft_cap=op.soft_cap)
     if op.window is not None:
         return activation.softmax(n, window=op.window, period=op.period, **options)
-    return activation.softmax(n, addend=op.has_addend, stats=op.has_stats, **options)
+    return activation.softmax(n, addend=op.has_addend, **options)
 
 
 def _draw(op) -> dict:
@@ -113,31 +113,6 @@ class Softmax(Operator):
                 lower=True,
             ),
             _banded_case,
-            # ... and each row's (m, l) for a split-KV merge: decode's 32
-            # heads over a part of 2048 keys, and with an addend.
-            Case(
-                dict(
-                    rows=32,
-                    cols=2048,
-                    num_aie_columns=2,
-                    num_channels=2,
-                    input_dtype=np.float32,
-                    has_stats=True,
-                ),
-                id="f32_stats",
-            ),
-            Case(
-                dict(
-                    rows=16,
-                    cols=128,
-                    num_aie_columns=2,
-                    num_channels=2,
-                    input_dtype=np.float32,
-                    has_addend=True,
-                    has_stats=True,
-                ),
-                id="f32_stats_addend",
-            ),
         ],
         draw=_draw,
     )
@@ -163,9 +138,6 @@ class Softmax(Operator):
     # input DMA channels, and x and addend already take both.
     window: int | None = param(default=None, array=True)
     period: int | None = param(default=None, array=True)
-    # Uncapped float input only: each row's (m, l) beside y, what a split-KV
-    # merge weighs the row's part by (mlir-aie's attention_merge).
-    has_stats: bool = param(default=False)
 
     # cols, or fewer per call
     length = per_call(bounds=cols)
@@ -187,14 +159,6 @@ class Softmax(Operator):
         when=has_addend,
     )
     y = Out(rows, cols, obj_shape=(block,), per=(num_aie_columns, num_channels))
-    stats = Out(
-        rows,
-        2,
-        dtype=np.float32,
-        obj_shape=(2,),
-        per=(num_aie_columns, num_channels),
-        when=has_stats,
-    )
     valid_cols = per_call(derive=lambda op: op.length)
     # A row held whole is one block, which the bound does not change.
     blocks = per_call(
@@ -215,15 +179,6 @@ class Softmax(Operator):
             raise ValueError(
                 "Softmax: soft_cap, addend, window and period are options "
                 "of the float32 input path; pass input_dtype=np.float32"
-            )
-        if self.has_stats and (
-            np.dtype(self.input_dtype) != np.dtype(np.float32)
-            or self.soft_cap is not None
-            or self.window is not None
-        ):
-            raise ValueError(
-                "Softmax: stats are the uncapped, unbanded float32 path's: a "
-                "capped row's maximum is in log2 units"
             )
         if (self.window is None) != (self.period is None):
             raise ValueError("Softmax: window and period are given together")
@@ -422,34 +377,26 @@ class Softmax(Operator):
         x_ins = self.x.fifos(self.x.depth)
         y_outs = self.y.fifos(self.y.depth)
         addend_ins = self.addend.fifos(self.addend.depth) if self.has_addend else None
-        stats_outs = self.stats.fifos(self.stats.depth) if self.has_stats else None
 
         def whole(of_in, of_out, softmax, *rest):
             of_addend = rest[0] if self.has_addend else None
-            of_stats = rest[-1] if self.has_stats else None
             for _ in range_(rows_per_core):
                 elem_in = of_in.acquire(1)
                 args = [elem_in]
                 if of_addend is not None:
                     args.append(of_addend.acquire(1))
                 elem_out = of_out.acquire(1)
-                outs = [elem_out]
-                if of_stats is not None:
-                    outs.append(of_stats.acquire(1))
-                softmax(*args, *outs, block)
+                softmax(*args, elem_out, block)
                 of_in.release(1)
                 if of_addend is not None:
                     of_addend.release(1)
                 of_out.release(1)
-                if of_stats is not None:
-                    of_stats.release(1)
 
         workers = [
             Worker(
                 whole,
                 [x_ins[k], y_outs[k], softmax_k]
-                + ([addend_ins[k]] if addend_ins else [])
-                + ([stats_outs[k]] if stats_outs else []),
+                + ([addend_ins[k]] if addend_ins else []),
             )
             for k in range(n_cores)
         ]
@@ -549,35 +496,16 @@ class Softmax(Operator):
                 length_parameter=blocks_valid,
                 length_unit=rows * self.block,
             )
-        if self.has_stats:
-            pairs = TensorAccessPattern.full((self.rows, 2))
-            for k in range(lanes):
-                self.stats.drain(
-                    pairs[k * rows : (k + 1) * rows, :].repeat(1),
-                    lane=k,
-                    group=tg,
-                    wait=True,
-                )
         rt.finish(tg)
 
     def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
-        """``x``'s rows are read thrice (streamed) or once, over blocks a bound may shorten.
-
-        ``addend`` and ``y`` read or write that span once; ``stats`` each
-        lane's rows' two floats.
-        """
-        lanes = self.cores
-        rows = self.rows // lanes
-        if self.has_stats and operand is self.stats:
-            pairs = TensorAccessPattern.full((self.rows, 2))
-            return [
-                (k, pairs[k * rows : (k + 1) * rows, :].repeat(1), None, None)
-                for k in range(lanes)
-            ]
+        """``x``'s rows are read thrice (streamed) or once, over blocks a bound may shorten; ``addend`` and ``y`` read or write that span once."""
         if operand not in (self.x, self.y) and not (
             self.has_addend and operand is self.addend
         ):
             return None
+        lanes = self.cores
+        rows = self.rows // lanes
         blocks = ceildiv(self.length, self.block)
         blocks_valid = self.blocks if self.streamed and self.blocks.per_call else None
         full = TensorAccessPattern.full((self.rows, self.cols))
@@ -627,10 +555,8 @@ class Softmax(Operator):
             y = activation.softmax_ref(
                 x, addend, None, tile_size=n, soft_cap=self.soft_cap
             )
-        if n != self.cols:
-            out = np.zeros((*np.shape(y)[:-1], self.cols), np.asarray(y).dtype)
-            out[..., :n] = y
-            y = out
-        if self.has_stats:
-            return y, activation.softmax_stats_ref(x, addend, None, tile_size=n)
-        return y
+        if n == self.cols:
+            return y
+        out = np.zeros((*np.shape(y)[:-1], self.cols), np.asarray(y).dtype)
+        out[..., :n] = y
+        return out
