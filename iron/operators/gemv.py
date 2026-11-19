@@ -80,10 +80,10 @@ def _cases(cls, dev: Device):
     widest = dev.cols
 
     # A case of 8 columns takes all of a narrower device.
-    def case(M, K, cols, tsi, tso, *, bench=False, lower=False, **extra):
+    def case(M, K, cols, tsi, tso, *, bench=False, lower=False, id=None, **extra):
         kwargs = dict(M=M, K=K, num_aie_columns=min(cols, widest), tile_size_input=tsi)
         kwargs.update(tile_size_output=tso, **extra)
-        return Case(kwargs, bench=bench, lower=lower)
+        return Case(kwargs, bench=bench, lower=lower, id=id)
 
     def bench(M, K, cols, *_):
         return min(cols, widest) == widest and M * K >= 2048 * 8192
@@ -102,6 +102,21 @@ def _cases(cls, dev: Device):
         ]
         # ... and B a real stream of its own, broadcast to every lane.
         + [case(2048, 2048, 8, 4, 256, feed_b=True)]
+        # ... and C the float32 sums: Llama decode's scores, into Softmax.
+        + [
+            case(128, 128, 1, 32, 128, output_dtype=np.float32, id="f32_out"),
+            case(
+                2048,
+                64,
+                8,
+                4,
+                256,
+                num_batches=32,
+                repeat=4,
+                output_dtype=np.float32,
+                id="f32_out-decode_scores",
+            ),
+        ]
         # ... and A as coded rows: Llama 3.2 1B's decode shapes, B in A's
         # head tile, in two where one coded row is shorter than B (2048x8192
         # at one row a tile), and on its own stream.
@@ -129,6 +144,8 @@ class GEMV(Finishing):
 
     M: int = param()
     K: int = param()
+    # float32: C is the kernel's float32 sums, unrounded.
+    output_dtype: Any = param(default=bfloat16, repr=False)
     # None: a single batch, with no batch dimension.
     num_batches: int | None = param(default=None)
     # Batches per matrix of A (grouped-query scores): no repeated copy.
@@ -185,6 +202,7 @@ class GEMV(Finishing):
     C = Out(
         num_batches,
         M,
+        dtype=output_dtype,
         obj_shape=(tile_size_output,),
         per=(num_aie_columns, num_channels),
         depth=2,
@@ -219,6 +237,20 @@ class GEMV(Finishing):
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
     def validate(self):
+        if np.dtype(self.output_dtype) not in (
+            np.dtype(bfloat16),
+            np.dtype(np.float32),
+        ):
+            raise ValueError(
+                f"GEMV: output_dtype must be bfloat16 or float32, got "
+                f"{np.dtype(self.output_dtype)}"
+            )
+        f32 = np.dtype(self.output_dtype) == np.dtype(np.float32)
+        if f32 and (self.coded_a or self.finish):
+            raise ValueError(
+                "GEMV: a float32 C is the plain kernel's, with no coded A and "
+                "no finish step (both run on bf16 tiles)"
+            )
         if self.repeat < 1 or (self.num_batches or 1) % self.repeat:
             raise ValueError(
                 f"GEMV: repeat ({self.repeat}) must divide num_batches "
@@ -336,7 +368,8 @@ class GEMV(Finishing):
         if dev is None:
             return new.replace(a_depth=self.a_depth or new.A.depth)
         item = np.dtype(bfloat16).itemsize
-        line, out = self.K * item, new.tile_size_output * item
+        line = self.K * item
+        out = new.tile_size_output * np.dtype(self.output_dtype).itemsize
         tile_bytes = (
             new.tile_size_input * new.A.shape[-1] * np.dtype(new.A.dtype).itemsize
         )
@@ -379,8 +412,11 @@ class GEMV(Finishing):
             step.consumer_at(self.tile_size_output, self.dev).layout().kernel()
 
     def fold(self, consumer, at: int):
-        # repeat computes its batches out of order, which a finish input does not follow.
-        return None if self.repeat > 1 else super().fold(consumer, at)
+        # repeat computes its batches out of order, which a finish input does
+        # not follow; finish steps run on bf16 tiles.
+        if self.repeat > 1 or np.dtype(self.output_dtype) == np.dtype(np.float32):
+            return None
+        return super().fold(consumer, at)
 
     def _can_ride(self) -> bool:
         """Whether A's own tile could carry a finish's other input instead of a stream of its own.
@@ -429,7 +465,7 @@ class GEMV(Finishing):
             tile_size_input,
             K,
             bfloat16,
-            bfloat16,
+            self.output_dtype,
             vectorized=True,
             vec_size=self.kernel_vector_size,
             output_rows=tile_size_output,
@@ -699,15 +735,36 @@ class GEMV(Finishing):
     def _matvec_reference(self, A, B):
         if self.repeat > 1:
             A = np.repeat(A.reshape(-1, *A.shape[-2:]), self.repeat, axis=0)
-        # float32: numpy's bf16 matmul accumulates in bf16, the kernel in f32.
-        a, b = A.astype(np.float32), B.astype(np.float32)
+        # numpy's bf16 matmul accumulates in bf16, the kernel in float32; a
+        # float32 C's reference sums in float64, so only its rounding is ours.
+        f32 = np.dtype(self.output_dtype) == np.dtype(np.float32)
+        acc = np.float64 if f32 else np.float32
+        a, b = A.astype(acc), B.astype(acc)
         if A.ndim == 3:
             b = b.reshape(A.shape[0], A.shape[2], 1)
-            return np.matmul(a, b).reshape(A.shape[0], A.shape[1]).astype(A.dtype)
-        return (a @ b.reshape(A.shape[-1])).astype(A.dtype)
+            c = np.matmul(a, b).reshape(A.shape[0], A.shape[1])
+        else:
+            c = a @ b.reshape(A.shape[-1])
+        return c.astype(self.output_dtype)
 
     def tolerance(self) -> Tolerance:
-        """C accumulates in f32 and rounds once; tighter than linalg.mv's contract, then each finish step's own."""
+        """C accumulates in f32 and rounds once; tighter than linalg.mv's contract, then each finish step's own.
+
+        A float32 C holds linalg.mv's float32 contract, plus the reference's
+        own rounding to float32.
+        """
+        if np.dtype(self.output_dtype) == np.dtype(np.float32):
+
+            def bound(A, B):
+                magnitude = self._matvec_reference(np.abs(A), np.abs(B))
+                return linalg.mv_f32_bound(
+                    magnitude, dim_k=self.K, vec_size=self._legal_kernel_vector_size()
+                ) + 2.0**-24 * np.asarray(magnitude, np.float64)
+
+            return Tolerance.bounded(
+                bound,
+                note=linalg.MV_F32_NOTE + "; plus the reference's float32 rounding",
+            )
         own = Tolerance.relative(0.04, 1e-3, note="f32 accumulation, rounded once")
         if not self.finish:
             return own

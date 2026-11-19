@@ -45,13 +45,11 @@ def _decode_region(
 ) -> Region:
     return Region(
         parts=(
-            Member(GEMV, dict(M=kv_len, K=head_dim)),
-            Member(Softmax, dict(rows=rows, cols=kv_len)),
+            Member(GEMV, dict(M=kv_len, K=head_dim, output_dtype=np.float32)),
+            Member(Softmax, dict(rows=rows, cols=kv_len, input_dtype=np.float32)),
             Member(GEMV, dict(M=head_dim, K=kv_len)),
         ),
         edges=(
-            # GEMV's C has no dtype parameter (always bf16): decode's scores
-            # cannot be named float32, a gap this graph reports rather than works around.
             CompositionEdge(0, "C", 1, "x"),
             CompositionEdge(1, "y", 2, "B"),
         ),
@@ -276,7 +274,7 @@ def test_prefill_graph_is_no_worse_than_its_own_untuned_build(npu2):
 @pytest.mark.supported_devices("npu2")
 @unbuilt
 def test_decode_graph_is_no_worse_than_the_fused_mha_it_replaces(npu2):
-    """Held to the fused ``MHA`` operator it replaces, at the same sizes, the graph's bf16 pipeline is no worse."""
+    """Held to the fused ``MHA`` operator it replaces, at the same sizes, the graph's float32 scores are no worse."""
     qk, softmax, pv = toys.decode_attention_ops(KV_LEN, HEAD_DIM, ROWS)
     graph_recording = toys.decode_attention_recording("decode_vs_mha", qk, softmax, pv)
     mha = toys.decode_attention_operator(KV_LEN, HEAD_DIM, ROWS)

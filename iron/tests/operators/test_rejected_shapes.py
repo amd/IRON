@@ -778,3 +778,30 @@ def test_a_coded_gemv_refuses_what_its_rows_cannot_carry(shape, match):
     """Coded rows are whole 64-weight units, of a weight A read once."""
     with pytest.raises(ValueError, match=match):
         GEMV(**shape, coded_a=True).resolved()
+
+
+@pytest.mark.parametrize(
+    "extra, match",
+    [
+        (dict(output_dtype=np.float16), "bfloat16 or float32"),
+        (dict(output_dtype=np.float32, coded_a=True), "no coded A"),
+    ],
+    ids=["dtype", "coded"],
+)
+def test_a_gemv_refuses_a_c_its_kernel_does_not_write(extra, match):
+    with pytest.raises(ValueError, match=match):
+        GEMV(M=256, K=128, **extra).resolved()
+
+
+def test_a_float32_gemv_folds_no_finish_step(npu2):
+    """Finish steps run on bf16 tiles, so a float32 C takes none."""
+    gemv = GEMV(
+        M=2048,
+        K=2048,
+        tile_size_input=4,
+        tile_size_output=512,
+        num_aie_columns=4,
+        num_channels=1,
+        output_dtype=np.float32,
+    )
+    assert gemv.fold(ElementwiseAdd(size=2048, tile_size=512), 1) is None

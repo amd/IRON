@@ -57,7 +57,7 @@ def has_worker_group(
 def decode_attention_ops(
     kv_len: int = 128, head_dim: int = 64, rows: int = 32
 ) -> tuple[GEMV, Softmax, GEMV]:
-    """Return decode MHA's graph, small: ``K . q -> Softmax -> V^T . p``.
+    """Return decode MHA's graph, small: ``K . q -> Softmax -> V^T . p``, its scores float32 into the softmax.
 
     ``rows`` packs several query rows (as decode packs a KV group's heads) so ``Softmax``
     meets its row count's multiple-of-16 rule at a size small enough to toy with: each
@@ -70,8 +70,9 @@ def decode_attention_ops(
         repeat=rows,
         tile_size_input=4,
         tile_size_output=32,
+        output_dtype=np.float32,
     )
-    softmax = Softmax(rows=rows, cols=kv_len)
+    softmax = Softmax(rows=rows, cols=kv_len, input_dtype=np.float32)
     pv = GEMV(
         M=head_dim,
         K=kv_len,
