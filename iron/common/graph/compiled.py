@@ -803,9 +803,12 @@ def apply_profile(
 ) -> tuple[Recording, tuple[Fusion, ...], Packing]:
     """Return ``recording`` as ``profile`` compiles it on ``dev``.
 
-    Its folds applied, its composition entries' tunables and regions
-    (``composed``), its fusions and their steps' tunables, and its packings.
-    A fusion entry's fusion overlapping a composed region gives way to it.
+    Its folds applied, its tunable entries' settings (``Profile.tunables_for``,
+    each one its step's caller did not pin and that moves it), its
+    composition entries' tunables and regions (``composed``), which win over
+    a tunable entry's, its fusions and their steps' tunables, and its
+    packings. A fusion entry's fusion overlapping a composed region gives
+    way to it.
     """
     folds = chosen_folds(recording, profile)
     folded = {s for f in folds for s in f.steps}
@@ -814,8 +817,26 @@ def apply_profile(
     )
     if folds:
         recording = apply_folds(recording, folds)
+    entries: dict[int, dict[str, Any]] = {}
+    for i, step in enumerate(recording.steps):
+        op = step.op
+        given = {n: vars(op)[n] for n in op.given}
+        moved = {
+            n: v
+            for n, v in profile.tunables_for(type(op), given).items()
+            if n not in op.pinned and vars(op)[n] != v
+        }
+        if moved:
+            entries[i] = moved
     tunables, regions = composed(recording, profile)
-    recording = rebuild(recording, tunables, dev)
+    recording = rebuild(
+        recording,
+        {
+            i: {**entries.get(i, {}), **tunables.get(i, {})}
+            for i in entries.keys() | tunables.keys()
+        },
+        dev,
+    )
     taken = {s for f in regions for s in f.steps}
     fused = regions + tuple(
         f for f in graph_fusions(recording, profile) if not taken & set(f.steps)
