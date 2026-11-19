@@ -918,8 +918,17 @@ class Derivation:
             )
             if source.elements != sink.elements or source.dtype != sink.dtype:
                 raise ValueError(
-                    f"{edge}: {source.name}'s {source.elements} elements and "
-                    f"{sink.name}'s {sink.elements} are not one buffer"
+                    f"{edge}: {source.name}'s {source.elements} elements of "
+                    f"{np.dtype(source.dtype).name} and {sink.name}'s "
+                    f"{sink.elements} of {np.dtype(sink.dtype).name} are not one "
+                    f"buffer"
+                )
+            unstreamed = [b.name for b in (source, sink) if not b.streamed]
+            if unstreamed:
+                raise NotImplementedError(
+                    f"{edge}: {unstreamed[0]} streams on no fifo of its own (it "
+                    f"rides another's or is held whole); an edge with it is not "
+                    f"modelled yet"
                 )
             if (
                 sizes[1] is not None

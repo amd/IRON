@@ -24,7 +24,7 @@ from iron.common.graph.sdf import analyze
 from iron.common.image.step import EdgeKind
 from iron.operators import GEMM, GEMV, ElementwiseAdd, ElementwiseMul, Softmax
 from iron.tests.support import toys_composition as toys
-from iron.tests.support.tuning import unbuilt
+from iron.tests.support.tuning import unbuilt, waits_on_a_kernel
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, measure, search
 
@@ -241,9 +241,13 @@ def test_decode_graph_is_no_worse_than_its_own_untuned_build(rows, kv_len, npu2)
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
-    "position", [1023, 32703], ids=["position_1023", "position_32703"]
+    "position",
+    [
+        pytest.param(1023, id="position_1023", marks=unbuilt),
+        # A whole 32704-key row fits no core: a split-KV merge kernel.
+        pytest.param(32703, id="position_32703", marks=waits_on_a_kernel),
+    ],
 )
-@unbuilt
 def test_decode_graph_holds_deep_cache_accuracy(position, npu2):
     """Ports the deep-cache positions of ``iron/tests/operators/test_mha_long_context.py``: ``kv_len`` is the cache read up to ``position``."""
     kv_len = position + 1
@@ -291,7 +295,7 @@ def test_decode_graph_is_no_worse_than_the_fused_mha_it_replaces(npu2):
 
 
 @pytest.mark.supported_devices("npu2")
-@unbuilt
+@waits_on_a_kernel  # float32 scores into the mask: no elementwise kernel reads float32
 def test_prefill_graph_is_no_worse_than_the_fused_mha_it_replaces(npu2):
     """Held to the fused ``MHA`` operator it replaces, scores matched to its own float32 setting, the graph is no worse."""
     qk = GEMM(

@@ -57,11 +57,26 @@ def decode_attention_ops(
     """Return decode MHA's graph, small: ``K . q -> Softmax -> V^T . p``.
 
     ``rows`` packs several query rows (as decode packs a KV group's heads) so ``Softmax``
-    meets its row count's multiple-of-16 rule at a size small enough to toy with.
+    meets its row count's multiple-of-16 rule at a size small enough to toy with: each
+    GEMV a batch a row, its one matrix shared (``repeat``).
     """
-    qk = GEMV(M=kv_len, K=head_dim, tile_size_input=4, tile_size_output=32)
+    qk = GEMV(
+        M=kv_len,
+        K=head_dim,
+        num_batches=rows,
+        repeat=rows,
+        tile_size_input=4,
+        tile_size_output=32,
+    )
     softmax = Softmax(rows=rows, cols=kv_len)
-    pv = GEMV(M=head_dim, K=kv_len, tile_size_input=4, tile_size_output=32)
+    pv = GEMV(
+        M=head_dim,
+        K=kv_len,
+        num_batches=rows,
+        repeat=rows,
+        tile_size_input=4,
+        tile_size_output=32,
+    )
     return qk, softmax, pv
 
 
