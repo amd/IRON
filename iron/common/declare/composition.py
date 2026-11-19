@@ -310,7 +310,11 @@ def refinement(cls: type, tunable: str) -> Refinement:
     ``EXACT`` unless the tunable is declared ``tunable(exact=False)``.
 
     Raises:
-        NotImplementedError: Not built yet: the pinned mlir-aie's ``tunable()``
-            takes no ``exact=``.
+        ValueError: ``tunable`` is not one of ``cls``'s tunables.
     """
-    raise NotImplementedError("tunable(exact=) is not in the pinned mlir-aie yet")
+    declaration = cls.declaration
+    if tunable not in declaration.tunables:
+        raise ValueError(f"{cls.__name__} has no tunable {tunable!r}")
+    return (
+        Refinement.EXACT if declaration.params[tunable].exact else Refinement.NO_WORSE
+    )

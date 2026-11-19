@@ -104,6 +104,13 @@ def test_a_small_m_may_resolve_to_gemv_or_gemm():
     assert {GEMV, GEMM} <= implementations
 
 
+def test_a_tunable_is_exact_unless_declared_otherwise():
+    """``refinement`` reads ``tunable(exact=)``: GEMV's ``tile_size_output``, the default, is ``EXACT``; a non-tunable is refused."""
+    assert refinement(GEMV, "tile_size_output") is Refinement.EXACT
+    with pytest.raises(ValueError, match="no tunable"):
+        refinement(GEMV, "M")
+
+
 def test_a_resolve_derived_tunable_is_never_a_width():
     """``a_depth``, filled by ``resolve()``, is never among a ``GEMV``'s width tunables."""
     op = GEMV(M=128, K=128).resolved(NPU2_DEVICE)
