@@ -673,13 +673,12 @@ def fit(
                 or region.phases is not None
                 or region.runtime is not None
                 or not all(isinstance(part, Member) for part in region.parts)
-                or any(e.depth is not None for e in region.edges)
                 or not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED}
             ):
                 unplaceable.append(
                     "placing a region the composer does not build yet (inflows, "
-                    "shared workers, chosen phases or depths, a runtime plan, "
-                    "nesting, or edges of DDR or the cascade)"
+                    "shared workers, chosen phases, a runtime plan, nesting, or "
+                    "edges of DDR or the cascade)"
                 )
             if "sequential" not in placements:
                 unplaceable.append(
@@ -713,6 +712,11 @@ def fit(
                         for e in region.edges
                     ],
                     kept=kept,
+                    depths={
+                        (e.producer, e.output): e.depth
+                        for e in region.edges
+                        if e.depth is not None
+                    },
                 )
             if refused is not None and set(placements) != {"sequential"}:
                 waiting.append(

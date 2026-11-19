@@ -17,7 +17,6 @@ pytestmark = pytest.mark.usefixtures("npu2")
 _REPEATS = 3
 
 
-@unbuilt
 @pytest.mark.parametrize("depth", [1, 2, 4])
 def test_chain_is_bit_identical_at_every_legal_depth(depth):
     """``add -> SiLU -> mul`` at every depth from the minimum to well past the knee: every repeated ``check`` passes, not only at one depth."""
@@ -33,7 +32,6 @@ def test_chain_is_bit_identical_at_every_legal_depth(depth):
         assert result.ok, result.why
 
 
-@unbuilt
 def test_skip_diamond_is_bit_identical_under_its_one_legal_firing_order():
     """The residual-add skip/broadcast window, checked repeatedly at its one legal order.
 

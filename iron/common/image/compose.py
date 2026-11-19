@@ -208,7 +208,16 @@ def fused_configuration(
             (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
             fed[e.input] = source
         arrays[j] = BuiltArray(
-            design, words, own, fed=fed, staged=fusion.kind is FusionKind.STAGED
+            design,
+            words,
+            own,
+            fed=fed,
+            staged=fusion.kind is FusionKind.STAGED,
+            depths={
+                e.output: e.depth
+                for e in fusion.edges
+                if e.producer == j and e.depth is not None
+            },
         )
         for producer, output in fusion.kept:
             if producer == j:

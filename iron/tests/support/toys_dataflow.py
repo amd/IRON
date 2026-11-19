@@ -12,7 +12,7 @@ import iron
 from iron import Precision, Scratchpad
 from iron.common.declare.composition import Region
 from iron.common.graph.record import Recording
-from iron.common.image.step import Edge, EdgeKind
+from iron.common.image.step import Edge
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemm import GEMM
@@ -55,7 +55,7 @@ def add_silu_mul_region(add, silu, mul, **edge_kwargs: object) -> Region:
     return Region(parts=members, edges=edges)
 
 
-def broadcast_skip(add_cols: int = 2, norm_cols: int = 1, depth: int | None = None):
+def broadcast_skip(add_cols: int = 2, norm_cols: int = 2, depth: int | None = None):
     """Return a residual ``add`` broadcast to a norm and a skip-held second ``add``.
 
     ``first``'s output feeds both ``norm`` and ``second`` directly, so the
@@ -73,8 +73,9 @@ def broadcast_skip(add_cols: int = 2, norm_cols: int = 1, depth: int | None = No
         member(second),
     )
     skip = Edge(0, "y", 2, "b", depth=depth)
-    # The add's two lanes join into the norm's one through a memtile.
-    edges = (Edge(0, "y", 1, "x", kind=EdgeKind.STAGED), skip)
+    # Every step at the same columns: each edge's lanes meet as they are. The
+    # skip stays edges[1].
+    edges = (Edge(0, "y", 1, "x"), skip, Edge(1, "y", 2, "a"))
     region = Region(parts=members, edges=edges)
     return region, first, norm, second
 

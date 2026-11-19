@@ -240,7 +240,7 @@ class FusedDesign:
                 self.fusion.kind.value,
                 tuple(d.identity for d in self.designs),
                 tuple(
-                    (e.producer, e.output, e.consumer, e.input)
+                    (e.producer, e.output, e.consumer, e.input, e.depth)
                     for e in self.fusion.edges
                 ),
                 self.fusion.kept,

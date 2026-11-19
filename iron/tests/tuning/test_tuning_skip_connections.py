@@ -80,8 +80,14 @@ def test_a_reconvergent_diamond_round_trips():
     )
 
 
-@unbuilt
-@pytest.mark.parametrize("held", HELDS)
+@pytest.mark.parametrize(
+    "held",
+    [
+        # One worker past IRON's folds, a DDR edge and chosen phases wait.
+        h if h == "memtile" else pytest.param(h, marks=unbuilt)
+        for h in HELDS
+    ],
+)
 @pytest.mark.supported_devices("npu2")
 def test_a_residual_skip_is_bit_identical_for_every_way_of_holding_it(held):
     """The residual window, held each way, is bit-identical to the same steps run apart."""

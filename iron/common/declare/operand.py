@@ -47,6 +47,8 @@ class Operand:
     A fed input reads ``fed_from``'s lanes, or ``staged`` fifos where ``Staging``
     restaged them; an output lists every input it ``feeds``, and one that
     ``keeps_host`` drains to the host too, its inputs reading ends of their own.
+    An output's ``chosen_depth``, where a composition chose one, is its lane
+    fifos' depth whatever its build asks.
     """
 
     def __init__(self, member: Any, op: Operator) -> None:
@@ -57,6 +59,7 @@ class Operand:
         self.staged: list[ObjectFifo] | None = None
         self.feeds: list[Operand] = []
         self.keeps_host = False
+        self.chosen_depth: int | None = None
         self.read_lanes: set[int] = set()
         self._decl = member.of(op)
 
@@ -218,6 +221,8 @@ class Operand:
                 f"lane, not an output's own"
             )
         depth = self.l1_depth if depth is None else depth
+        if self.drains and self.chosen_depth is not None:
+            depth = self.chosen_depth
         obj_type = self.obj_type if obj_type is None else obj_type
         lane_tiles = [None] * self.lanes if tiles is None else tiles
         if len(lane_tiles) != self.lanes:

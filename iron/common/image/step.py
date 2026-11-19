@@ -217,6 +217,11 @@ class Fusion:
         """
         wiring = ",".join(f"{p}:{o}>{c}:{i}" for p, o, c, i in self.local_edges)
         wiring += "".join(f"+{self.steps.index(p)}:{o}" for p, o in self.kept)
+        wiring += "".join(
+            f"#{self.steps.index(e.producer)}:{e.output}={e.depth}"
+            for e in self.edges
+            if e.depth is not None
+        )
         kind = f"{self.kind.value}/phased" if self.phased else self.kind.value
         digest = hashlib.sha256(
             f"{kind}[{'|'.join(designs)}]({wiring})".encode()

@@ -323,8 +323,8 @@ def composed(
         NotImplementedError: What the composer does not build yet: a
             profile's schedules, variants, bindings or state layouts, or an
             entry rooted at a configuration or a step, with nested regions,
-            inflows, shared workers, chosen phases, a runtime plan, a chosen
-            depth, fission, a self-loop over a carried buffer, edges of DDR
+            inflows, shared workers, chosen phases, a runtime plan,
+            fission, a self-loop over a carried buffer, edges of DDR
             or the cascade, matching steps that are not consecutive, steps with no
             edge that depend through memory, or an edge the composer does not
             build as its kind (``admits``). An edge out of a buffer steps past
@@ -356,7 +356,6 @@ def composed(
             or root.workers
             or root.phases is not None
             or root.runtime is not None
-            or any(e.depth is not None for e in root.edges)
             or any(m.part is not None for m in root.steps())
             or any(e.producer == e.consumer for e in root.edges)
             or not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED}
@@ -364,8 +363,7 @@ def composed(
             raise NotImplementedError(
                 f"building {entry} is not built yet: the composer builds a "
                 f"region of steps whose edges are stream or staged, "
-                f"with no chosen depth, phase, worker, inflow, runtime plan or "
-                f"self-loop"
+                f"with no chosen phase, worker, inflow, runtime plan or self-loop"
             )
         for match in recording.occurrences(entry):
             if taken & set(match):
@@ -427,7 +425,11 @@ def composed(
                         match,
                         tuple(
                             Edge(
-                                match[e.producer], e.output, match[e.consumer], e.input
+                                match[e.producer],
+                                e.output,
+                                match[e.consumer],
+                                e.input,
+                                depth=e.depth,
                             )
                             for e in root.edges
                         ),

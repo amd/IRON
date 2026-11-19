@@ -20,7 +20,6 @@ from iron.tune.search import fit
 pytestmark = pytest.mark.usefixtures("npu2")
 
 
-@unbuilt
 def test_a_deep_buffer_within_the_memtile_budget_is_counted_and_fits():
     """A staged edge held a few objects deep, well inside the memtile banks the target model reports: ``fit`` counts it and does not refuse it."""
     gemv = GEMV(M=256, K=256, tile_size_input=4, tile_size_output=256)
@@ -81,7 +80,6 @@ def test_more_buffer_descriptors_than_a_tile_holds_is_refused_before_any_build()
     assert result.stage == "counts"
 
 
-@unbuilt
 def test_resource_limits_come_from_the_target_model_not_a_constant():
     """The budget ``fit`` holds a design to is the target model's own.
 

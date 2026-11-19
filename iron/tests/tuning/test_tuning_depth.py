@@ -105,7 +105,6 @@ def test_skip_diamond_minimum_depth_is_between_two_and_four():
     assert 2 < analysis.min_depth[skip_edge] <= 4
 
 
-@unbuilt
 def test_skip_diamond_minimum_depth_runs_bit_identical():
     """The residual-add skip/broadcast window, held at four objects (the known-good depth): ``check`` holds it bit-identical to the steps run apart."""
     region, first, norm, second = toys.broadcast_skip(depth=4)
