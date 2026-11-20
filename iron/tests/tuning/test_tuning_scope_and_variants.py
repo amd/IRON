@@ -5,6 +5,7 @@
 
 import pytest
 
+import iron
 from iron.common.declare import Profile
 from iron.common.declare.composition import (
     Binding,
@@ -23,7 +24,7 @@ from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
-from iron.tests.support.toys_settings import RangedPair
+from iron.tests.support.toys_settings import RangedPair, small_integer_weight
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, measure, search
@@ -31,11 +32,20 @@ from iron.tune.search import candidates, check, fit, measure, search
 pytestmark = pytest.mark.usefixtures("device")
 
 
-def _gemv_toys(device):
-    """Return the same GEMV shape's two recordings: a decode-sized occurrence and a prompt-chunk-sized one."""
-    decode = GEMV(M=2048, K=2048).resolved(device)
-    chunk = GEMV(M=2048, K=2048, num_batches=8).resolved(device)
-    return Recording.of_step(decode), Recording.of_step(chunk)
+def _gemv_decode(device):
+    """Return a decode-sized GEMV's recording."""
+    return Recording.of_step(GEMV(M=2048, K=2048).resolved(device))
+
+
+class _Projection(iron.Graph):
+    """One held weight's GEMV over a decode step's vector, or each row of a prompt chunk."""
+
+    def __init__(self, M: int, K: int):
+        self.w = iron.param(small_integer_weight((M, K), 0))
+
+    def body(self, x):
+        rows = x.shape[0] if len(x.shape) == 2 else None
+        return GEMV.step(self.w, x, num_batches=rows, repeat=rows or 1)
 
 
 @unbuilt
@@ -43,7 +53,7 @@ def test_scope_entries_round_trip_by_version_occurrence_and_device_part(
     tmp_path, device
 ):
     """A ``Scope`` (versions, occurrences, device part) round-trips through the profile, and ``candidates`` proposes each."""
-    decode_rec, _ = _gemv_toys(device)
+    decode_rec = _gemv_decode(device)
     member = Member(cls=GEMV, dims={"M": 2048, "K": 2048})
     by_version = Entry(
         root=member, scope=Scope(versions=frozenset({decode_rec.version}))
@@ -105,7 +115,6 @@ def test_a_binding_names_how_a_per_call_value_reaches_the_design(tmp_path, devic
     )
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_a_variant_is_bit_identical_to_the_untuned_build_on_both_sides_of_its_boundary(
     device,
@@ -113,8 +122,9 @@ def test_a_variant_is_bit_identical_to_the_untuned_build_on_both_sides_of_its_bo
     """A variant is bit-identical to the single bounded baseline at each side of its boundary.
 
     A call's ``values`` carries ``rows`` at one specific number: one call at 256 (the
-    small variant's own range) and one at 257 (the large variant's), both held to the
-    one baseline design bounded at the full 2048.
+    small variant's own range, the graph re-recorded at 256 rows of ``x``) and one at
+    257 (the large variant's), both held to the one baseline design bounded at the full
+    2048. ``valid``, which no variant is over, is at its full 256 in both.
     """
     g = RangedPair(K=256, N=256)
     recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
@@ -127,22 +137,25 @@ def test_a_variant_is_bit_identical_to_the_untuned_build_on_both_sides_of_its_bo
     )
     tuned = Profile()
     tuned.add_variants(variants)
-    at_small = Timed(recording, values={"rows": 256})
-    at_large = Timed(recording, values={"rows": 257})
+    at_small = Timed(recording, values={"rows": 256, "valid": 256})
+    at_large = Timed(recording, values={"rows": 257, "valid": 256})
     for call in (at_small, at_large):
         result = check(tuned, baseline, [call], device, refinement=Refinement.EXACT)
         assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_a_derived_chunk_size_is_checked_against_its_base(device):
+def test_a_derived_chunk_size_is_checked_against_its_base(device, request):
     """``Schedule.size`` naming a smaller derived chunk is bit-identical against the chunk's own base, run at the full length.
 
     Running fewer rows of a prompt chunk is a shorter call, not a reordered reduction, so
-    this is held to bit identity.
+    this is held to bit identity. The half chunk is the graph re-recorded at four of the
+    chunk's eight rows, run twice over them.
     """
-    _, chunk = _gemv_toys(device)
+    if not device.can_dispatch_full_elf:
+        # fit waits on a derived version on an xclbin per step.
+        request.applymarker(unbuilt)
+    chunk = _Projection(2048, 2048).record(x=(8, 2048))
     base = Profile()
     derived = Profile()
     derived.add_schedule(Schedule(version=chunk.version, size="half_chunk"))
@@ -230,6 +243,24 @@ def test_ranges_that_do_not_tile_the_value_space_are_refused(device):
     assert not result.ok
     assert result.stage == "counts"
     assert "do not tile" in (result.why or "")
+
+
+def test_a_design_not_legal_at_its_ranges_capacity_is_refused(device):
+    """A range's entry naming a step its capacity does not record (512 rows where at most 256 run) is refused before any build."""
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    wrong = Entry(root=Member(cls=GEMM, dims={"M": 512, "K": 256, "N": 256}))
+    large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
+    profile = Profile()
+    profile.add_variants(
+        Variants(
+            values=("rows",), ranges=((((0, 256),), wrong), (((257, 2048),), large))
+        )
+    )
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "counts"
+    assert "not legal" in (result.why or "")
 
 
 def test_more_variants_than_the_hosts_image_budget_is_refused(device):
