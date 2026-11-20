@@ -14,6 +14,7 @@ import pytest
 from aie.utils.compile import NPU_CACHE_HOME
 
 from iron.tune.costmodel import PRIOR, SEEDS, CostModel
+from iron.tune.ddr import Ceiling
 
 
 def test_a_model_without_samples_predicts_by_its_prior():
@@ -43,6 +44,17 @@ def test_a_model_round_trips_through_its_file(tmp_path):
     assert loaded == model
     assert not (SEEDS / "npu3.json").exists()
     assert CostModel.load("npu3", tmp_path) is None
+
+
+def test_a_models_ddr_rates_round_trip_by_power_mode(tmp_path):
+    ceiling = Ceiling(1800.0, {2: 4.02, 16: 2.99}, {256: 3.1}, {1: 3.9})
+    model = CostModel()
+    model.ddr["turbo"] = ceiling.as_json()
+    model.save("npu2", tmp_path)
+    loaded = CostModel.load("npu2", tmp_path)
+    assert loaded == model
+    assert Ceiling.from_json(loaded.ddr["turbo"]) == ceiling
+    assert "default" not in loaded.ddr
 
 
 def test_a_refit_is_kept_in_the_cache_and_the_packaged_seed_is_untouched(tmp_path):

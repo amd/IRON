@@ -13,6 +13,10 @@ their prior by ``PRIOR_WEIGHT`` samples' worth so a few samples cannot throw
 them far. A tune writes its refit to ``<device>.json`` under the NPU cache
 (``NPU_CACHE_HOME/iron/costs``), so one device's tunes bootstrap the next;
 ``costs/<device>.json`` beside this module seeds a device without one.
+
+Beside the terms, the device's DDR rates per power mode, as ``ddr.py``
+measures them: the bytes a host stream moves a core cycle, against how many
+run at once and an object's size.
 """
 
 from __future__ import annotations
@@ -55,6 +59,8 @@ class CostModel:
     )
     # What the terms are pulled toward: PRIOR, or a device's measured switch.
     prior: dict[str, float] = dataclasses.field(default_factory=lambda: dict(PRIOR))
+    # Per power mode, ddr.py's curves (``Ceiling``'s fields), as measured.
+    ddr: dict[str, dict] = dataclasses.field(default_factory=dict)
 
     @classmethod
     def calibrated(cls, fixed_us: float, per_core_us: float) -> CostModel:
@@ -92,12 +98,18 @@ class CostModel:
             terms=data["terms"],
             samples=[(dict(s["change"]), s["extra_us"]) for s in data["samples"]],
             prior=data["prior"],
+            ddr=data.get("ddr", {}),
         )
 
     def save(self, device: str, directory: Path = REFITS) -> Path:
         """Write ``device``'s model to ``directory``; return its path."""
         path = Path(directory) / f"{device}.json"
         samples = [{"change": c, "extra_us": t} for c, t in self.samples]
-        data = {"terms": self.terms, "prior": self.prior, "samples": samples}
+        data = {
+            "terms": self.terms,
+            "prior": self.prior,
+            "samples": samples,
+            "ddr": self.ddr,
+        }
         write(path, json.dumps(data, indent=1) + "\n")
         return path
