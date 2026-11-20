@@ -15,6 +15,7 @@ import pytest
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Configuration, Entry, Refinement, Region
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import interleaved_kv_write, kv_write_then_read
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
@@ -96,7 +97,14 @@ def test_two_interleaved_writers_round_trip_with_element_disjointness_named(devi
     )
 
 
-@unbuilt
+@pytest.mark.parametrize(
+    "device",
+    [
+        pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
+        for name in sorted(DEVICES)
+    ],
+    indirect=True,
+)
 @pytest.mark.parametrize("position", sorted(POSITIONS))
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_write_then_read_is_bit_identical_to_the_steps_run_apart(position, device):

@@ -44,6 +44,7 @@ _BUILT_COMBOS = {
         ),
         (HandOff.EQUAL, "fan_out", "memtile", "min", "different", "smaller"),
         (HandOff.EQUAL, "skip", "memtile", "min_minus_one", "same", "recorded"),
+        (HandOff.SPLIT, "through_memory", "memtile", "min", "same", "recorded"),
         *(
             (shape, "feedback", "l1", "min_minus_one", "same", "recorded")
             for shape in (HandOff.EQUAL, HandOff.JOIN, HandOff.SLICES, HandOff.SPLIT)

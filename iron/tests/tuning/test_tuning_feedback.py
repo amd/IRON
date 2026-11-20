@@ -213,14 +213,7 @@ def test_a_cycle_without_enough_initial_values_is_refused_before_any_build(devic
     assert "deadlock" in (result.why or "") or "initial" in (result.why or "")
 
 
-@pytest.mark.parametrize(
-    "cycle",
-    [
-        # The scan's lanes staged into the multiply wait on the composer.
-        (pytest.param(c, marks=unbuilt) if c == "scan_running_state" else c)
-        for c in sorted(CARRIED)
-    ],
-)
+@pytest.mark.parametrize("cycle", sorted(CARRIED))
 @pytest.mark.supported_devices("npu2")
 def test_a_carry_held_in_host_memory_is_bit_identical_to_the_calls_run_apart(
     cycle, device
