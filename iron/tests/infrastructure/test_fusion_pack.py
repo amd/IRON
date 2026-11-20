@@ -149,10 +149,13 @@ def test_an_image_refuses_a_dependent_pack(packaging):
         Image(recording, packaging(), fusions=(Fusion(FusionKind.PACK, (0, 1)),))
 
 
-def test_pack_refuses_when_columns_cannot_co_reside():
-    """q/k/v plus a fourth, full-width GEMV (gate_proj) cannot share one device: too many shim DMA channels between four designs the whole chip wide.
+def test_pack_whose_drains_outrun_the_shim_places_with_them_joined():
+    """q/k/v plus a fourth, full-width GEMV (gate_proj) drain more lanes than the shim receives, and fill more than it sends.
 
-    Fit is decided by placing, not refused up front; q/k/v alone co-fit at ``_qkv``'s default widths.
+    The build joins each run of a member's drained lanes in a memtile into
+    one host lane and sends the fills as packet flows (``compose.transports``),
+    and so the four share one device. Fit is decided by placing, not refused
+    up front.
     """
     q, k, v = _qkv()
     gate = LLAMA_NPU2_PROFILE.make(GEMV, M=8192, K=2048, num_aie_columns=8)
@@ -172,7 +175,8 @@ def test_pack_refuses_when_columns_cannot_co_reside():
     text = Composition(image).text()
     with ir.Context(), ir.Location.unknown():
         diagnostic = places(ir.Module.parse(text))
-    assert diagnostic is not None and "ShimNOCTile" in diagnostic
+    assert diagnostic is None
+    assert "aie.objectfifo.link" in text
 
 
 # ---------------------------------------------------------------------------

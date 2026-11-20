@@ -15,7 +15,7 @@ import hashlib
 import itertools
 import logging
 import math
-from collections.abc import Hashable, Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 from aie import ir
@@ -24,14 +24,29 @@ from aie.dialects import memref, vector
 from aie.extras.dialects.arith import constant
 from aie.helpers.npdtypes import np_ndarray_type_get_dtype, np_ndarray_type_get_shape
 from aie.helpers.util import np_dtype_to_mlir_type, np_ndarray_type_to_memref_type
-from aie.iron import CascadeFlow, DeviceConfiguration, Program, Runtime, Worker
+from aie.iron import (
+    CascadeFlow,
+    DeviceConfiguration,
+    ObjectFifo,
+    Program,
+    Runtime,
+    Worker,
+)
 from aie.iron.controlflow import range_
 from aie.iron.dataflow.objectfifo import ObjectFifoHandle
 from aie.passmanager import PassManager
 from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
-from ..design import BuiltArray, OperatorDesign, configuration, identities
+from ..declare.operand import Operand
+from ..design import (
+    BuiltArray,
+    OperatorDesign,
+    SplicedArray,
+    configuration,
+    identities,
+)
+from ..elementwise import Elementwise, FinishStep, Rowwise
 from .step import BufferRef, Edge, EdgeKind, Fusion, FusionKind
 
 logger = logging.getLogger(__name__)
@@ -52,9 +67,9 @@ SEQUENTIAL, ANNEALED = "sequential_placer", "sa_placer"
 # The sequential placer's diagnostic where no shim tile has a channel left.
 SHIM_SHORT = "DMA channel(s) free"
 
-# Each packed group's placer and the diagnostic where none routes it, by its
-# designs' identities.
-_placed: dict[tuple[str, ...], tuple[str, str | None]] = {}
+# Each packed group's or lone fusion's placer and the diagnostic where none
+# routes it, by its designs' identities or the fusion's symbol.
+_placed: dict[Hashable, tuple[str, str | None]] = {}
 
 
 class CoResidenceError(ValueError):
@@ -177,27 +192,55 @@ def places(
     return "\n".join(diagnostics) if diagnostics else None
 
 
+def transports(
+    designs: Sequence[OperatorDesign],
+    packets: bool | None = None,
+    drains: int | None = None,
+) -> Iterator[tuple[bool, int]]:
+    """Yield each ``(packets, drains)`` a fusion of ``designs`` may take, in the order a build tries them.
+
+    What is given is kept; what is None is varied: the drains each lane on
+    its own, then joined in runs of 2, 4, ... lanes up to the widest
+    output's (``Fusion.drains``), and at each the host fills as circuits,
+    then as packet flows (``Fusion.packets``): the fewest memtile hops
+    first, and circuits before channels shared by packets.
+    """
+    widest = max(
+        (b.lanes for d in designs for b in d.op.buffers if b.drains), default=1
+    )
+    runs = (
+        [drains] if drains is not None else [1 << k for k in range(widest.bit_length())]
+    )
+    for run in runs:
+        for packeted in [packets] if packets is not None else [False, True]:
+            yield packeted, run
+
+
 def transported(
     fusion: Fusion,
     designs: Sequence[OperatorDesign],
     words: Mapping[str, str] | None = None,
     beside: Mapping[str, OperatorDesign] | None = None,
 ) -> Fusion:
-    """Return ``fusion`` with its host fills as packet flows where circuits run the shim's DMA channels short and packets place.
+    """Return ``fusion`` under the first of its ``transports`` the sequential placer places, where circuits run the shim's DMA channels short.
 
-    Where ``fusion.packets`` is None, the sequential placer decides (``fits``),
-    with ``beside``'s designs packed in the same configuration; otherwise
-    ``fusion`` is returned as given, for the build to report.
+    Decided by the sequential placer (``fits``), with ``beside``'s designs
+    packed in the same configuration. Where none places, or the first
+    refusal is not the shim's channels, ``fusion`` is returned as given,
+    for the build to report.
     """
-    if fusion.packets is not None:
-        return fusion
     members = dict(zip((str(j) for j in fusion.steps), designs, strict=True))
     members.update(beside or {})
-    refused = fits(members, words, fusion=fusion)
-    if refused is None or SHIM_SHORT not in refused:
-        return fusion
-    packeted = dataclasses.replace(fusion, packets=True)
-    return packeted if fits(members, words, fusion=packeted) is None else fusion
+    for k, (packets, drains) in enumerate(
+        transports(designs, fusion.packets, fusion.drains)
+    ):
+        tried = dataclasses.replace(fusion, packets=packets, drains=drains)
+        refused = fits(members, words, fusion=tried)
+        if refused is None:
+            return fusion if k == 0 else tried
+        if SHIM_SHORT not in refused:
+            return fusion
+    return fusion
 
 
 def fused_configuration(
@@ -224,15 +267,6 @@ def fused_configuration(
     for e in fusion.edges:
         incoming.setdefault(e.consumer, []).append(e)
     cascades = [e for e in fusion.edges if e.kind is EdgeKind.CASCADE]
-    for e in cascades:
-        if any(
-            (d.producer, d.output) == (e.producer, e.output) and d != e
-            for d in fusion.edges
-        ):
-            raise NotImplementedError(
-                f"{e}: an output on the cascade that also feeds another step "
-                f"on-chip is not built yet"
-            )
     # The lanes' bound ends go to their first on-chip reader (by consumer in
     # step order), unless the host's drain keeps them (a tee).
     first_reader: dict[tuple[int, str], Edge] = {}
@@ -260,7 +294,39 @@ def fused_configuration(
     on_chip = {(e.consumer, e.input) for e in fusion.edges} | {
         (p, output) for (p, output) in first_reader if (p, output) not in kept
     }
+    # A stream within one worker group whose producer joins its cores' fifos
+    # in a memtile: its consumer's kernel is spliced into those cores.
+    joined_in = {
+        e
+        for e in fusion.edges
+        if e.kind is EdgeKind.STREAM
+        and any({e.producer, e.consumer} <= set(group) for group in fusion.workers)
+    }
+    spliced: dict[int, Spliced] = {}
+    spliced_from: dict[int, int] = {}
     for design, j, own in zip(designs, fusion.steps, scalars, strict=True):
+        into = [
+            e
+            for e in incoming.get(j, ())
+            if e in joined_in
+            and next(
+                b for b in arrays[e.producer].op.buffers if b.name == e.output
+            ).join
+            is not None
+        ]
+        if into:
+            (e,) = into
+            spliced[j] = splice(
+                e,
+                design,
+                arrays[e.producer],
+                incoming.get(j, ()),
+                any(c.producer == j for c in cascades),
+                words,
+            )
+            arrays[j] = spliced[j].array
+            spliced_from[j] = e.producer
+            continue
         fed = {}
         for e in incoming.get(j, ()):
             if e.kind is EdgeKind.CASCADE:
@@ -290,6 +356,19 @@ def fused_configuration(
                 if fusion.packets
                 else ()
             ),
+            splices=[e.output for e in [*joined_in, *cascades] if e.producer == j],
+            joined_drains=(
+                {
+                    b.name: fusion.drains
+                    for b in design.op.buffers
+                    if b.drains
+                    and (j, b.name) not in first_reader
+                    and b.lanes > 1
+                    and b.lanes % fusion.drains == 0
+                }
+                if fusion.drains is not None and fusion.drains > 1
+                else None
+            ),
         )
         for producer, output in fusion.kept:
             if producer == j:
@@ -301,6 +380,12 @@ def fused_configuration(
     for e in cascades:
         (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
         (sink,) = [b for b in arrays[e.consumer].op.buffers if b.name == e.input]
+        sending, receiving = spliced.get(e.producer), spliced.get(e.consumer)
+        if sending is not None or receiving is not None or source.join is not None:
+            relays += cascade_cores(
+                e, arrays[e.producer], sending, receiving, sink, before, after
+            )
+            continue
         per_object = math.prod(source.obj_shape)
         moved = source.moved_per_lane()
         for lane, (reading, writing) in enumerate(source.cascade_to(sink)):
@@ -337,7 +422,33 @@ def fused_configuration(
         and any(id(w) in before or id(w) in after for w in arrays[j].workers)
     ]
     joined: dict[int, Worker] = {}
+    for j, made in spliced.items():
+        producer = arrays[spliced_from[j]]
+        for writer, stage in made.cores:
+            (worker,) = stage.workers
+            bodies = [
+                writer,
+                *before.get(id(worker), ()),
+                worker,
+                *after.get(id(worker), ()),
+            ]
+            try:
+                core = Worker.join(bodies)
+            except ValueError as e:  # joining what mlir-aie does not join
+                raise NotImplementedError(
+                    f"splicing step {j} into step {spliced_from[j]}'s cores is not "
+                    f"built yet: {e}"
+                ) from e
+            producer.workers = [core if w is writer else w for w in producer.workers]
+            joined |= {id(w): core for w in bodies}
     for group in [*fusion.workers, *alone]:
+        if any(j in spliced for j in group):
+            if len(group) != 2 or group[1] not in spliced:
+                raise NotImplementedError(
+                    f"one core for steps {tuple(group)} is not built yet: a step "
+                    f"spliced into its producer's cores shares them with no other"
+                )
+            continue
         joined |= share(
             group,
             [
@@ -366,6 +477,247 @@ def fused_configuration(
         phases=[grouped[p] for p in sorted(grouped)],
     )
     return configured, [arrays[j] for j in fusion.steps]
+
+
+@dataclasses.dataclass
+class Spliced:
+    """A step spliced into its producer's cores (``splice``).
+
+    Attributes:
+        array: The step's array, its host operands moving along the
+            producer's lanes.
+        cores: Each core's own worker and its stage, lane by lane: what
+            ``Worker.join`` makes one core, relays between.
+        arriving: Each input the cascade fills, the fifo a core's stage
+            reads it from, in ``cores``' order.
+    """
+
+    array: SplicedArray
+    cores: list[tuple[Worker, BuiltArray]]
+    arriving: dict[str, list[ObjectFifo]]
+
+
+def splice(
+    edge: Edge,
+    design: OperatorDesign,
+    producer: BuiltArray,
+    incoming: Sequence[Edge],
+    cascaded: bool,
+    words: Mapping[str, str] | None = None,
+) -> Spliced:
+    """Splice step ``design``'s kernel into ``producer``'s cores, which ``edge`` streams it from: a stage on each core.
+
+    ``producer``'s output joins its cores' fifos in a memtile, and was built
+    to splice (``Operand.splices``). Each core runs the step on its own
+    tile, as a finish step would (``FinishStep.consumer_at``), after its own
+    body; the stages' outputs take the cores' places in the join, so the
+    output's lanes carry the step's, unless its output leaves on the
+    cascade (``cascaded``), each core's from that core. Each other input
+    arrives in the same tiles: on the cascade, to each core (``arriving``),
+    or its host buffer moving along the output's lanes, split in a memtile
+    at the join's offsets and in its order (the output's ``to_stream`` as
+    the split's ``from_stream``). The cores are joined later, relays
+    between (``fused_configuration``).
+
+    Args:
+        edge: The stream from the producer's output into the step.
+        design: The step's design.
+        producer: The producer's array.
+        incoming: Every edge into the step.
+        cascaded: The step's output leaves on the cascade.
+        words: On a full ELF, the shared scratchpad words.
+
+    Raises:
+        NotImplementedError: The step is not an elementwise operator over
+            tiles, has another output or a per-call value, another of its
+            inputs is fed on-chip other than by the cascade, or the output
+            is read by another step or the host too: splicing those is not
+            built yet.
+        ValueError: The stage's output tile is not the core's
+            (``Operand.join_from``).
+    """
+    op = design.op
+    (source,) = [b for b in producer.op.buffers if b.name == edge.output]
+    join = source.join
+    assert join is not None, "splice() takes an output its build joined"
+    if (
+        not isinstance(op, Elementwise)
+        or isinstance(op, Rowwise)
+        or len(op.outputs) != 1
+        or op.values
+    ):
+        raise NotImplementedError(
+            f"splicing {type(op).__name__} into {type(producer.op).__name__}'s "
+            f"cores is not built yet: a step spliced into a producer's cores is "
+            f"an elementwise operator over tiles, with one output and no per-call "
+            f"value"
+        )
+    others = [e for e in incoming if e != edge]
+    if (
+        any(e.kind is not EdgeKind.CASCADE for e in others)
+        or source.keeps_host
+        or source.feeds
+    ):
+        raise NotImplementedError(
+            f"splicing {type(op).__name__} into {type(producer.op).__name__}'s "
+            f"cores is not built yet where another of its inputs is fed on-chip "
+            f"but by the cascade, or {source.name} is read elsewhere too"
+        )
+    on_cascade = {e.input for e in others}
+    names = [b.name for b in op.inputs]
+    step = FinishStep.of(op, names.index(edge.input))
+    (out,) = op.outputs
+    moved = source.moved_per_lane()
+    per_object = math.prod(source.obj_shape)
+    hosts: dict[str, list] = {
+        b.name: []
+        for b in op.buffers
+        if b.name != edge.input and b.name not in on_cascade
+    }
+    if cascaded:
+        del hosts[out.name]
+    else:
+        hosts[out.name] = list(source.handles)
+    cores_of: list[tuple[Worker, BuiltArray]] = []
+    arriving: dict[str, list[ObjectFifo]] = {n: [] for n in on_cascade}
+    for lane, cores in enumerate(source.core_fifos):
+        objects = -(-moved.get(lane, 0) // per_object)
+        tiles: dict[str, list[ObjectFifo]] = {}
+        for b in op.inputs:
+            types = [np.ndarray[tuple(c.shape), np.dtype[b.dtype]] for c in cores]
+            if b.name == edge.input:
+                continue
+            if b.name in on_cascade:
+                # The receiving relay runs through before the stage reads.
+                tiles[b.name] = [ObjectFifo(t, depth=objects) for t in types]
+                arriving[b.name] += tiles[b.name]
+                continue
+            mirror = ObjectFifo(
+                np.ndarray[tuple(source.obj_shape), np.dtype[b.dtype]],
+                depth=source.lane_fifos[lane].depth,
+            )
+            hosts[b.name].append(mirror.prod())
+            tiles[b.name] = mirror.cons(
+                from_stream=source.lane_fifos[lane].to_stream
+            ).split(
+                join.offsets, tile=join.tiles[lane], obj_types=types, depths=join.depths
+            )
+        made = []
+        for k, core in enumerate(cores):
+            line = math.prod(core.shape)
+            stage = BuiltArray(
+                OperatorDesign(step.consumer_at(line, op.dev, objects * line)),
+                words,
+                fed={edge.input: core} | {n: fifos[k] for n, fifos in tiles.items()},
+            )
+            made.append(stage.op.outputs[0])
+            (writer,) = [
+                w
+                for w in producer.workers
+                if any(
+                    isinstance(h, ObjectFifoHandle) and h.object_fifo is core
+                    for h in w.fifos
+                )
+            ]
+            cores_of.append((writer, stage))
+        if not cascaded:
+            source.join_from(lane, made)
+    return Spliced(
+        SplicedArray(
+            design,
+            source,
+            edge.input,
+            hosts,
+            [stage for _, stage in cores_of],
+        ),
+        cores_of,
+        arriving,
+    )
+
+
+def cascade_cores(
+    edge: Edge,
+    producer: BuiltArray,
+    sending: Spliced | None,
+    receiving: Spliced | None,
+    sink: Operand,
+    before: dict[int, list[Worker]],
+    after: dict[int, list[Worker]],
+) -> list[tuple[Worker, Worker]]:
+    """Carry ``edge`` over the cascade core by core, where an end is spliced or joined in a memtile: a relay pair a core.
+
+    The sending end's cores are the spliced step's (``sending``), each core's
+    stage output, or the cores of an output joined in a memtile (its
+    ``core_fifos``); the receiving end's are the spliced step's
+    (``receiving``), each core's fifo of the input (``Spliced.arriving``).
+    Each sending relay runs after its core's body (``after``), each
+    receiving one before (``before``).
+
+    Returns:
+        Each core pair's relays, sending then receiving.
+
+    Raises:
+        NotImplementedError: An end is neither spliced nor joined, or the two
+            ends' cores do not pair one to one with one object type.
+    """
+    (source,) = [b for b in producer.op.buffers if b.name == edge.output]
+    if sending is not None:
+        sends = [
+            (stage.workers[0], stage.op.outputs[0].reader(0))
+            for _, stage in sending.cores
+        ]
+        for _, stage in sending.cores:
+            stage.op.outputs[0].cascade = sink
+    elif source.join is not None and source.splices:
+        sends = [
+            (
+                next(
+                    w
+                    for w in producer.workers
+                    if any(
+                        isinstance(h, ObjectFifoHandle) and h.object_fifo is fifo
+                        for h in w.fifos
+                    )
+                ),
+                fifo.cons(fifo.depth),
+            )
+            for fifos in source.core_fifos
+            for fifo in fifos
+        ]
+    else:
+        sends = None
+    receives = (
+        None
+        if receiving is None
+        else [
+            (stage, fifo.prod())
+            for (_, stage), fifo in zip(
+                receiving.cores, receiving.arriving[edge.input], strict=True
+            )
+        ]
+    )
+    if sends is None or receives is None or len(sends) != len(receives):
+        raise NotImplementedError(
+            f"{edge}: a cascade between a step's lanes and another's cores, or "
+            f"between cores that do not pair one to one, is not built yet"
+        )
+    pairs = []
+    for (sender, reading), (stage, writing) in zip(sends, receives):
+        if reading.obj_type != writing.obj_type:
+            raise NotImplementedError(
+                f"{edge}: a cascade from a core's {reading.obj_type} into a core's "
+                f"{writing.obj_type} is not built yet"
+            )
+        (fed,) = [b for b in stage.op.inputs if b.name == edge.input]
+        objects = -(-fed.moved_per_lane()[0] // math.prod(fed.obj_shape))
+        pair = (
+            cascade_relay(reading, objects, True),
+            cascade_relay(writing, objects, False),
+        )
+        after.setdefault(id(sender), []).append(pair[0])
+        before.setdefault(id(stage.workers[0]), []).append(pair[1])
+        pairs.append(pair)
+    return pairs
 
 
 def share(
@@ -746,7 +1098,9 @@ class Composition:
         """Return ``packing``'s groups that place and route as one device.
 
         A group the default placer cannot route is placed by the annealing one where
-        that routes it (``Packing.annealed``); one neither routes (an operator's
+        that routes it (``Packing.annealed``), as is a fusion in no group (a
+        cascade chain the default placer, which never moves a placed peer,
+        cannot lay out); one neither routes (an operator's
         mapping changed since the profile was tuned) runs unpacked, with a warning. A
         group naming a fusion's own symbol builds it fused, its other members beside
         it (``fits``'s ``fusion``); one naming more than one fusion is not yet
@@ -800,6 +1154,28 @@ class Composition:
             groups.append(tuple(kept))
             if placer == ANNEALED:
                 annealed.update(kept)
+        packed = {n for group in groups for n in group}
+        for window, (member_designs, fusion) in self.fusions.items():
+            if window in packed:
+                continue
+            # A fusion's symbol does not spell its edges' kinds or transport.
+            key = (window, tuple(e.kind for e in fusion.edges), fusion.packets)
+            if key not in _placed:
+                designs = dict(zip((str(j) for j in fusion.steps), member_designs))
+                refused = fits(designs, fusion=fusion)
+                if refused is None:
+                    _placed[key] = (SEQUENTIAL, None)
+                # Short of channels, the transport is the build's to choose
+                # (``transported``); annealing adds none.
+                elif (
+                    SHIM_SHORT not in refused
+                    and fits(designs, fusion=fusion, placer=ANNEALED) is None
+                ):
+                    _placed[key] = (ANNEALED, None)
+                else:
+                    _placed[key] = (SEQUENTIAL, refused)
+            if _placed[key][0] == ANNEALED:
+                annealed.add(window)
         return Packing(tuple(groups), tuple(sorted(annealed)))
 
     @property

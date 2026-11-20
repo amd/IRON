@@ -534,6 +534,20 @@ def composed(
                     recording.steps[match[i]].op.resolved()
                     for i in (e.producer, e.consumer)
                 )
+                # Steps on one core meet lane by lane, or the consumer runs
+                # spliced into the producer's cores, and a cascade into or out
+                # of such a core runs core to core: the composer's to say.
+                grouped = {s for group in root.workers for s in group}
+                if (
+                    e.kind is EdgeKind.STREAM
+                    and any(
+                        {e.producer, e.consumer} <= set(group) for group in root.workers
+                    )
+                ) or (
+                    e.kind is EdgeKind.CASCADE
+                    and bool({e.producer, e.consumer} & grouped)
+                ):
+                    continue
                 built = admits(p, e.output, c, e.input)
                 if built is None or (
                     e.kind in (EdgeKind.STREAM, EdgeKind.CASCADE)

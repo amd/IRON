@@ -25,6 +25,7 @@ from typing import Any
 
 import numpy as np
 from aie.dialects._aie_enum_gen import ObjectFifoLinkMode, ObjectFifoPort
+from aie.iron import Program, Worker
 from aie.iron.dataflow.objectfifo import ObjectFifo, ObjectFifoLink
 from aie.iron.device import Device
 from aie.iron.kernel import ExternalFunction
@@ -34,7 +35,8 @@ from aie.utils import set_current_device
 
 from ..declare import Operator
 from ..declare.composition import Entry, Region
-from ..design import BuiltArray, OperatorDesign
+from ..design import BuiltArray, OperatorDesign, configuration
+from ..image.compose import Spliced, cascade_cores, splice
 from ..image.step import BufferRef, Edge, EdgeKind, HandOff
 from .clock import kernel_cycles
 from .record import Recording
@@ -424,6 +426,13 @@ class Derivation:
     or a state the graph holds) arrives whole, so its edge starts the call
     holding every object the call moves on it.
 
+    Steps the composer joins core to core are built as it builds them
+    (``compose.splice``, ``compose.cascade_cores``) and resolved as one
+    program. A step spliced into its producer's cores runs on each core
+    after the producer's body, the two one actor, the core's own tile its
+    edge; a cascade into or out of such cores is a channel a core pair, its
+    relays the transport, not actors.
+
     Args:
         region: The composed region.
         recording: The recording its steps are matched in.
@@ -446,10 +455,25 @@ class Derivation:
         self.region = region
         self.device = device
         self.wired, _ = region.wiring()
+        groups = [set(group) for group in region.workers]
+        one_core = [
+            (e, p, c)
+            for e, p, c in self.wired
+            if e.kind is EdgeKind.STREAM and any({p, c} <= g for g in groups)
+        ]
+        # Built as the composer builds them: an output leaving on the cascade,
+        # or streaming to a step on its worker, is built to splice.
+        splices: dict[int, list[str]] = {}
+        for e, p, c in self.wired:
+            if e.kind is EdgeKind.CASCADE or (e, p, c) in one_core:
+                splices.setdefault(p, []).append(e.output)
         self.ops: list[Operator] = []
         self.recorded: list[tuple[Any, Recorded]] = []
         self.refs: list[dict[str, BufferRef]] = []
-        for s, member in zip(matches[0], region.steps()):
+        self.spliced: dict[Edge, list[tuple[Worker, Worker, ObjectFifo]]] = {}
+        self.per_core: dict[tuple[int, str], list[ObjectFifo]] = {}
+        spliced_into: dict[int, tuple[int, Spliced]] = {}
+        for i, (s, member) in enumerate(zip(matches[0], region.steps())):
             step = recording.steps[s]
             op = step.op
             if member.tunables:
@@ -463,10 +487,131 @@ class Derivation:
                 )
             self.ops.append(op)
             self.refs.append({b.name: ref for ref, b in zip(step.refs(), op.buffers)})
+            into = [
+                (e, p)
+                for e, p, c in one_core
+                if c == i
+                and next(
+                    b for b in self.recorded[p][0].op.buffers if b.name == e.output
+                ).join
+                is not None
+            ]
             with set_current_device(device), record() as recorded:
-                array = BuiltArray(OperatorDesign(op))
-                array.program().resolve_program()
+                if not into:
+                    array: BuiltArray = BuiltArray(
+                        OperatorDesign(op), splices=splices.get(i, ())
+                    )
+                else:
+                    (edge, p), *more = into
+                    if more or any(i in g and g != {p, i} for g in groups):
+                        raise NotImplementedError(
+                            f"one core for steps {sorted(g for g in groups if i in g)} "
+                            f"is not built yet: a step spliced into its producer's "
+                            f"cores shares them with no other"
+                        )
+                    producer = self.recorded[p][0]
+                    cascaded = any(
+                        e.kind is EdgeKind.CASCADE and q == i for e, q, _ in self.wired
+                    )
+                    made = splice(
+                        edge,
+                        OperatorDesign(op),
+                        producer,
+                        [e for e, _, c in self.wired if c == i],
+                        cascaded,
+                    )
+                    array = made.array
+                    spliced_into[i] = (p, made)
+                    (source,) = [
+                        b for b in producer.op.buffers if b.name == edge.output
+                    ]
+                    self.spliced[edge] = [
+                        (writer, stage.workers[0], core)
+                        for (writer, stage), core in zip(
+                            made.cores,
+                            [f for fifos in source.core_fifos for f in fifos],
+                            strict=True,
+                        )
+                    ]
+                    for name, fifos in made.arriving.items():
+                        self.per_core[(i, name)] = fifos
+                    if cascaded:
+                        self.per_core[(i, array.op.outputs[0].name)] = [
+                            stage.op.outputs[0].lane_fifos[0] for _, stage in made.cores
+                        ]
+            for b in array.op.buffers:
+                if b.splices and b.join is not None:
+                    self.per_core[(i, b.name)] = [f for fs in b.core_fifos for f in fs]
             self.recorded.append((array, recorded))
+        # The composer joins these steps' cores core to core, so each group
+        # resolves as one program: a spliced step with its producer, and a
+        # cascade's ends where either is per core, its relays between them. A
+        # relay moves what the cascade edge's channel carries: it is no actor.
+        relayed = [
+            (e, p, c)
+            for e, p, c in self.wired
+            if e.kind is EdgeKind.CASCADE
+            and ((p, e.output) in self.per_core or (c, e.input) in self.per_core)
+        ]
+        part = {i: frozenset([i]) for i in range(len(self.recorded))}
+        for p, c in [(p, c) for c, (p, _) in spliced_into.items()] + [
+            (p, c) for _, p, c in relayed
+        ]:
+            merged = part[p] | part[c]
+            for j in merged:
+                part[j] = merged
+        for group in sorted(set(part.values()), key=min):
+            steps = sorted(group)
+            arrays = {j: self.recorded[j][0] for j in steps}
+            owner = {id(w): j for j in steps for w in arrays[j].workers}
+            for c, (p, made) in spliced_into.items():
+                if c in group:
+                    staged = [stage.workers[0] for _, stage in made.cores]
+                    arrays[p].workers += staged
+                    owner |= {id(w): c for w in staged}
+            with set_current_device(device), record() as resolved:
+                for e, p, c in relayed:
+                    if p not in group:
+                        continue
+                    (sink,) = [b for b in arrays[c].op.buffers if b.name == e.input]
+                    pairs = cascade_cores(
+                        e,
+                        arrays[p],
+                        spliced_into[p][1] if p in spliced_into else None,
+                        spliced_into[c][1] if c in spliced_into else None,
+                        sink,
+                        {},
+                        {},
+                    )
+                    arrays[steps[0]].workers += [w for pair in pairs for w in pair]
+                if len(steps) == 1:
+                    arrays[steps[0]].program().resolve_program()
+                else:
+                    configured = configuration(
+                        "analysed",
+                        {str(j): arrays[j] for j in steps},
+                        steps=[str(j) for j in steps],
+                        fuse=True,
+                    )
+                    Program.compose(
+                        [configured], entry=configured.runtimes[0]
+                    ).resolve_program()
+            # A spliced step's host operands move along its producer's lanes:
+            # their transfers are its own.
+            fifo_step = {
+                h.object_fifo: j
+                for j in steps
+                for b in arrays[j].op.buffers
+                if b.streamed
+                for h in b.lane_handles
+            }
+            for core in resolved.cores:
+                if id(core.owner) in owner:
+                    self.recorded[owner[id(core.owner)]][1].cores.append(core)
+            for transfer in resolved.transfers:
+                step = fifo_step.get(transfer.fifo, steps[0])
+                self.recorded[step][1].transfers.append(transfer)
+            self.recorded[steps[0]][1].links.extend(resolved.links)
         self.carried = set(recording.feedback) | {
             h.ref().root for _, h in recording.states.values()
         }
@@ -498,6 +643,19 @@ class Derivation:
             self.lanes.append(lanes)
             self.obj_elements.append(obj_elements)
             self._through_links(recorded.links)
+        # A joined output's core fifos each move what the lane they join into
+        # would drain (``Operand.moved_per_lane``), whatever reads them instead.
+        for array, _ in self.recorded:
+            for b in array.op.buffers:
+                if b.splices and b.join is not None:
+                    each = b.moved_per_lane()
+                    for lane, fifos in enumerate(b.core_fifos):
+                        for f in fifos:
+                            self.objects.setdefault(
+                                f, -(-each.get(lane, 0) // math.prod(b.obj_shape))
+                            )
+        self.links = [link for _, recorded in self.recorded for link in recorded.links]
+        self._through_links(self.links)
 
     def _through_links(self, links: Sequence[ObjectFifoLink]) -> None:
         """Carry the objects a call moves across ``links``, from the fifos that know them to those that do not."""
@@ -628,6 +786,48 @@ class Derivation:
                 f"than one way"
             )
         return found[0]
+
+    def _all_trips(self) -> dict[int, dict[int, int]]:
+        """Return every core's loop trip counts (``_trips``), by ``id`` of its scope.
+
+        A core whose fifos no fill, drain or link settles waits on others: once
+        a core's loops settle, the objects it releases on a fifo no transfer
+        knows are what a call moves on it, so a core whose loops read it (a
+        spliced stage reading its producer's tile) settles in turn.
+
+        Raises:
+            NotImplementedError: A core no other's objects settle (``_trips``).
+        """
+        cores = [core for _, recorded in self.recorded for core in recorded.cores]
+        solved: dict[int, dict[int, int]] = {}
+        while True:
+            waiting: NotImplementedError | None = None
+            settled = False
+            for core in cores:
+                if id(core) in solved:
+                    continue
+                try:
+                    trips = self._trips(core)
+                except NotImplementedError as e:
+                    waiting = waiting or e
+                    continue
+                solved[id(core)] = trips
+                settled = True
+                released: dict[tuple[ObjectFifo, bool], int] = {}
+                for a in self._events(core.body, trips):
+                    if a.kind == "release":
+                        key = (a.fifo, a.port == ObjectFifoPort.Produce)
+                        released[key] = released.get(key, 0) + a.count
+                for (fifo, produced), objects in released.items():
+                    if fifo not in self.objects and (
+                        produced or (fifo, True) not in released
+                    ):
+                        self.objects[fifo] = objects
+            if waiting is None:
+                return solved
+            if not settled:
+                raise waiting
+            self._through_links(self.links)
 
     def _events(
         self, body: Sequence[Access | Scope], trips: Mapping[int, int]
@@ -832,9 +1032,12 @@ class Derivation:
         repetition: dict[int, int] = {}
         # Per actor, the step whose core it is; None for a link.
         actor_step: list[int | None] = []
+        solved = self._all_trips()
+        actor_of: dict[int, int] = {}
         for i, (_, recorded) in enumerate(self.recorded):
             for k, core in enumerate(recorded.cores):
-                trips = self._trips(core)
+                trips = solved[id(core)]
+                actor_of[id(core.owner)] = len(programs)
                 actor_step.append(i)
                 actor_kernels.append(
                     tuple(
@@ -870,9 +1073,13 @@ class Derivation:
         # Steps on one worker: each lane's producer core and its reader are one
         # actor, running their programs in the worker's firing order.
         lead: dict[int, int] = {}
+        # A step spliced into its producer's cores: each core and its stage.
+        for cores in self.spliced.values():
+            for writing, stage, _ in cores:
+                lead[actor_of[id(stage)]] = actor_of[id(writing)]
         for group in self.region.workers:
             for edge, p, c in self.wired:
-                if p not in group or c not in group:
+                if p not in group or c not in group or edge in self.spliced:
                     continue
                 outs = self.lanes[p].get(edge.output, [])
                 ins = self.lanes[c].get(edge.input, [])
@@ -923,6 +1130,48 @@ class Derivation:
         feeds = Counter((p, edge.output) for edge, p, _ in self.wired)
         phases = self.region.phases
         for n, (edge, p, c) in enumerate(self.wired):
+            phase = phases[n] if phases else 0
+            # Spliced, a core's tile stays on the core: its stage reads it.
+            # A cascade into or out of such cores runs core to core.
+            if edge in self.spliced or (
+                edge.kind is EdgeKind.CASCADE
+                and (
+                    (p, edge.output) in self.per_core
+                    or (c, edge.input) in self.per_core
+                )
+            ):
+                if edge in self.spliced:
+                    pairs = [(core, core) for _, _, core in self.spliced[edge]]
+                else:
+                    sends = self.per_core.get((p, edge.output))
+                    arrives = self.per_core.get((c, edge.input))
+                    if sends is None or arrives is None or len(sends) != len(arrives):
+                        raise NotImplementedError(
+                            f"{edge}: a cascade between a step's lanes and another's "
+                            f"cores, or between cores that do not pair one to one, is "
+                            f"not built yet"
+                        )
+                    pairs = list(zip(sends, arrives))
+                    for sent, arriving in pairs:
+                        if sent.obj_type != arriving.obj_type:
+                            raise NotImplementedError(
+                                f"{edge}: a cascade from a core's {sent.obj_type} into "
+                                f"a core's {arriving.obj_type} is not built yet"
+                            )
+                for sent, arriving in pairs:
+                    for actor in readers.get(arriving, []):
+                        channels.append(Channel(writer[sent], actor, phase=phase))
+                        e = len(channels) - 1
+                        writes.setdefault(sent, []).append(e)
+                        reads[(arriving, actor)] = e
+                        edge_channels.setdefault(edge, []).append(e)
+                hand_off[edge] = HandOff.EQUAL
+                continue
+            if (p, edge.output) in self.per_core:
+                raise NotImplementedError(
+                    f"{edge}: an output its build joins from its cores' own fifos, "
+                    f"read on its lanes, is not built yet"
+                )
             if edge.kind is EdgeKind.DDR:
                 for inp in self.lanes[c].get(edge.input, []):
                     if inp not in self.objects or not readers.get(inp):
@@ -941,9 +1190,7 @@ class Derivation:
                     )
                     writer[inp] = source
                     for actor in readers[inp]:
-                        channels.append(
-                            Channel(source, actor, phase=phases[n] if phases else 0)
-                        )
+                        channels.append(Channel(source, actor, phase=phase))
                         e = len(channels) - 1
                         writes.setdefault(inp, []).append(e)
                         reads[(inp, actor)] = e
@@ -990,6 +1237,11 @@ class Derivation:
                     f"{edge}: {sink.name}'s fifos carry another buffer's objects "
                     f"too (it rides them); an edge into it is not modelled yet"
                 )
+            if any(not readers.get(f) for f in ins):
+                raise NotImplementedError(
+                    f"{edge}: no core of {type(self.ops[c]).__name__} reads "
+                    f"{sink.name}'s lanes; an edge into it is not modelled yet"
+                )
             produced, consumed = self._streams(source), self._streams(sink)
             if (
                 len(outs) != len(ins)
@@ -1001,7 +1253,7 @@ class Derivation:
                     (sizes[0], sizes[1]),
                     (produced, consumed),
                     (outs, ins),
-                    phases[n] if phases else 0,
+                    phase,
                     (programs, channels, writes, reads, edge_channels),
                     (writer, readers),
                 )
@@ -1018,7 +1270,7 @@ class Derivation:
                             writer[out],
                             actor,
                             initial=self.objects[inp] if carried else 0,
-                            phase=phases[n] if phases else 0,
+                            phase=phase,
                         )
                     )
                     e = len(channels) - 1

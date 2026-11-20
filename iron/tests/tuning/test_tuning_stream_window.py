@@ -10,10 +10,15 @@ the NPU; a test is ``@unbuilt`` while what it calls raises ``NotImplementedError
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement, Region
+from iron.common.design import OperatorDesign
+from iron.common.image.compose import SHIM_SHORT, fits, transported
+from iron.common.image.step import Edge, Fusion, FusionKind
 from iron.tests.support.toys_edges import (
     chain,
     fan_in_gate_up_mul,
@@ -143,16 +148,36 @@ def test_a_window_over_the_arrays_cores_is_refused_before_any_build(device):
     assert "core" in (result.why or "")
 
 
-@unbuilt
-def test_a_window_over_the_shim_channels_is_refused_before_any_build(device):
-    """A window whose members fit the array's cores but outrun its shim channels is refused before any build."""
-    wide_recording, wide_region = fan_out_norm_qkv(columns=(device.cols,) * 3)
+def test_a_window_whose_drains_outrun_the_shim_joins_them_in_memtiles(device):
+    """The norm fanned into Q, K and V at the array's full width drains more lanes than the shim receives, its fills shared by packets or not.
+
+    Its build joins each run of a projection's lanes in a memtile into one
+    host lane (``Fusion.drains``), and so it fits.
+    """
+    recording, region = fan_out_norm_qkv(columns=(device.cols,) * 3)
+    designs = [OperatorDesign(step.op.resolved()) for step in recording.steps]
+    fusion = Fusion(
+        FusionKind.STREAM, (0, 1, 2, 3), tuple(Edge(0, "y", c, "B") for c in (1, 2, 3))
+    )
+    members = {str(j): d for j, d in enumerate(designs)}
+    for packets in (False, True):
+        unjoined = dataclasses.replace(fusion, packets=packets, drains=1)
+        assert SHIM_SHORT in (fits(members, fusion=unjoined) or "")
+    assert transported(fusion, designs).drains > 1
     profile = Profile()
-    profile.add_entry(Entry(wide_region))
-    result = fit(profile, [Timed(wide_recording)], device)
-    assert not result.ok
-    assert result.stage == "counts"
-    assert "channel" in (result.why or "")
+    profile.add_entry(Entry(region))
+    result = fit(profile, [Timed(recording)], device)
+    assert result.ok, result.why
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_window_whose_drains_outrun_the_shim_is_bit_identical(device):
+    """The full-width norm -> Q, K, V window, its drains joined in memtiles, is bit-identical to its steps run apart."""
+    recording, region = fan_out_norm_qkv(columns=(device.cols,) * 3)
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
 
 
 @unbuilt

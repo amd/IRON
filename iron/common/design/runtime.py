@@ -424,6 +424,33 @@ class OperatorRuntime(Runtime):
             rtp.barrier.set(1)
 
 
+class SplicedRuntime(OperatorRuntime):
+    """A spliced step's sequence: each core's stage takes its runtime parameters, then the step's own host transfers.
+
+    Args:
+        op: The step, its host operands moving along its producer's lanes.
+        built: The step's build, which makes nothing of its own.
+        stages: Each stage's sequence, whose preamble alone runs.
+        name: The sequence's symbol; the Program names it when None.
+    """
+
+    def __init__(
+        self,
+        op: Operator,
+        built: Built,
+        stages: Sequence[OperatorRuntime],
+        name: str | None = None,
+    ) -> None:
+        super().__init__(op, built, name=name)
+        self.stages = list(stages)
+
+    def preamble(self, **values) -> None:
+        """Write the step's own parameters, then each stage's."""
+        super().preamble(**values)
+        for stage in self.stages:
+            stage.preamble()
+
+
 class MergedRuntime(Runtime):
     """Operator runtimes run back to back as one sequence (``Runtime.merge``).
 

@@ -21,7 +21,7 @@ import math
 import subprocess
 import time
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
@@ -52,6 +52,7 @@ from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
 from ..common.graph.fusion import composed, memory_waits
 from ..common.graph.record import Recording
 from ..common.graph.sdf import Derivation
+from ..common.image.compose import ANNEALED, SEQUENTIAL
 from ..common.image.packaging import SCRATCHPAD_WORDS
 from ..common.image.step import Edge, EdgeKind, FusionKind, HandOff
 from .autotune import Timed, refusal, settings
@@ -322,7 +323,11 @@ class Measured:
     base_seconds: float
 
 
-PLACEMENTS: Sequence[str] = ("sequential", "sa:0", "sa:1", "sa:2")
+PLACEMENTS: Sequence[str] = ("sequential", "sa:1", "sa:2", "sa:3")
+
+# The placer settings a build takes: the sequential placer, else the annealing
+# one at mlir-aie's default seed (``Composition.placed``). ``sa:N`` is seed N.
+BUILT_PLACERS: Mapping[str, str] = {"sequential": SEQUENTIAL, "sa:1": ANNEALED}
 
 
 def candidates(
@@ -701,10 +706,12 @@ def fit(
     the array. The
     dataflow analysis then finds whether the region's steps are convex (no
     step outside it on a path between two of them), whether it balances, whether each
-    stream edge's lanes meet as they are (a cascade's one to one), and
+    stream or cascade edge's lanes meet as they are, and
     whether it runs at its chosen
     depths, the rest at their minimum. The placer last places the composed
-    module, where the composer builds the region as IRON's fusions do.
+    module, where the composer builds the region as IRON's fusions do: under
+    each of ``placements`` the build takes in turn (``BUILT_PLACERS``), the
+    sequential placer, then the annealing one where it refuses.
 
     Before any call, each entry's own choices: a configuration resident into
     the next across its own teardown, or wider than the array; a runtime
@@ -746,8 +753,8 @@ def fit(
             variants, bindings, fusion or packing entries, a configuration
             the composer does not build, an entry rooted at a step, scoped
             to some runs of its shape, splitting a step by
-            fission, a placer setting past the
-            sequential placer, a region the composer does not build, and
+            fission, a placer setting the build does not take
+            (``BUILT_PLACERS``), a region the composer does not build, and
             what the analysis does not model (``Derivation``).
     """
     waiting = [
@@ -1132,7 +1139,12 @@ def fit(
                             )
             unplaceable = []
             for edge, p, _ in derivation.wired:
-                elements = derivation.obj_elements[p].get(edge.output)
+                # Spliced, an edge holds each core's own tile.
+                elements = (
+                    int(np.prod(derivation.spliced[edge][0][2].shape))
+                    if edge in derivation.spliced
+                    else derivation.obj_elements[p].get(edge.output)
+                )
                 if edge.depth is None or edge.kind not in held_in or elements is None:
                     continue
                 tile, memory, bds = held_in[edge.kind]
@@ -1166,18 +1178,15 @@ def fit(
                 for edge, p, c in derivation.wired:
                     if edge.kind not in (EdgeKind.STREAM, EdgeKind.CASCADE):
                         continue
+                    # A broadcast's lanes meet as they are, each read by
+                    # several: a cascade's relay is one of them.
                     shape = analysis.hand_off[edge]
-                    if shape not in (
-                        (HandOff.EQUAL, HandOff.BROADCAST)
-                        if edge.kind is EdgeKind.STREAM
-                        else (HandOff.EQUAL,)
-                    ):
+                    if shape not in (HandOff.EQUAL, HandOff.BROADCAST):
                         return Fit(
                             False,
                             "analysis",
-                            f"{edge} is a {edge.kind.value}, whose lanes meet one to "
-                            f"one as they are; its {shape.value} hand-off needs a "
-                            f"restage",
+                            f"{edge} is a {edge.kind.value}, whose lanes meet as "
+                            f"they are; its {shape.value} hand-off needs a restage",
                         )
                 why = analysis.deadlock(
                     {e: e.depth for e, _, _ in derivation.wired if e.depth is not None}
@@ -1248,57 +1257,67 @@ def fit(
                 (position[a], position[b])
                 for a, b in memory_waits(recording, found[0], region.edges)
             ]
+            tried = [s for s in placements if s in BUILT_PLACERS]
+            refusals: list[str] = []
             with set_current_device(device):
                 try:
-                    refused = group_fit_verdict(
-                        derivation.ops,
-                        kind=(
-                            (
-                                FusionKind.STAGED
-                                if EdgeKind.STAGED in kinds
-                                else FusionKind.STREAM
-                            )
-                            if kinds or ordered
-                            else None
-                        ),
-                        edges=[
-                            (e.producer, e.output, e.consumer, e.input)
-                            for e in region.edges
-                            if e.kind in (EdgeKind.STREAM, EdgeKind.STAGED)
-                        ],
-                        cascades=[
-                            (e.producer, e.output, e.consumer, e.input)
-                            for e in region.edges
-                            if e.kind is EdgeKind.CASCADE
-                        ],
-                        kept=kept,
-                        depths={
-                            (e.producer, e.output): e.depth
-                            for e in region.edges
-                            if e.depth is not None and e.kind is not EdgeKind.DDR
-                        },
-                        waits=[
-                            *(
-                                (e.producer, e.consumer)
-                                for e in region.edges
-                                if e.kind is EdgeKind.DDR
+                    for setting in tried:
+                        refused = group_fit_verdict(
+                            derivation.ops,
+                            kind=(
+                                (
+                                    FusionKind.STAGED
+                                    if EdgeKind.STAGED in kinds
+                                    else FusionKind.STREAM
+                                )
+                                if kinds or ordered
+                                else None
                             ),
-                            *ordered,
-                        ],
-                        workers=region.workers,
-                        phases=region.step_phases(),
-                    )
+                            edges=[
+                                (e.producer, e.output, e.consumer, e.input)
+                                for e in region.edges
+                                if e.kind in (EdgeKind.STREAM, EdgeKind.STAGED)
+                            ],
+                            cascades=[
+                                (e.producer, e.output, e.consumer, e.input)
+                                for e in region.edges
+                                if e.kind is EdgeKind.CASCADE
+                            ],
+                            kept=kept,
+                            depths={
+                                (e.producer, e.output): e.depth
+                                for e in region.edges
+                                if e.depth is not None and e.kind is not EdgeKind.DDR
+                            },
+                            waits=[
+                                *(
+                                    (e.producer, e.consumer)
+                                    for e in region.edges
+                                    if e.kind is EdgeKind.DDR
+                                ),
+                                *ordered,
+                            ],
+                            workers=region.workers,
+                            phases=region.step_phases(),
+                            placer=BUILT_PLACERS[setting],
+                        )
+                        if refused is None:
+                            break
+                        refusals.append(refused)
                 except NotImplementedError as e:
                     waiting.append(str(e))
                     continue
-            if refused is not None and set(placements) != {"sequential"}:
+            if len(refusals) < len(tried):
+                continue
+            untried = [s for s in placements if s not in BUILT_PLACERS]
+            if untried:
                 waiting.append(
-                    f"the sequential placer refuses it ({refused}); trying "
-                    f"{', '.join(s for s in placements if s != 'sequential')} is not "
-                    f"built yet"
+                    f"the placer refuses it under {', '.join(tried)} ({refusals[0]}); "
+                    f"trying {', '.join(untried)} is not built yet: the build places "
+                    f"only as {', '.join(BUILT_PLACERS)} do"
                 )
-            elif refused is not None:
-                return Fit(False, "placer", refused)
+            else:
+                return Fit(False, "placer", refusals[0])
         for group, at_once in together.items():
             refused = _independent(
                 [span for span, _ in at_once],
