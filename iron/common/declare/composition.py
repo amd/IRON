@@ -358,7 +358,7 @@ class Schedule:
         commands_in_flight: Commands submitted before the previous completes.
         interleave_with: Versions mixed into the same command.
         size: A derived version to run instead, by name: ``"merged_<k>x"``,
-            ``k`` calls merged into one.
+            ``k`` calls merged into one, the one built.
         packaging: One full ELF, or an xclbin per step; None for the device's default.
     """
 
@@ -374,20 +374,11 @@ class Schedule:
 
     @property
     def merged_calls(self) -> int:
-        """The calls ``size`` merges into one call; 1 where it names none.
-
-        Raises:
-            ValueError: ``size`` is not ``"merged_<k>x"``, ``k`` past one.
-        """
-        if self.size is None:
-            return 1
-        k = self.size.removeprefix("merged_").removesuffix("x")
-        if f"merged_{k}x" != self.size or not k.isdigit() or int(k) < 2:
-            raise ValueError(
-                f"{self.size!r} names no derived version: a merge is 'merged_<k>x', "
-                f"k calls past one"
-            )
-        return int(k)
+        """The calls ``size`` merges into one call (``"merged_<k>x"``, ``k`` past one); 1 where it names no merge."""
+        k = (self.size or "").removeprefix("merged_").removesuffix("x")
+        if self.size == f"merged_{k}x" and k.isdigit() and int(k) > 1:
+            return int(k)
+        return 1
 
 
 @dataclass(frozen=True)

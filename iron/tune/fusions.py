@@ -969,7 +969,8 @@ class Applied:
         into one (``Recording.merged``), and the commands it keeps in flight.
 
         Raises:
-            NotImplementedError: The schedule both merges calls and runs
+            NotImplementedError: The schedule names a derived version other
+                than calls merged into one, or both merges calls and runs
                 several a command.
 
         Its weights coded as ``Graph.compile`` codes them (``Recording.code_weights``),
@@ -983,6 +984,12 @@ class Applied:
         schedules = [s for s in profile.schedules() if s.version == recording.version]
         per = max((s.calls_per_command for s in schedules), default=1)
         merged = max((s.merged_calls for s in schedules), default=1)
+        derived = [s.size for s in schedules if s.size and s.merged_calls == 1]
+        if derived:
+            raise NotImplementedError(
+                f"{recording.name}: the derived version {derived[0]!r}, other than "
+                f"calls merged into one, is not built yet"
+            )
         if per > 1 and merged > 1:
             raise NotImplementedError(
                 f"{recording.name}: several merged calls a command are not built yet"

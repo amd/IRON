@@ -1367,7 +1367,12 @@ def fit(
                         f"which outlasts the call, so a call depends on the one "
                         f"before",
                     )
-            if schedule.size is not None:
+            if schedule.size is not None and schedule.merged_calls == 1:
+                waiting.append(
+                    f"building a schedule's derived version {schedule.size!r} other "
+                    f"than calls merged into one is not built yet"
+                )
+            elif schedule.size is not None:
                 try:
                     with set_current_device(device):
                         recording.merged(schedule.merged_calls)
