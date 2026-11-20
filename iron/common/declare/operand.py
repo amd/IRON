@@ -82,9 +82,9 @@ class Operand:
     only to the host whose ``drain_join`` is above one joins each run of that
     many lanes in a memtile into one host lane (``joined_drains``), so it
     takes fewer of the shim's receiving channels. An output whose first
-    on-chip reader takes smaller objects than its own ``delivers`` that
-    reader's object type: each lane's fifo sends whole objects and its
-    reader receives them a smaller object at a time (the dialect's
+    on-chip reader takes other objects than its own, either a whole number
+    of the other, ``delivers`` that reader's object type: each lane's fifo
+    sends its own objects and its reader receives its own (the dialect's
     asymmetric fifo).
     """
 

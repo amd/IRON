@@ -288,8 +288,8 @@ def fused_configuration(
         (source,) = [b for b in made.buffers if b.name == e.output]
         per_object = math.prod(source.obj_shape)
         chosen[e] = max(-(-n // per_object) for n in source.moved_per_lane().values())
-    # A stream whose reader takes each object its producer sends as a whole
-    # number of smaller ones: one fifo, each end at its own object size.
+    # A stream whose ends' objects are each a whole number of the other's:
+    # one fifo, each end at its own object size.
     delivered: dict[tuple[int, str], Any] = {}
     for e in fusion.edges:
         if (
@@ -318,7 +318,7 @@ def fused_configuration(
         sizes = math.prod(made.obj_shape), math.prod(taken.obj_shape)
         if (
             sizes[0] != sizes[1]
-            and sizes[0] % sizes[1] == 0
+            and max(sizes) % min(sizes) == 0
             and np.dtype(made.dtype) == np.dtype(taken.dtype)
         ):
             delivered[(e.producer, e.output)] = taken.obj_type

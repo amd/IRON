@@ -1601,16 +1601,17 @@ def fit(
                     or made == taken
                 ):
                     continue
-                # One fifo delivers each object as a whole number of the
-                # reader's (the dialect's asymmetric fifo): a stream from one
-                # core to another, read nowhere else, in a region the
-                # composer streams (``compose.fused_configuration``).
+                # One fifo delivers the producer's objects as the reader's
+                # (the dialect's asymmetric fifo), either a whole number of the
+                # other: a stream from one core to another, read nowhere else,
+                # in a region the composer streams
+                # (``compose.fused_configuration``).
                 if edge.kind is EdgeKind.CASCADE:
                     why = "the cascade carries one object size"
-                elif made % taken:
+                elif made % taken and taken % made:
                     why = (
-                        "an asymmetric fifo delivers each object as a whole number "
-                        "of smaller ones"
+                        "an asymmetric fifo's ends each take a whole number of "
+                        "the other's objects"
                     )
                 elif EdgeKind.STAGED in {e.kind for e in region.edges}:
                     why = "beside staged edges the composer stages it too"

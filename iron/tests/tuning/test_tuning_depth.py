@@ -32,8 +32,7 @@ def _held_where_it_can_be(device, role, shape, depth, rate):
     hand-off can be held in L1; the analysis, not the toy's name, says which,
     read off the memtile-held toy (the hand-off is the operators' lanes', not
     where the value waits). An L1 hold the analysis does not model, or the
-    composer does not build (a stream whose reader takes larger objects than
-    its producer sends), yet stays in the memtile.
+    composer does not build, yet stays in the memtile.
     """
     staged = toys_edges.combination_toy(
         device, shape, role, "memtile", depth, rate, "recorded"

@@ -13,6 +13,7 @@ import pytest
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement, Region
+from iron.common.graph.sdf import analyze
 from iron.tests.support.toys_edges import (
     HELDS,
     diamond_qkv_merge,
@@ -123,14 +124,17 @@ def test_tuner_picks_the_way_of_holding_that_pays(device):
     )
 
 
-@unbuilt
 def test_a_depth_below_the_analyzed_minimum_is_refused_before_any_build(device):
     """A skip edge shallower than the dataflow analysis's minimum is refused before any build.
 
-    Add -> GEMV -> Add held on a 2-deep broadcast edge hangs the device; a
-    skip held 4 deep runs where a 2-deep hold deadlocks.
+    Add -> GEMV -> Add, the GEMV's two-element objects delivered to the
+    second add whole (an asymmetric fifo): the skip's minimum is one, which
+    npu2 runs bit-identical, as it does four.
     """
-    recording, region = _short_skip_region(depth=1)
+    recording, region = _short_skip_region()
+    least = analyze(region, recording, device).min_depth[region.edges[-1]]
+    assert least == 1
+    recording, region = _short_skip_region(depth=least - 1)
     profile = Profile()
     profile.add_entry(Entry(region))
     result = fit(profile, [Timed(recording)], device)
@@ -139,7 +143,6 @@ def test_a_depth_below_the_analyzed_minimum_is_refused_before_any_build(device):
     assert "depth" in (result.why or "") or "deadlock" in (result.why or "")
 
 
-@unbuilt
 def test_the_recorded_safe_depth_fits(device):
     """The same skip edge at a depth of 4, which runs safely, is not refused by the analysis."""
     recording, region = _short_skip_region(depth=4)
