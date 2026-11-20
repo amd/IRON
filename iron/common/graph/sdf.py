@@ -22,7 +22,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import Any
+from typing import Any, get_origin
 
 import numpy as np
 from aie.dialects._aie_enum_gen import ObjectFifoLinkMode, ObjectFifoPort
@@ -30,6 +30,7 @@ from aie.iron import Program, Worker
 from aie.iron.dataflow.objectfifo import ObjectFifo, ObjectFifoLink
 from aie.iron.device import Device
 from aie.iron.kernel import ExternalFunction
+from aie.iron.kernels import Param
 from aie.iron.trace import Access, Scope, record
 from aie.iron.trace import Recording as Recorded
 from aie.utils import set_current_device
@@ -385,8 +386,10 @@ class Analysis:
 
         Raises:
             NotImplementedError: One core's body calls several kernels, in an
-                order its accesses do not record, or a kernel is built for
-                an NPU other than the one attached (``kernel_cycles``).
+                order its accesses do not record, a kernel takes scalars its
+                core computes at run time (its operator passes none), or a
+                kernel is built for an NPU other than the one attached
+                (``kernel_cycles``).
         """
         costs = []
         for kernels, scalars, work, fired, program in zip(
@@ -406,6 +409,19 @@ class Analysis:
                         f"its accesses do not record, is not modelled yet"
                     )
                 for k in ks:
+                    contract = kernels[k].contract
+                    types = kernels[k].arg_types()
+                    bound = dict(contract.parameter_bindings)
+                    free = sum(
+                        r is Param and get_origin(types[n]) is not np.ndarray
+                        for n, r in enumerate(contract.roles)
+                        if n not in bound
+                    )
+                    if free and not scalars[k]:
+                        raise NotImplementedError(
+                            f"pricing {kernels[k].name}, whose {free} scalar(s) its "
+                            f"core computes at run time, is not modelled yet"
+                        )
                     row[i] = Fraction(kernel_cycles(kernels[k], scalars[k]))
             costs.append(row)
         return costs
@@ -523,16 +539,24 @@ class Derivation:
         self.values = dict(values or {})
         self.wired, _ = region.wiring()
         groups = [set(group) for group in region.workers]
+        # A carry across calls is no splice within the call: its initial
+        # objects model it.
         one_core = [
             (e, p, c)
             for e, p, c in self.wired
-            if e.kind is EdgeKind.STREAM and any({p, c} <= g for g in groups)
+            if e.kind is EdgeKind.STREAM
+            and not e.across_calls
+            and any({p, c} <= g for g in groups)
         ]
         # Built as the composer builds them: an output leaving on the cascade,
         # or streaming to a step on its worker, is built to splice.
         splices: dict[int, list[str]] = {}
         for e, p, c in self.wired:
-            if e.kind is EdgeKind.CASCADE or (e, p, c) in one_core:
+            if (e.kind is EdgeKind.CASCADE and not e.across_calls) or (
+                e,
+                p,
+                c,
+            ) in one_core:
                 splices.setdefault(p, []).append(e.output)
         self.ops: list[Operator] = []
         self.recorded: list[tuple[Any, Recorded]] = []
@@ -1220,7 +1244,13 @@ class Derivation:
                 lead[actor_of[id(stage)]] = actor_of[id(writing)]
         for group in self.region.workers:
             for edge, p, c in self.wired:
-                if p not in group or c not in group or edge in self.spliced:
+                # A carry across calls joins no actors within the call.
+                if (
+                    p not in group
+                    or c not in group
+                    or edge in self.spliced
+                    or edge.across_calls
+                ):
                     continue
                 outs = self.lanes[p].get(edge.output, [])
                 ins = self.lanes[c].get(edge.input, [])

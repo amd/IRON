@@ -21,6 +21,7 @@ import pytest
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Hold, Refinement, Region
 from iron.common.graph.record import Recording
+from iron.common.graph.sdf import analyze
 from iron.common.image.step import Edge
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -257,11 +258,34 @@ def test_the_recorded_initial_value_fits(device):
     assert result.ok, result.why
 
 
+# Priced on its own NPU; npu1's waits on host 203.
 @unbuilt
+@pytest.mark.supported_devices("npu2")
 def test_the_analysis_bounds_the_cycles_throughput(device):
-    """The analysis's bound on a cycle's throughput (one trip around the loop) is recorded alongside the fit."""
+    """The analysis's bound on a cycle's throughput is one trip around the loop.
+
+    The scan's state is carried from each call into the next: a call's period
+    is the time each lane's core takes around that loop, its own priced work
+    for a call, and the edge on the cycle held deeper does not lower it.
+    """
     recording, region = _scan_region()
     profile = Profile()
     profile.add_entry(Entry(region))
-    result = fit(profile, [Timed(recording)], device)
-    assert result.ok
+    assert fit(profile, [Timed(recording)], device).ok
+    analysis = analyze(region, recording, device)
+    cycle = region.edges[0]
+    trip = max(
+        sum(
+            sum(analysis.costs[actor])
+            for actor in {
+                analysis.flow.channels[c].producer,
+                analysis.flow.channels[c].consumer,
+            }
+        )
+        for c in analysis.channels[cycle]
+    )
+    assert analysis.period == trip
+    deeper = analyze(
+        region.deepened(0, analysis.min_depth[cycle] + 2), recording, device
+    )
+    assert deeper.period == analysis.period
