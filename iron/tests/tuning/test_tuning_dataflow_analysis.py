@@ -7,10 +7,13 @@ import pytest
 from aie.dialects.aie import get_target_model
 
 from iron.common.declare.composition import Edge, Region
-from iron.common.graph.sdf import analyze
+from iron.common.declare.profile import Profile
+from iron.common.graph.sdf import Derivation, analyze
 from iron.common.image.step import HandOff
+from iron.operators import MHA
 from iron.tests.support import toys_composition
 from iron.tests.support import toys_dataflow as toys
+from iron.tests.support.llama_model import small
 from iron.tests.support.toys_edges import member
 
 pytestmark = pytest.mark.usefixtures("device")
@@ -126,3 +129,25 @@ def test_a_spliced_step_s_output_streams_on_its_producers_lanes(device):
     )
     analysis = analyze(region, recording, device)
     assert analysis.hand_off[region.edges[1]] is HandOff.RATIO
+
+
+def test_a_step_is_derived_as_its_resolved_operator(device):
+    """A step is built and sized as its operator resolved for the device, tunables or none.
+
+    MHA's key blocks a call derive from its key block, which only resolving
+    sets. npu2's MHA maps one core a query block; npu1's three a block, whose key
+    fill a call sizes other than by a lane's length, which the analysis waits
+    on by name rather than deriving from an unresolved key block.
+    """
+    model = small()
+    model.profile = Profile()
+    decode, _ = model.shapes()
+    recording = model.record(**decode)
+    op = next(s.op for s in recording.steps if isinstance(s.op, MHA))
+    region = Region((member(op),))
+    if device.resolve().name == "npu1":
+        with pytest.raises(NotImplementedError, match="sized per call"):
+            Derivation(region, recording, device)
+        return
+    derivation = Derivation(region, recording, device)
+    assert derivation.ops[0].B_kv == op.resolved(device).B_kv
