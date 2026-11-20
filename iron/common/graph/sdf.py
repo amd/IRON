@@ -1220,8 +1220,9 @@ class Derivation:
                     writer[fifo] = actor
                 elif actor not in readers.setdefault(fifo, []):
                     readers[fifo].append(actor)
-        # Steps on one worker: each lane's producer core and its reader are one
-        # actor, running their programs in the worker's firing order.
+        # Steps on one worker: lane k's producer core and its reader are one
+        # actor, running their programs in the worker's firing order; lanes
+        # past the other step's run alone, restaged as a memtile would.
         lead: dict[int, int] = {}
         # A step spliced into its producer's cores: each core and its stage.
         for cores in self.spliced.values():
@@ -1240,8 +1241,7 @@ class Derivation:
                 outs = self.lanes[p].get(edge.output, [])
                 ins = self.lanes[c].get(edge.input, [])
                 if (
-                    len(outs) != len(ins)
-                    or any(len(readers.get(f, [])) != 1 for f in ins)
+                    any(len(readers.get(f, [])) != 1 for f in ins)
                     or any(actor_step[writer[f]] is None for f in outs)
                     or any(actor_step[readers[f][0]] is None for f in ins)
                 ):

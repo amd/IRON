@@ -28,9 +28,9 @@ from typing import Literal, Protocol
 
 import numpy as np
 from aie import ir
-from aie.dialects.aie import get_target_model
+from aie.dialects.aie import WireBundle, get_target_model
 from aie.iron.device import Device
-from aie.utils import set_current_device
+from aie.utils import bfp, set_current_device
 from aie.utils.compile.jit.params import OperatorParam
 
 from ..common.declare import Profile
@@ -47,6 +47,7 @@ from ..common.declare.composition import (
     Version,
     refinement,
 )
+from ..common.declare.operand import Staging
 from ..common.design import OperatorDesign
 from ..common.graph.carried import CarriedLoop
 from ..common.graph.coded import CodedWeight, encode_all
@@ -882,7 +883,9 @@ def fit(
     step outside it on a path between two of them), whether it balances, whether each
     stream or cascade edge's lanes meet as they are, and
     whether it runs at its chosen
-    depths, the rest at their minimum. The placer last places the composed
+    depths, the rest at their minimum. A stream between steps on one worker
+    may restage its lanes in L1, held to each core's channels, memory,
+    buffer descriptors and locks (``_restaged_on_cores``). The placer last places the composed
     module, where the composer builds the region as IRON's fusions do: under
     each of ``placements`` the build takes in turn (``BUILT_PLACERS``), the
     sequential placer, then the annealing one where it refuses.
@@ -1536,6 +1539,8 @@ def fit(
                 why = _held_past(derivation, edge, p, edge.depth, held_in, locks)
                 if why is not None:
                     return Fit(False, "counts", why)
+            # Restages held in L1, on the cores their two steps share.
+            on_cores: list[tuple[Edge, int, int, int]] = []
             # A region with no edge hands nothing on-chip: nothing to analyse.
             if region.edges:
                 try:
@@ -1551,13 +1556,30 @@ def fit(
                     # A broadcast's lanes meet as they are, each read by
                     # several: a cascade's relay is one of them.
                     shape = analysis.hand_off[edge]
-                    if shape not in (HandOff.EQUAL, HandOff.BROADCAST):
-                        return Fit(
-                            False,
-                            "analysis",
-                            f"{edge} is a {edge.kind.value}, whose lanes meet as "
-                            f"they are; its {shape.value} hand-off needs a restage",
+                    if shape in (HandOff.EQUAL, HandOff.BROADCAST):
+                        continue
+                    if edge.kind is EdgeKind.STREAM and any(
+                        {p, c} <= set(group) for group in region.workers
+                    ):
+                        on_cores.append(
+                            (
+                                edge,
+                                p,
+                                c,
+                                (
+                                    analysis.min_depth[edge]
+                                    if edge.depth is None
+                                    else edge.depth
+                                ),
+                            )
                         )
+                        continue
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"{edge} is a {edge.kind.value}, whose lanes meet as "
+                        f"they are; its {shape.value} hand-off needs a restage",
+                    )
                 why = analysis.deadlock(
                     {e: e.depth for e, _, _ in derivation.wired if e.depth is not None}
                 )
@@ -1591,6 +1613,17 @@ def fit(
                     )
                 }
             )
+            for edge, p, c, depth in on_cores:
+                why = _restaged_on_cores(
+                    derivation,
+                    edge,
+                    (p, c),
+                    depth,
+                    (p, edge.output) in kept,
+                    model,
+                )
+                if why is not None:
+                    return Fit(False, "counts", why)
             for edge, p, c in derivation.wired:
                 made = derivation.obj_elements[p].get(edge.output)
                 taken = derivation.obj_elements[c].get(edge.input)
@@ -1599,6 +1632,7 @@ def fit(
                     or made is None
                     or taken is None
                     or made == taken
+                    or edge in [e for e, _, _, _ in on_cores]
                 ):
                     continue
                 # One fifo delivers each object as a whole number of the
@@ -1997,6 +2031,131 @@ def _held_past(
         )
     if depth > locks:
         return f"{edge} holds {depth} objects, more than a lock counts ({locks})"
+    return None
+
+
+def _restaged_on_cores(
+    derivation: Derivation,
+    edge: Edge,
+    ends: tuple[int, int],
+    depth: int,
+    elsewhere: bool,
+    model,
+) -> str | None:
+    """Return why ``edge``'s restage, held in L1 on the cores its two steps share, is past one of them under every placement; else None.
+
+    Lane k of either step runs on core k. Each group ``Staging`` plans is
+    held as ``Staging.on_cores`` builds it: a link on a core, its pool
+    ``depth`` rounds deep or a call's rounds where more (a core runs its
+    producer's call through before its consumer's), a join on its
+    consumer lane's core, a split, or a join split again, on its first
+    producer lane's. The core's own lanes meet the round in its memory, as
+    do the lanes of the neighbours whose cores reach that memory, at best
+    every other lane up to their number; each lane past them takes a
+    channel and a buffer descriptor a round on the link's core. So these
+    are lower bounds: what a plan adds, a join split again sending its
+    rounds out of the core and back, the placer counts. The pool holds a
+    lock pair a slot. Each
+    core also holds its two steps' other fifos, a lock pair each, and a
+    channel and descriptors for each that leaves the core. ``elsewhere``
+    sends a link core's own producer lane to its other readers.
+
+    Args:
+        derivation: The region's derivation.
+        edge: The restaged edge.
+        ends: Its producer's and consumer's steps in ``derivation``.
+        depth: The rounds its links hold.
+        elsewhere: Whether the producer's lanes are also read elsewhere.
+        model: The device's target model.
+
+    Returns:
+        The first core past a core tile's input or output channels,
+        memory, buffer descriptors or locks, or None.
+    """
+    p, c = ends
+    (source,) = [
+        b for b in derivation.recorded[p][0].op.buffers if b.name == edge.output
+    ]
+    (sink,) = [b for b in derivation.recorded[c][0].op.buffers if b.name == edge.input]
+    try:
+        with set_current_device(derivation.device):
+            staging = Staging(source, sink)
+    except ValueError as e:
+        return f"{edge}, restaged in L1: {e}"
+    lanes = (derivation.lanes[p][edge.output], derivation.lanes[c][edge.input])
+    cores = max(len(lanes[0]), len(lanes[1]))
+    inputs, outputs, held, bds, locks = ([0] * cores for _ in range(5))
+    handles: list[list] = [[] for _ in range(cores)]
+    for step, fifos in zip(ends, lanes):
+        for k, fifo in enumerate(fifos):
+            (worker,) = [
+                core.owner
+                for core in derivation.recorded[step][1].cores
+                if any(h.object_fifo is fifo for h in core.owner.fifos)
+            ]
+            handles[k] += [
+                h for h in worker.fifos if h.object_fifo not in (*lanes[0], *lanes[1])
+            ]
+    for k, own in enumerate(handles):
+        here = Counter(h.object_fifo for h in own)
+        for h in own:
+            local = here[h.object_fifo] > 1
+            # Both ends on this core: one buffer and lock pair, no channel.
+            if local and h.handle_type == "cons":
+                continue
+            held[k] += h.depth * math.prod(h.shape) * bfp.itemsize(h.dtype)
+            locks[k] += 2
+            if not local:
+                bds[k] += h.depth
+                inputs[k] += h.handle_type == "cons"
+                outputs[k] += h.handle_type == "prod"
+    tiles = [
+        (col, row)
+        for col in range(model.columns())
+        for row in range(model.rows())
+        if model.is_core_tile(col, row)
+    ]
+    neighbours = max(
+        sum(
+            model.is_legal_mem_affinity(*other, *tile)
+            for other in tiles
+            if other != tile
+        )
+        for tile in tiles
+    )
+    for (ins, taken, outs, _), rounds in zip(staging.groups, staging.rounds):
+        at = outs[0] if len(outs) == 1 else ins[0]
+        deep = max(depth, rounds)
+        held[at] += deep * sum(taken) * staging.item
+        locks[at] += 2 * max(len(ins), len(outs))
+        far_in = max(0, sum(k != at for k in ins) - neighbours)
+        far_out = max(0, sum(j != at for j in outs) - neighbours)
+        sent = elsewhere and at in ins
+        inputs[at] += far_in
+        outputs[at] += far_out + sent
+        bds[at] += deep * (far_in + far_out + sent)
+    col, row = tiles[0]
+    for k in range(cores):
+        for what, n, most in (
+            (
+                "input channels",
+                inputs[k],
+                model.get_num_dest_switchbox_connections(col, row, WireBundle.DMA),
+            ),
+            (
+                "output channels",
+                outputs[k],
+                model.get_num_source_switchbox_connections(col, row, WireBundle.DMA),
+            ),
+            ("bytes", held[k], model.get_local_memory_size()),
+            ("buffer descriptors", bds[k], model.get_num_bds(col, row)),
+            ("locks", locks[k], model.get_num_locks(col, row)),
+        ):
+            if n > most:
+                return (
+                    f"{edge}, restaged in L1, takes {n} {what} on core {k} of its "
+                    f"steps' worker, however it is placed; a core tile has {most}"
+                )
     return None
 
 

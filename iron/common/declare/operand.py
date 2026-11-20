@@ -403,7 +403,12 @@ class Operand:
             [],
         )
 
-    def feed(self, source: Operand | ObjectFifo, staged: bool = False) -> None:
+    def feed(
+        self,
+        source: Operand | ObjectFifo,
+        staged: bool = False,
+        cores: Sequence[Any] | None = None,
+    ) -> None:
         """Take this input's stream on-chip from ``source``, another operator's output or one fifo (a lane source).
 
         Neither is a host transfer; several inputs may each be fed one source.
@@ -415,15 +420,20 @@ class Operand:
                 reads, or a fifo whose consumer end it reads.
             staged: Where the lanes do not meet directly, restage them
                 through memtiles (``Staging``) rather than refuse.
+            cores: Where the lanes do not meet directly, restage them held
+                in L1 on these core tiles, a lane of ``source``'s each
+                (``Staging.on_cores``), rather than refuse.
 
         Raises:
             ValueError: This is not a streamed input, ``source`` not a bound
                 output, this is a held (``replicate``) input, ``source`` is
                 pinned rather than streamed, a lane source feeds more than
                 one lane or objects of another type, or, unless ``staged``
-                and ``Staging`` takes them, their lanes or objects differ or
+                or ``cores`` and ``Staging`` takes them, their lanes or objects differ or
                 a lane's host access pattern does not visit the same
                 elements in the same order on both sides.
+            NotImplementedError: Held in L1, a round is read in another
+                order than it is joined (``Staging.on_cores``).
         """
         drains = source.drains if isinstance(source, Operand) else True
         if not (self.streamed and self.fills) or not drains:
@@ -448,18 +458,18 @@ class Operand:
                 f"{source.name} is pinned to shim channels, not a fifo: it "
                 f"cannot feed {self.name} on-chip"
             )
-        mismatch = self._mismatch(source)
-        if mismatch is not None and not staged:
+        mismatch = self.mismatch(source)
+        if mismatch is not None and not (staged or cores is not None):
             raise ValueError(mismatch)
         if source.keeps_host:
             # The host's drain keeps each lane's bound end.
             source.read_lanes.update(range(source.lanes))
         if mismatch is not None:
-            self.staged = Staging(source, self).build()
+            self.staged = Staging(source, self, cores).build()
         self.fed_from = source
         source.feeds.append(self)
 
-    def _mismatch(self, source: Operand) -> str | None:
+    def mismatch(self, source: Operand) -> str | None:
         """Return how ``source``'s lanes fail to meet this input's as they are, or None where each lane carries the same elements in order.
 
         In this input's objects: the source's own, or those it ``delivers``.
@@ -514,7 +524,7 @@ class Operand:
                 f"a streamed input of its own, each on fifos rather than pinned "
                 f"to shim channels"
             )
-        mismatch = sink._mismatch(self)
+        mismatch = sink.mismatch(self)
         if mismatch is not None:
             raise ValueError(mismatch)
         if self.keeps_host:
@@ -1021,7 +1031,10 @@ class Staging:
     joins them and each one's slot of a round, in elements, then its lanes of
     ``sink`` and their slots, in the order the round splits into them;
     ``walks``, per group, the walk reading a joined round in that order, or
-    None where it is already.
+    None where it is already; ``rounds``, per group, the rounds a call moves.
+
+    Given ``cores``, each lane of ``source``'s core tile, the restage is held
+    in L1 instead (``build``), each round within a core tile's memory.
 
     Raises:
         ValueError: The two are not one buffer, a side's lanes do not visit
@@ -1032,8 +1045,10 @@ class Staging:
             more than it sends a split of splits.
     """
 
-    def __init__(self, source: Operand, sink: Operand) -> None:
-        self.source, self.sink = source, sink
+    def __init__(
+        self, source: Operand, sink: Operand, cores: Sequence[Any] | None = None
+    ) -> None:
+        self.source, self.sink, self.cores = source, sink, cores
         edge = (
             f"{type(source.op).__name__}.{source.name} -> "
             f"{type(sink.op).__name__}.{sink.name}"
@@ -1132,10 +1147,15 @@ class Staging:
         self.fan_in = tm.get_num_dest_switchbox_connections(0, row, WireBundle.DMA)
         self.fan_out = tm.get_num_source_switchbox_connections(0, row, WireBundle.DMA)
         self.capacity = tm.get_mem_tile_size()
+        self.holder = "a memtile"
+        if cores is not None:
+            self.capacity = tm.get_local_memory_size()
+            self.holder = "a core tile"
         self.item = bfp.itemsize(sink.dtype)
 
         self.groups: list[tuple[list[int], list[int], list[int], list[int]]] = []
         self.walks: list[TensorAccessPattern | None] = []
+        self.rounds: list[int] = []
         owner = np.empty(source.elements, dtype=np.int64)
         for lane, stream in enumerate(produced):
             owner[stream] = lane
@@ -1215,8 +1235,8 @@ class Staging:
                 )
             if sum(taken) * self.item > self.capacity:
                 raise ValueError(
-                    f"{edge}: a round of {sum(taken)} elements is past a "
-                    f"memtile's {self.capacity} bytes"
+                    f"{edge}: a round of {sum(taken)} elements is past "
+                    f"{self.holder}'s {self.capacity} bytes"
                 )
             tile_p, tile_c = units
             if tile_p is not None and any(
@@ -1229,6 +1249,7 @@ class Staging:
                 )
             self.groups.append((ins, taken, outs, given))
             self.walks.append(walk)
+            self.rounds.append(k)
 
     def build(self) -> list[ObjectFifo]:
         """Wire each group at memtiles over ends of ``source``'s lanes (``Operand.reader``).
@@ -1237,10 +1258,15 @@ class Staging:
         split of a round: of the source lane's own fifo where a round is
         one of its objects, else of the source lanes joined into rounds.
 
+        Given ``cores``, the groups are held in L1 on them instead
+        (``on_cores``).
+
         Returns:
             Per lane of ``sink``, the fifo it reads, of ``sink``'s ``obj_type`` at
             its consumers.
         """
+        if self.cores is not None:
+            return self.on_cores()
         source, sink = self.source, self.sink
         fifos: list[Any] = [None] * sink.lanes
         for (ins, taken, outs, given), walk in zip(self.groups, self.walks):
@@ -1258,6 +1284,89 @@ class Staging:
                 end = self.joined(ends, taken, None, walk).cons()
             for k, out in zip(outs, self.split(end, given)):
                 fifos[k] = out
+        return fifos
+
+    def on_cores(self) -> list[ObjectFifo]:
+        """Wire each group by a link on one of ``cores``, held in L1: a join on its sink lane's core, else on its first source lane's.
+
+        Each round is one object of the link's pool on that core, a call's
+        rounds deep: a core runs its producer's whole call before its
+        consumer's. A source lane whose objects are its slot of a round, read
+        here first, and a sink lane whose objects are its slot keep them in
+        the pool (``ObjectFifo.delegate_tile``): in place where their core
+        is the link's or a neighbour reaching its memory, else by DMA. A
+        join split again, or a split of rounds of several source objects,
+        joins its rounds into a fifo the core sends itself.
+
+        Returns:
+            Per lane of ``sink``, the fifo it reads, of ``sink``'s
+            ``obj_type`` at its consumers.
+
+        Raises:
+            NotImplementedError: A round is read in another order than it
+                is joined: the core reads its pool as written.
+        """
+        source, sink = self.source, self.sink
+        assert self.cores is not None, "on_cores() restages on given cores"
+        fifos: list[Any] = [None] * sink.lanes
+        produce, consume = math.prod(source.obj_shape), math.prod(sink.obj_shape)
+        for (ins, taken, outs, given), walk, rounds in zip(
+            self.groups, self.walks, self.rounds
+        ):
+            if walk is not None:
+                raise NotImplementedError(
+                    f"{source.name} -> {sink.name}: a round read on a core in "
+                    f"another order than it is joined is not built yet"
+                )
+            tile = self.cores[outs[0] if len(outs) == 1 else ins[0]]
+            ends = []
+            for k, slot in zip(ins, taken):
+                first = k not in source.read_lanes
+                end = source.reader(k)
+                if first and slot == produce:
+                    end.object_fifo.delegate_tile = tile
+                ends.append(end)
+            offsets = list(itertools.accumulate(taken[:-1], initial=0))
+            if len(outs) == 1:
+                fifo = ObjectFifo(
+                    np.ndarray[(sum(taken),), np.dtype[sink.dtype]],
+                    depth=rounds,
+                    consumer_obj_type=None if sum(taken) == consume else sink.obj_type,
+                    delegate_tile=tile if sum(taken) == consume else None,
+                )
+                ObjectFifoLink(
+                    ends, fifo.prod(), tile, offsets if len(ends) > 1 else [], []
+                )
+                fifos[outs[0]] = fifo
+                continue
+            if len(ins) == 1 and taken[0] == produce:
+                (end,) = ends
+            else:
+                joined = ObjectFifo(
+                    np.ndarray[(sum(taken),), np.dtype[sink.dtype]], depth=rounds
+                )
+                ObjectFifoLink(
+                    ends, joined.prod(), tile, offsets if len(ends) > 1 else [], []
+                )
+                end = joined.cons()
+            parts = [
+                ObjectFifo(
+                    np.ndarray[(slot,), np.dtype[sink.dtype]],
+                    depth=rounds,
+                    consumer_obj_type=None if slot == consume else sink.obj_type,
+                    delegate_tile=tile if slot == consume else None,
+                )
+                for slot in given
+            ]
+            ObjectFifoLink(
+                end,
+                [part.prod() for part in parts],
+                tile,
+                [],
+                list(itertools.accumulate(given[:-1], initial=0)),
+            )
+            for j, part in zip(outs, parts):
+                fifos[j] = part
         return fifos
 
     def split(self, end: Any, given: list[int]) -> list[ObjectFifo]:
