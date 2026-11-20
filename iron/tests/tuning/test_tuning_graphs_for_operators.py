@@ -24,6 +24,7 @@ from iron.common.graph.sdf import analyze
 from iron.common.image.step import EdgeKind
 from iron.operators import GEMM, GEMV, ElementwiseAdd, ElementwiseMul, Softmax
 from iron.tests.support import toys_composition as toys
+from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import unbuilt, waits_on_a_kernel
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, measure, search
@@ -389,11 +390,11 @@ def test_search_composes_the_prefill_graph_where_it_pays(npu2):
 
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
-@unbuilt
 def test_search_composes_the_axpy_graph_where_it_pays(npu2):
-    region = _axpy_region()
-    entry = Entry(root=region)
     mul, add = toys.axpy_ops()
+    entry = Entry(
+        root=Region(parts=(member(mul), member(add)), edges=_axpy_region().edges)
+    )
     recording = toys.axpy_recording("axpy_search", mul, add)
     calls = [Timed(recording)]
     start = Profile()
@@ -401,8 +402,10 @@ def test_search_composes_the_axpy_graph_where_it_pays(npu2):
     with_entry.add_entry(entry)
     ratio = measure(with_entry, start, calls, npu2).ratio
     tuned = search(calls, start, npu2)
+    # Where the window pays, what search keeps is at least as fast (a later
+    # round may widen it on top).
     if ratio < 0.95:
-        assert entry in tuned.entries()
+        assert measure(tuned, with_entry, calls, npu2).ratio < 1.05
     if ratio > 1.05:
         assert entry not in tuned.entries()
     result = check(tuned, start, calls, npu2, Refinement.NO_WORSE)

@@ -1827,17 +1827,21 @@ def search(
 ) -> Profile:
     """Return the fastest profile found from ``start`` that passes every check.
 
-    Each edit ``candidates`` yields is applied to ``start``, fitted
+    In rounds, each from the profile the last one kept (``start`` first):
+    each edit ``candidates`` yields from it is applied to it, fitted
     (``fit``; one that waits or is refused is passed over) and measured in
-    place against ``start`` (``measure``); one under ``GAINS`` gains, and one
+    place against it (``measure``); one under ``GAINS`` gains, and one
     that does not build, or builds wrong, is refused and logged. The gainers are
     then taken best first, each applied to the profile so far (a region and
     a tunable edit of the same steps compose; a region over steps an earlier
     one holds gives way to it, as a tunable an earlier one sets does): one
     that builds what the profile so far builds is passed over; a take is
     checked against ``start`` by its refinement (``check``) and measured
-    against the profile so far, and kept where it still gains.
-    Pricing stops at ``budget_s``.
+    against the profile so far, and kept where it still gains. The next
+    round's ``candidates`` reach what composes on a take (a hold of an edge
+    of a region it adds); an edit an earlier round priced is not priced
+    again. The search ends at a round that keeps nothing, or at
+    ``budget_s``.
 
     Args:
         calls: The graph's calls, every version.
@@ -1855,67 +1859,89 @@ def search(
             "counting the images a profile loads is not built yet"
         )
     begun = time.perf_counter()
-    priced: list[tuple[float, Edit]] = []
-    edits = candidates(calls, start, device)
-    while budget_s is None or time.perf_counter() - begun < budget_s:
-        try:
-            edit = next(edits)
-        except StopIteration:
-            break
-        except NotImplementedError as e:
-            logger.info("search: %s", e)
-            break
-        edited = edit.apply(start)
-        try:
-            fitted = fit(edited, calls, device)
-        except NotImplementedError as e:
-            logger.info("search: waits: %s", e)
-            continue
-        if not fitted.ok:
-            logger.info("search: refused at %s: %s", fitted.stage, fitted.why)
-            continue
-        try:
-            ratio = measure(
-                edited, start, calls, device, timing=PRICING, refinement=edit.refinement
-            ).ratio
-        except NotBitIdentical as e:
-            logger.warning("search: refused, built wrong: %s: %s", edit, e)
-            continue
-        except NotImplementedError as e:
-            logger.info("search: waits: %s", e)
-            continue
-        except (ValueError, RuntimeError, ir.MLIRError) as e:
-            logger.warning("search: refused, does not build: %s: %s", edit, e)
-            continue
-        logger.info("search: %.3f for %s", ratio, edit)
-        if ratio < GAINS:
-            priced.append((ratio, edit))
     incumbent = start
-    for ratio, edit in sorted(priced, key=lambda pair: pair[0]):
-        edited = edit.apply(incumbent)
-        with set_current_device(device):
-            same = all(
-                Applied.of(c, edited, device).fingerprint(device)
-                == Applied.of(c, incumbent, device).fingerprint(device)
-                for c in calls
-            )
-        if same:
-            continue  # an earlier take decides what it names
-        checked = check(edited, start, calls, device, edit.refinement)
-        if not checked.ok:
-            logger.info("search: %s is not bit-identical: %s", edit, checked.why)
-            continue
-        if (
-            measure(
-                edited,
-                incumbent,
-                calls,
-                device,
-                timing=PRICING,
-                refinement=edit.refinement,
-            ).ratio
-            >= GAINS
-        ):
-            continue
-        incumbent = edited
+    tried: set[str] = set()
+    while budget_s is None or time.perf_counter() - begun < budget_s:
+        base = incumbent
+        priced: list[tuple[float, Edit]] = []
+        edits = candidates(calls, base, device)
+        while budget_s is None or time.perf_counter() - begun < budget_s:
+            try:
+                edit = next(edits)
+            except StopIteration:
+                break
+            except NotImplementedError as e:
+                logger.info("search: %s", e)
+                break
+            # Entry is unhashable, so an edit is known by its repr.
+            if repr(edit) in tried:
+                continue
+            tried.add(repr(edit))
+            edited = edit.apply(base)
+            try:
+                fitted = fit(edited, calls, device)
+            except NotImplementedError as e:
+                logger.info("search: %s waits: %s", edit, e)
+                continue
+            if not fitted.ok:
+                logger.info(
+                    "search: %s refused at %s: %s", edit, fitted.stage, fitted.why
+                )
+                continue
+            try:
+                ratio = measure(
+                    edited,
+                    base,
+                    calls,
+                    device,
+                    timing=PRICING,
+                    refinement=edit.refinement,
+                ).ratio
+            except NotBitIdentical as e:
+                logger.warning("search: refused, built wrong: %s: %s", edit, e)
+                continue
+            except NotImplementedError as e:
+                logger.info("search: %s waits: %s", edit, e)
+                continue
+            except (ValueError, RuntimeError, ir.MLIRError) as e:
+                logger.warning("search: refused, does not build: %s: %s", edit, e)
+                continue
+            logger.info("search: %.3f for %s", ratio, edit)
+            if ratio < GAINS:
+                priced.append((ratio, edit))
+        for ratio, edit in sorted(priced, key=lambda pair: pair[0]):
+            try:
+                edited = edit.apply(incumbent)
+            except ValueError as e:
+                # An earlier take replaced the entry it edits; the next round
+                # proposes it again on what that take left.
+                logger.info("search: %s gives way: %s", edit, e)
+                continue
+            with set_current_device(device):
+                same = all(
+                    Applied.of(c, edited, device).fingerprint(device)
+                    == Applied.of(c, incumbent, device).fingerprint(device)
+                    for c in calls
+                )
+            if same:
+                continue  # an earlier take decides what it names
+            checked = check(edited, start, calls, device, edit.refinement)
+            if not checked.ok:
+                logger.info("search: %s is not bit-identical: %s", edit, checked.why)
+                continue
+            if (
+                measure(
+                    edited,
+                    incumbent,
+                    calls,
+                    device,
+                    timing=PRICING,
+                    refinement=edit.refinement,
+                ).ratio
+                >= GAINS
+            ):
+                continue
+            incumbent = edited
+        if incumbent is base:
+            break
     return incumbent
