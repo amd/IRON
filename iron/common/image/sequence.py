@@ -156,15 +156,30 @@ class Image:
                         f"step {edge.consumer} ({type(consumer.op).__name__}) has "
                         f"no filled buffer {edge.input!r}"
                     )
+                # A slice (``Fusion.slices``) reads part of the whole buffer.
+                (sliced,) = [
+                    at
+                    for c, name, at in fusion.slices
+                    if (c, name) == (edge.consumer, edge.input)
+                ] or [None]
+                item = bfp.itemsize(
+                    next(b for b in producer.op.buffers if b.name == edge.output).dtype
+                )
                 if (
                     out.nbytes is not None
-                    or in_.nbytes is not None
                     or out.root != in_.root
+                    or (in_.nbytes is not None) != (sliced is not None)
+                    or (sliced is not None and in_.start != out.start + sliced * item)
                 ):
                     raise ValueError(
                         f"edge {edge.producer}->{edge.consumer}: {edge.output!r} "
                         f"({out}) and {edge.input!r} ({in_}) do not name one "
                         f"whole buffer"
+                        + (
+                            ""
+                            if sliced is None
+                            else f", nor it a slice from element {sliced}"
+                        )
                     )
                 outside = [
                     i

@@ -39,7 +39,7 @@ from aie.passmanager import PassManager
 from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
-from ..declare.operand import Operand
+from ..declare.operand import Operand, Slicing
 from ..design import (
     BuiltArray,
     OperatorDesign,
@@ -339,6 +339,8 @@ def fused_configuration(
     }
     spliced: dict[int, Spliced] = {}
     spliced_from: dict[int, int] = {}
+    slice_at = {(c, name): at for c, name, at in fusion.slices}
+    sliced: dict[tuple[int, str], Any] = {}
     for design, j, own in zip(designs, fusion.steps, scalars, strict=True):
         into = [
             e
@@ -362,12 +364,41 @@ def fused_configuration(
             arrays[j] = spliced[j].array
             spliced_from[j] = e.producer
             continue
-        fed = {}
+        fed: dict[str, Operand | Any] = {}
         for e in incoming.get(j, ()):
             if e.kind is EdgeKind.CASCADE:
                 continue
             (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
-            fed[e.input] = source
+            if (j, e.input) in slice_at and (j, e.input) not in sliced:
+                # One memtile splits the output among every slice of it.
+                group = [
+                    d
+                    for d in fusion.edges
+                    if (d.producer, d.output) == (e.producer, e.output)
+                    and (d.consumer, d.input) in slice_at
+                ]
+                slicing = Slicing(
+                    source,
+                    [
+                        (
+                            next(
+                                b
+                                for b in designs[
+                                    fusion.steps.index(d.consumer)
+                                ].op.buffers
+                                if b.name == d.input
+                            ),
+                            slice_at[(d.consumer, d.input)],
+                        )
+                        for d in group
+                    ],
+                )
+                by_start = sorted(group, key=lambda d: slice_at[(d.consumer, d.input)])
+                sliced.update(
+                    ((d.consumer, d.input), fifo)
+                    for d, fifo in zip(by_start, slicing.build(), strict=True)
+                )
+            fed[e.input] = sliced.get((j, e.input), source)
         arrays[j] = BuiltArray(
             design,
             words,

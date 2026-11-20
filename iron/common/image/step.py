@@ -141,7 +141,9 @@ class Fusion:
     channels; 1 drains each lane on its own; None leaves it to the placer,
     as ``packets``.
     ``phases`` names each member's phase, in ``steps``' order, where they are
-    chosen rather than derived (``compose.phases``).
+    chosen rather than derived (``compose.phases``). ``slices`` names each
+    ``(consumer, input, at)`` of an edge whose consumer reads part of what its
+    producer makes, from the producer's element ``at`` on (``Slicing``).
     """
 
     kind: FusionKind
@@ -154,6 +156,7 @@ class Fusion:
     packets: bool | None = None
     phases: tuple[int, ...] | None = None
     drains: int | None = None
+    slices: tuple[tuple[int, str, int], ...] = ()
 
     def __post_init__(self) -> None:
         if len(self.steps) < 2:

@@ -344,8 +344,8 @@ def candidates(
     such a window its edges join to both its ends, where a legal order moves
     the others out of the way (``Recording.gatherable``), with an edge for
     each hand-off the recording makes inside it: one step the only writer of
-    a whole, streamed buffer, a later step reading it whole, the two ends one
-    buffer; or, the buffer state the graph holds, any step of the window
+    a whole, streamed buffer, a later step reading it whole or a slice of it,
+    the two ends one buffer (or the reader's a part of it); or, the buffer state the graph holds, any step of the window
     reading it, the writer itself (a self-loop) or one before it in the
     window reading what it wrote the call before. Its edges are ordered by producer, then
     consumer, each a stream where the dataflow analysis finds the lanes meet
@@ -482,12 +482,7 @@ def candidates(
                 for c in range(lo, hi + 1):
                     for sink, read in zip(steps[c].op.buffers, steps[c].refs()):
                         made = writers.get(read.root, [])
-                        if (
-                            not sink.fills
-                            or not sink.streamed
-                            or read.nbytes is not None
-                            or len(made) != 1
-                        ):
+                        if not sink.fills or not sink.streamed or len(made) != 1:
                             continue
                         p = made[0]
                         # State a step of the window writes is carried: read
@@ -1758,6 +1753,7 @@ def fit(
                             workers=region.workers,
                             phases=region.step_phases(),
                             placer=BUILT_PLACERS[setting],
+                            slices=derivation.slices,
                         )
                         if refused is None:
                             break

@@ -465,7 +465,10 @@ def broadcast_weight_to_columns(dev: Device, size=2048):
 
 
 def slices_qkv(size=2048):
-    """One GEMV computing ``[q|k|v]`` into one buffer, each third read by its own consumer: realizes ``HandOff.SLICES``."""
+    """One GEMV computing ``[q|k|v]`` into one buffer, each third read by its own consumer: realizes ``HandOff.SLICES``.
+
+    A consumer reading part of a stream takes it off a memtile: the edges are staged.
+    """
     qkv = GEMV(M=3 * size, K=size, num_aie_columns=1, feed_b=True)
     third = size * np.dtype(bfloat16).itemsize
     readers = [SiLU(size=size, num_aie_columns=1) for _ in range(3)]
@@ -479,7 +482,7 @@ def slices_qkv(size=2048):
     recording = Recording.of_steps("toy_slices", steps, ["A", "x"], ["q", "k", "v"])
     region = Region(
         tuple(member(s.op) for s in recording.steps),
-        tuple(Edge(0, "C", k, "x") for k in (1, 2, 3)),
+        tuple(Edge(0, "C", k, "x", kind=EdgeKind.STAGED) for k in (1, 2, 3)),
     )
     return recording, region
 
