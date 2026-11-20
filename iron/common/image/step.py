@@ -105,6 +105,11 @@ class Edge:
     kind: EdgeKind = EdgeKind.STREAM
     depth: int | None = None
 
+    @property
+    def across_calls(self) -> bool:
+        """Whether it carries what its producer writes into its consumer's next call: a self-loop, or a consumer earlier than its producer."""
+        return self.consumer <= self.producer
+
 
 @dataclass(frozen=True)
 class Fusion:

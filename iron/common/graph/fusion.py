@@ -365,7 +365,9 @@ def composed(
     through host memory with no edge between them (``memory_waits``). A cascade
     edge carries its producer's output to its consumer's core over the
     cascade (``Operand.cascade_to``). Chosen phases run each step in its in-edges'
-    phase (``Fusion.phases``).
+    phase (``Fusion.phases``). An edge across calls (``Edge.across_calls``)
+    held in DDR is the recording's own carry of the buffer it names, read by
+    the next call from host memory, so it adds nothing to the fusion.
 
     A configuration of steps gives each its member's tunables; which
     designs it loads together is the packing's (``packing.configured``). The
@@ -383,12 +385,15 @@ def composed(
             reload or holding regions, a runtime plan other than one task
             group, chosen phases a fusion's demands do not meet
             (``compose.phases``, at build), or an entry rooted at a step,
-            with nested regions, inflows, shared workers, fission, a self-loop over a carried buffer, cascades beside staged or DDR
-            edges, a DDR
+            with nested regions, inflows, shared workers, fission, an edge
+            across calls held on chip (the carry resident between calls),
+            cascades beside staged or DDR edges, a DDR
             edge's chosen depth, matching steps that are not consecutive, or
             an edge the composer does not build as its kind (``admits``). An edge out of a buffer steps past
             the region, a DDR edge or the host also read keeps its drain to
             host (a tee, ``Fusion.kept``).
+        ValueError: An edge across calls names a buffer the recording does
+            not carry, or one other than its consumer reads.
     """
     for kind, kept in (
         (
@@ -450,20 +455,27 @@ def composed(
                 if root.concurrent is not None:
                     at_once.setdefault(root.concurrent, set()).update(match)
             continue
-        kinds = {e.kind for e in root.edges} if isinstance(root, Region) else set()
         if (
             not isinstance(root, Region)
             or not all(isinstance(part, Member) for part in root.parts)
             or root.inflows
             or any(m.part is not None for m in root.steps())
-            or any(e.producer == e.consumer for e in root.edges)
         ):
             raise NotImplementedError(
                 f"building {entry} is not built yet: the composer builds a "
-                f"region of steps with no inflow or self-loop"
+                f"region of steps with no inflow"
             )
+        across = [e for e in root.edges if e.across_calls]
+        resident = [e for e in across if e.kind is not EdgeKind.DDR]
+        if resident:
+            raise NotImplementedError(
+                f"building {entry} is not built yet: {resident[0]} holds what one "
+                f"call carries to the next on chip, resident between calls"
+            )
+        within = [e for e in root.edges if not e.across_calls]
+        kinds = {e.kind for e in within}
         chosen = root.step_phases()
-        phased = any(e.kind is EdgeKind.DDR for e in root.edges) or chosen is not None
+        phased = any(e.kind is EdgeKind.DDR for e in within) or chosen is not None
         plan = root.runtime or RuntimePlan()
         # One task group: every task issued at once, then each awaited. In one
         # phase a barrier and per-channel awaits are the same awaits.
@@ -502,8 +514,11 @@ def composed(
             raise NotImplementedError(
                 f"building {entry} is not built yet: a DDR edge's chosen depth"
             )
-        on_chip = [e for e in root.edges if e.kind is not EdgeKind.DDR]
-        through_memory = [e for e in root.edges if e.kind is EdgeKind.DDR]
+        on_chip = [e for e in within if e.kind is not EdgeKind.DDR]
+        through_memory = [e for e in within if e.kind is EdgeKind.DDR]
+        carried = set(recording.feedback) | {
+            h.ref().root for _, h in recording.states.values()
+        }
         for match in recording.occurrences(entry):
             if taken & set(match):
                 continue
@@ -512,6 +527,27 @@ def composed(
                     f"building a region of steps {match}, which are not "
                     f"consecutive, is not built yet"
                 )
+            # Held in host memory, a carry across calls is the recording's own
+            # round trip of a carried buffer: the step reads what the call
+            # before wrote, as it does with no edge.
+            for e in across:
+                made, read = (
+                    {
+                        ref.root
+                        for ref, b in zip(step.refs(), step.op.buffers)
+                        if b.name == name
+                    }
+                    for step, name in (
+                        (recording.steps[match[e.producer]], e.output),
+                        (recording.steps[match[e.consumer]], e.input),
+                    )
+                )
+                if made != read or not made <= carried:
+                    raise ValueError(
+                        f"{e} carries {sorted(made)} into the next call, which "
+                        f"reads {sorted(read)}: a carry across calls is a buffer "
+                        f"the recording carries, read where it was written"
+                    )
             ordered = memory_waits(recording, match, root.edges)
             kept: list[tuple[int, str]] = []
             for e in on_chip:

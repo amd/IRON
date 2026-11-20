@@ -55,7 +55,7 @@ from ..common.graph.sdf import Derivation
 from ..common.image.compose import ANNEALED, SEQUENTIAL
 from ..common.image.packaging import SCRATCHPAD_WORDS
 from ..common.image.step import Edge, EdgeKind, FusionKind, HandOff
-from .autotune import Timed, refusal, settings
+from .autotune import Point, Timed, refusal, settings
 from .cli import WATCHDOG_HEADROOM, watchdog_s
 from .fusions import (
     Applied,
@@ -853,7 +853,7 @@ def fit(
                     )
             for e, p in zip(part.edges, part.phases):
                 made = phase.get(e.producer, 0)
-                if e.producer != e.consumer and made > p:
+                if not e.across_calls and made > p:
                     return Fit(
                         False,
                         "analysis",
@@ -954,7 +954,10 @@ def fit(
                     and isinstance(part, Region)
                     and (
                         part.phases is not None
-                        or any(e.kind is EdgeKind.DDR for e in part.edges)
+                        or any(
+                            e.kind is EdgeKind.DDR and not e.across_calls
+                            for e in part.edges
+                        )
                         or (
                             part is region
                             and memory_waits(recording, found[0], part.edges)
@@ -1224,7 +1227,7 @@ def fit(
                         f"({made} elements and {taken}) is not built yet; the "
                         f"composer gives a fifo one object size"
                     )
-            kinds = {e.kind for e in region.edges}
+            kinds = {e.kind for e in region.edges if not e.across_calls}
             unplaceable += [
                 f"placing a region with {what} is not built yet: the composer "
                 f"does not build it"
@@ -1293,7 +1296,7 @@ def fit(
                                 *(
                                     (e.producer, e.consumer)
                                     for e in region.edges
-                                    if e.kind is EdgeKind.DDR
+                                    if e.kind is EdgeKind.DDR and not e.across_calls
                                 ),
                                 *ordered,
                             ],
@@ -1676,7 +1679,10 @@ def check(
     keeps commands in flight runs its draws so batched instead, against them
     called one at a time (``_batched``). Calls that hold state run in order
     instead, each side's
-    states carried into its next call (``_in_order``). Held to ``NO_WORSE``,
+    states carried into its next call (``_in_order``). A call checked apart
+    that carries values to the next (``Recording.carry``) and is not given
+    them starts each at both ends of its recorded range (``Recording.limits``),
+    as a first call may. Held to ``NO_WORSE``,
     each call is instead no worse than the base's against its reference
     (``_no_worse``).
 
@@ -1699,8 +1705,8 @@ def check(
             calls of one version with base calls of several).
         NotImplementedError: What is not checked yet: a no-worse call that
             carries state (``_no_worse``), a call checked apart that carries
-            values to the next without being given them, and what ``fit`` or
-            the composer (``composed``) does not take yet.
+            a value to the next with no range recorded to start it in, and
+            what ``fit`` or the composer (``composed``) does not take yet.
     """
     fitted = fit(profile, calls, device)
     if not fitted.ok:
@@ -1775,14 +1781,48 @@ def check(
         why = _batched(profile, base, call, old, device, batching[0])
         if why is not None:
             return Check(False, refinement, why)
-    for call, _ in apart:
-        unfed = sorted(set(call.recording.carry) - set(call.values))
-        if unfed:
-            raise NotImplementedError(
-                f"{call.recording.name}: checking calls that carry "
-                f"{', '.join(unfed)} from one to the next, one call apart, is not "
-                f"built yet: no first call starts the carry"
+    started = []
+    for call, old in apart:
+        recording = call.recording
+        unfed = sorted(set(recording.carry) - set(call.values))
+        # A carry no caller starts starts at each end of its recorded range, so
+        # an offset read wrongly at one end shows at the other.
+        ends = {
+            name: sorted(
+                {
+                    k
+                    for limit in recording.limits
+                    if limit.plus is None and limit.expression.value.name == name
+                    for k in (limit.lo, limit.hi - 1)
+                    if limit.evaluate({name: k}) == k
+                }
             )
+            for name in unfed
+        }
+        bare = [name for name, at in ends.items() if not at]
+        if bare:
+            raise NotImplementedError(
+                f"{recording.name}: checking calls that carry {', '.join(bare)} "
+                f"from one to the next, one call apart, is not built yet: no first "
+                f"call starts the carry, and no recorded range says where it may"
+            )
+        if unfed:
+            points = [
+                {**call.values, **{name: at[k] for name, at in ends.items()}}
+                for k in (0, -1)
+            ]
+            for point in points:
+                recording.check_limits(point)
+            call, old = (
+                dataclasses.replace(
+                    side,
+                    values=points[0],
+                    points=tuple(Point(1 / len(points), p) for p in points),
+                )
+                for side in (call, old)
+            )
+        started.append((call, old))
+    apart = started
     if len(apart) > 1 and any(call.recording.states for call, _ in apart):
         why = _in_order(profile, base, apart, device)
         return Check(why is None, refinement, why)

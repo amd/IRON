@@ -1129,6 +1129,15 @@ class Derivation:
         hand_off: dict[Edge, HandOff] = {}
         feeds = Counter((p, edge.output) for edge, p, _ in self.wired)
         phases = self.region.phases
+        uncarried = [
+            f"{edge} carries {self.refs[p][edge.output].root} into the next call "
+            f"through host memory, but the recording carries no such buffer: the "
+            f"first call has no initial value to read"
+            for edge, p, _ in self.wired
+            if edge.kind is EdgeKind.DDR
+            and edge.across_calls
+            and self.refs[p][edge.output].root not in self.carried
+        ]
         for n, (edge, p, c) in enumerate(self.wired):
             phase = phases[n] if phases else 0
             # Spliced, a core's tile stays on the core: its stage reads it.
@@ -1347,7 +1356,7 @@ class Derivation:
                 for edge, es in edge_channels.items()
                 if depths
             },
-            why=why or deadlock,
+            why=why or deadlock or next(iter(uncarried), None),
             flow=flow,
             channels=edge_channels,
             fixed=fixed,
