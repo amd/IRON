@@ -35,6 +35,7 @@ from aie.utils import set_current_device
 from ..declare import Operator
 from ..declare.composition import Entry, Region
 from ..design import BuiltArray, OperatorDesign
+from ..elementwise import Elementwise
 from ..image.step import BufferRef, Edge, EdgeKind, HandOff
 from .clock import kernel_cycles
 from .record import Recording
@@ -317,6 +318,8 @@ class Analysis:
         fixed: The channels an operator's own build holds at a depth.
         kernels: Per actor, the kernels its core calls; none for a memtile
             link, which takes no time of a core's.
+        scalars: Per actor, each of its kernels' scalar arguments its
+            contract leaves unbound, as its operator passes them.
         work: Per actor, the accesses its work comes before: each output
             it releases (once, not again for each reader a broadcast writes
             to), or, where it writes none, each input it frees.
@@ -334,6 +337,7 @@ class Analysis:
     channels: dict[Edge, list[int]] = field(repr=False, compare=False)
     fixed: dict[int, int] = field(repr=False, compare=False)
     kernels: list[tuple[ExternalFunction, ...]] = field(repr=False, compare=False)
+    scalars: list[tuple[tuple, ...]] = field(repr=False, compare=False)
     work: list[list[int]] = field(repr=False, compare=False)
 
     def deadlock(self, depths: Mapping[Edge, int]) -> str | None:
@@ -358,15 +362,15 @@ class Analysis:
                 firing the recording does not hold.
         """
         costs = []
-        for kernels, work, program in zip(
-            self.kernels, self.work, self.flow.programs, strict=True
+        for kernels, scalars, work, program in zip(
+            self.kernels, self.scalars, self.work, self.flow.programs, strict=True
         ):
             if len(kernels) > 1:
                 raise NotImplementedError(
                     f"pricing a core that calls {len(kernels)} kernels "
                     f"({', '.join(fn.name for fn in kernels)}) is not modelled yet"
                 )
-            each = Fraction(kernel_cycles(kernels[0]) if kernels else 0)
+            each = Fraction(kernel_cycles(kernels[0], scalars[0]) if kernels else 0)
             marked = set(work)
             costs.append(
                 [each if i in marked else Fraction(0) for i in range(len(program))]
@@ -907,10 +911,12 @@ class Derivation:
         """
         programs: list[list[tuple[ObjectFifo, bool, bool, int]]] = []
         actor_kernels: list[tuple[ExternalFunction, ...]] = []
+        actor_scalars: list[tuple[tuple, ...]] = []
         repetition: dict[int, int] = {}
         # Per actor, the step whose core it is; None for a link.
         actor_step: list[int | None] = []
-        for i, (_, recorded) in enumerate(self.recorded):
+        for i, (array, recorded) in enumerate(self.recorded):
+            given = array.op.scalars() if isinstance(array.op, Elementwise) else ()
             for k, core in enumerate(recorded.cores):
                 trips = self._trips(core)
                 actor_step.append(i)
@@ -919,6 +925,7 @@ class Derivation:
                         f for f in core.owner.fn_args if isinstance(f, ExternalFunction)
                     )
                 )
+                actor_scalars.append((given,) * len(actor_kernels[-1]))
                 programs.append(
                     [
                         (
@@ -935,6 +942,7 @@ class Derivation:
                     repetition[i] = trips[id(outermost[0])] if outermost else 1
             for link in recorded.links:
                 actor_kernels.append(())
+                actor_scalars.append(())
                 actor_step.append(None)
                 programs.append(self._link_events(link))
         writer: dict[ObjectFifo, int] = {}
@@ -980,10 +988,12 @@ class Derivation:
             ordered = sorted(members, key=lambda a: firing[actor_step[a]])
             programs[first] = [event for a in ordered for event in programs[a]]
             actor_kernels[first] = tuple(f for a in ordered for f in actor_kernels[a])
+            actor_scalars[first] = tuple(s for a in ordered for s in actor_scalars[a])
             for a in members:
                 if a != first:
                     programs[a] = []
                     actor_kernels[a] = ()
+                    actor_scalars[a] = ()
         if lead:
             writer, readers = {}, {}
             for actor, program in enumerate(programs):
@@ -1116,6 +1126,7 @@ class Derivation:
                 if fifo.depth is not None:
                     fixed[e] = fifo.depth
         actor_kernels += [()] * (len(programs) - len(actor_kernels))
+        actor_scalars += [()] * (len(programs) - len(actor_scalars))
         events: list[list[Event]] = []
         work: list[list[int]] = []
         for actor, program in enumerate(programs):
@@ -1180,6 +1191,7 @@ class Derivation:
             channels=edge_channels,
             fixed=fixed,
             kernels=actor_kernels,
+            scalars=actor_scalars,
             work=work,
         )
 
