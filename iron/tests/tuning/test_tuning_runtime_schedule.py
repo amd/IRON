@@ -167,7 +167,6 @@ def test_burst_and_transfer_bytes_round_trip_and_are_proposed(tmp_path):
         ]
 
 
-@unbuilt
 def test_phase_boundaries_round_trip_and_are_proposed(tmp_path):
     """``Region.phases`` boundaries on the skip toy (one phase a GEMV's row, two past it) round-trip and are candidates."""
     region, recording = _skip_region(phases=(0, 2, 1, 2))
@@ -204,6 +203,21 @@ def test_skip_phases_are_bit_identical_with_no_hang():
     base_profile = Profile()
     base_profile.add_entry(Entry(root=base_region))
     region, _ = _skip_region(phases=(0, 2, 1, 2))
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    result = check(profile, base_profile, [Timed(recording)], DEVICE, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+def test_skip_phases_a_reader_of_its_row_starts_are_bit_identical():
+    """The skip toy at chosen phases the norm and the GEMV each start is bit-identical to it in one phase, and does not hang.
+
+    Each reads its producer's row whole, so each may run a phase later.
+    """
+    base_region, recording = _skip_region()
+    base_profile = Profile()
+    base_profile.add_entry(Entry(root=base_region))
+    region, _ = _skip_region(phases=(1, 2, 2, 2))
     profile = Profile()
     profile.add_entry(Entry(root=region))
     result = check(profile, base_profile, [Timed(recording)], DEVICE, Refinement.EXACT)

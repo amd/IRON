@@ -131,6 +131,8 @@ class Fusion:
     the shim's sending channels; False keeps them circuits; None leaves it to
     the placer: packets only where circuits run the channels short and packets
     place (``compose.transported``).
+    ``phases`` names each member's phase, in ``steps``' order, where they are
+    chosen rather than derived (``compose.phases``).
     """
 
     kind: FusionKind
@@ -141,10 +143,18 @@ class Fusion:
     waits: tuple[tuple[int, int], ...] = ()
     workers: tuple[tuple[int, ...], ...] = ()
     packets: bool | None = None
+    phases: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         if len(self.steps) < 2:
             raise ValueError("a fusion needs at least two steps")
+        if self.phases is not None and (
+            not self.phased or len(self.phases) != len(self.steps)
+        ):
+            raise ValueError(
+                f"fusion {self.steps}: chosen phases {self.phases} name a phase "
+                f"for each member of a phased fusion"
+            )
         if self.phased and self.kind not in (FusionKind.STREAM, FusionKind.STAGED):
             raise ValueError(f"a {self.kind.value} fusion has no phases to run apart")
         if list(self.steps) != sorted(set(self.steps)):
@@ -264,6 +274,8 @@ class Fusion:
             "@" + "+".join(str(self.steps.index(s)) for s in group)
             for group in self.workers
         )
+        if self.phases is not None:
+            wiring += "%" + ",".join(map(str, self.phases))
         kind = f"{self.kind.value}/phased" if self.phased else self.kind.value
         digest = hashlib.sha256(
             f"{kind}[{'|'.join(designs)}]({wiring})".encode()

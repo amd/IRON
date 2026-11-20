@@ -622,10 +622,10 @@ def candidates(
                 parts: list[Region | Member] = []
                 s = lo
                 while s <= hi:
-                    found = pieces.get(s)
-                    if found is not None and found[1][-1] <= hi:
-                        parts.append(found[0])
-                        s += len(found[1])
+                    piece = pieces.get(s)
+                    if piece is not None and piece[1][-1] <= hi:
+                        parts.append(piece[0])
+                        s += len(piece[1])
                     else:
                         parts.append(members[s])
                         s += 1
@@ -707,10 +707,10 @@ def fit(
     phase boundary. A configuration at its first match (``_configuration_fit``)
     has parts run at once independent, its cores counted and its steps placed
     as one device configuration; configurations concurrent under one id must
-    be independent of each other, and take disjoint columns. A plan's
-    per-channel awaits must not reuse a channel the host fills in more tasks
-    than it keeps in flight: a fill reports done before its data leaves the
-    shim. A version's schedule must not run a part before one it reads, nor
+    be independent of each other, their chosen columns disjoint, and are
+    placed as one pack. A plan's per-channel awaits must not reuse a channel
+    the host fills in more tasks than it keeps in flight: a fill reports
+    done before its data leaves the shim. A version's schedule must not run a part before one it reads, nor
     overlap or merge calls where a step writes a buffer that outlasts the
     call, and on an xclbin per step it takes no phased region and no
     teardown.
@@ -892,7 +892,7 @@ def fit(
         readers, writers = recording.users()
         spans: list[tuple[int, ...]] = []
         applied: list[Configuration | Region | Member] = []
-        together: dict[int, list[tuple[int, ...]]] = {}
+        together: dict[int, list[tuple[tuple[int, ...], Entry]]] = {}
         after = [
             {
                 r
@@ -969,7 +969,7 @@ def fit(
                 waiting.append("fitting an entry rooted at a Member is not built yet")
                 continue
             if isinstance(region, Configuration) and region.concurrent is not None:
-                together.setdefault(region.concurrent, []).append(found[0])
+                together.setdefault(region.concurrent, []).append((found[0], entry))
             if isinstance(region, Configuration):
                 verdict = _configuration_fit(
                     region,
@@ -1205,7 +1205,6 @@ def fit(
                 f"does not build it"
                 for what, named in (
                     ("inflows", region.inflows),
-                    ("chosen phases", region.phases is not None),
                     (
                         "nested regions",
                         not all(isinstance(part, Member) for part in region.parts),
@@ -1229,40 +1228,45 @@ def fit(
                 waiting += unplaceable
                 continue
             with set_current_device(device):
-                refused = group_fit_verdict(
-                    derivation.ops,
-                    kind=(
-                        (
-                            FusionKind.STAGED
-                            if EdgeKind.STAGED in kinds
-                            else FusionKind.STREAM
-                        )
-                        if kinds
-                        else None
-                    ),
-                    edges=[
-                        (e.producer, e.output, e.consumer, e.input)
-                        for e in region.edges
-                        if e.kind in (EdgeKind.STREAM, EdgeKind.STAGED)
-                    ],
-                    cascades=[
-                        (e.producer, e.output, e.consumer, e.input)
-                        for e in region.edges
-                        if e.kind is EdgeKind.CASCADE
-                    ],
-                    kept=kept,
-                    depths={
-                        (e.producer, e.output): e.depth
-                        for e in region.edges
-                        if e.depth is not None and e.kind is not EdgeKind.DDR
-                    },
-                    waits=[
-                        (e.producer, e.consumer)
-                        for e in region.edges
-                        if e.kind is EdgeKind.DDR
-                    ],
-                    workers=region.workers,
-                )
+                try:
+                    refused = group_fit_verdict(
+                        derivation.ops,
+                        kind=(
+                            (
+                                FusionKind.STAGED
+                                if EdgeKind.STAGED in kinds
+                                else FusionKind.STREAM
+                            )
+                            if kinds
+                            else None
+                        ),
+                        edges=[
+                            (e.producer, e.output, e.consumer, e.input)
+                            for e in region.edges
+                            if e.kind in (EdgeKind.STREAM, EdgeKind.STAGED)
+                        ],
+                        cascades=[
+                            (e.producer, e.output, e.consumer, e.input)
+                            for e in region.edges
+                            if e.kind is EdgeKind.CASCADE
+                        ],
+                        kept=kept,
+                        depths={
+                            (e.producer, e.output): e.depth
+                            for e in region.edges
+                            if e.depth is not None and e.kind is not EdgeKind.DDR
+                        },
+                        waits=[
+                            (e.producer, e.consumer)
+                            for e in region.edges
+                            if e.kind is EdgeKind.DDR
+                        ],
+                        workers=region.workers,
+                        phases=region.step_phases(),
+                    )
+                except NotImplementedError as e:
+                    waiting.append(str(e))
+                    continue
             if refused is not None and set(placements) != {"sequential"}:
                 waiting.append(
                     f"the sequential placer refuses it ({refused}); trying "
@@ -1271,12 +1275,40 @@ def fit(
                 )
             elif refused is not None:
                 return Fit(False, "placer", refused)
-        for group, spans_at_once in together.items():
+        for group, at_once in together.items():
             refused = _independent(
-                spans_at_once, after, recording, f"configurations concurrent as {group}"
+                [span for span, _ in at_once],
+                after,
+                recording,
+                f"configurations concurrent as {group}",
             )
             if refused is not None:
                 return refused
+            alone = Profile()
+            for _, entry in at_once:
+                alone.add_entry(entry)
+            try:
+                with set_current_device(device):
+                    tunables, packs = composed(recording, alone)
+            except NotImplementedError as e:
+                waiting.append(str(e))
+                continue
+            for pack in packs:
+                with set_current_device(device):
+                    ops = [
+                        recording.steps[s]
+                        .op._with_tunables(**tunables.get(s, {}))
+                        .resolved(device)
+                        for s in pack.steps
+                    ]
+                    refused = group_fit_verdict(ops, kind=FusionKind.PACK)
+                if refused is not None and set(placements) != {"sequential"}:
+                    waiting.append(
+                        f"the sequential placer refuses steps {pack.steps} at once "
+                        f"({refused}); trying the others is not built yet"
+                    )
+                elif refused is not None:
+                    return Fit(False, "placer", refused)
         persist = (
             set(recording.feedback)
             | {h.ref().root for _, h in recording.states.values()}
@@ -1336,10 +1368,9 @@ def fit(
                 )
                 if kept
             ]
+    # A width left to the placer was placed with its pack, above.
     for group, at_once in concurrent.items():
-        taken = sum(
-            model.columns() if c.columns is None else c.columns for c in at_once
-        )
+        taken = sum(c.columns for c in at_once if c.columns is not None)
         if len(at_once) > 1 and taken > model.columns():
             return Fit(
                 False,
@@ -1469,7 +1500,6 @@ def _configuration_fit(
     unbuilt = [
         f"building a configuration with {what} is not built yet"
         for what, kept in (
-            ("parts run at once", configuration.concurrent is not None),
             ("a partial width", configuration.columns is not None),
             ("buffers resident into the next", configuration.resident),
             (
@@ -1483,8 +1513,8 @@ def _configuration_fit(
         )
         if kept
     ]
-    if unbuilt:
-        return unbuilt
+    if unbuilt or configuration.concurrent is not None:
+        return unbuilt  # parts run at once are placed as their pack, in fit
     with set_current_device(device):
         designs = {OperatorDesign(op).name: op for op in derivation.ops}
         refused = group_fit_verdict(list(designs.values()))

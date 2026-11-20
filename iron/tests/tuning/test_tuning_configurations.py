@@ -53,6 +53,16 @@ def _alternating_configuration() -> tuple[Configuration, object]:
     return configuration, recording
 
 
+def _independent_pair_recording(name: str, gemv, mul) -> Recording:
+    """Return ``gemv`` then ``mul`` on other inputs: neither reads the other."""
+    return Recording.of_steps(
+        name,
+        sequences.steps((gemv, "A", "B", "y"), (mul, "a", "b", "z")),
+        ["A", "B", "a", "b"],
+        ["y", "z"],
+    )
+
+
 def _wide_configuration() -> tuple[Configuration, object]:
     size = 8192
     members = tuple(
@@ -197,6 +207,23 @@ def test_concurrency_at_once_with_no_shared_data_is_bit_identical():
     assert result.ok, result.why
 
 
+def test_concurrency_at_once_of_consecutive_steps_is_bit_identical():
+    """Two configurations concurrent under one id run at once as one pack, bit-identical to each loaded alone.
+
+    A step each, the two consecutive and independent.
+    """
+    gemv, _, mul = gemv_silu_mul(M=256, cols=2, tile=64)
+    recording = _independent_pair_recording("config_at_once_consecutive", gemv, mul)
+    profile = Profile()
+    base = Profile()
+    for op in (gemv, mul):
+        profile.add_entry(Entry(root=Configuration(parts=(member(op),), concurrent=1)))
+        base.add_entry(Entry(root=Configuration(parts=(member(op),))))
+    assert fit(profile, [Timed(recording)], DEVICE).ok
+    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
+    assert result.ok, result.why
+
+
 @unbuilt
 def test_disjoint_columns_concurrency_is_bit_identical():
     """Two designs on disjoint columns at once (``Configuration.concurrent`` with a ``columns`` width each) are bit-identical to each alone."""
@@ -219,13 +246,7 @@ def test_disjoint_columns_concurrency_is_bit_identical():
     base.add_entry(
         Entry(root=Configuration(parts=(Member(type(mul), {"size": mul.size}),)))
     )
-    # The projection and a multiply of other inputs: neither reads the other.
-    recording = Recording.of_steps(
-        "config_disjoint_columns",
-        sequences.steps((gemv, "A", "B", "y"), (mul, "a", "b", "z")),
-        ["A", "B", "a", "b"],
-        ["y", "z"],
-    )
+    recording = _independent_pair_recording("config_disjoint_columns", gemv, mul)
     result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
@@ -413,13 +434,7 @@ def test_overlapping_columns_at_once_is_refused():
     right = Configuration(
         parts=(Member(type(mul), {"size": mul.size}),), columns=6, concurrent=1
     )
-    # The projection and a multiply of other inputs: neither reads the other.
-    recording = Recording.of_steps(
-        "config_overlapping_columns",
-        sequences.steps((gemv, "A", "B", "y"), (mul, "a", "b", "z")),
-        ["A", "B", "a", "b"],
-        ["y", "z"],
-    )
+    recording = _independent_pair_recording("config_overlapping_columns", gemv, mul)
     profile = Profile()
     profile.add_entry(Entry(root=left))
     profile.add_entry(Entry(root=right))

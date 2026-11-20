@@ -332,13 +332,15 @@ def _composed_module(
     workers: Sequence[tuple[int, ...]] = (),
     cascades: Sequence[tuple[int, str, int, str]] = (),
     packets: bool = False,
+    phases: Sequence[int] | None = None,
 ) -> ir.Module:
     """Return the one module ``fits`` places ``designs`` as, built the same way it does.
 
     Plain (``configuration``), or, given ``kind``, as ``kind``'s own fusion wires
     ``edges`` (and ``cascades`` over the cascade), each output ``kept`` drained
-    to the host too, each of ``waits`` a phase apart, its host fills packet
-    flows given ``packets`` (``fused_configuration``,
+    to the host too, each of ``waits`` a phase apart, each member at its
+    chosen ``phases``, its host fills packet flows given ``packets``
+    (``fused_configuration``,
     which also tells a pack's or a stream's own array per member, fuse=True, from a
     merge's shared one). Composing is cheap next to
     running the placement pipeline on the result, so a group-fit verdict's cache key is
@@ -361,11 +363,12 @@ def _composed_module(
                 Edge(p, out, c, inp, kind=EdgeKind.CASCADE)
                 for p, out, c, inp in cascades
             ),
-            phased=bool(waits),
+            phased=bool(waits) or phases is not None,
             kept=tuple(kept),
             waits=tuple(waits),
             workers=tuple(workers),
             packets=packets,
+            phases=None if phases is None else tuple(phases),
         )
         configured, _ = fused_configuration("fused", fusion, list(designs.values()))
     return Program.compose([configured], entry=configured.runtimes[0]).resolve_program()
@@ -387,6 +390,7 @@ def group_fit_verdict(
     waits: Sequence[tuple[int, int]] = (),
     workers: Sequence[tuple[int, ...]] = (),
     cascades: Sequence[tuple[int, str, int, str]] = (),
+    phases: Sequence[int] | None = None,
     packet_fills: bool = True,
 ) -> str | None:
     """Why the placer refuses ``ops``' resolved designs sharing one device configuration (plain, or as ``kind``'s fusion wires ``edges``).
@@ -399,7 +403,8 @@ def group_fit_verdict(
     circuits run the shim's DMA channels short is placed again with its host
     fills as packet flows, as its build takes them (``compose.transported``),
     unless ``packet_fills`` is False: a search pruning on "never faster
-    narrower" holds that of circuits, not of fills sharing a channel.
+    narrower" holds that of circuits, not of fills sharing a channel. ``phases`` are its members' chosen
+    phases (``Fusion.phases``).
 
     Or None if they co-reside; kept under ``fit_cache``, keyed on the composed module's
     own text (``_composed_module``) and each design's build (``artifact_hash``, as
@@ -407,6 +412,9 @@ def group_fit_verdict(
     takes invalidates it by construction, not only one to ``compose.py``'s own source.
     The placer runs in a process of its own (``failures.place``): a compiler crash
     refuses the group, recorded in ``ledger`` where one is given.
+
+    Raises:
+        NotImplementedError: Composing them is not built yet.
     """
     refusal = None
     # A fusion short of shim channels by circuits is refused for why packets are.
@@ -422,6 +430,7 @@ def group_fit_verdict(
             workers,
             cascades,
             packets,
+            phases,
         )
         if isinstance(found, str):
             return found  # composing itself refused; no placement pass to cache
@@ -480,13 +489,29 @@ def _fit_record(
     workers: Sequence[tuple[int, ...]] = (),
     cascades: Sequence[tuple[int, str, int, str]] = (),
     packets: bool = False,
+    phases: Sequence[int] | None = None,
 ) -> tuple[str, Path] | str:
-    """``ops`` composed into one module, its text and its verdict's file under ``fit_cache``; or why composing them refused."""
+    """``ops`` composed into one module, its text and its verdict's file under ``fit_cache``; or why composing them refused.
+
+    Raises:
+        NotImplementedError: Composing them is not built yet.
+    """
     designs = {str(i): OperatorDesign(op.resolved()) for i, op in enumerate(ops)}
     try:
         module = _composed_module(
-            designs, kind, edges, kept, depths, waits, workers, cascades, packets
+            designs,
+            kind,
+            edges,
+            kept,
+            depths,
+            waits,
+            workers,
+            cascades,
+            packets,
+            phases,
         )
+    except NotImplementedError:
+        raise
     except (ValueError, RuntimeError, ir.MLIRError) as e:
         return str(e)
     text = str(module)

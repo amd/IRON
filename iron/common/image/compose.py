@@ -513,11 +513,19 @@ def phases(fusion: Fusion, arrays: Mapping[int, BuiltArray]) -> dict[int, int]:
     reads what another writes to host memory (``Fusion.waits``) runs a phase or
     more after it.
 
+    Chosen phases (``Fusion.phases``) take the place of these demands' least
+    phases where they meet them: a whole object's reader then runs in its
+    producer's phase or any later one, as in a fusion of one phase.
+
     Raises:
         ValueError: The edges' demands contradict (an edge that must start a phase
             and a chain that must not, between the same members), or members of one
             phase are not consecutive in ``fusion.steps``, so the phases' sequences
             could not run in step order.
+        NotImplementedError: Chosen phases a demand does not meet: a lane's first
+            reader of several objects run a phase from its producer, whose fifo
+            would have to hold the producer's call, or a reader of host memory
+            in its writer's phase.
     """
     # The order BuiltArray binds readers in: by consumer in step order, then edge.
     incoming: dict[int, list[Edge]] = {}
@@ -543,7 +551,37 @@ def phases(fusion: Fusion, arrays: Mapping[int, BuiltArray]) -> dict[int, int]:
             later = (e.producer, e.output) in seen
             seen.add((e.producer, e.output))
             (starts if whole else holds if later else joins).append(e)
-    phase = dict.fromkeys(fusion.steps, 0)
+    if fusion.phases is not None:
+        phase = dict(zip(fusion.steps, fusion.phases, strict=True))
+        unmet = (
+            [
+                f"{e} joins its producer's phase {phase[e.producer]} and its "
+                f"consumer's {phase[e.consumer]}: a lane's first reader of several "
+                f"objects runs in its producer's phase"
+                for e in joins
+                if phase[e.producer] != phase[e.consumer]
+            ]
+            + [
+                f"{e} runs its consumer in phase {phase[e.consumer]}, before its "
+                f"producer's {phase[e.producer]}"
+                for e in [*starts, *holds]
+                if phase[e.consumer] < phase[e.producer]
+            ]
+            + [
+                f"step {c} reads in host memory what step {p} writes, in its phase "
+                f"{phase[p]}"
+                for p, c in fusion.waits
+                if phase[c] <= phase[p]
+            ]
+        )
+        if unmet:
+            raise NotImplementedError(
+                f"fusion {fusion.steps} at its chosen phases is not built yet: "
+                f"{unmet[0]}"
+            )
+        starts, holds, joins = [], [], []
+    else:
+        phase = dict.fromkeys(fusion.steps, 0)
     while True:
         before = dict(phase)
         for producer, consumer in [(e.producer, e.consumer) for e in starts] + list(
@@ -565,6 +603,11 @@ def phases(fusion: Fusion, arrays: Mapping[int, BuiltArray]) -> dict[int, int]:
                 f"that keeps one join the same members, so it runs in no phases"
             )
     order = [phase[j] for j in fusion.steps]
+    if order != sorted(order) and fusion.phases is not None:
+        raise NotImplementedError(
+            f"fusion {fusion.steps}: chosen phases {order} out of step order are "
+            f"not built yet: the phases' sequences run in step order"
+        )
     if order != sorted(order):
         raise ValueError(
             f"fusion {fusion.steps}: its phases {order} do not follow step order"

@@ -329,21 +329,24 @@ def composed(
     edge. A DDR edge's consumer reads what its producer wrote to host memory
     a phase or more later (a phased fusion, ``Fusion.waits``). A cascade
     edge carries its producer's output to its consumer's core over the
-    cascade (``Operand.cascade_to``).
+    cascade (``Operand.cascade_to``). Chosen phases run each step in its in-edges'
+    phase (``Fusion.phases``).
 
     A configuration of steps gives each its member's tunables; which
-    designs it loads together is the packing's (``packing.configured``).
+    designs it loads together is the packing's (``packing.configured``). The
+    steps of the configurations concurrent under one id, at every match, run
+    at once as one pack where they are consecutive and no region holds them.
 
     Raises:
         NotImplementedError: What the composer does not build yet: a
             profile's schedules beyond their packaging, variants, bindings or
-            state layouts, a configuration whose parts run at once, at a
-            partial width, keeping buffers resident, switched other than by a
+            state layouts, steps run at once that are not consecutive, a
+            configuration at a partial width, keeping buffers resident, switched other than by a
             reload or holding regions, a runtime plan other than one task
-            group, or an entry rooted at a step, with nested regions,
-            inflows, shared workers, chosen phases, a runtime plan,
-            fission, a self-loop over a carried buffer, cascades beside
-            staged or DDR edges, a DDR
+            group, chosen phases a fusion's demands do not meet
+            (``compose.phases``, at build), or an entry rooted at a step,
+            with nested regions, inflows, shared workers, fission, a self-loop over a carried buffer, cascades beside staged or DDR
+            edges, a DDR
             edge's chosen depth, matching steps that are not consecutive,
             members that depend through memory with no edge between them, or
             an edge the composer does not build as its kind (``admits``). An edge out of a buffer steps past
@@ -370,13 +373,14 @@ def composed(
     taken: set[int] = set()
     conflicts = _pack_conflicts(recording)
     readers, _ = recording.users()
+    # The steps of the configurations concurrent under each id, run as one pack.
+    at_once: dict[int, set[int]] = {}
     for entry in profile.entries():
         root = entry.root
         if isinstance(root, Configuration):
             unbuilt = [
                 what
                 for what, kept in (
-                    ("parts run at once", root.concurrent is not None),
                     ("a partial width", root.columns is not None),
                     ("buffers resident into the next", root.resident),
                     (
@@ -399,20 +403,23 @@ def composed(
                 for s, m in zip(match, root.steps()):
                     for name, value in (m.tunables or {}).items():
                         tunables.setdefault(s, {}).setdefault(name, value)
+                if root.concurrent is not None:
+                    at_once.setdefault(root.concurrent, set()).update(match)
             continue
         kinds = {e.kind for e in root.edges} if isinstance(root, Region) else set()
         if (
             not isinstance(root, Region)
             or not all(isinstance(part, Member) for part in root.parts)
             or root.inflows
-            or root.phases is not None
             or any(m.part is not None for m in root.steps())
             or any(e.producer == e.consumer for e in root.edges)
         ):
             raise NotImplementedError(
                 f"building {entry} is not built yet: the composer builds a "
-                f"region of steps with no chosen phase, inflow or self-loop"
+                f"region of steps with no inflow or self-loop"
             )
+        chosen = root.step_phases()
+        phased = any(e.kind is EdgeKind.DDR for e in root.edges) or chosen is not None
         plan = root.runtime or RuntimePlan()
         # One task group: every task issued at once, then each awaited. In one
         # phase a barrier and per-channel awaits are the same awaits.
@@ -421,8 +428,7 @@ def composed(
             for what, kept in (
                 (
                     "per-channel awaits between phases",
-                    plan.waits == "per_channel"
-                    and any(e.kind is EdgeKind.DDR for e in root.edges),
+                    plan.waits == "per_channel" and phased,
                 ),
                 (f"{plan.overlap} overlap", plan.overlap != "none"),
                 (f"{plan.chunks} chunks", plan.chunks != 1),
@@ -537,7 +543,7 @@ def composed(
                             )
                             for e in on_chip
                         ),
-                        phased=bool(through_memory),
+                        phased=phased,
                         kept=tuple(kept),
                         waits=tuple(
                             (match[e.producer], match[e.consumer])
@@ -546,7 +552,19 @@ def composed(
                         workers=tuple(
                             tuple(match[i] for i in group) for group in root.workers
                         ),
+                        phases=chosen,
                     )
                 )
                 taken.update(match)
+    for group, together in at_once.items():
+        steps = tuple(sorted(together))
+        if len(steps) < 2 or taken & together:
+            continue
+        if steps != tuple(range(steps[0], steps[-1] + 1)):
+            raise NotImplementedError(
+                f"building steps {steps} at once (configurations concurrent as "
+                f"{group}), which are not consecutive, is not built yet"
+            )
+        fused.append(Fusion(FusionKind.PACK, steps))
+        taken.update(steps)
     return tunables, tuple(fused)
