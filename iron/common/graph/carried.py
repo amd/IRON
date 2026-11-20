@@ -233,6 +233,9 @@ class CarriedLoop:
         # body itself, is dead after, so the heap holds first's ctrlcode and
         # body's first copy, then body's depth copies, never 1 + depth.
         self._runs: list[FullELFRun] | None = None
+        # calls()'s runs, each with its own input and output buffers, built on
+        # its first batch and kept for the next.
+        self._batch_runs: list[FullELFRun] = []
 
     def calls(
         self, batch: Sequence[tuple[Sequence[np.ndarray], Mapping[str, int]]]
@@ -302,7 +305,11 @@ class CarriedLoop:
         ]
         call = self.body.callable
         assert isinstance(call, FullELFCallable), "a loop's runs are a full ELF's"
-        runs = [call.new_run(owned=("input", "output")) for _ in range(self.depth)]
+        if not self._batch_runs:
+            self._batch_runs = [
+                call.new_run(owned=("input", "output")) for _ in range(self.depth)
+            ]
+        runs = self._batch_runs
         if self.body.emit is not None:
             for k, run in enumerate(runs):
                 run.bind_feedback(runs[(k + 1) % self.depth].scratchpad_alias())

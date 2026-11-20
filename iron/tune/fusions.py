@@ -947,6 +947,8 @@ class Applied:
         full_elf: One full ELF, else an xclbin per step; None for the
             device's default (``packaged``).
         teardown: Whether a full ELF undoes each configuration once done.
+        commands_in_flight: The commands its version's schedule keeps in
+            flight from the host (``CarriedLoop``).
     """
 
     recording: Recording
@@ -954,6 +956,7 @@ class Applied:
     packing: Packing
     full_elf: bool | None = None
     teardown: bool = False
+    commands_in_flight: int = 1
 
     @classmethod
     def of(
@@ -962,7 +965,8 @@ class Applied:
         """Return ``call`` under ``profile`` on ``dev``.
 
         Where its version's schedule runs several calls a command, the derived
-        version running them (``Recording.repeated``).
+        version running them (``Recording.repeated``), and the commands it
+        keeps in flight.
 
         Its weights coded as ``Graph.compile`` codes them (``Recording.code_weights``),
         in ``call``'s recording itself: how a weight is read is its recording's, the
@@ -972,14 +976,8 @@ class Applied:
         begun = time.perf_counter()
         call.recording.code_weights()
         recording = call.recording
-        per = max(
-            (
-                s.calls_per_command
-                for s in profile.schedules()
-                if s.version == recording.version
-            ),
-            default=1,
-        )
+        schedules = [s for s in profile.schedules() if s.version == recording.version]
+        per = max((s.calls_per_command for s in schedules), default=1)
         if per > 1:
             recording = recording.repeated(per)
         recording, fused, packing = apply_profile(recording, profile, dev)
@@ -988,14 +986,24 @@ class Applied:
             fused,
             dataclasses.replace(packing, required=required),
             *packaged(recording, profile),
+            commands_in_flight=max(
+                (s.commands_in_flight for s in schedules), default=1
+            ),
         )
         Spent.charge(build_s=time.perf_counter() - begun)
         return out
 
     def fingerprint(self, dev) -> Hashable:
-        """Return what this builds: two with one fingerprint build one image."""
+        """Return what this builds and how it is run: two with one fingerprint build one image and dispatch it alike."""
         steps = tuple(_identity(s.op, dev) for s in self.recording.steps)
-        return steps, self.fused, self.packing, self.full_elf, self.teardown
+        return (
+            steps,
+            self.fused,
+            self.packing,
+            self.full_elf,
+            self.teardown,
+            self.commands_in_flight,
+        )
 
     def built(self, dev) -> CompiledGraph:
         """Return the version, packaged as ``dev`` does."""
