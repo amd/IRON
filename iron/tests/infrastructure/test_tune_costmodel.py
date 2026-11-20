@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 from aie.utils.compile import NPU_CACHE_HOME
 
+from iron.common.graph.sdf import Ceiling
 from iron.tune.costmodel import PRIOR, SEEDS, CostModel
-from iron.tune.ddr import Ceiling
 
 
 def test_a_model_without_samples_predicts_by_its_prior():
@@ -47,7 +47,14 @@ def test_a_model_round_trips_through_its_file(tmp_path):
 
 
 def test_a_models_ddr_rates_round_trip_by_power_mode(tmp_path):
-    ceiling = Ceiling(1800.0, {2: 4.02, 16: 2.99}, {256: 3.1}, {1: 3.9})
+    ceiling = Ceiling(
+        core_mhz=1800.0,
+        mixed={2: 4.02, 16: 2.99},
+        mixed_object=8192,
+        objects={256: 4.3, 8192: 4.02},
+        read={1: 3.9},
+        boundary=3600.0,
+    )
     model = CostModel()
     model.ddr["turbo"] = ceiling.as_json()
     model.save("npu2", tmp_path)
