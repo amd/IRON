@@ -332,7 +332,8 @@ class Schedule:
         calls_overlapped: Calls in flight inside one command.
         commands_in_flight: Commands submitted before the previous completes.
         interleave_with: Versions mixed into the same command.
-        size: A derived version to run instead, by name.
+        size: A derived version to run instead, by name: ``"merged_<k>x"``,
+            ``k`` calls merged into one.
         packaging: One full ELF, or an xclbin per step; None for the device's default.
     """
 

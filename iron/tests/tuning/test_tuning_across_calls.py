@@ -11,9 +11,9 @@ from iron.common.declare.composition import Configuration, Entry, Refinement, Sc
 from iron.common.declare.profile import Profile
 from iron.tests.support import toys_schedule
 from iron.tests.support.tools import DEVICES
-from iron.tests.support.tuning import unbuilt
+from iron.tests.support.tuning import scheduled_by_candidates, unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import candidates, check, fit, search
+from iron.tune.search import check, fit, search
 
 DEVICE = DEVICES["npu2"]()
 
@@ -30,7 +30,6 @@ def _kv_recording():
     return toys_schedule.kv_write_read_recording("across_calls_kv", write, read)
 
 
-@unbuilt
 def test_calls_per_command_round_trips_and_is_proposed(tmp_path):
     """``Schedule.calls_per_command`` (1, 2, 4) round-trips through a profile and is a candidate."""
     recording = _decode_recording()
@@ -43,14 +42,11 @@ def test_calls_per_command_round_trips_and_is_proposed(tmp_path):
         profile.save(tmp_path / f"calls_per_command_{calls_per_command}.json")
         loaded = Profile.load(tmp_path / f"calls_per_command_{calls_per_command}.json")
         assert loaded.schedules() == [schedule]
-        start = Profile()
-        assert any(
-            schedule in edit.apply(start).schedules()
-            for edit in candidates([Timed(recording)], start, DEVICE)
-        )
+        assert scheduled_by_candidates(
+            schedule, [Timed(recording)], DEVICE
+        ).schedules() == [schedule]
 
 
-@unbuilt
 def test_calls_overlapped_round_trips_and_is_proposed(tmp_path):
     """``Schedule.calls_overlapped`` (calls in flight inside one command) round-trips and is a candidate."""
     recording = _decode_recording()
@@ -62,11 +58,9 @@ def test_calls_overlapped_round_trips_and_is_proposed(tmp_path):
     profile.save(tmp_path / "calls_overlapped.json")
     loaded = Profile.load(tmp_path / "calls_overlapped.json")
     assert loaded.schedules() == [schedule]
-    start = Profile()
-    assert any(
-        schedule in edit.apply(start).schedules()
-        for edit in candidates([Timed(recording)], start, DEVICE)
-    )
+    assert scheduled_by_candidates(
+        schedule, [Timed(recording)], DEVICE
+    ).schedules() == [schedule]
 
 
 @unbuilt
@@ -80,14 +74,11 @@ def test_interleave_with_decode_and_prefill_round_trips_and_is_proposed(tmp_path
     profile.save(tmp_path / "interleave.json")
     loaded = Profile.load(tmp_path / "interleave.json")
     assert loaded.schedules() == [schedule]
-    start = Profile()
-    assert any(
-        schedule in edit.apply(start).schedules()
-        for edit in candidates([Timed(decode), Timed(prefill)], start, DEVICE)
-    )
+    assert scheduled_by_candidates(
+        schedule, [Timed(decode), Timed(prefill)], DEVICE
+    ).schedules() == [schedule]
 
 
-@unbuilt
 def test_derived_size_merging_two_calls_round_trips_and_is_proposed(tmp_path):
     """``Schedule.size`` naming a derived version (two prefill chunks as one) round-trips and is a candidate."""
     recording = _decode_recording()
@@ -97,11 +88,9 @@ def test_derived_size_merging_two_calls_round_trips_and_is_proposed(tmp_path):
     profile.save(tmp_path / "derived_size.json")
     loaded = Profile.load(tmp_path / "derived_size.json")
     assert loaded.schedules() == [schedule]
-    start = Profile()
-    assert any(
-        schedule in edit.apply(start).schedules()
-        for edit in candidates([Timed(recording)], start, DEVICE)
-    )
+    assert scheduled_by_candidates(
+        schedule, [Timed(recording)], DEVICE
+    ).schedules() == [schedule]
 
 
 @unbuilt
@@ -189,7 +178,6 @@ def test_tuner_keeps_the_call_schedule_that_pays():
     )
 
 
-@unbuilt
 def test_an_overlap_breaking_a_dependence_is_refused():
     """Overlapping a KV write-then-read dependence across calls is refused before any build."""
     recording = _kv_recording()
@@ -201,7 +189,6 @@ def test_an_overlap_breaking_a_dependence_is_refused():
     assert "depend" in (result.why or "") or "overlap" in (result.why or "")
 
 
-@unbuilt
 def test_a_merge_breaking_a_dependence_is_refused():
     """Merging calls whose carried state the merge would reorder past a feedback cycle's initial values is refused before any build."""
     recording = _kv_recording()
@@ -213,7 +200,6 @@ def test_a_merge_breaking_a_dependence_is_refused():
     assert "depend" in (result.why or "") or "merge" in (result.why or "")
 
 
-@unbuilt
 def test_state_resident_across_a_teardown_is_refused():
     """State kept resident into a command that tears its configuration down is refused before any build."""
     recording = _kv_recording()

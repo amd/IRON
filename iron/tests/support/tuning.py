@@ -4,9 +4,11 @@
 """What the transformation tests share.
 
 The marks for a type IRON does not build yet and for one that waits on a
-kernel, and reaching a region by composing ``candidates``' edits.
+kernel, and reaching a region, its runtime plan or a schedule by composing
+``candidates``' edits.
 """
 
+import dataclasses
 import itertools
 from collections.abc import Sequence
 
@@ -14,9 +16,16 @@ import pytest
 from aie.iron.device import Device
 
 from iron.common.declare import Profile
-from iron.common.declare.composition import Hold, Region
+from iron.common.declare.composition import Hold, Region, RuntimePlan, Schedule
 from iron.tune.autotune import Timed
-from iron.tune.search import AddEntry, DepthEdge, HoldEdge, candidates
+from iron.tune.search import (
+    AddEntry,
+    DepthEdge,
+    HoldEdge,
+    PlanRegion,
+    ScheduleVersion,
+    candidates,
+)
 
 unbuilt = pytest.mark.xfail(
     strict=True,
@@ -99,4 +108,67 @@ def reached_by_candidates(
                 reached = edit.apply(reached)
                 break
         (current,) = reached.entries()
+    return reached
+
+
+def planned_by_candidates(
+    region: Region, calls: Sequence[Timed], device: Device
+) -> Profile:
+    """Return the profile composing ``candidates``' edits reaches toward ``region``, its runtime plan included.
+
+    The region without its plan as ``reached_by_candidates`` reaches it,
+    then each field of the plan off its default, one ``PlanRegion`` edit
+    each, as ``candidates`` yields it for the profile as it then stands. The
+    default plan named is reached through another wait and back.
+    ``candidates`` raises where it yields no such edit.
+    """
+    reached = reached_by_candidates(
+        dataclasses.replace(region, runtime=None), calls, device
+    )
+    if region.runtime is None:
+        return reached
+    plan = vars(region.runtime)
+    default = vars(RuntimePlan())
+    wanted = [(n, v) for n, v in plan.items() if v != default[n]] or [
+        ("waits", "per_channel"),
+        ("waits", plan["waits"]),
+    ]
+    for name, value in wanted:
+        (current,) = reached.entries()
+        reached = next(
+            edit
+            for edit in candidates(calls, reached, device)
+            if isinstance(edit, PlanRegion)
+            and edit.entry == current
+            and (edit.field, edit.value) == (name, value)
+        ).apply(reached)
+    return reached
+
+
+def scheduled_by_candidates(
+    schedule: Schedule, calls: Sequence[Timed], device: Device
+) -> Profile:
+    """Return the profile composing ``candidates``' edits reaches toward ``schedule``, from an empty one.
+
+    Each field of the schedule off its default, in the order ``Schedule``
+    declares them, one ``ScheduleVersion`` edit each, as ``candidates``
+    yields it for the profile as it then stands. The default schedule named
+    is reached through two calls a command and back. ``candidates`` raises
+    where it yields no such edit.
+    """
+    held = vars(schedule)
+    default = vars(Schedule(schedule.version))
+    wanted = [(n, v) for n, v in held.items() if v != default[n]] or [
+        ("calls_per_command", 2),
+        ("calls_per_command", held["calls_per_command"]),
+    ]
+    reached = Profile()
+    for name, value in wanted:
+        reached = next(
+            edit
+            for edit in candidates(calls, reached, device)
+            if isinstance(edit, ScheduleVersion)
+            and (edit.version, edit.field, edit.value)
+            == (schedule.version, name, value)
+        ).apply(reached)
     return reached

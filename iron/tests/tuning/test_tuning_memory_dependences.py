@@ -127,7 +127,6 @@ def test_tuner_keeps_the_region_where_it_pays():
     )
 
 
-@unbuilt
 def test_two_configurations_sharing_a_memory_dependence_at_once_is_refused():
     """A writer and a reader of the same cache buffer, named concurrent across two configurations, are refused before any build.
 

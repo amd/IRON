@@ -18,6 +18,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import time
+from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
@@ -30,15 +31,22 @@ from aie.utils import set_current_device
 
 from ..common.declare import Profile
 from ..common.declare.composition import (
+    Configuration,
     Entry,
     Hold,
     Member,
     Refinement,
     Region,
+    RuntimePlan,
+    Schedule,
+    Switch,
+    Version,
     refinement,
 )
+from ..common.design import OperatorDesign
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
 from ..common.graph.fusion import composed
+from ..common.graph.record import Recording
 from ..common.graph.sdf import Derivation
 from ..common.image.step import Edge, EdgeKind, FusionKind, HandOff
 from .autotune import Timed, refusal, settings
@@ -154,9 +162,78 @@ class DepthEdge:
         return edited
 
 
+@dataclass(frozen=True)
+class PlanRegion:
+    """An edit setting one field of the runtime plan of a region the profile composes (``RuntimePlan``).
+
+    Attributes:
+        entry: The entry, as the profile holds it.
+        field: The ``RuntimePlan`` field set.
+        value: Its value.
+        touches: The steps the region composes, by index in the recording it
+            was found in.
+        refinement: How the edited build relates to the untuned build.
+    """
+
+    entry: Entry
+    field: str
+    value: object
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with ``entry`` replaced by itself, its plan's ``field`` at ``value``."""
+        edited = profile.copy()
+        root = self.entry.root
+        assert isinstance(root, Region), "candidates yields it for regions alone"
+        plan = dataclasses.replace(
+            root.runtime or RuntimePlan(), **{self.field: self.value}
+        )
+        planned = dataclasses.replace(
+            self.entry, root=dataclasses.replace(root, runtime=plan)
+        )
+        edited.replace_entry(self.entry, planned)
+        return edited
+
+
+@dataclass(frozen=True)
+class ScheduleVersion:
+    """An edit setting one field of a version's schedule (``Schedule``), the version's default schedule where the profile holds none.
+
+    Attributes:
+        version: The version scheduled.
+        field: The ``Schedule`` field set.
+        value: Its value.
+        touches: Every step of the version's recording.
+        refinement: How the edited build relates to the untuned build.
+    """
+
+    version: Version
+    field: str
+    value: object
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with ``version``'s schedule's ``field`` at ``value``."""
+        edited = profile.copy()
+        held = [s for s in profile.schedules() if s.version == self.version]
+        schedule = held[0] if held else Schedule(self.version)
+        changed = dataclasses.replace(schedule, **{self.field: self.value})
+        if held:
+            edited.replace_schedule(schedule, changed)
+        else:
+            edited.add_schedule(changed)
+        return edited
+
+
 # A chosen depth is an edge's minimum times a power of two up to this many
 # doublings, beside its knee; past what a core or memtile holds, fit refuses.
 DEPTH_DOUBLINGS = 4
+
+# A runtime plan's chunks, and a schedule's calls a command or merged into one,
+# are powers of two up to this many doublings.
+SCHEDULE_DOUBLINGS = 2
 
 logger = logging.getLogger(__name__)
 
@@ -176,14 +253,15 @@ _NOT_GENERATED = (
     "regions of steps that are not consecutive",
     "cascade edges",
     "inflows",
-    "runtime plans",
+    "a runtime plan's DDR burst lengths and transfer sizes",
     "nested regions",
-    "configurations",
+    "a configuration of one design, and its concurrency, width, residency, "
+    "switch and teardown",
     "widths differing between a region's members",
     "fission",
     "substitution",
     "scopes",
-    "schedules",
+    "a schedule's order and recomputed steps",
     "variants and bindings",
     "state layouts",
 )
@@ -270,7 +348,22 @@ def candidates(
     recording runs, each edge held at each other place (``HoldEdge``) and at
     each chosen depth, its analysis minimum times 2 to 2**DEPTH_DOUBLINGS
     and its knee (``DepthEdge``): one edge an edit, so the search composes
-    several; the analysis's own kind and minimum are the region edit's.
+    several; the analysis's own kind and minimum are the region edit's. With
+    them, each other value of each field of its runtime plan (``PlanRegion``):
+    its awaits, its overlap, its chunks (powers of two up to
+    2**SCHEDULE_DOUBLINGS), its tasks in flight (one up to the target model's
+    task queue depth) and its chaining. Last, for each call's version, each
+    other value of each field of its schedule (``ScheduleVersion``): its calls a
+    command, calls overlapped (fewer than its calls a command), commands in
+    flight, calls merged into one (``"merged_<k>x"``), each other version
+    interleaved, and its packaging; ``fit`` refuses one that breaks a
+    dependence.
+
+    Before the schedules, after each call's tunables, its configurations:
+    each window of consecutive steps a region's window may be, of two or
+    more designs, as one ``Configuration`` loaded together, each region the
+    profile composes inside it (at its first match) one part, every other
+    step a member.
 
     Args:
         calls: The graph's calls, every version.
@@ -284,7 +377,9 @@ def candidates(
     proposed: list[Entry] = []
     holds: list[tuple[Entry, int, Hold]] = []
     deepened: list[tuple[Entry, int, int]] = []
+    planned: list[tuple[Entry | Version, str, object]] = []
     cores = device.cols * len(device.core_rows)
+    queue = get_target_model(device.resolve()).get_dma_task_queue_depth()
     for timed in calls:
         recording = timed.recording
         for entry in profile.entries():
@@ -303,6 +398,19 @@ def candidates(
                         continue
                     holds.append((entry, index, place))
                     yield HoldEdge(entry, index, place, touches)
+            plan = root.runtime or RuntimePlan()
+            for name, values in (
+                ("waits", ("barrier", "per_channel")),
+                ("overlap", ("none", "prefetch", "pipelined")),
+                ("chunks", [1 << k for k in range(SCHEDULE_DOUBLINGS + 1)]),
+                ("in_flight", range(1, queue + 1)),
+                ("chained", (False, True)),
+            ):
+                for value in values:
+                    if value == vars(plan)[name] or (entry, name, value) in planned:
+                        continue
+                    planned.append((entry, name, value))
+                    yield PlanRegion(entry, name, value, touches)
             try:
                 analysis = Derivation(root, recording, device).analysis()
             except (NotImplementedError, ValueError):
@@ -497,6 +605,67 @@ def candidates(
                             else Refinement.EXACT
                         ),
                     )
+        # Each region the profile composes, by its first match's first step.
+        pieces: dict[int, tuple[Region, tuple[int, ...]]] = {}
+        for entry in profile.entries():
+            for match in (
+                recording.occurrences(entry)[:1]
+                if isinstance(entry.root, Region)
+                else ()
+            ):
+                if match == tuple(range(match[0], match[0] + len(match))):
+                    pieces.setdefault(match[0], (entry.root, match))
+        for lo in range(len(steps)):
+            for hi in range(lo + 1, min(lo + cores, len(steps))):
+                if recording.crosses_host(lo, hi):
+                    break
+                if all(m == members[lo] for m in members[lo : hi + 1]):
+                    continue  # one design: its own configuration already
+                parts: list[Region | Member] = []
+                s = lo
+                while s <= hi:
+                    region, match = pieces.get(s, (None, ()))
+                    if region is not None and match[-1] <= hi:
+                        parts.append(region)
+                        s += len(match)
+                    else:
+                        parts.append(members[s])
+                        s += 1
+                entry = Entry(Configuration(tuple(parts)))
+                if len(parts) > 1 and entry not in proposed:
+                    proposed.append(entry)
+                    yield AddEntry(entry, frozenset(range(lo, hi + 1)))
+    versions = [t.recording.version for t in calls]
+    for timed in calls:
+        version = timed.recording.version
+        held = [s for s in profile.schedules() if s.version == version]
+        schedule = held[0] if held else Schedule(version)
+        doublings = [1 << k for k in range(SCHEDULE_DOUBLINGS + 1)]
+        for name, values in (
+            ("calls_per_command", doublings),
+            ("calls_overlapped", range(schedule.calls_per_command)),
+            ("commands_in_flight", doublings),
+            ("size", [None, *(f"merged_{k}x" for k in doublings[1:])]),
+            (
+                "interleave_with",
+                [(), *((v,) for v in dict.fromkeys(versions) if v != version)],
+            ),
+            (
+                "packaging",
+                [
+                    None,
+                    "xclbin",
+                    *(["full_elf"] if device.can_dispatch_full_elf else []),
+                ],
+            ),
+        ):
+            for value in values:
+                if value == vars(schedule)[name] or (version, name, value) in planned:
+                    continue
+                planned.append((version, name, value))
+                yield ScheduleVersion(
+                    version, name, value, frozenset(range(len(timed.recording.steps)))
+                )
     raise NotImplementedError(
         "candidates does not generate yet: " + ", ".join(_NOT_GENERATED)
     )
@@ -528,6 +697,22 @@ def fit(
     depths, the rest at their minimum. The placer last places the composed
     module, where the composer builds the region as IRON's fusions do.
 
+    Before any call, each entry's own choices: a configuration resident into
+    the next across its own teardown, or wider than the array; a runtime
+    plan keeping more tasks in flight than a channel's queue holds, or
+    chaining more chunks than a shim tile has buffer descriptors; chosen
+    phases that put a consumer before its producer, or a stream across a
+    phase boundary. A configuration at its first match (``_configuration_fit``)
+    has parts run at once independent, its cores counted and its steps placed
+    as one device configuration; configurations concurrent under one id must
+    be independent of each other, and take disjoint columns. A plan's
+    per-channel awaits must not reuse a channel the host fills in more tasks
+    than it keeps in flight: a fill reports done before its data leaves the
+    shim. A version's schedule must not run a part before one it reads, nor
+    overlap or merge calls where a step writes a buffer that outlasts the
+    call, and on an xclbin per step it takes no phased region and no
+    teardown.
+
     A refusal from any stage of any entry wins over what is not fitted yet;
     only where nothing refuses is the first of those raised.
 
@@ -539,11 +724,14 @@ def fit(
         max_images: The images the host may hold loaded at once; None for no limit.
 
     Raises:
-        ValueError: An entry matches none of the calls' steps.
+        ValueError: An entry matches none of the calls' steps, a schedule
+            none of their versions, a schedule orders a part its entries do
+            not name, or a region names other than a phase per edge.
         NotImplementedError: What is not fitted yet, where nothing refuses:
-            images held at once, a profile's schedules, variants, bindings,
-            fusion or packing entries, an entry rooted at a configuration or
-            a step, scoped to some runs of its shape, splitting a step by
+            images held at once, a schedule's choices past its packaging,
+            variants, bindings, fusion or packing entries, a configuration
+            the composer does not build, an entry rooted at a step, scoped
+            to some runs of its shape, splitting a step by
             fission or chaining a cascade, more fifos to or
             from the host than the shim has channels (IRON's composer gives
             each its own; mlir-aie can share them), a placer setting past the
@@ -554,7 +742,6 @@ def fit(
         f"fitting {kind} is not built yet"
         for kind, kept in (
             ("images held at once", max_images is not None),
-            ("schedule entries", profile.schedules()),
             ("variants", profile.variants()),
             ("bindings", profile.bindings()),
             ("fusion entries", profile.fusions()),
@@ -576,7 +763,100 @@ def fit(
             model.get_num_bds(0, mem_row),
         ),
     }
+    shim_row = next(r for r in rows if model.is_shim_noc_tile(0, r))
+    queue = model.get_dma_task_queue_depth()
+    entries = profile.entries()
+    concurrent: dict[int, list[Configuration]] = {}
+    for entry in entries:
+        root = entry.root
+        if isinstance(root, Configuration):
+            if root.teardown and root.resident:
+                return Fit(
+                    False,
+                    "analysis",
+                    f"it keeps {', '.join(root.resident)} on chip into the next "
+                    f"configuration, across its own teardown",
+                )
+            if root.columns is not None and root.columns > model.columns():
+                return Fit(
+                    False,
+                    "counts",
+                    f"it takes {root.columns} columns; {device.resolve()} has "
+                    f"{model.columns()}",
+                )
+            if root.concurrent is not None:
+                concurrent.setdefault(root.concurrent, []).append(root)
+        parts: list[Configuration | Region | Member] = [root]
+        while parts:
+            part = parts.pop()
+            if isinstance(part, Member):
+                continue
+            parts += part.parts
+            if not isinstance(part, Region):
+                continue
+            plan = part.runtime
+            if plan is not None and (plan.in_flight or 0) > queue:
+                return Fit(
+                    False,
+                    "counts",
+                    f"its runtime plan keeps {plan.in_flight} tasks in flight a "
+                    f"channel; a channel's task queue holds {queue}",
+                )
+            if (
+                plan is not None
+                and plan.chained
+                and plan.chunks > model.get_num_bds(0, shim_row)
+            ):
+                return Fit(
+                    False,
+                    "counts",
+                    f"its runtime plan chains {plan.chunks} chunks into one task, a "
+                    f"buffer descriptor each; a shim tile has "
+                    f"{model.get_num_bds(0, shim_row)}",
+                )
+            if part.phases is None:
+                continue
+            if len(part.phases) != len(part.edges):
+                raise ValueError(
+                    f"{part} names {len(part.phases)} phases for "
+                    f"{len(part.edges)} edges, a phase per edge"
+                )
+            phase: dict[int, int] = {}
+            for e, p in zip(part.edges, part.phases):
+                if phase.setdefault(e.consumer, p) != p:
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"step {e.consumer}'s edges name phases "
+                        f"{phase[e.consumer]} and {p}; a step runs in one phase",
+                    )
+            for e, p in zip(part.edges, part.phases):
+                made = phase.get(e.producer, 0)
+                if e.producer != e.consumer and made > p:
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"{e} runs its consumer in phase {p}, before its producer "
+                        f"in phase {made}",
+                    )
+                if e.kind is EdgeKind.STREAM and made < p:
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"{e} is a stream from phase {made} into phase {p}: a value "
+                        f"crossing a phase boundary waits in a memtile or DDR, "
+                        f"and a stream holds it in neither",
+                    )
+    for schedule in profile.schedules():
+        if schedule.packaging == "full_elf" and not device.can_dispatch_full_elf:
+            return Fit(
+                False,
+                "counts",
+                f"its schedule packages a full ELF; {device.resolve()} has no "
+                f"full-ELF dispatch",
+            )
     matched: set[int] = set()
+    scheduled: set[int] = set()
     for timed in calls:
         recording = timed.recording
         steps = list(recording.steps)
@@ -608,6 +888,9 @@ def fit(
             recording = dataclasses.replace(recording, steps=steps)
             recording.rebind(retuned)
         readers, writers = recording.users()
+        spans: list[tuple[int, ...]] = []
+        applied: list[Configuration | Region | Member] = []
+        together: dict[int, list[tuple[int, ...]]] = {}
         after = [
             {
                 r
@@ -639,9 +922,43 @@ def fit(
                 continue
             matched.add(index)
             inside = set(found[0])
+            applied.append(region)
+            xclbin = any(
+                s.version == recording.version and s.packaging == "xclbin"
+                for s in profile.schedules()
+            )
+            for part in (region, *(() if isinstance(region, Member) else region.parts)):
+                if xclbin and isinstance(part, Configuration) and part.teardown:
+                    return Fit(
+                        False,
+                        "analysis",
+                        "a configuration torn down after use on an xclbin per "
+                        "step, which leaves no configuration to undo",
+                    )
+                if (
+                    xclbin
+                    and isinstance(part, Region)
+                    and (
+                        part.phases is not None
+                        or any(e.kind is EdgeKind.DDR for e in part.edges)
+                    )
+                ):
+                    return Fit(
+                        False,
+                        "analysis",
+                        "a phased region on an xclbin per step: phases run in turn "
+                        "as a full ELF's sequences",
+                    )
+            at = 0
+            for part in region.parts if not isinstance(region, Member) else (region,):
+                spans.append(found[0][at : at + len(part.steps())])
+                at += len(part.steps())
             frontier = [o for s in inside for o in after[s] if o not in inside]
             seen = set(frontier)
-            while frontier:
+            # A configuration's parts run in turn, steps outside it between them.
+            while frontier and not (
+                isinstance(region, Configuration) and region.concurrent is None
+            ):
                 o = frontier.pop()
                 if after[o] & inside:
                     return Fit(
@@ -653,11 +970,24 @@ def fit(
                     )
                 frontier += [n for n in after[o] - inside if n not in seen]
                 seen |= after[o] - inside
-            if not isinstance(region, Region):
-                waiting.append(
-                    f"fitting an entry rooted at a {type(region).__name__} is not "
-                    f"built yet"
+            if isinstance(region, Member):
+                waiting.append("fitting an entry rooted at a Member is not built yet")
+                continue
+            if isinstance(region, Configuration) and region.concurrent is not None:
+                together.setdefault(region.concurrent, []).append(found[0])
+            if isinstance(region, Configuration):
+                verdict = _configuration_fit(
+                    region,
+                    found[0],
+                    recording,
+                    after,
+                    device,
+                    cores_on_array // model.columns(),
+                    placements,
                 )
+                if isinstance(verdict, Fit):
+                    return verdict
+                waiting += verdict
                 continue
             if entry.scope.occurrences is not None:
                 waiting.append(
@@ -735,6 +1065,26 @@ def fit(
                     for t in recorded.transfers
                     if (s, owner.get(t.fifo)) not in on_chip
                 }
+                plan = region.runtime
+                if plan is None or plan.waits != "per_channel" or plan.chained:
+                    continue
+                tasks = Counter(
+                    t.fifo
+                    for t in recorded.transfers
+                    if t.kind == "fill" and (s, owner.get(t.fifo)) not in on_chip
+                )
+                for fifo, n in tasks.items():
+                    if n * plan.chunks > (plan.in_flight or queue):
+                        return Fit(
+                            False,
+                            "analysis",
+                            f"step {s} ({type(derivation.ops[s]).__name__}) fills "
+                            f"{fifo.name} from the host in {n * plan.chunks} tasks "
+                            f"a call, {plan.in_flight or queue} in flight, each "
+                            f"awaited on its own channel: the channel is reused "
+                            f"once a fill reports done, which it does before its "
+                            f"data leaves the shim, not a sure await",
+                        )
             unplaceable = [
                 f"its steps {kind} {taken} fifos from the host, and "
                 f"{device.resolve()} has {budget} shim channels: IRON's composer "
@@ -826,17 +1176,23 @@ def fit(
                         f"gives a fifo one object size"
                     )
             kinds = {e.kind for e in region.edges}
-            if (
-                region.inflows
-                or region.phases is not None
-                or region.runtime is not None
-                or not all(isinstance(part, Member) for part in region.parts)
-                or not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED, EdgeKind.DDR}
-            ):
-                unplaceable.append(
-                    "placing a region the composer does not build yet (inflows, "
-                    "chosen phases, a runtime plan, nesting, or cascade edges)"
+            unplaceable += [
+                f"placing a region with {what} is not built yet: the composer "
+                f"does not build it"
+                for what, named in (
+                    ("inflows", region.inflows),
+                    ("chosen phases", region.phases is not None),
+                    (
+                        "nested regions",
+                        not all(isinstance(part, Member) for part in region.parts),
+                    ),
+                    (
+                        "cascade edges",
+                        not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED, EdgeKind.DDR},
+                    ),
                 )
+                if named
+            ]
             if "sequential" not in placements:
                 unplaceable.append(
                     "placing with anything but the sequential placer is not built yet"
@@ -890,12 +1246,232 @@ def fit(
                 )
             elif refused is not None:
                 return Fit(False, "placer", refused)
+        for group, spans_at_once in together.items():
+            refused = _independent(
+                spans_at_once, after, recording, f"configurations concurrent as {group}"
+            )
+            if refused is not None:
+                return refused
+        persist = (
+            set(recording.feedback)
+            | {h.ref().root for _, h in recording.states.values()}
+            | {h.ref().root for h in recording.inputs}
+            | set(recording.pinned)
+            | set(recording.residents)
+        )
+        carried = [
+            (root, w)
+            for root, ws in writers.items()
+            if root in persist
+            for w in sorted(set(ws) - {-1})[:1]
+        ]
+        for number, schedule in enumerate(profile.schedules()):
+            if schedule.version != recording.version:
+                continue
+            scheduled.add(number)
+            for a, b in schedule.order:
+                if not 0 <= min(a, b) <= max(a, b) < len(spans):
+                    raise ValueError(
+                        f"{schedule} orders part {max(a, b)}; the entries in "
+                        f"{recording.name} name {len(spans)} parts"
+                    )
+                reads = sorted(_reached(spans[b], after) & set(spans[a]))
+                if reads:
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"its schedule runs part {a} (step {reads[0]}, "
+                        f"{type(recording.steps[reads[0]].op).__name__}) before part "
+                        f"{b}, whose output it reads",
+                    )
+            for what, kept in (
+                ("overlapping calls", schedule.calls_overlapped),
+                (f"a merge of calls into {schedule.size!r}", schedule.size),
+            ):
+                if kept and carried:
+                    root, w = carried[0]
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"{what} breaks a dependence: step {w} "
+                        f"({type(recording.steps[w].op).__name__}) writes {root}, "
+                        f"which outlasts the call, so a call depends on the one "
+                        f"before",
+                    )
+            waiting += [
+                f"building a schedule's {what} is not built yet"
+                for what, kept in (
+                    ("order beyond dependences", schedule.order),
+                    ("recomputed steps", schedule.recompute),
+                    ("calls per command", schedule.calls_per_command != 1),
+                    ("calls overlapped", schedule.calls_overlapped),
+                    ("commands in flight", schedule.commands_in_flight != 1),
+                    ("versions interleaved", schedule.interleave_with),
+                    ("derived size", schedule.size is not None),
+                )
+                if kept
+            ]
+    for group, at_once in concurrent.items():
+        taken = sum(
+            model.columns() if c.columns is None else c.columns for c in at_once
+        )
+        if len(at_once) > 1 and taken > model.columns():
+            return Fit(
+                False,
+                "placer",
+                f"the configurations running at once as {group} take {taken} "
+                f"columns; {device.resolve()} has {model.columns()}, so they cannot "
+                f"be disjoint",
+            )
     unmatched = [e for n, e in enumerate(profile.entries()) if n not in matched]
     if unmatched:
         raise ValueError(f"{unmatched[0]} matches none of the calls' steps")
+    unscheduled = [s for n, s in enumerate(profile.schedules()) if n not in scheduled]
+    if unscheduled:
+        raise ValueError(f"{unscheduled[0]} schedules none of the calls' versions")
     if waiting:
         raise NotImplementedError(waiting[0])
     return Fit(True)
+
+
+def _reached(steps: Sequence[int], after: Sequence[set[int]]) -> set[int]:
+    """Return ``steps`` and every step on a path (``after``, each step's later readers) from one of them."""
+    reached = set(steps)
+    frontier = list(steps)
+    while frontier:
+        found = after[frontier.pop()] - reached
+        reached |= found
+        frontier += found
+    return reached
+
+
+def _independent(
+    spans: Sequence[tuple[int, ...]],
+    after: Sequence[set[int]],
+    recording: Recording,
+    what: str,
+) -> Fit | None:
+    """Return the refusal of ``spans``, steps run at once as ``what``, where a step of one is on a path from another's; None where they are independent."""
+    for k, span in enumerate(spans):
+        reached = _reached(span, after)
+        for j, other in enumerate(spans):
+            depends = sorted(reached & set(other)) if j != k else []
+            if depends:
+                return Fit(
+                    False,
+                    "analysis",
+                    f"{what} run at once, but step {depends[0]} "
+                    f"({type(recording.steps[depends[0]].op).__name__}) depends on "
+                    f"steps {span}: what runs at once must be independent, no "
+                    f"written data shared",
+                )
+    return None
+
+
+def _configuration_fit(
+    configuration: Configuration,
+    match: tuple[int, ...],
+    recording: Recording,
+    after: Sequence[set[int]],
+    device: Device,
+    core_rows: int,
+    placements: Sequence[str],
+) -> Fit | list[str]:
+    """Return ``configuration``'s refusal at ``match``, its steps in ``recording``, or what is not fitted of it yet.
+
+    Parts that run at once (``Configuration.concurrent``) must be
+    independent: no step of one on a path (``after``) from another's. The
+    cores its steps take are then counted against the array, or the
+    ``columns`` it is given, ``core_rows`` cores each: steps of one array
+    share its cores unless they run at once, and a region's steps each take
+    their own, as a fusion's members do, steps sharing a worker counted once.
+    A configuration of steps alone is placed last, as one device
+    configuration, as a packing is.
+
+    Args:
+        configuration: The configuration fitted.
+        match: The recording's step each of its steps is, depth-first.
+        recording: The recording it is matched in.
+        after: Each step's readers later in the recording.
+        device: The device.
+        core_rows: The core tiles a column holds.
+        placements: The placer's settings a fit may try.
+
+    Returns:
+        A ``Fit`` refusing it, or each thing not fitted yet.
+    """
+    spans = []
+    at = 0
+    for part in configuration.parts:
+        spans.append(match[at : at + len(part.steps())])
+        at += len(part.steps())
+    if configuration.concurrent is not None:
+        refused = _independent(spans, after, recording, "its parts")
+        if refused is not None:
+            return refused
+    try:
+        derivation = Derivation(Region(configuration.parts), recording, device)
+    except NotImplementedError as e:
+        return [str(e)]
+    cores = [len(recorded.cores) for _, recorded in derivation.recorded]
+    arrays: dict[object, int] = {}
+    own = 0
+    at = 0
+    for part in configuration.parts:
+        steps = range(at, at + len(part.steps()))
+        at += len(part.steps())
+        if isinstance(part, Member) and configuration.concurrent is None:
+            key = derivation.ops[steps[0]].array_key()
+            arrays[key] = max(arrays.get(key, 0), cores[steps[0]])
+            continue
+        workers = part.workers if isinstance(part, Region) else ()
+        shared = {s for worker in workers for s in worker}
+        own += sum(cores[s] for k, s in enumerate(steps) if k not in shared)
+        own += sum(max(cores[steps[k]] for k in worker) for worker in workers)
+    needed = own + sum(arrays.values())
+    width = device.cols if configuration.columns is None else configuration.columns
+    if needed > width * core_rows:
+        return Fit(
+            False,
+            "counts",
+            f"its steps take {needed} cores; "
+            + (
+                f"{device.resolve()} has {width * core_rows}"
+                if configuration.columns is None
+                else f"its {width} columns hold {width * core_rows}"
+            ),
+        )
+    unbuilt = [
+        f"building a configuration with {what} is not built yet"
+        for what, kept in (
+            ("parts run at once", configuration.concurrent is not None),
+            ("a partial width", configuration.columns is not None),
+            ("buffers resident into the next", configuration.resident),
+            (
+                "a switch other than a reload",
+                configuration.switch not in (None, Switch.RELOAD),
+            ),
+            (
+                "regions among its parts",
+                not all(isinstance(p, Member) for p in configuration.parts),
+            ),
+        )
+        if kept
+    ]
+    if unbuilt:
+        return unbuilt
+    with set_current_device(device):
+        designs = {OperatorDesign(op).name: op for op in derivation.ops}
+        refused = group_fit_verdict(list(designs.values()))
+    if refused is not None and set(placements) != {"sequential"}:
+        return [
+            f"the sequential placer refuses it ({refused}); trying "
+            f"{', '.join(s for s in placements if s != 'sequential')} is not "
+            f"built yet"
+        ]
+    if refused is not None:
+        return Fit(False, "placer", refused)
+    return []
 
 
 def check(
