@@ -54,7 +54,7 @@ from ..common.graph.coded import CodedWeight, encode_all
 from ..common.graph.compiled import _words
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
 from ..common.graph.fusion import composed, in_turn, memory_waits, narrowed
-from ..common.graph.record import Recording
+from ..common.graph.record import NotLegalAtCapacity, Recording
 from ..common.graph.sdf import Derivation
 from ..common.image.compose import ANNEALED, SEQUENTIAL
 from ..common.image.packaging import SCRATCHPAD_WORDS
@@ -932,8 +932,9 @@ def fit(
     variants over its values. Then each range's design at its capacity:
     the call re-recorded from its graph where each value takes at most its
     range's top (``Recording.selected``), which the range's entry must
-    match, fitted under that entry alone; a design not legal there is
-    refused by the counts, or as its own fit refuses it.
+    match, fitted under that entry alone; a design not legal there
+    (``NotLegalAtCapacity``) is refused by the counts, or as its own fit
+    refuses it.
 
     A refusal from any stage of any entry wins over what is not fitted yet;
     only where nothing refuses is the first of those raised.
@@ -1060,7 +1061,8 @@ def fit(
         for box, _ in variants.ranges:
             at = {**top, **{n: hi for n, (_, hi) in zip(variants.values, box)}}
             try:
-                variant, chosen = recording.selected(alone, at)
+                with set_current_device(device):
+                    variant, chosen = recording.selected(alone, at)
                 fitted = fit(
                     chosen,
                     [dataclasses.replace(timed, recording=variant, values=at)],
@@ -1070,7 +1072,7 @@ def fit(
             except NotImplementedError as e:
                 waiting.append(str(e))
                 continue
-            except ValueError as e:
+            except NotLegalAtCapacity as e:
                 return Fit(False, "counts", f"its range {box}: {e}")
             if not fitted.ok:
                 return dataclasses.replace(
@@ -1799,13 +1801,14 @@ def fit(
                     )
                 elif refused is not None:
                     return Fit(False, "placer", refused)
-        # A returned output no step reads before its last write is the host's
-        # after each call, though pinned as written in parts.
+        # A returned output its steps write whole, read only after its last
+        # write, is the host's after each call, though pinned as written in parts.
         handed = {
             root
             for root in {h.ref().root for h in recording.returned}
             if -1 not in writers.get(root, [-1]) + readers.get(root, [])
             and all(r > max(writers[root]) for r in readers.get(root, []))
+            and recording.writes_whole(root)
         }
         persist = (
             set(recording.feedback)

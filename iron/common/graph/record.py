@@ -311,6 +311,10 @@ class _Placing:
         )
 
 
+class NotLegalAtCapacity(ValueError):
+    """A variant's entry matches no step of the call recorded at its range's capacity (``Recording.selected``)."""
+
+
 def version_key(inputs: Mapping[str, tuple[tuple[int, ...], Any]]) -> Version:
     """Return the key of a graph's version for ``inputs`` (each input's shape and dtype, by name, in the order its body takes them)."""
     return tuple(
@@ -610,18 +614,64 @@ class Recording:
             return recording.merged(merged)
         return recording
 
+    def writes_whole(self, root: str) -> bool:
+        """Whether its steps' writes of buffer ``root`` together cover every byte of it."""
+        size = self.pinned.get(root)
+        runs = []
+        for step in self.steps:
+            for ref, b in zip(step.refs(), step.op.buffers, strict=True):
+                if b.drains and ref.root == root:
+                    if ref.nbytes is None and (size is None or b.nbytes >= size):
+                        return True
+                    runs.append((ref.start, ref.nbytes or b.nbytes))
+        reached = 0
+        for start, nbytes in sorted(runs):
+            if start > reached:
+                return False
+            reached = max(reached, start + nbytes)
+        return size is not None and reached >= size
+
     def recorded_at(self, shapes: Mapping[str, tuple[int, ...]]) -> Recording:
         """Return its graph recorded again, each input at its shape in ``shapes`` and the rest at their own.
 
+        The graph must still record this recording at its own shapes: the
+        same steps (``design_key``), the same weights (one object, or equal
+        contents for one its body makes) and the same states.
+
         Raises:
             ValueError: It was built of steps rather than recorded from a
-                graph, or is a derived version.
+                graph, is a derived version, or its graph has changed since
+                (its profile, a param, a coded weight).
         """
         if self.graph is None or self.derived_from is not None:
             raise ValueError(
                 f"{self.name}: only a graph's own recording is recorded again at "
                 f"other shapes; this one is "
                 + ("built of steps" if self.graph is None else "a derived version")
+            )
+        again = self.graph.record(
+            **{h.name: (tuple(h.shape), h.dtype) for h in self.inputs}
+        )
+        weights, kept = (
+            {h.name: w for w, h in r.weights.values()} for r in (again, self)
+        )
+        if (
+            [s.op.design_key() for s in again.steps]
+            != [s.op.design_key() for s in self.steps]
+            or weights.keys() != kept.keys()
+            or again.states.keys() != self.states.keys()
+            or not all(
+                w is kept[n]
+                or isinstance(w, np.ndarray)
+                and isinstance(kept[n], np.ndarray)
+                and np.array_equal(w, kept[n])
+                for n, w in weights.items()
+            )
+        ):
+            raise ValueError(
+                f"{self.name}: its graph has changed since it was recorded (its "
+                f"profile, a param or a coded weight), so at other shapes it "
+                f"would record another design"
             )
         return self.graph.record(
             **{
@@ -645,8 +695,9 @@ class Recording:
         Raises:
             ValueError: A bound needs more rows than an input holds.
             NotImplementedError: A value bounds no input, or bounds one other
-                than by a linear count on the leading axis of a whole view; or
-                ``_over`` does not build it.
+                than by a linear count on the leading axis of a whole view; a
+                step reads an input it shrinks other than through a bound by a
+                value in ``bounds``; or ``_over`` does not build it.
         """
         rows: dict[str, int] = {}
         for value, bound in bounds.items():
@@ -688,6 +739,20 @@ class Recording:
         shapes = {n: (r, *inputs[n][1:]) for n, r in rows.items() if r != inputs[n][0]}
         if not shapes:
             return self
+        unbounded = [
+            h
+            for step in self.steps
+            for h in (*step.slots, *([step.gather] if step.gather else []))
+            if h.name in shapes
+            and not (0 in h.valid and h.valid[0].value.name in bounds)
+        ]
+        if unbounded:
+            raise NotImplementedError(
+                f"{self.name}: a design at the capacity of {dict(bounds)} is not "
+                f"built where a step reads {unbounded[0]!r} other than through a "
+                f"bound one of them sets: its rows past the capacity would go "
+                f"unread"
+            )
         return self._over(
             self.recorded_at(shapes),
             1,
@@ -699,7 +764,9 @@ class Recording:
 
         Each a call of its graph recorded at ``1/calls`` of every input's
         leading rows (``recorded_at``), call ``j`` over the ``j``-th run of
-        each input and returned output (``_over``).
+        each input and returned output (``_over``). That a call's rows are
+        independent of each other is not checked here: ``check`` holds the
+        split bit-identical to its base.
 
         Raises:
             ValueError: An input's leading rows do not divide into ``calls``.
@@ -830,7 +897,10 @@ class Recording:
         )
 
     def selected(
-        self, profile: Profile, values: Mapping[str, int]
+        self,
+        profile: Profile,
+        values: Mapping[str, int],
+        points: Sequence[Mapping[str, int]] = (),
     ) -> tuple[Recording, Profile]:
         """Return how ``profile`` runs a call of this version at ``values``: each set of its variants' design at its range.
 
@@ -841,16 +911,18 @@ class Recording:
         its range's top), and ``profile`` with its variants replaced by those
         ranges' entries; an entry rooted at a step gives that step's tunables
         as a tunable entry does (``Profile.add``). With no variants, this
-        recording and a copy of ``profile``.
+        recording and a copy of ``profile``. Each of ``points``, the values
+        the call is run at too, must lie in the range ``values`` selects.
 
         Raises:
-            ValueError: No range holds ``values``, or a range's entry matches
-                no step at its capacity: its design is not legal there.
+            ValueError: No range holds ``values``.
+            NotLegalAtCapacity: A range's entry matches no step at its
+                capacity: its design is not legal there.
             NotImplementedError: ``values`` does not give a value the
-                variants are over (a call whose points may each select
-                another), a range's entry rooted at a step is scoped, runs on
-                the host or is split by fission, or ``at_capacity`` does not
-                build its capacity.
+                variants are over, or a point lies in another range (a design
+                per point is not built), a range's entry rooted at a step is
+                scoped, runs on the host or is split by fission, or
+                ``at_capacity`` does not build its capacity.
         """
         chosen = profile.copy()
         names = {v.name for v in self.values}
@@ -881,12 +953,27 @@ class Recording:
                     f"{[values[n] for n in variants.values]}"
                 )
             box, entry = holding[0]
+            outside = [
+                p
+                for p in points
+                if not all(
+                    lo <= p[n] <= hi
+                    for n, (lo, hi) in zip(variants.values, box, strict=True)
+                )
+            ]
+            if outside:
+                raise NotImplementedError(
+                    f"{self.name}: a call whose points span more than one range "
+                    f"over {', '.join(variants.values)} ({box} and "
+                    f"{[outside[0][n] for n in variants.values]}) is not built "
+                    f"yet: each point would select its own design"
+                )
             bounds.update((n, hi) for n, (_, hi) in zip(variants.values, box))
             entries.append(entry)
         recording = self.at_capacity(bounds) if bounds else self
         for entry in entries:
             if not recording.occurrences(entry):
-                raise ValueError(
+                raise NotLegalAtCapacity(
                     f"{recording.name}: {entry.root} matches no step at its range's "
                     f"capacity, so its design is not legal there"
                 )

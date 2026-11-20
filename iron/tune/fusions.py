@@ -983,7 +983,8 @@ class Applied:
         """Return ``call`` under ``profile`` on ``dev``.
 
         The design its values select where ``profile`` has variants
-        (``Recording.selected``), the version its schedule builds
+        (``Recording.selected``), refused where a point it is timed at lies
+        in another range, the version its schedule builds
         (``Recording.scheduled``), and the commands it keeps in flight.
 
         Its weights coded as ``Graph.compile`` codes them (``Recording.code_weights``),
@@ -997,7 +998,9 @@ class Applied:
         """
         begun = time.perf_counter()
         call.recording.code_weights()
-        selected, profile = call.recording.selected(profile, call.values)
+        selected, profile = call.recording.selected(
+            profile, call.values, [values for _, values in call.timed_points()]
+        )
         recording, fused, packing = apply_profile(
             selected.scheduled(profile), profile, dev
         )

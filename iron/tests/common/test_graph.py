@@ -1899,3 +1899,35 @@ def test_only_a_graph_s_recording_is_recorded_again_and_its_graph_is_no_part_of_
     steps = Recording.of_step(GEMV(M=256, K=256, num_aie_columns=1))
     with pytest.raises(ValueError, match="built of steps"):
         steps.split(2)
+
+
+class _RowsAndCopy(iron.Graph):
+    """A projection of ``x``'s first ``rows``, and a copy of ``x``'s rows of eight, whole or its first ``valid``."""
+
+    def __init__(self, bounded_copy: bool):
+        self.bounded_copy = bounded_copy
+
+    def body(self, x, w, *, rows: Scratchpad[np.int32], valid: Scratchpad[np.int32]):
+        projected = GEMM.step(x[:rows], w, b_col_maj=True, precision=Precision.MEDIUM)
+        flat = x.reshape(x.shape[0] * x.shape[1] // 8, 8)
+        return projected, Copy.step(flat[:valid] if self.bounded_copy else flat)
+
+
+@pytest.mark.parametrize("bounded_copy", [False, True])
+def test_a_capacity_is_refused_where_a_step_reads_the_input_past_the_bounds(
+    bounded_copy,
+):
+    """``x`` shrunk to 256 rows would leave rows the copy reads unread, whole or bounded by another value: refused."""
+    recording = _RowsAndCopy(bounded_copy).record(x=(2048, 256), w=(256, 256))
+    with pytest.raises(NotImplementedError, match="other than through a bound"):
+        recording.at_capacity({"rows": 256})
+
+
+def test_a_graph_changed_since_its_recording_is_not_recorded_again():
+    """A param rebound after recording would make the re-recorded design differ from the one it is checked against: refused."""
+    graph = _TwoProjections()
+    recording = graph.record(x=(8, 256))
+    assert recording.split(2).steps
+    graph.a = iron.param(np.ones((256, 256), dtype=bfloat16))
+    with pytest.raises(ValueError, match="changed since it was recorded"):
+        recording.split(2)

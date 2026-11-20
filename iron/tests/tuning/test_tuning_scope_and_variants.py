@@ -26,7 +26,8 @@ from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.tests.support.toys_settings import RangedPair, small_integer_weight
 from iron.tests.support.tuning import unbuilt
-from iron.tune.autotune import Timed
+from iron.tune.autotune import Point, Timed
+from iron.tune.fusions import Applied
 from iron.tune.search import candidates, check, fit, measure, search
 
 pytestmark = pytest.mark.usefixtures("device")
@@ -191,15 +192,16 @@ def test_a_boundary_is_kept_only_where_its_saving_beats_a_switch_and_one_more_de
     assert variants in tuned.variants()
 
 
-@pytest.mark.parametrize("read_first", [True, False])
-def test_an_output_written_in_parts_and_read_before_its_last_write_breaks_a_merge(
-    device, read_first
-):
-    """A returned output written in halves outlasts the call where a step reads the second half before writing it.
+@pytest.mark.parametrize(
+    "order", ["read_before_last_write", "read_unwritten_part", "read_after_writes"]
+)
+def test_an_output_read_where_a_call_has_not_written_it_breaks_a_merge(device, order):
+    """A returned output written in parts outlasts the call where a step reads part of it this call has not yet written.
 
-    Each call then reads what the call before left there, so merging calls is refused
-    before any build. Read only after both halves are written, it is the host's after
-    each call, and the merge waits on what is not built rather than being refused.
+    Read before the write of its second half, or a half no step writes, each call reads
+    what the call before left there, so merging calls is refused before any build.
+    Read only after both halves are written, it is the host's after each call, and the
+    merge waits on what is not built rather than being refused.
     """
     add = ElementwiseAdd(size=256, tile_size=128, num_aie_columns=1)
     first, second = BufferRef("out", 0, 512), BufferRef("out", 512, 512)
@@ -208,13 +210,17 @@ def test_an_output_written_in_parts_and_read_before_its_last_write_breaks_a_merg
         SequenceStep(add, (BufferRef("x"), BufferRef("x"), second)),
     ]
     reads = SequenceStep(add, (BufferRef("x"), second, BufferRef("t")))
-    steps = [writes[0], reads, writes[1]] if read_first else [*writes, reads]
+    steps = {
+        "read_before_last_write": [writes[0], reads, writes[1]],
+        "read_unwritten_part": [writes[0], reads],
+        "read_after_writes": [*writes, reads],
+    }[order]
     recording = Recording.of_steps(
         "halves", steps, ["x"], ["out", "t"], pinned={"out": 1024}
     )
     profile = Profile()
     profile.add_schedule(Schedule(version=recording.version, size="merged_2x"))
-    if not read_first:
+    if order == "read_after_writes":
         with pytest.raises(NotImplementedError, match="part of out"):
             fit(profile, [Timed(recording)], device)
         return
@@ -222,6 +228,46 @@ def test_an_output_written_in_parts_and_read_before_its_last_write_breaks_a_merg
     assert not result.ok
     assert result.stage == "analysis"
     assert "breaks a dependence" in (result.why or "")
+
+
+def test_a_call_whose_points_span_more_than_one_range_is_refused_before_any_build(
+    device,
+):
+    """A call at ``rows=256`` timed at 64 and at 1024 would run the 256-row design past its capacity: refused, not built."""
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    small = Entry(root=Member(cls=GEMM, dims={"M": 256, "K": 256, "N": 256}))
+    large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
+    tuned = Profile()
+    tuned.add_variants(
+        Variants(
+            values=("rows",), ranges=((((0, 256),), small), (((257, 2048),), large))
+        )
+    )
+    points = (Point(0.5, {"rows": 64}), Point(0.5, {"rows": 1024}))
+    call = Timed(recording, values={"rows": 256, "valid": 256}, points=points)
+    with pytest.raises(NotImplementedError, match="span more than one range"):
+        Applied.of(call, tuned, device)
+    within = Timed(recording, values={"rows": 256, "valid": 256}, points=points[:1])
+    assert Applied.of(within, tuned, device).recording.steps[0].op.M == 256
+
+
+def test_a_malformed_range_entry_is_raised_not_refused_as_illegal(device):
+    """An entry that names a step's tunable among its dims is an error in the profile, not a design illegal at its capacity."""
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    malformed = Entry(
+        root=Member(cls=GEMM, dims={"M": 256, "K": 256, "N": 256, "tile_m": 64})
+    )
+    large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
+    profile = Profile()
+    profile.add_variants(
+        Variants(
+            values=("rows",), ranges=((((0, 256),), malformed), (((257, 2048),), large))
+        )
+    )
+    with pytest.raises(ValueError, match="dims name its tunables"):
+        fit(profile, [Timed(recording)], device)
 
 
 def test_ranges_that_do_not_tile_the_value_space_are_refused(device):
