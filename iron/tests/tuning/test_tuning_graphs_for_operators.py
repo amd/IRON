@@ -34,6 +34,9 @@ pytestmark = pytest.mark.usefixtures("device")
 
 KV_LEN, HEAD_DIM, ROWS = 128, 64, 32
 SEQ = 32
+# MHA pads a prefill chunk's queries to a multiple of 64: at 64 it pads none,
+# so the graph and the fused MHA take one Q.
+PREFILL_SEQ = 64
 
 # Llama 3.2 1B's shipped decode and prefill mapping, at their own sizes (no padding to a
 # toy size): decode packs its 32 query heads into rows, prefill chunks 128 queries over
@@ -262,15 +265,16 @@ def test_decode_graph_holds_deep_cache_accuracy(position, device):
     assert result.ok, result.why
 
 
-# Where prefill's scores fit staged. npu1 builds GEMM on an array narrower than
-# the device, which a configuration beside another operator's does not take.
-_SCORES_FIT = [
+# Where prefill's GEMMs compose beside another operator. npu1 builds GEMM on an
+# array narrower than the device, which a configuration beside another
+# operator's does not take.
+_PREFILL_BUILT = [
     pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
     for name in sorted(DEVICES)
 ]
 
 
-@pytest.mark.parametrize("device", _SCORES_FIT, indirect=True)
+@pytest.mark.parametrize("device", _PREFILL_BUILT, indirect=True)
 def test_prefill_scores_stage_into_the_mask_add_and_fit(device):
     """Prefill's float32 scores, QK^T's column halves, staged into the mask add's rows, which stream into the softmax: the region fits.
 
@@ -299,8 +303,8 @@ def test_prefill_scores_staged_into_the_mask_add_are_bit_identical(device):
     assert result.ok, result.why
 
 
+@pytest.mark.parametrize("device", _PREFILL_BUILT, indirect=True)
 @pytest.mark.supported_devices("npu1", "npu2")
-@unbuilt
 def test_prefill_graph_is_no_worse_than_its_own_untuned_build(device):
     qk, add_mask, softmax, pv = toys.prefill_attention_ops(SEQ, KV_LEN, HEAD_DIM)
     recording = toys.prefill_attention_recording("prefill", qk, add_mask, softmax, pv)
@@ -331,22 +335,15 @@ def test_decode_graph_is_no_worse_than_the_fused_mha_it_replaces(device):
     assert result.ok, result.why
 
 
+@pytest.mark.parametrize("device", _PREFILL_BUILT, indirect=True)
 @pytest.mark.supported_devices("npu1", "npu2")
-@unbuilt  # GEMM's float32 scores staged into the mask add
 def test_prefill_graph_is_no_worse_than_the_fused_mha_it_replaces(device):
-    """Held to the fused ``MHA`` operator it replaces, scores matched to its own float32 setting, the graph is no worse."""
-    qk, add_mask, softmax, pv = toys.prefill_attention_ops(
-        SEQ, KV_LEN, HEAD_DIM, scores=np.float32
-    )
-    graph_recording = toys.prefill_attention_recording(
-        "prefill_vs_mha", qk, add_mask, softmax, pv
-    )
-    mha = toys.prefill_attention_operator(SEQ, KV_LEN, HEAD_DIM)
+    """Held to the fused ``MHA`` operator it replaces, over its own Q, K and V, scores matched to its own float32 setting, the graph is no worse."""
+    mha = toys.prefill_attention_operator(PREFILL_SEQ, KV_LEN, HEAD_DIM)
+    graph_recording, region = toys.prefill_attention_graph(mha, scores=np.float32)
     operator_recording = toys.prefill_attention_operator_recording("prefill_mha", mha)
     profile = Profile()
-    profile.add_entry(
-        Entry(root=_prefill_region(SEQ, KV_LEN, HEAD_DIM, scores_dtype=np.float32))
-    )
+    profile.add_entry(Entry(root=region))
     result = check(
         profile,
         Profile(),
