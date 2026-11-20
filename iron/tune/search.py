@@ -44,6 +44,7 @@ from ..common.declare.composition import (
     refinement,
 )
 from ..common.design import OperatorDesign
+from ..common.graph.carried import CarriedLoop
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
 from ..common.graph.fusion import composed
 from ..common.graph.record import Recording
@@ -1362,7 +1363,14 @@ def fit(
                     ("recomputed steps", schedule.recompute),
                     ("calls per command", schedule.calls_per_command != 1),
                     ("calls overlapped", schedule.calls_overlapped),
-                    ("commands in flight", schedule.commands_in_flight != 1),
+                    (
+                        "commands in flight on an xclbin per step",
+                        schedule.commands_in_flight != 1
+                        and (
+                            schedule.packaging == "xclbin"
+                            or not device.can_dispatch_full_elf
+                        ),
+                    ),
                     ("versions interleaved", schedule.interleave_with),
                     ("derived size", schedule.size is not None),
                 )
@@ -1544,7 +1552,9 @@ def check(
     same seeded inputs and states at its values and at each of its bounds
     halved; every output within its bound, carried buffer and state must be
     bit-identical (``compare_graphs``, every point marked known so nothing
-    is timed). Calls that hold state run in order instead, each side's
+    is timed). A version whose schedule keeps commands in flight also runs
+    its draws that many in flight against them called one at a time
+    (``_in_flight``). Calls that hold state run in order instead, each side's
     states carried into its next call (``_in_order``). Held to ``NO_WORSE``,
     each call is instead no worse than the base's against its reference
     (``_no_worse``).
@@ -1584,6 +1594,21 @@ def check(
             if why is not None:
                 return Check(False, refinement, why)
         return Check(True, refinement)
+    for call in calls:
+        depth = max(
+            (
+                s.commands_in_flight
+                for s in profile.schedules()
+                if s.version == call.recording.version
+            ),
+            default=1,
+        )
+        if depth > 1:
+            why = _in_flight(
+                profile, base, call, olds[call.recording.version], device, depth
+            )
+            if why is not None:
+                return Check(False, refinement, why)
     if len(calls) > 1 and any(c.recording.states for c in calls):
         why = _in_order(profile, base, calls, olds, device)
         return Check(why is None, refinement, why)
@@ -1592,6 +1617,74 @@ def check(
         if why is not None:
             return Check(False, refinement, why)
     return Check(True, refinement)
+
+
+def _in_flight(
+    profile: Profile,
+    base: Profile,
+    call: Timed,
+    old: Timed,
+    device: Device,
+    depth: int,
+) -> str | None:
+    """Return how ``call``'s draws, run ``depth`` commands in flight under ``profile``, first differ from them called one at a time under ``base``, or None.
+
+    ``2 * depth + 1`` calls, each on its seeded draw at the call's values,
+    from one set of seeded states; in flight through ``CarriedLoop.calls``
+    (where the version carries values, the first call's, the Emit giving
+    the rest), apart each an ordinary call. Every returned output of each
+    call, and every state after the last, must be bit-identical.
+    """
+    recording = call.recording
+    values = dict(call.values)
+    draws = [drawn_inputs(recording, seed) for seed in range(2 * depth + 1)]
+    with set_current_device(device):
+        graphs = (
+            Applied.of(old, base, device).built(device),
+            Applied.of(call, profile, device).built(device),
+        )
+    rng = np.random.default_rng(len(draws))
+    states = {h.name: _random_tensor(h, rng) for _, h in recording.states.values()}
+    owns = [{h.name: s for s, h in g.recording.states.values()} for g in graphs]
+    try:
+        for graph, own in zip(graphs, owns, strict=True):
+            for name, content in states.items():
+                graph.write(own[name], content)
+        apart = []
+        for tensors in draws:
+            graphs[0](*tensors, **values)
+            apart.append(graphs[0].returned())
+        with set_current_device(device):
+            loop = CarriedLoop(graphs[1], graphs[1], depth)
+            at_once = loop.calls(
+                [
+                    (tensors, values) if k == 0 or graphs[1].emit is None else ((), {})
+                    for k, tensors in enumerate(draws)
+                ]
+            )
+        for k, (want, got) in enumerate(zip(apart, at_once, strict=True)):
+            differ = [n for n in want if not np.array_equal(want[n], got[n])]
+            if differ:
+                return (
+                    f"{recording.name}: call {k} of {len(draws)}, {depth} in "
+                    f"flight: {', '.join(differ)} not bit-identical"
+                )
+        differ = [
+            name
+            for name in states
+            if not np.array_equal(
+                graphs[0].read(owns[0][name]), graphs[1].read(owns[1][name])
+            )
+        ]
+        if differ:
+            return (
+                f"{recording.name}: after {len(draws)} calls, {depth} in flight: "
+                f"{', '.join(differ)} not bit-identical"
+            )
+    finally:
+        for graph in graphs:
+            graph.release()
+    return None
 
 
 def _bit_identical(

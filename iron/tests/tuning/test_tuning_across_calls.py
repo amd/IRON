@@ -147,7 +147,6 @@ def test_per_call_parameters_updated_inside_one_command_are_bit_identical():
     assert result.ok, result.why
 
 
-@unbuilt
 def test_commands_in_flight_are_bit_identical_to_one_at_a_time():
     """1, 2 and 3 commands in flight from the host are bit-identical to one command finishing before the next is submitted."""
     recording = _decode_recording()
