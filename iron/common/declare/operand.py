@@ -118,6 +118,10 @@ class Operand:
     role = property(lambda self: type(self._decl))
 
     @property
+    def lanes(self) -> int:
+        return self._decl.lanes if self.along is None else self.along.lanes
+
+    @property
     def tap(self) -> TensorAccessPattern:
         return TensorAccessPattern.full((self.elements,))
 

@@ -42,6 +42,7 @@ from iron.operators.relu import ReLU
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
+from iron.tests.support import sequences
 from iron.tests.support.graphs import Chain, Walk
 from iron.tests.support.llama_model import llama_1b, small
 from iron.tests.support.xrt import without_xrt
@@ -81,6 +82,24 @@ def _ffn():
         w_gate=w_gate, w_up=w_up, w_down=w_down, norm_w=norm_w, cache=cache
     )
     return ffn, refs
+
+
+def test_a_buffer_named_whole_is_read_in_each_step_s_own_shape(npu2):
+    """A flat add's output read whole by a softmax over rows: the reference hands the softmax its rows, not the add's flat buffer."""
+    add = ElementwiseAdd(size=4096, tile_size=128)
+    softmax = Softmax(rows=32, cols=128)
+    recording = Recording.of_steps(
+        "flat_into_rows",
+        sequences.steps((add, "a", "b", "s"), (softmax, "s", "p")),
+        ["a", "b"],
+        ["p"],
+    )
+    rng = np.random.default_rng(0)
+    a, b = (rng.standard_normal(4096).astype(bfloat16) for _ in range(2))
+    (p,), _ = recording.reference({"a": a, "b": b}, {})
+    summed = np.asarray(add.reference(a, b)).reshape(32, 128)
+    want = np.asarray(softmax.reference(summed))
+    assert np.array_equal(np.asarray(p).view(np.uint16), want.view(np.uint16))
 
 
 def test_tracing_records_the_runlist_with_names_from_roles():
