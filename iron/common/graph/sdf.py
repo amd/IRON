@@ -626,6 +626,7 @@ class Derivation:
                     continue
                 lanes[b.name] = [h.object_fifo for h in b.lane_handles]
                 obj_elements[b.name] = math.prod(b.obj_shape)
+            moved: dict[ObjectFifo, int] = {}
             for transfer in recorded.transfers:
                 if transfer.elements is None:
                     site = transfer.site
@@ -635,21 +636,23 @@ class Derivation:
                         + (f" ({site.filename}:{site.line})" if site else "")
                         + "; analysing a call at its own values is not modelled yet"
                     )
-                self.objects[transfer.fifo] = self.objects.get(transfer.fifo, 0) + -(
+                moved[transfer.fifo] = moved.get(transfer.fifo, 0) + -(
                     -transfer.elements // math.prod(transfer.fifo.shape)
                 )
+            self.objects.update(moved)
             self.lanes.append(lanes)
             self.obj_elements.append(obj_elements)
+            self._through_links(recorded.links)
         # A joined output's core fifos each move what the lane they join into
         # would drain (``Operand.moved_per_lane``), whatever reads them instead.
         for array, _ in self.recorded:
             for b in array.op.buffers:
                 if b.splices and b.join is not None:
-                    moved = b.moved_per_lane()
+                    each = b.moved_per_lane()
                     for lane, fifos in enumerate(b.core_fifos):
                         for f in fifos:
                             self.objects.setdefault(
-                                f, -(-moved.get(lane, 0) // math.prod(b.obj_shape))
+                                f, -(-each.get(lane, 0) // math.prod(b.obj_shape))
                             )
         self.links = [link for _, recorded in self.recorded for link in recorded.links]
         self._through_links(self.links)
