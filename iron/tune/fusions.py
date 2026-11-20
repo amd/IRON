@@ -454,7 +454,7 @@ def group_fit_verdict(
             verdict = record.read_text()
         else:
             outcome, diagnostic = place(text, placer)
-            if outcome == "crash":
+            if outcome in ("crash", "hang"):
                 if ledger is not None:
                     dev = ops[0].dev
                     ledger.record(
@@ -466,7 +466,11 @@ def group_fit_verdict(
                         + " in one device",
                         module=text,
                     )
-                diagnostic = f"the compiler crashed: {first_error(diagnostic or '')}"
+                diagnostic = (
+                    f"the compiler hung: {diagnostic}"
+                    if outcome == "hang"
+                    else f"the compiler crashed: {first_error(diagnostic or '')}"
+                )
             verdict = "fits" if outcome == "fits" else f"refused: {diagnostic}"
             write(record, verdict)
         if verdict == "fits":

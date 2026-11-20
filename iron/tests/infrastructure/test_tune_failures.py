@@ -56,6 +56,16 @@ def test_a_refusal_keeps_its_error_ahead_of_a_long_op_dump(npu2):
     assert verdict == "refused" and "has more than 16 blocks" in diagnostic
 
 
+def test_a_placement_past_its_time_is_a_hang_not_a_refusal(npu2):
+    """``aie-opt`` still placing past ``seconds`` is ended and named a hang, so a stuck placer costs a bounded wait and never reads as a refused design."""
+    wide = [
+        cls(size=8192, num_aie_columns=8, num_channels=2, tile_size=256).resolved(npu2)
+        for cls in (ReLU, Tanh, Sigmoid)
+    ]
+    verdict, diagnostic = place(_module(*wide), seconds=0.001)
+    assert verdict == "hang" and "ran past" in diagnostic
+
+
 def test_device_timeout_recognizes_the_drivers_own_ends():
     """A timeout, and amdxdna 2.27's abort once its recovery takes the command."""
     assert device_timeout(

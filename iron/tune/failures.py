@@ -97,25 +97,43 @@ def signature(kind: Kind, diagnostic: str) -> str:
     return f"{kind.value}: {words.strip()[:200]}"
 
 
-def place(module: str, placer: str = SEQUENTIAL) -> tuple[str, str | None]:
-    """Run the fit pipeline on ``module`` under ``placer`` in an ``aie-opt`` of its own, so a compiler crash ends that process, not the caller.
+# Placements here take seconds; the sequential placer has run 19 min on one
+# composed module (a pre-norm MLP's configuration).
+PLACE_SECONDS = 300.0
 
-    ``("fits", None)``, ``("refused", diagnostic)`` or ``("crash", diagnostic)``.
+
+def place(
+    module: str, placer: str = SEQUENTIAL, seconds: float = PLACE_SECONDS
+) -> tuple[str, str | None]:
+    """Run the fit pipeline on ``module`` under ``placer`` in an ``aie-opt`` of its own, so a compiler crash or hang ends that process, not the caller.
+
+    Args:
+        module: The composed module's text.
+        placer: The placer the pipeline runs.
+        seconds: How long ``aie-opt`` may run before it counts as hung.
+
+    Returns:
+        ``("fits", None)``, ``("refused", diagnostic)``, ``("crash", diagnostic)``
+        or ``("hang", diagnostic)``.
     """
     with tempfile.NamedTemporaryFile("w", suffix=".mlir") as f:
         f.write(module)
         f.flush()
-        done = subprocess.run(
-            [
-                str(Path(aie_config.aiecc_path()).with_name("aie-opt")),
-                f"--pass-pipeline={_FIT_PIPELINE.format(placer=placer)}",
-                f.name,
-                "-o",
-                "/dev/null",
-            ],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            done = subprocess.run(
+                [
+                    str(Path(aie_config.aiecc_path()).with_name("aie-opt")),
+                    f"--pass-pipeline={_FIT_PIPELINE.format(placer=placer)}",
+                    f.name,
+                    "-o",
+                    "/dev/null",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=seconds,
+            )
+        except subprocess.TimeoutExpired:
+            return "hang", f"aie-opt ran past {seconds:g} s placing it under {placer}"
     if done.returncode == 0:
         return "fits", None
     crashed = done.returncode < 0 or "Stack dump" in done.stderr
@@ -221,7 +239,7 @@ class Ledger:
                     continue
                 path = self.directory / entry.repro
                 verdict, _ = place(gzip.decompress(path.read_bytes()).decode())
-                if verdict != "crash" and entry.kind == Kind.CRASH.value:
+                if verdict not in ("crash", "hang") and entry.kind == Kind.CRASH.value:
                     entry.status, entry.fixed_by = "fixed", toolchain()
                 out.append((entry, verdict))
             self._write(entries)
