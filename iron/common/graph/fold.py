@@ -24,10 +24,10 @@ from .record import Recording, Step
 
 
 def _admits(producer: Operator, consumer: Operator, at: int) -> Operator | None:
-    """``producer.fold(consumer, at)``, or None where it refuses or does not resolve on the current device."""
+    """``producer.fold(consumer, at)``, or None where it refuses, its validation refuses the fused operator, or it does not resolve on the current device."""
     try:
         fused = producer.fold(consumer, at)
-    except Unresolvable:
+    except (Unresolvable, ValueError):
         return None
     if fused is None:
         return None

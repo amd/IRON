@@ -35,7 +35,7 @@ from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import AddEntry, HoldEdge, candidates, check, fit, measure, search
 
-pytestmark = pytest.mark.usefixtures("npu2")
+pytestmark = pytest.mark.usefixtures("device")
 
 M = 64
 
@@ -61,7 +61,7 @@ def _named_region_and_recording(name: str) -> tuple[Region, object]:
 
 
 @pytest.mark.parametrize("name", toys.PAIR_TOYS)
-def test_two_actors_on_one_core_round_trip_as_an_entry(name, tmp_path, npu2):
+def test_two_actors_on_one_core_round_trip_as_an_entry(name, tmp_path, device):
     """Two actors on one core round-trip, and composing ``candidates``' edits reaches them: the region, then its edge held in L1."""
     region, recording = _named_region_and_recording(name)
     entry = Entry(root=region)
@@ -70,7 +70,7 @@ def test_two_actors_on_one_core_round_trip_as_an_entry(name, tmp_path, npu2):
     profile.save(tmp_path / "profile.json")
     loaded = Profile.load(tmp_path / "profile.json")
     assert loaded.entries() == profile.entries()
-    reached = reached_by_candidates(region, [Timed(recording)], npu2)
+    reached = reached_by_candidates(region, [Timed(recording)], device)
     assert reached.entries() == [entry]
 
 
@@ -98,12 +98,12 @@ def test_two_actors_on_one_core_round_trip_as_an_entry(name, tmp_path, npu2):
     ],
 )
 def test_every_topology_is_proposed_on_its_producer_s_core(
-    recording_fn, topology, npu2
+    recording_fn, topology, device
 ):
     """Each topology's region, its producer and a consumer then held on one core (an L1 hold), is an edit ``candidates`` yields."""
     calls = [Timed(recording_fn())]
     profile = Profile()
-    for edit in candidates(calls, profile, npu2):
+    for edit in candidates(calls, profile, device):
         if (
             isinstance(edit, AddEntry)
             and isinstance(edit.entry.root, Region)
@@ -114,13 +114,13 @@ def test_every_topology_is_proposed_on_its_producer_s_core(
             break
     assert any(
         toys.has_worker_group(e)
-        for edit in candidates(calls, profile, npu2)
+        for edit in candidates(calls, profile, device)
         if isinstance(edit, HoldEdge) and edit.place is Hold.L1
         for e in edit.apply(profile).entries()
     )
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
     "name",
     [
@@ -129,16 +129,16 @@ def test_every_topology_is_proposed_on_its_producer_s_core(
         for n in toys.PAIR_TOYS
     ],
 )
-def test_two_actors_on_one_core_is_bit_identical_to_the_steps_run_apart(name, npu2):
+def test_two_actors_on_one_core_is_bit_identical_to_the_steps_run_apart(name, device):
     region, recording = _named_region_and_recording(name)
     profile, base = Profile(), Profile()
     profile.add_entry(Entry(root=region))
-    result = check(profile, base, [Timed(recording)], npu2, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
-@pytest.mark.supported_devices("npu2")
-def test_a_per_call_size_below_the_recorded_one_still_runs_on_one_core(npu2):
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_per_call_size_below_the_recorded_one_still_runs_on_one_core(device):
     """A valid KV length or a partial prompt chunk below the recorded size still joins."""
     small = _joined_region(
         Member(ElementwiseAdd, dict(size=16 * 64)),
@@ -150,12 +150,12 @@ def test_a_per_call_size_below_the_recorded_one_still_runs_on_one_core(npu2):
     recording = toys.add_softmax_recording("small_call", add, softmax)
     profile, base = Profile(), Profile()
     profile.add_entry(Entry(root=small))
-    result = check(profile, base, [Timed(recording)], npu2, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
 @pytest.mark.extensive
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
     "name",
     [
@@ -164,32 +164,32 @@ def test_a_per_call_size_below_the_recorded_one_still_runs_on_one_core(npu2):
         for n in toys.PAIR_TOYS
     ],
 )
-def test_search_keeps_the_pair_joined_where_it_pays(name, npu2):
+def test_search_keeps_the_pair_joined_where_it_pays(name, device):
     region, recording = _named_region_and_recording(name)
     entry = Entry(root=region)
     calls = [Timed(recording)]
     start = Profile()
     with_entry = Profile()
     with_entry.add_entry(entry)
-    ratio = measure(with_entry, start, calls, npu2).ratio
-    tuned = search(calls, start, npu2)
+    ratio = measure(with_entry, start, calls, device).ratio
+    tuned = search(calls, start, device)
     # Where the pair joined pays, what search keeps is at least as fast (it may
     # join the pair otherwise, as a stream window, and pass this one over).
     if ratio < 0.95:
-        assert measure(tuned, with_entry, calls, npu2).ratio < 1.05
+        assert measure(tuned, with_entry, calls, device).ratio < 1.05
     if ratio > 1.05:
         assert entry not in tuned.entries()
-    result = check(tuned, start, calls, npu2, Refinement.EXACT)
+    result = check(tuned, start, calls, device, Refinement.EXACT)
     assert result.ok, result.why
 
 
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
-def test_search_prices_a_hold_on_the_window_it_took(npu2, caplog):
+def test_search_prices_a_hold_on_the_window_it_took(device, caplog):
     """A hold names an edge of a region the profile holds: search prices one only in a round after it takes the GEMV -> SiLU window."""
     _, recording = _named_region_and_recording("gemv_silu")
     with caplog.at_level(logging.INFO, logger="iron.tune.search"):
-        tuned = search([Timed(recording)], Profile(), npu2)
+        tuned = search([Timed(recording)], Profile(), device)
     assert any(isinstance(e.root, Region) for e in tuned.entries())
     assert any(
         r.getMessage().startswith("search: ") and "HoldEdge(" in r.getMessage()
@@ -197,13 +197,13 @@ def test_search_prices_a_hold_on_the_window_it_took(npu2, caplog):
     )
 
 
-@pytest.mark.supported_devices("npu2")
-def test_a_pair_over_a_core_s_memory_is_refused(npu2):
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_pair_over_a_core_s_memory_is_refused(device):
     """A GEMV and a SiLU that each fit a core's memory alone, but not together on one worker.
 
     On one worker the SiLU folds into the GEMV, its kernel run on each
-    1024-element output tile. The GEMV alone holds 64640 of npu2's 65536
-    bytes (one A tile of 4 rows of 5952, a line, its double-buffered output
+    1024-element output tile. The GEMV alone holds 64640 of a core's 65536
+    bytes, npu1's and npu2's alike (one A tile of 4 rows of 5952, a line, its double-buffered output
     and the stack) and builds; the fold's scratch tile adds 2048.
     """
     gemv = GEMV(M=6144, K=5952, tile_size_input=4, tile_size_output=1024)
@@ -217,18 +217,18 @@ def test_a_pair_over_a_core_s_memory_is_refused(npu2):
         ["A", "B"],
         ["out"],
     )
-    verdict = fit(profile, [Timed(recording)], npu2)
+    verdict = fit(profile, [Timed(recording)], device)
     assert not verdict.ok and verdict.stage == "counts"
 
 
 @unbuilt
-@pytest.mark.supported_devices("npu2")
-def test_mismatched_tile_sizes_are_refused(npu2):
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_mismatched_tile_sizes_are_refused(device):
     """AXPY's kernel takes tiles of a multiple of 64; a GEMV writing 2 at a time cannot carry it onto one worker."""
     recording = toys.mismatched_tile_recording("mismatched")
     composed = [
         edit.apply(Profile())
-        for edit in candidates([Timed(recording)], Profile(), npu2)
+        for edit in candidates([Timed(recording)], Profile(), device)
     ]
     assert not any(
         toys.has_worker_group(e) for profile in composed for e in profile.entries()
@@ -236,8 +236,8 @@ def test_mismatched_tile_sizes_are_refused(npu2):
 
 
 @unbuilt
-@pytest.mark.supported_devices("npu2")
-def test_more_than_a_core_s_two_input_channels_is_refused(npu2):
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_more_than_a_core_s_two_input_channels_is_refused(device):
     """A binary consumer needs a free input channel; both of a core's are already the producer's.
 
     ``gate``'s GEMV reads ``A`` and ``B`` through the core's two input
@@ -252,7 +252,7 @@ def test_more_than_a_core_s_two_input_channels_is_refused(npu2):
     profile = Profile()
     profile.add_entry(Entry(root=region))
     recording = toys.fan_in_recording("no_channel")
-    verdict = fit(profile, [Timed(recording)], npu2)
+    verdict = fit(profile, [Timed(recording)], device)
     assert not verdict.ok and verdict.stage == "counts"
 
 
@@ -261,8 +261,8 @@ def test_more_than_a_core_s_two_input_channels_is_refused(npu2):
     reason="fit has no rule for repeat's channel state yet; it refuses this "
     "pair only because GEMV's batch-major lanes need a restage into Add's",
 )
-@pytest.mark.supported_devices("npu2")
-def test_gemv_refuses_under_repeat(npu2):
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_gemv_refuses_under_repeat(device):
     """GEMV's ``repeat`` keeps its own channel state across calls, which a fold cannot share."""
     region = _joined_region(
         Member(GEMV, dict(M=2048, K=2048, repeat=2)),
@@ -273,6 +273,6 @@ def test_gemv_refuses_under_repeat(npu2):
     profile = Profile()
     profile.add_entry(Entry(root=region))
     recording = toys.gemv_add_recording("repeat_refused", M=2048, K=2048, repeat=2)
-    verdict = fit(profile, [Timed(recording)], npu2)
+    verdict = fit(profile, [Timed(recording)], device)
     assert not verdict.ok and verdict.stage == "analysis"
     assert "repeat" in (verdict.why or "")

@@ -5,7 +5,6 @@
 
 import numpy as np
 import pytest
-from aie.iron.device import NPU2
 from ml_dtypes import bfloat16
 
 import iron
@@ -32,9 +31,7 @@ from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, measure, search
 
-NPU2_DEVICE = NPU2()
-
-pytestmark = pytest.mark.usefixtures("npu2")
+pytestmark = pytest.mark.usefixtures("device")
 
 
 def _wide_weight(M: int, K: int) -> np.ndarray:
@@ -67,7 +64,7 @@ def _coded_region(M: int, K: int, rows: int, num_aie_columns: int) -> Region:
     )
 
 
-def test_coding_legality_depends_on_the_weights_own_values():
+def test_coding_legality_depends_on_the_weights_own_values(device):
     """``Decode`` has no plain fallback: a weight a ``GEMV``'s own ``coded_a`` flag would read plain refuses it instead.
 
     ``Recording.code_weights`` is real, device-free host work (what a compile runs
@@ -103,11 +100,11 @@ def test_coding_legality_depends_on_the_weights_own_values():
 
 
 @unbuilt
-def test_coding_is_proposed_wherever_capacity_holds_at_that_width(tmp_path):
+def test_coding_is_proposed_wherever_capacity_holds_at_that_width(tmp_path, device):
     """Coding round-trips as a ``Region`` whose ``Decode`` and its consumer share a worker, and is proposed wherever capacity holds."""
     decode, gemv = coded_consumer(M=128, K=128, rows=1, num_aie_columns=1)
     recording = coded_consumer_recording(
-        "coded_candidates", decode.resolved(NPU2_DEVICE), gemv.resolved(NPU2_DEVICE)
+        "coded_candidates", decode.resolved(device), gemv.resolved(device)
     )
     entry = Entry(root=_coded_region(M=128, K=128, rows=1, num_aie_columns=1))
     profile = Profile()
@@ -116,7 +113,7 @@ def test_coding_is_proposed_wherever_capacity_holds_at_that_width(tmp_path):
     profile.save(path)
     loaded = Profile.load(path)
     assert loaded.entries() == [entry]
-    found = list(candidates([Timed(recording)], loaded, NPU2_DEVICE))
+    found = list(candidates([Timed(recording)], loaded, device))
     assert any(
         isinstance(e.apply(loaded).entries()[-1].root, Region)
         and e.apply(loaded).entries()[-1].root.workers == ((0, 1),)
@@ -125,8 +122,8 @@ def test_coding_is_proposed_wherever_capacity_holds_at_that_width(tmp_path):
 
 
 @unbuilt
-@pytest.mark.supported_devices("npu2")
-def test_coded_weights_are_bit_identical_to_plain():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_coded_weights_are_bit_identical_to_plain(device):
     """A coded weight, decoded on chip by a ``Decode`` sharing a worker with its consumer, is bit-identical to the plain weight the untuned build reads.
 
     The recording carries a real weight (``coded_consumer_recording_with_weight``): both
@@ -146,7 +143,7 @@ def test_coded_weights_are_bit_identical_to_plain():
         coded_profile,
         base,
         [Timed(recording)],
-        NPU2_DEVICE,
+        device,
         refinement=Refinement.EXACT,
     )
     assert result.ok, result.why
@@ -154,7 +151,8 @@ def test_coded_weights_are_bit_identical_to_plain():
 
 @pytest.mark.extensive
 @unbuilt
-def test_coding_is_kept_only_where_ddr_bytes_saved_beat_the_decode_cost():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_coding_is_kept_only_where_ddr_bytes_saved_beat_the_decode_cost(device):
     """The tuner keeps coding on a weight-bound decode ``GEMV`` and drops it on a compute-bound one.
 
     Both calls run the same ``Decode`` into ``GEMV`` toy and the same real weight
@@ -176,22 +174,18 @@ def test_coding_is_kept_only_where_ddr_bytes_saved_beat_the_decode_cost():
     )
 
     weight_bound_calls = [Timed(weight_bound)]
-    weight_bound_ratio = measure(
-        with_entry, start, weight_bound_calls, NPU2_DEVICE
-    ).ratio
+    weight_bound_ratio = measure(with_entry, start, weight_bound_calls, device).ratio
     assert weight_bound_ratio < 0.95
-    weight_bound_tuned = search(weight_bound_calls, start, NPU2_DEVICE, budget_s=5.0)
+    weight_bound_tuned = search(weight_bound_calls, start, device, budget_s=5.0)
     assert any(
         isinstance(e.root, Region) and len(e.root.steps()) > 1
         for e in weight_bound_tuned.entries()
     )
 
     compute_bound_calls = [Timed(compute_bound)]
-    compute_bound_ratio = measure(
-        with_entry, start, compute_bound_calls, NPU2_DEVICE
-    ).ratio
+    compute_bound_ratio = measure(with_entry, start, compute_bound_calls, device).ratio
     assert compute_bound_ratio > 1.05
-    compute_bound_tuned = search(compute_bound_calls, start, NPU2_DEVICE, budget_s=5.0)
+    compute_bound_tuned = search(compute_bound_calls, start, device, budget_s=5.0)
     assert not any(
         isinstance(e.root, Region) and len(e.root.steps()) > 1
         for e in compute_bound_tuned.entries()
@@ -199,7 +193,7 @@ def test_coding_is_kept_only_where_ddr_bytes_saved_beat_the_decode_cost():
 
 
 @unbuilt
-def test_a_width_where_a_row_overflows_its_capacity_is_refused_before_any_build():
+def test_a_width_where_a_row_overflows_its_capacity_is_refused_before_any_build(device):
     """A width whose coded row overflows its exception capacity is refused before any build, naming the row."""
     weight = _wide_weight(M=128, K=64)
     recording = coded_consumer_recording_with_weight(
@@ -207,22 +201,26 @@ def test_a_width_where_a_row_overflows_its_capacity_is_refused_before_any_build(
     )
     profile = Profile()
     profile.add_entry(Entry(root=_coded_region(M=128, K=64, rows=1, num_aie_columns=1)))
-    result = fit(profile, [Timed(recording)], NPU2_DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
     assert "row" in result.why
 
 
 @unbuilt
-def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed():
+def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed(device):
     """Coding part of a shared array (not every shape sharing it) is refused unless the candidate also proposes the split."""
-    decode, gemv = coded_consumer(M=2048, K=8192, rows=1, num_aie_columns=8)
+    decode, gemv = coded_consumer(M=2048, K=8192, rows=1, num_aie_columns=device.cols)
     other = GEMV(
-        M=2048, K=8192, num_aie_columns=8, tile_size_input=1, tile_size_output=256
-    ).resolved(NPU2_DEVICE)
+        M=2048,
+        K=8192,
+        num_aie_columns=device.cols,
+        tile_size_input=1,
+        tile_size_output=256,
+    ).resolved(device)
     steps = sequences.steps(
-        (decode.resolved(NPU2_DEVICE), "coded", "w"),
-        (gemv.resolved(NPU2_DEVICE), "w", "x", "out1"),
+        (decode.resolved(device), "coded", "w"),
+        (gemv.resolved(device), "w", "x", "out1"),
         (other, "w2", "x2", "out2"),
     )
     recording = Recording.of_steps(
@@ -230,34 +228,34 @@ def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed()
     )
     configuration = Configuration(
         parts=(
-            _coded_region(M=2048, K=8192, rows=1, num_aie_columns=8),
+            _coded_region(M=2048, K=8192, rows=1, num_aie_columns=device.cols),
             Member(
                 cls=GEMV,
                 dims=dict(M=2048, K=8192),
                 tunables=dict(
-                    num_aie_columns=8, tile_size_input=1, tile_size_output=256
+                    num_aie_columns=device.cols, tile_size_input=1, tile_size_output=256
                 ),
             ),
         )
     )
     profile = Profile()
     profile.add_entry(Entry(root=configuration))
-    result = fit(profile, [Timed(recording)], NPU2_DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
 
 
 @unbuilt
-def test_lossy_coding_is_never_proposed():
+def test_lossy_coding_is_never_proposed(device):
     """Coding is lossless by declaration (``Decode.tolerance`` is exact); a lossy encoding is never among the candidates."""
     decode, gemv = coded_consumer(M=128, K=128, rows=1, num_aie_columns=1)
-    resolved = decode.resolved(NPU2_DEVICE)
+    resolved = decode.resolved(device)
     assert resolved.tolerance().rtol is None and resolved.tolerance().atol is None
     recording = coded_consumer_recording(
-        "lossless_only", resolved, gemv.resolved(NPU2_DEVICE)
+        "lossless_only", resolved, gemv.resolved(device)
     )
     profile = Profile()
-    found = list(candidates([Timed(recording)], profile, NPU2_DEVICE))
+    found = list(candidates([Timed(recording)], profile, device))
     decode_members = [
         part
         for e in found

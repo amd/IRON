@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections import deque
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -20,12 +20,11 @@ from aie.helpers.taplib import Affine
 
 from ...operators.emit import ROW, UNCLAMPED, Emit
 from ..image.artifacts import Parameter
-from ..image.callable import FullELFCallable
+from ..image.callable import FullELFCallable, FullELFRun
 from .handle import Dense, Handle, State
-from .record import Recording, Step
+from .record import CALL_SUFFIX, Recording, Step
 
 if TYPE_CHECKING:
-    from ..image.callable import FullELFRun
     from .compiled import CompiledGraph, Word
 
 CARRY, PROGRAM, IMAGE = "carry", "emit_program", "emit_image"
@@ -187,33 +186,42 @@ def compose(
 
 
 class CarriedLoop:
-    """A graph's carried values looped on the device.
+    """A graph's calls looped on the device, ``depth`` commands in flight.
 
-    ``first`` runs once from the host, then ``body`` (no tensor) with
-    ``depth`` runs in flight, each run's Emit writing the next's
-    scratchpad, so the host only waits and restarts.
+    ``start`` runs ``first`` once from the host, then ``steps`` runs
+    ``body`` (no tensor) with ``depth`` runs in flight, each run's Emit
+    writing the next's scratchpad, so the host only waits and restarts.
+    ``calls`` runs a batch of ``body``'s calls, each with its own tensors
+    in its run's own input and output buffers, ``depth`` in flight; where
+    ``body`` carries values, the first call's are the host's and each
+    later call's the Emit of the call before, as ``steps``' are. A buffer
+    or state carried from one call to the next stays on the device between
+    them, as commands on one context run in turn. A version running several
+    calls a command (``Recording.repeated``) takes the batch that many at a
+    time, each call's tensors and values its own.
     """
 
     def __init__(self, first: CompiledGraph, body: CompiledGraph, depth: int = 2):
         for version in (first, body):
-            if version.emit is None:
+            if version.recording.carry and version.emit is None:
                 raise ValueError(
                     f"{version.recording.name}: a full-ELF version with carried values "
                     f"loops; this one has no Emit step (compile one that takes a "
                     f"tensor with feeds= the version it starts)"
                 )
-        if first.arena is None or first.arena is not body.arena:
+            if not version.plan.full_elf:
+                raise ValueError(
+                    f"{version.recording.name}: an xclbin per step dispatches each "
+                    f"step; a loop's runs are a full ELF's"
+                )
+        if first.arena is not body.arena:
             raise ValueError("first and body are versions of one graph")
-        if body.recording.inputs:
-            raise ValueError(
-                f"{body.recording.name}: the looped version takes no tensor, got "
-                f"{[h.name for h in body.recording.inputs]}"
-            )
         if depth < 1:
             raise ValueError(f"depth is at least 1, got {depth}")
         self.first, self.body, self.depth = first, body, depth
-        first.emit_to(body)
-        body.emit_to(body)
+        if body.emit is not None:
+            first.emit_to(body)
+            body.emit_to(body)
         # Each run holds a copy of its ELF's control code in the device heap,
         # 64 MB on older amdxdna, so the loop reuses each version's own run.
         first_call, body_call = first.callable, body.callable
@@ -225,6 +233,112 @@ class CarriedLoop:
         # body itself, is dead after, so the heap holds first's ctrlcode and
         # body's first copy, then body's depth copies, never 1 + depth.
         self._runs: list[FullELFRun] | None = None
+
+    def calls(
+        self, batch: Sequence[tuple[Sequence[np.ndarray], Mapping[str, int]]]
+    ) -> list[dict[str, np.ndarray]]:
+        """Run each of ``batch``'s calls of ``body``, ``depth`` in flight, and return what each returned, by name.
+
+        Args:
+            batch: Each call's tensors and per-call values; where ``body``
+                carries values, a call after the first gives neither (the
+                call before's Emit writes its values).
+
+        Raises:
+            ValueError: The batch is not whole commands of a version running
+                several calls a command, a later call gives values ``body``'s
+                Emit writes, or
+                tensors (a carried version after its first call takes none).
+            NotImplementedError: ``depth`` is past one and ``body`` returns
+                an output outside its output buffer, which a later run in
+                flight would write over, or runs a host step between its
+                commands.
+        """
+        layout = self.body.callable.op.layout
+        shared = [
+            h.name
+            for h in self.body.recording.returned
+            if layout[h.ref().root][0] not in ("input", "output")
+        ]
+        if self.depth > 1 and shared:
+            raise NotImplementedError(
+                f"{self.body.recording.name}: calls in flight returning {shared}, "
+                f"outside the output buffer, are not built yet: a later run would "
+                f"write over them before the host reads them"
+            )
+        if self.body.recording.host:
+            raise NotImplementedError(
+                f"{self.body.recording.name}: calls in flight around a host step "
+                f"are not built yet"
+            )
+        if self.body.emit is not None and any(t or v for t, v in batch[1:]):
+            raise ValueError(
+                f"{self.body.recording.name}: a later call's values are the Emit's "
+                f"of the call before, and it takes no tensor; give only the first "
+                f"call's"
+            )
+        per = self.body.recording.calls
+        if len(batch) % per:
+            raise ValueError(
+                f"{self.body.recording.name} runs {per} calls a command; got "
+                f"{len(batch)}"
+            )
+        # A command of a repeated version takes each of its calls' tensors in
+        # turn, and each call's values under its own names.
+        batch = [
+            (
+                [t for tensors, _ in batch[k : k + per] for t in tensors],
+                (
+                    {
+                        name + CALL_SUFFIX.format(j): value
+                        for j, (_, values) in enumerate(batch[k : k + per])
+                        for name, value in values.items()
+                    }
+                    if per > 1
+                    else batch[k][1]
+                ),
+            )
+            for k in range(0, len(batch), per)
+        ]
+        call = self.body.callable
+        assert isinstance(call, FullELFCallable), "a loop's runs are a full ELF's"
+        runs = [call.new_run(owned=("input", "output")) for _ in range(self.depth)]
+        if self.body.emit is not None:
+            for k, run in enumerate(runs):
+                run.bind_feedback(runs[(k + 1) % self.depth].scratchpad_alias())
+        results: list[dict[str, np.ndarray]] = []
+        out: deque[tuple[int, FullELFRun]] = deque()
+        try:
+            for k, (tensors, values) in enumerate(batch):
+                run = runs[k % self.depth]
+                if len(out) == self.depth:
+                    _, done = out.popleft()
+                    call.wait(done)
+                    results.append(self.body.returned(done))
+                if k and self.body.emit is not None:
+                    call.start(run)  # the call before's Emit wrote its values
+                else:
+                    self.body.start(run, *tensors, **values)
+                out.append((k, run))
+            while out:
+                _, done = out.popleft()
+                call.wait(done)
+                results.append(self.body.returned(done))
+        finally:
+            call.wait(*(run for _, run in out))
+            for run in runs:
+                run.wired = False
+        if per == 1:
+            return results
+        return [
+            {
+                name.removesuffix(CALL_SUFFIX.format(j)): value
+                for name, value in returned.items()
+                if name.endswith(CALL_SUFFIX.format(j))
+            }
+            for returned in results
+            for j in range(per)
+        ]
 
     def run(self, steps: int, /, *tensors, **values) -> Iterator[int]:
         """``start`` now, then ``steps``, each index yielded once complete."""
@@ -259,6 +373,12 @@ class CarriedLoop:
         Closing early waits out the steps in flight.
         """
         assert self._runs is not None, "start() builds body's runs first"
+        if self.body.recording.inputs:
+            raise ValueError(
+                f"{self.body.recording.name}: the looped version takes no tensor, got "
+                f"{[h.name for h in self.body.recording.inputs]}; give each call's "
+                f"to calls()"
+            )
         in_flight: deque[int] = deque()
         for k in range(min(self.depth, steps)):
             self._runs[k].start()

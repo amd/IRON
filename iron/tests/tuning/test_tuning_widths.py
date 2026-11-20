@@ -23,15 +23,10 @@ from iron.operators.silu import SiLU
 from iron.tests.support import toys_dataflow as toys
 from iron.tests.support import toys_schedule
 from iron.tests.support.fusable import gemv_silu_mul_recording
-from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import PLACEMENTS, candidates, check, fit, search
-
-DEVICE = DEVICES["npu2"]()
-_ARRAY_COLUMNS = get_target_model(DEVICE.resolve()).columns()
-
 
 _SIZE = 2048  # divides evenly into 64-element tiles at 1, 2, 4 or 8 columns
 
@@ -62,7 +57,7 @@ def _window(columns, channels=1, kind=EdgeKind.STREAM):
     return region, recording
 
 
-def test_per_member_width_counts_round_trip_and_are_proposed(tmp_path):
+def test_per_member_width_counts_round_trip_and_are_proposed(tmp_path, device):
     """A window's per-member column counts round-trip through a profile and are a candidate.
 
     The window recorded at two columns, proposed at four: a width the
@@ -79,28 +74,32 @@ def test_per_member_width_counts_round_trip_and_are_proposed(tmp_path):
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, DEVICE)
+        for edit in candidates([Timed(recording)], start, device)
     )
 
 
-def test_narrowed_window_is_bit_identical_to_full_width():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_narrowed_window_is_bit_identical_to_full_width(device):
     """A window narrowed to fit the array is bit-identical to the same window at full width."""
-    full_region, recording = _window(columns=min(4, _ARRAY_COLUMNS))
+    full_region, recording = _window(
+        columns=min(4, get_target_model(device.resolve()).columns())
+    )
     narrow_region, _ = _window(columns=1)
     base = Profile()
     base.add_entry(Entry(root=full_region))
     profile = Profile()
     profile.add_entry(Entry(root=narrow_region))
-    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
 @pytest.mark.extensive
-def test_tuner_keeps_widths_that_pay_and_bounds_builds():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_tuner_keeps_widths_that_pay_and_bounds_builds(device):
     """The tuner keeps the width setting that pays, builds stay bounded, and several placements are tried."""
     _, recording = _window(columns=2)
     start = Profile()
-    found = search([Timed(recording)], start, DEVICE, budget_s=60.0)
+    found = search([Timed(recording)], start, device, budget_s=60.0)
     assert any(
         isinstance(e.root, Region)
         and len(e.root.steps()) > 1
@@ -110,24 +109,28 @@ def test_tuner_keeps_widths_that_pay_and_bounds_builds():
     assert len(PLACEMENTS) > 1
 
 
-def test_a_width_over_the_arrays_columns_is_refused_by_counts():
+@pytest.mark.usefixtures("device")
+def test_a_width_over_the_arrays_columns_is_refused_by_counts(device):
     """A GEMM at the array's full width, four cores a column, with a norm beside it, is refused by counts, before any build.
 
     Each member alone is a legal design; the GEMM claims every core, so the
     window as a whole does not fit.
     """
-    gemm, norm = toys.gemm_rowwise(M=256, N=512, cols=_ARRAY_COLUMNS)
+    gemm, norm = toys.gemm_rowwise(
+        device, M=256, N=512, cols=get_target_model(device.resolve()).columns()
+    )
     region = toys.gemm_rowwise_region(gemm, norm)
     recording = toys.gemm_rowwise_recording("full_width", gemm, norm)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
     assert "column" in (result.why or "") or "core" in (result.why or "")
 
 
-def test_a_width_over_the_shims_sending_channels_builds_by_packets():
+@pytest.mark.supported_devices("npu2")
+def test_a_width_over_the_shims_sending_channels_builds_by_packets(device):
     """C's narrow window (4 cores, 4 streams), whose fills outrun npu2's shim sending channels as circuits, builds bit-identical with them as packet flows."""
     region, recording = _window(columns=4, channels=4, kind=EdgeKind.STAGED)
     designs = {
@@ -137,20 +140,20 @@ def test_a_width_over_the_shims_sending_channels_builds_by_packets():
     fusion = Fusion(
         FusionKind.STAGED, (0, 1, 2), (Edge(0, "C", 1, "x"), Edge(1, "y", 2, "a"))
     )
-    with set_current_device(DEVICE):
+    with set_current_device(device):
         assert SHIM_SHORT in (fits(designs, fusion=fusion) or "")
         assert fits(designs, fusion=dataclasses.replace(fusion, packets=True)) is None
     profile = Profile()
     profile.add_entry(Entry(root=region))
     calls = [Timed(recording)]
-    fitted = fit(profile, calls, DEVICE)
+    fitted = fit(profile, calls, device)
     assert fitted.ok, fitted.why
-    result = check(profile, Profile(), calls, DEVICE, Refinement.EXACT)
+    result = check(profile, Profile(), calls, device, Refinement.EXACT)
     assert result.ok, result.why
 
 
 @unbuilt
-def test_a_by_shape_entry_claiming_fewer_runs_than_iron_applies_is_refused():
+def test_a_by_shape_entry_claiming_fewer_runs_than_iron_applies_is_refused(device):
     """A width entry naming only some runs of a shape two steps of the recording share is refused: one width set must fit every run."""
     gemv, add = toys_schedule.decode_step()
     recording = toys_schedule.decode_step_recording("width_shared_shape", gemv, add)
@@ -159,7 +162,7 @@ def test_a_by_shape_entry_claiming_fewer_runs_than_iron_applies_is_refused():
     )
     profile = Profile()
     profile.add_entry(Entry(root=region, scope=Scope(occurrences=(0,))))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "analysis"
     assert "every run" in (result.why or "") or "shape" in (result.why or "")
@@ -169,15 +172,17 @@ def test_a_by_shape_entry_claiming_fewer_runs_than_iron_applies_is_refused():
     reason="no witness toy yet: each window the placer refuses so far, the counts "
     "refuse first"
 )
-def test_counts_the_fit_accepts_but_the_placer_refuses_need_a_witness():
+def test_counts_the_fit_accepts_but_the_placer_refuses_need_a_witness(device):
     """Counts that fit the array but the placer refuses need a witness placement before they count.
 
     Such a refusal is a compiler-failure candidate, not a bare count refusal.
     """
-    region, recording = _window(columns=_ARRAY_COLUMNS, channels=1)
+    region, recording = _window(
+        columns=get_target_model(device.resolve()).columns(), channels=1
+    )
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, [Timed(recording)], DEVICE, placements=PLACEMENTS)
+    result = fit(profile, [Timed(recording)], device, placements=PLACEMENTS)
     assert not result.ok
     assert result.stage == "placer"
     assert result.breakdown

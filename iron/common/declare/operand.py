@@ -882,23 +882,28 @@ class Operand:
 class Staging:
     """``source``'s lanes restaged through memtiles into ``sink``'s, where they do not meet directly.
 
-    Each of ``sink``'s lanes joined from whole lanes of ``source``, or each lane of
-    ``source`` split among ``sink``'s. Derived from both operands' ``transfers()`` and
-    checked element for element against them, so every lane of ``sink`` reads, round by
-    round, what the host round trip gives it. A per-call bound is honored only where
-    both sides move the same whole rounds every call.
+    Lanes sharing elements are a group, restaged a round at a time: each round
+    joins a slot of each of the group's ``source`` lanes in turn and splits it
+    into a slot of each of its ``sink`` lanes. One sink lane is a join, one
+    source lane a split, and several of each (a ratio) a join split again. A
+    round is as small as both sides' whole objects allow, so a split whose
+    lanes change from object to object splits rounds of several objects.
+    Derived from both operands' ``transfers()`` and checked element for element
+    against them, so every lane of ``sink`` reads, round by round, what the host
+    round trip gives it. A per-call bound is honored only where both sides move
+    the same whole rounds every call.
 
-    ``joins`` holds, per lane of ``sink``, the lanes of ``source`` joined into
-    it and each one's slot of a round, in elements; ``splits``, per lane of
-    ``source``, the lanes of ``sink`` it is split into and each one's slot.
+    ``groups`` holds, per group, its lanes of ``source`` in the order a round
+    joins them and each one's slot of a round, in elements, then its lanes of
+    ``sink`` and their slots, in the order the round splits into them.
 
     Raises:
         ValueError: The two are not one buffer, a side's lanes do not visit
             each element once or in whole objects, a bound is not honored as
-            above, neither a join nor a split reproduces ``sink``'s order, or
-            a memtile cannot take one: a split to more lanes than its DMA
-            channels, or a round past its memory. A join of more lanes than a
-            memtile takes is a join of joins.
+            above, no round reproduces ``sink``'s order, or a memtile cannot
+            take one: a split to more lanes than its DMA channels, or a round
+            past its memory. A join of more lanes than a memtile takes is a
+            join of joins.
     """
 
     def __init__(self, source: Operand, sink: Operand) -> None:
@@ -1003,102 +1008,83 @@ class Staging:
         self.capacity = tm.get_mem_tile_size()
         self.item = bfp.itemsize(sink.dtype)
 
-        self.joins: list[tuple[list[int], list[int]]] = []
-        self.splits: list[tuple[list[int], list[int]]] = []
+        self.groups: list[tuple[list[int], list[int], list[int], list[int]]] = []
         owner = np.empty(source.elements, dtype=np.int64)
         for lane, stream in enumerate(produced):
             owner[stream] = lane
-        groups = [
-            [int(k) for k in lanes[np.argsort(first)]]
-            for lanes, first in (
-                np.unique(owner[stream], return_index=True) for stream in consumed
-            )
-        ]
-        if sorted(k for group in groups for k in group) == list(range(source.lanes)):
-            for group, stream in zip(groups, consumed):
-                rounds = math.gcd(
-                    *(len(produced[k]) // produce for k in group),
-                    len(stream) // consume,
-                )
-                # The most rounds, so the smallest memtile object, whose slots
-                # must still be whole 32-bit words.
-                for k in range(rounds, 0, -1):
-                    slots = [len(produced[j]) // k for j in group]
-                    if rounds % k or any(s * self.item % 4 for s in slots):
-                        continue
-                    joined = np.concatenate(
-                        [produced[j].reshape(k, -1) for j in group], axis=1
-                    )
-                    if np.array_equal(joined.reshape(-1), stream):
-                        break
-                else:
-                    raise ValueError(
-                        f"{edge}: joining lanes {group} of {source.name}, at any "
-                        f"round, does not give a lane of {sink.name} its host order"
-                    )
-                if sum(slots) * self.item > self.capacity:
-                    raise ValueError(
-                        f"{edge}: a round of {sum(slots)} elements is past a "
-                        f"memtile's {self.capacity} bytes"
-                    )
-                tile_p, tile_c = units
-                if tile_p is not None and any(
-                    tile_p % s or tile_p // s * sum(slots) != tile_c for s in slots
-                ):
-                    raise ValueError(
-                        f"{edge}: a call's bound moves {tile_p}-element tiles of "
-                        f"{source.name} and {tile_c} of {sink.name}, not whole "
-                        f"rounds of slots {slots}"
-                    )
-                self.joins.append((group, slots))
-            return
         reader = np.empty(sink.elements, dtype=np.int64)
         for lane, stream in enumerate(consumed):
             reader[stream] = lane
-        for stream in produced:
-            lanes, first = np.unique(reader[stream], return_index=True)
-            group = [int(k) for k in lanes[np.argsort(first)]]
-            rounds = len(stream) // produce
-            slots = [len(consumed[j]) // rounds for j in group]
-            if any(len(consumed[j]) % rounds for j in group) or any(
-                s % consume or s * self.item % 4 for s in slots
-            ):
-                split = None
+        # Lanes sharing an element are one group: source lanes first, then sink's.
+        label = list(range(source.lanes + sink.lanes))
+        for p, c in np.unique(np.stack([owner, reader], axis=1), axis=0).tolist():
+            a, b = label[p], label[source.lanes + c]
+            label = [a if x == b else x for x in label]
+        for group in dict.fromkeys(label[source.lanes :]):
+            outs = [j for j in range(sink.lanes) if label[source.lanes + j] == group]
+            if len(outs) == 1:
+                lanes, first = np.unique(owner[consumed[outs[0]]], return_index=True)
+                ins = [int(k) for k in lanes[np.argsort(first)]]
             else:
-                split = np.concatenate(
-                    [consumed[j].reshape(rounds, -1) for j in group], axis=1
+                ins = sorted(
+                    (k for k in range(source.lanes) if label[k] == group),
+                    key=lambda k: int(produced[k].min()),
                 )
-            if split is None or not np.array_equal(split.reshape(-1), stream):
+                lanes, first = np.unique(
+                    reader[np.concatenate([produced[k] for k in ins])],
+                    return_index=True,
+                )
+                outs = [int(j) for j in lanes[np.argsort(first)]]
+            rounds = math.gcd(
+                *(len(produced[k]) // produce for k in ins),
+                *(len(consumed[j]) // consume for j in outs),
+            )
+            # The most rounds, so the smallest memtile object, whose slots
+            # must still be whole 32-bit words.
+            for k in range(rounds, 0, -1):
+                taken = [len(produced[i]) // k for i in ins]
+                given = [len(consumed[j]) // k for j in outs]
+                if rounds % k or any(s * self.item % 4 for s in taken + given):
+                    continue
+                if np.array_equal(
+                    np.concatenate([produced[i].reshape(k, -1) for i in ins], axis=1),
+                    np.concatenate([consumed[j].reshape(k, -1) for j in outs], axis=1),
+                ):
+                    break
+            else:
                 raise ValueError(
-                    f"{edge}: neither a join of whole lanes of {source.name} nor "
-                    f"a split of each of its objects gives {sink.name}'s lanes "
-                    f"their host order"
+                    f"{edge}: no round of lanes {ins} of {source.name}, joined "
+                    f"in turn, splits into lanes {outs} of {sink.name} in their "
+                    f"host order"
+                )
+            if sum(taken) * self.item > self.capacity:
+                raise ValueError(
+                    f"{edge}: a round of {sum(taken)} elements is past a "
+                    f"memtile's {self.capacity} bytes"
                 )
             tile_p, tile_c = units
             if tile_p is not None and any(
-                tile_p // produce * s != tile_c for s in slots
+                tile_p % s or tile_p // s * g != tile_c for s in taken for g in given
             ):
                 raise ValueError(
                     f"{edge}: a call's bound moves {tile_p}-element tiles of "
-                    f"{source.name} and {tile_c} of {sink.name}, not whole rounds "
-                    f"of its {produce}-element objects"
+                    f"{source.name} and {tile_c} of {sink.name}, not whole "
+                    f"rounds of slots {taken} into {given}"
                 )
-            if len(group) > channels_out:
+            if len(outs) > channels_out:
                 raise ValueError(
-                    f"{edge}: a lane of {source.name} splits into {len(group)} "
-                    f"lanes of {sink.name} in one memtile, which sends {channels_out}"
+                    f"{edge}: lanes {ins} of {source.name} split into "
+                    f"{len(outs)} lanes of {sink.name} in one memtile, which "
+                    f"sends {channels_out}"
                 )
-            self.splits.append((group, slots))
-        if sorted(k for group, _ in self.splits for k in group) != list(
-            range(sink.lanes)
-        ):
-            raise ValueError(
-                f"{edge}: a lane of {sink.name} takes parts of two lanes of "
-                f"{source.name}, which no one join or split gives"
-            )
+            self.groups.append((ins, taken, outs, given))
 
     def build(self) -> list[ObjectFifo]:
-        """Wire the plan at memtiles over ends of ``source``'s lanes (``Operand.reader``).
+        """Wire each group at memtiles over ends of ``source``'s lanes (``Operand.reader``).
+
+        One sink lane is a join of its group's source lanes. Several are a
+        split of a round: of the source lane's own fifo where a round is
+        one of its objects, else of the source lanes joined into rounds.
 
         Returns:
             Per lane of ``sink``, the fifo it reads, of ``sink``'s ``obj_type`` at
@@ -1106,37 +1092,47 @@ class Staging:
         """
         source, sink = self.source, self.sink
         fifos: list[Any] = [None] * sink.lanes
-        for lane, (group, slots) in enumerate(self.joins):
-            ends = [source.reader(k) for k in group]
-            # More lanes than a memtile takes join in parts first, each part
-            # one link's output and the next's input, on another memtile.
-            while len(ends) > self.fan_in:
-                parts = math.ceil(len(ends) / math.ceil(len(ends) / self.fan_in))
-                joined, sizes = [], []
-                for at in range(0, len(ends), parts):
-                    part = slots[at : at + parts]
-                    fifo = self.joined(ends[at : at + parts], part, None)
-                    joined.append(fifo.cons())
-                    sizes.append(sum(part))
-                ends, slots = joined, sizes
-            fifos[lane] = self.joined(ends, slots, sink.obj_type)
-        for lane, (group, slots) in enumerate(self.splits):
-            outs = source.reader(lane).split(
-                list(itertools.accumulate(slots[:-1], initial=0)),
-                obj_types=[sink.obj_type] * len(group),
+        for ins, taken, outs, given in self.groups:
+            ends = [source.reader(k) for k in ins]
+            if len(outs) == 1:
+                fifos[outs[0]] = self.joined(ends, taken, sink.obj_type)
+                continue
+            if len(ins) == 1 and taken[0] == math.prod(source.obj_shape):
+                end = ends[0]
+            else:
+                end = self.joined(ends, taken, None).cons()
+            parts = end.split(
+                list(itertools.accumulate(given[:-1], initial=0)),
+                obj_types=[sink.obj_type] * len(outs),
             )
-            for k, out in zip(group, outs):
+            for k, out in zip(outs, parts):
                 fifos[k] = out
         return fifos
 
     def joined(self, ends: list, slots: list[int], read_as: Any) -> ObjectFifo:
         """Return a memtile fifo whose objects join ``ends``' objects.
 
+        More ends than a memtile takes join in parts first, each part one
+        link's output and the next's input, on another memtile.
+
         Args:
             ends: The producer ends joined into one fifo's objects.
             slots: Each end's slot of the joined object, in elements.
             read_as: The type its consumers read objects as, where given.
         """
+        if len(ends) > self.fan_in:
+            size = math.ceil(len(ends) / math.ceil(len(ends) / self.fan_in))
+            starts = range(0, len(ends), size)
+            return self.joined(
+                [
+                    self.joined(
+                        ends[at : at + size], slots[at : at + size], None
+                    ).cons()
+                    for at in starts
+                ],
+                [sum(slots[at : at + size]) for at in starts],
+                read_as,
+            )
         obj = np.ndarray[(sum(slots),), np.dtype[self.sink.dtype]]
         fifo = ObjectFifo(
             obj,

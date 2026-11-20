@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import itertools
 import logging
@@ -27,6 +28,7 @@ from ..image.packaging import Kind, Plan
 from ..image.step import BufferRef, SequenceStep
 from .coded import CodedWeight, encode_all
 from .handle import (
+    Buffer,
     Dense,
     Gather,
     Handle,
@@ -207,6 +209,40 @@ def _take_views(cls, operands, kwargs, values):
     return out
 
 
+# Call ``j``'s inputs, outputs and per-call values in a version running several
+# calls in one command (``Recording.repeated``).
+CALL_SUFFIX = "__call{}"
+
+
+@dataclasses.dataclass(frozen=True)
+class _CallNames:
+    """What one call of a repeated version names its own (``Recording.repeated``).
+
+    Attributes:
+        buffers: Its own buffer for each of the version's own, by name.
+        values: Its own per-call value for each of the version's, by name.
+    """
+
+    buffers: dict[str, Buffer]
+    values: dict[str, PerCall]
+
+    def expression(self, e: Affine | None) -> Affine | None:
+        """Return ``e`` over this call's own value; None for None."""
+        return (
+            None
+            if e is None
+            else dataclasses.replace(e, value=self.values[e.value.name])
+        )
+
+    def handle(self, h: Handle) -> Handle:
+        """Return ``h`` on this call's own buffer, where it has one, its bounds over its own values."""
+        return dataclasses.replace(
+            h,
+            buffer=self.buffers.get(h.buffer.name, h.buffer),
+            valid={axis: self.expression(n) for axis, n in h.valid.items()},
+        )
+
+
 def version_key(inputs: Mapping[str, tuple[tuple[int, ...], Any]]) -> Version:
     """Return the key of a graph's version for ``inputs`` (each input's shape and dtype, by name, in the order its body takes them)."""
     return tuple(
@@ -255,11 +291,136 @@ class Recording:
     host: list[HostStep] = dataclasses.field(default_factory=list)
     # Each weight a coded read was given but which is read plain, and why.
     read_plain: dict[str, str] = dataclasses.field(default_factory=dict)
+    # A derived version running this many calls of another back to back in one
+    # command (``repeated``), and that version's key.
+    calls: int = 1
+    derived_from: Version | None = None
 
     @property
     def version(self) -> Version:
-        """The key of the graph version this recording compiles to."""
+        """The key of the graph version this recording compiles to, a derived version's own."""
+        if self.derived_from is not None:
+            return self.derived_from
         return version_key({h.name: (h.shape, h.dtype) for h in self.inputs})
+
+    def repeated(self, calls: int) -> Recording:
+        """Return the derived version running ``calls`` of this one's calls back to back, one command.
+
+        Call ``j``'s inputs, returned outputs and per-call values are its own,
+        each named with the suffix ``CALL_SUFFIX.format(j)``: each binding's
+        word is written once a call, the IRON-side layout of a slot set per
+        call that mlir-aie's scratchpad management replaces (PLAN step 2).
+        Everything else (weights, states, the buffers carried to the next
+        call, intermediates) is one buffer every call uses in turn, so what
+        one call carries the next reads on the device.
+
+        Raises:
+            NotImplementedError: It carries values (their next a call's
+                Emit, between commands), runs a host step, gathers by ids, or
+                encodes an input from an address.
+        """
+        unbuilt = [
+            what
+            for what, kept in (
+                ("carried values", self.carry),
+                ("a host step", self.host),
+                ("an input encoded from an address", self.encoders or self.addresses),
+                (
+                    "a gather",
+                    any(
+                        isinstance(h.layout, Gather) or s.gather is not None
+                        for s in self.steps
+                        for h in s.slots
+                    ),
+                ),
+            )
+            if kept
+        ]
+        if unbuilt:
+            raise NotImplementedError(
+                f"{self.name}: {calls} calls in one command of a version with "
+                f"{unbuilt[0]} are not built yet"
+            )
+        kept = set(self.feedback) | {h.ref().root for _, h in self.states.values()}
+        own = {
+            h.buffer.name: h.buffer
+            for h in (*self.inputs, *self.returned)
+            if h.buffer.name not in kept
+        }
+        steps: list[Step] = []
+        inputs: list[Handle] = []
+        returned: list[Handle] = []
+        values: list[PerCall] = []
+        bindings: list[Binding] = []
+        limits: list[Limit] = []
+        for j in range(calls):
+            suffix = CALL_SUFFIX.format(j)
+            call = _CallNames(
+                {
+                    name: Buffer(name + suffix, b.role, b.shape, b.dtype)
+                    for name, b in own.items()
+                },
+                {},
+            )
+            for v in self.values:
+                copied = copy.copy(v)
+                copied.name = v.name + suffix
+                call.values[v.name] = copied
+            values += call.values.values()
+            ops: dict[int, Operator] = {}
+            for step in self.steps:
+                op = step.op
+                if op.bound_values and id(op) not in ops:
+                    ops[id(op)] = op.replace(
+                        bound_values={
+                            name: call.expression(e)
+                            for name, e in op.bound_values.items()
+                        }
+                    )
+                steps.append(
+                    Step(
+                        ops.get(id(op), op),
+                        [call.handle(h) for h in step.slots],
+                        [call.handle(h) for h in step.inputs],
+                        [call.handle(h) for h in step.outputs],
+                    )
+                )
+            inputs += [call.handle(h) for h in self.inputs]
+            returned += [call.handle(h) for h in self.returned]
+            for b in self.bindings:
+                op = ops.get(id(b.op), b.op)
+                expression = call.expression(b.expression)
+                assert expression is not None, "a binding writes an expression"
+                bindings.append(Binding(op, op.value(b.member.name), expression))
+            limits += [
+                dataclasses.replace(
+                    limit,
+                    expression=call.expression(limit.expression),
+                    plus=call.expression(limit.plus),
+                )
+                for limit in self.limits
+            ]
+        carried = [h for h in self.outputs if h.buffer.name in kept]
+        pinned = dict(self.pinned)
+        for name in own.keys() & self.pinned.keys():
+            del pinned[name]
+            pinned.update(
+                (name + CALL_SUFFIX.format(j), self.pinned[name]) for j in range(calls)
+            )
+        return dataclasses.replace(
+            self,
+            name=f"{self.name}_x{calls}",
+            pinned=pinned,
+            steps=steps,
+            inputs=inputs,
+            outputs=[*returned, *carried],
+            values=values,
+            bindings=bindings,
+            returned=returned,
+            limits=limits,
+            calls=calls,
+            derived_from=self.version,
+        )
 
     def occurrences(self, entry: Entry) -> tuple[tuple[int, ...], ...]:
         """Return each match of ``entry`` in this recording: the step each of its steps is, depth-first.

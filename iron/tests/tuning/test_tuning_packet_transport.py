@@ -5,30 +5,29 @@
 
 from __future__ import annotations
 
+import pytest
+
 from iron.common.declare.composition import Entry, Member, Refinement, Region
 from iron.common.declare.profile import Profile
 from iron.common.image.step import Edge, EdgeKind
 from iron.tests.support import toys_schedule
-from iron.tests.support.tools import DEVICES
 from iron.tune.autotune import Timed
 from iron.tune.search import check, fit
 
-DEVICE = DEVICES["npu2"]()
 
+def _packet_window(device):
+    """Return a norm feeding two equal GEMVs at half the array's columns, two channels each (npu2's 4x2 window).
 
-def _packet_window():
-    """Return a 4x2 window: a norm feeding two equal GEMVs streaming their weights at once over the shim channels."""
-    norm, gate, up = toys_schedule.two_gemv_window(columns=4, channels=2)
+    Their weights and the norm's input want one stream more than the shim
+    has channels.
+    """
+    columns = device.cols // 2
+    norm, gate, up = toys_schedule.two_gemv_window(columns=columns, channels=2)
+    widths = {"num_aie_columns": columns, "num_channels": 2}
     members = (
         Member(type(norm), {"rows": norm.rows}),
-        Member(
-            type(gate),
-            {"M": gate.M, "K": gate.K},
-            {"num_aie_columns": 4, "num_channels": 2},
-        ),
-        Member(
-            type(up), {"M": up.M, "K": up.K}, {"num_aie_columns": 4, "num_channels": 2}
-        ),
+        Member(type(gate), {"M": gate.M, "K": gate.K}, widths),
+        Member(type(up), {"M": up.M, "K": up.K}, widths),
     )
     edges = (
         Edge(0, "y", 1, "B", kind=EdgeKind.STREAM),
@@ -39,34 +38,39 @@ def _packet_window():
     return region, recording
 
 
-def test_the_4x2_window_builds_with_packet_transport_and_is_bit_identical():
-    """The 4x2 window, built requesting packet transport on the placer's channel verdict, is bit-identical to its steps apart.
+@pytest.mark.supported_devices("npu2")
+def test_the_window_past_the_shim_builds_with_packet_transport_and_is_bit_identical(
+    device,
+):
+    """The window past the shim, built requesting packet transport on the placer's channel verdict, is bit-identical to its steps apart.
 
     This settles whether the shim channel limit is the compiler's or the
     array's: the budget met by sharing through packets rather than one stream
     each.
     """
-    region, recording = _packet_window()
+    region, recording = _packet_window(device)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = check(profile, Profile(), [Timed(recording)], DEVICE, Refinement.EXACT)
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
-def test_the_4x2_window_is_bit_identical_across_repeated_runs():
+@pytest.mark.supported_devices("npu2")
+def test_the_window_past_the_shim_is_bit_identical_across_repeated_runs(device):
     """Repeated runs of the packet-transport window agree bit for bit with each other, not only with the reference."""
-    region, recording = _packet_window()
+    region, recording = _packet_window(device)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    first = check(profile, profile, [Timed(recording)], DEVICE, Refinement.EXACT)
-    second = check(profile, profile, [Timed(recording)], DEVICE, Refinement.EXACT)
+    first = check(profile, profile, [Timed(recording)], device, Refinement.EXACT)
+    second = check(profile, profile, [Timed(recording)], device, Refinement.EXACT)
     assert first.ok and second.ok, (first.why, second.why)
 
 
-def test_the_4x2_window_does_not_hang():
+@pytest.mark.supported_devices("npu2")
+def test_the_window_past_the_shim_does_not_hang(device):
     """The window fits the shim's channel budget by sharing, so static fit accepts it (no refusal, and no build to hang)."""
-    region, recording = _packet_window()
+    region, recording = _packet_window(device)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert result.ok, result.why

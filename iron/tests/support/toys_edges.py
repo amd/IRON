@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
+from aie.iron.device import Device
 from ml_dtypes import bfloat16
 
 import iron
@@ -250,16 +251,16 @@ def diamond_qkv_merge(size=256):
     return recording, region
 
 
-def wide_mlp_window(cols=(8, 8, 8, 8)):
-    """Return a gate/up/SiLU/multiply window at the profile's widest tunables, an over-budget window.
+def wide_mlp_window(dev: Device):
+    """Return a gate/up/SiLU/multiply window at the widest tunables ``dev`` takes, an over-budget window.
 
     At Llama decode's recorded widths this window demands 40 cores, 24
-    shim-in and 8 shim-out channels, and fits only at 4 columns; this toy
-    keeps the same shape (gate, up, SiLU, multiply), the GEMVs at two
-    channels a column, so at eight columns each its members take 48 cores,
-    past npu2's 32.
+    shim-in and 8 shim-out channels, and fits npu2 only at 4 columns; this
+    toy keeps the same shape (gate, up, SiLU, multiply), each member at
+    every column, the GEMVs at two channels a column, so its members take
+    six cores a column, more than a column has (48 of npu2's 32).
     """
-    gc, uc, sc, mc = cols
+    gc = uc = sc = mc = dev.cols
     gate = GEMV(M=2048, K=2048, num_aie_columns=gc, num_channels=2)
     up = GEMV(M=2048, K=2048, num_aie_columns=uc, num_channels=2)
     silu = SiLU(size=2048, num_aie_columns=sc, tile_size=256)
@@ -406,10 +407,10 @@ def cross_call_trail(successor_len=8, steps=4):
 # ---------------------------------------------------------------------------
 
 
-def join_8_into_4(size=2048):
-    """ElementwiseAdd's eight lanes joined into RMSNorm's four: realizes ``HandOff.JOIN``."""
-    add = ElementwiseAdd(size=8 * size, num_aie_columns=8, tile_size=size)
-    norm = RMSNorm(rows=8, tile_size=size, num_aie_columns=4)
+def join_in_pairs(dev: Device, size=2048):
+    """ElementwiseAdd at every column of ``dev`` joined in pairs into RMSNorm at half of them (8 into 4 on npu2): realizes ``HandOff.JOIN``."""
+    add = ElementwiseAdd(size=dev.cols * size, num_aie_columns=dev.cols, tile_size=size)
+    norm = RMSNorm(rows=dev.cols, tile_size=size, num_aie_columns=dev.cols // 2)
     steps = sequences.steps((add, "a", "b", "mid"), (norm, "mid", "out"))
     recording = Recording.of_steps("toy_join", steps, ["a", "b"], ["out"])
     region = Region(
@@ -418,10 +419,10 @@ def join_8_into_4(size=2048):
     return recording, region
 
 
-def split_4_into_8(size=2048):
-    """GEMV at 4 lanes into SiLU at 8: realizes ``HandOff.SPLIT`` (a 4 -> 8 split that once hung)."""
-    gemv = GEMV(M=size, K=size, num_aie_columns=4, feed_b=True)
-    silu = SiLU(size=size, num_aie_columns=8, tile_size=size // 8)
+def split_in_two(dev: Device, size=2048):
+    """GEMV at half of ``dev``'s columns, each lane split in two into SiLU at all: realizes ``HandOff.SPLIT`` (npu2's 4 -> 8 split once hung)."""
+    gemv = GEMV(M=size, K=size, num_aie_columns=dev.cols // 2, feed_b=True)
+    silu = SiLU(size=size, num_aie_columns=dev.cols, tile_size=size // dev.cols)
     steps = sequences.steps((gemv, "A", "B", "mid"), (silu, "mid", "out"))
     recording = Recording.of_steps("toy_split", steps, ["A", "B"], ["out"])
     region = Region(
@@ -430,10 +431,10 @@ def split_4_into_8(size=2048):
     return recording, region
 
 
-def broadcast_weight_to_columns(size=2048, cols=4):
-    """One vector read by every column of a GEMV: realizes ``HandOff.BROADCAST``."""
+def broadcast_weight_to_columns(dev: Device, size=2048):
+    """One vector read by every column of a GEMV at half of ``dev``'s columns: realizes ``HandOff.BROADCAST``."""
     add = ElementwiseAdd(size=size, num_aie_columns=1, tile_size=size)
-    gemv = GEMV(M=size, K=size, num_aie_columns=cols, feed_b=True)
+    gemv = GEMV(M=size, K=size, num_aie_columns=dev.cols // 2, feed_b=True)
     steps = sequences.steps((add, "a", "b", "mid"), (gemv, "A", "mid", "out"))
     recording = Recording.of_steps("toy_broadcast", steps, ["a", "b", "A"], ["out"])
     region = Region((member(add), member(gemv)), (Edge(0, "y", 1, "B"),))
@@ -460,10 +461,16 @@ def slices_qkv(size=2048):
     return recording, region
 
 
-def ratio_4_into_6(size=288):
-    """GEMV at 4 lanes into a multiply at 6: realizes ``HandOff.RATIO`` (a consumer lane taking parts of two producer lanes); refused today."""
-    gemv = GEMV(M=size, K=size, num_aie_columns=4, feed_b=True)
-    mul = ElementwiseMul(size=size, num_aie_columns=6, tile_size=size // 6)
+def ratio_two_into_three(dev: Device, size=288):
+    """GEMV at half of ``dev``'s columns into a multiply at three quarters (4 into 6 on npu2): realizes ``HandOff.RATIO``.
+
+    A consumer lane takes parts of two producer lanes.
+    """
+    producers, consumers = lane_counts(HandOff.RATIO, dev.cols)
+    gemv = GEMV(M=size, K=size, num_aie_columns=producers, feed_b=True)
+    mul = ElementwiseMul(
+        size=size, num_aie_columns=consumers, tile_size=size // consumers
+    )
     steps = sequences.steps((gemv, "A", "B", "mid"), (mul, "mid", "up", "out"))
     recording = Recording.of_steps("toy_ratio", steps, ["A", "B", "up"], ["out"])
     region = Region(
@@ -472,10 +479,18 @@ def ratio_4_into_6(size=288):
     return recording, region
 
 
-def ratio_6_into_4(size=288):
-    """Return the reverse of ``ratio_4_into_6``: a multiply at 6 lanes into an add at 4, each of whose lanes takes parts of two."""
-    mul = ElementwiseMul(size=size, num_aie_columns=6, tile_size=size // 6)
-    add = ElementwiseAdd(size=size, num_aie_columns=4, tile_size=size // 4)
+def ratio_three_into_two(dev: Device, size=288):
+    """Return the reverse of ``ratio_two_into_three``: a multiply at three quarters of ``dev``'s columns into an add at half.
+
+    Each of the add's lanes takes parts of two of the multiply's.
+    """
+    consumers, producers = lane_counts(HandOff.RATIO, dev.cols)
+    mul = ElementwiseMul(
+        size=size, num_aie_columns=producers, tile_size=size // producers
+    )
+    add = ElementwiseAdd(
+        size=size, num_aie_columns=consumers, tile_size=size // consumers
+    )
     steps = sequences.steps((mul, "a", "b", "mid"), (add, "mid", "c", "out"))
     recording = Recording.of_steps("toy_ratio_reverse", steps, ["a", "b", "c"], ["out"])
     region = Region(
@@ -538,20 +553,28 @@ SIZES = ("recorded", "smaller")
 
 _EDGE_SIZE = 1536
 
-# Each shape's (producer, consumer) lane counts: a plain count ratio stands
-# in for the shape's real routing pattern (BROADCAST, SLICES and LAYOUT are
-# really about which elements a lane reads, not how many); the full,
-# per-pattern realization of every shape is `test_tuning_hand_off_shapes.py`'s
-# job, one toy per shape with no role or held place crossed in.
-_CORES: dict[HandOff, tuple[int, int]] = {
-    HandOff.EQUAL: (2, 2),
-    HandOff.JOIN: (8, 2),
-    HandOff.SPLIT: (2, 8),
-    HandOff.RATIO: (4, 6),
-    HandOff.BROADCAST: (1, 4),
-    HandOff.SLICES: (1, 3),
-    HandOff.LAYOUT: (4, 1),
-}
+
+def lane_counts(shape: HandOff, columns: int) -> tuple[int, int]:
+    """Return the (producer, consumer) lane counts standing in for ``shape`` on an array ``columns`` wide.
+
+    A plain count ratio stands in for the shape's real routing pattern
+    (BROADCAST, SLICES and LAYOUT are really about which elements a lane
+    reads, not how many); the full, per-pattern realization of every shape
+    is ``test_tuning_hand_off_shapes.py``'s job, one toy per shape with no
+    role or held place crossed in. A join and a split span the array; a
+    ratio is half its columns against three quarters (4 and 6 on npu2, 2 and
+    3 on npu1).
+    """
+    half = columns // 2
+    return {
+        HandOff.EQUAL: (2, 2),
+        HandOff.JOIN: (columns, 2),
+        HandOff.SPLIT: (2, columns),
+        HandOff.RATIO: (half, half + half // 2),
+        HandOff.BROADCAST: (1, 4),
+        HandOff.SLICES: (1, 3),
+        HandOff.LAYOUT: (4, 1),
+    }[shape]
 
 
 def _next(values: tuple, value) -> Any:
@@ -585,9 +608,9 @@ def with_resolved_depth(region: Region, index: int, depth: int) -> Region:
     return region.deepened(index, depth)
 
 
-def _chain_combo(shape, held, rate, bounded):
+def _chain_combo(lanes, held, rate, bounded):
     """Add -> RMSNorm -> ElementwiseMul, the distinguished edge Add -> RMSNorm."""
-    p_cols, c_cols = _CORES[shape]
+    p_cols, c_cols = lanes
     mult = 2 if rate == "different" else 1
     add = ElementwiseAdd(
         size=_EDGE_SIZE, num_aie_columns=p_cols, tile_size=_EDGE_SIZE // (p_cols * mult)
@@ -641,9 +664,9 @@ def _chain_bounded_recording(
     return dataclasses.replace(recording, name="combo_chain_bounded")
 
 
-def _fan_out_combo(shape, held, rate, bounded):
+def _fan_out_combo(lanes, held, rate, bounded):
     """RMSNorm fanned into Q, K and V, then a tail add on Q's lane; the distinguished edge is the one into Q."""
-    p_cols, c_cols = _CORES[shape]
+    p_cols, c_cols = lanes
     mult = 2 if rate == "different" else 1
     norm = RMSNorm(rows=p_cols, tile_size=_EDGE_SIZE // p_cols, num_aie_columns=p_cols)
     q = GEMV(
@@ -738,9 +761,9 @@ def _fan_out_bounded_recording(
     return dataclasses.replace(recording, name="combo_fan_out_bounded")
 
 
-def _fan_in_combo(shape, held, rate, bounded):
+def _fan_in_combo(lanes, held, rate, bounded):
     """Gate and up projections into one multiply, then a tail add; the distinguished edge is gate -> multiply."""
-    p_cols, c_cols = _CORES[shape]
+    p_cols, c_cols = lanes
     mult = 2 if rate == "different" else 1
     gate = GEMV(
         M=_EDGE_SIZE,
@@ -823,9 +846,9 @@ def _fan_in_bounded_recording(
     return dataclasses.replace(recording, name="combo_fan_in_bounded")
 
 
-def _skip_combo(shape, held, rate, bounded):
+def _skip_combo(lanes, held, rate, bounded):
     """Add -> RMSNorm -> GEMV -> Add -> tail add, the distinguished edge the residual skip into the second add."""
-    p_cols, c_cols = _CORES[shape]
+    p_cols, c_cols = lanes
     mult = 2 if rate == "different" else 1
     add = ElementwiseAdd(
         size=_EDGE_SIZE, num_aie_columns=p_cols, tile_size=_EDGE_SIZE // (p_cols * mult)
@@ -923,9 +946,9 @@ def _skip_bounded_recording(
     return dataclasses.replace(recording, name="combo_skip_bounded")
 
 
-def _diamond_combo(shape, held, rate, bounded):
+def _diamond_combo(lanes, held, rate, bounded):
     """RMSNorm fans into Q and K, rejoining into an Add, then a tail add; the distinguished edge is Q -> the merge."""
-    p_cols, c_cols = _CORES[shape]
+    p_cols, c_cols = lanes
     mult = 2 if rate == "different" else 1
     norm = RMSNorm(rows=1, tile_size=_EDGE_SIZE, num_aie_columns=1)
     q = GEMV(
@@ -1022,16 +1045,16 @@ def _diamond_bounded_recording(
     return dataclasses.replace(recording, name="combo_diamond_bounded")
 
 
-def _through_memory_combo(shape, held, rate, bounded):
+def _through_memory_combo(lanes, held, rate, bounded):
     """Return a producer streaming into a cache write, the write ordered before a read, the read feeding a consumer.
 
     The distinguished edge is the producer -> write edge; the write -> read
     dependence (through the shared cache buffer, no edge) is left for the
-    dataflow analysis to derive from the recording. ``shape`` is realized as
+    dataflow analysis to derive from the recording. ``lanes`` is realized as
     a channel-count pair; ``rate`` as the producer's per-transfer tile (a
     mover's own firing granularity), half as wide so it transfers twice.
     """
-    p_cols, c_cols = _CORES[shape]
+    p_cols, c_cols = lanes
     mult = 2 if rate == "different" else 1
     producer = Copy(
         input_buffer_size=_EDGE_SIZE,
@@ -1100,9 +1123,9 @@ def _through_memory_bounded_recording(
     return dataclasses.replace(recording, name="combo_through_memory_bounded")
 
 
-def _feedback_combo(shape, held, rate, bounded):
+def _feedback_combo(lanes, held, rate, bounded):
     """Return a carried accumulator (``acc = acc + x``) into a multiply; the distinguished edge is the accumulator's own self-loop."""
-    p_cols, c_cols = _CORES[shape]
+    p_cols, c_cols = lanes
     mult = 2 if rate == "different" else 1
     add = ElementwiseAdd(
         size=_EDGE_SIZE, num_aie_columns=p_cols, tile_size=_EDGE_SIZE // (p_cols * mult)
@@ -1167,13 +1190,19 @@ _ROLE_BUILDERS = {
 
 
 def combination_toy(
-    shape: HandOff, role: str, held: str, depth: str, rate: str, size: str
+    dev: Device,
+    shape: HandOff,
+    role: str,
+    held: str,
+    depth: str,
+    rate: str,
+    size: str,
 ) -> tuple[str, Recording, Region, int]:
-    """Return ``(name, Recording, Region, distinguished_edge_index)`` for one cell of the all-pairs cover.
+    """Return ``(name, Recording, Region, distinguished_edge_index)`` for one cell of the all-pairs cover, on ``dev``.
 
     ``role`` picks the topology; the distinguished edge's two members take
-    real lane counts (and, for ``rate``, a tile-size split) realizing
-    ``shape`` and ``rate``; every edge's held place (``held`` on the
+    real lane counts on ``dev``'s array (``lane_counts``, and, for ``rate``,
+    a tile-size split) realizing ``shape`` and ``rate``; every edge's held place (``held`` on the
     distinguished one, the next of ``HELDS`` on the rest) is realized
     structurally (``realize_helds``). ``depth`` is named only: its real
     value is resolved from ``iron.common.graph.sdf.analyze`` inside a test,
@@ -1182,7 +1211,7 @@ def combination_toy(
     ``with_resolved_depth``.
     """
     recording, region, index = _ROLE_BUILDERS[role](
-        shape, held, rate, size == "smaller"
+        lane_counts(shape, dev.cols), held, rate, size == "smaller"
     )
     name = f"{role}_{shape.value}_{held}_{depth}_{rate}_{size}"
     return name, recording, region, index

@@ -17,10 +17,10 @@ from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import fit
 
-pytestmark = pytest.mark.usefixtures("npu2")
+pytestmark = pytest.mark.usefixtures("device")
 
 
-def test_a_deep_buffer_within_the_memtile_budget_is_counted_and_fits():
+def test_a_deep_buffer_within_the_memtile_budget_is_counted_and_fits(device):
     """A staged edge held a few objects deep, well inside the memtile banks the target model reports: ``fit`` counts it and does not refuse it."""
     gemv = GEMV(M=256, K=256, tile_size_input=4, tile_size_output=256)
     add = ElementwiseAdd(size=256, tile_size=256)
@@ -34,30 +34,30 @@ def test_a_deep_buffer_within_the_memtile_budget_is_counted_and_fits():
     profile = Profile()
     profile.add_entry(Entry(root=region))
     recording = gemv_add_recording("fits", gemv, add)
-    result = fit(profile, [Timed(recording)], toys.NPU2)
+    result = fit(profile, [Timed(recording)], device)
     assert result.ok
 
 
 @unbuilt
-def test_a_strided_token_pattern_counts_its_buffer_descriptors():
+def test_a_strided_token_pattern_counts_its_buffer_descriptors(device):
     """A row-tiled edge counts the buffer descriptors its stride needs.
 
     A real 16-row tile (``tile_m = 16``) into a per-row consumer, so
     neither end moves whole rows a firing as a contiguous edge would.
-    ``M = 48`` keeps the row split npu2's array resolves at one, so the
+    ``M = 48`` keeps the row split each device's array resolves at one, so the
     real per-firing count is ``tile_m`` alone and depth 16 is its minimum.
     """
-    gemm, norm = toys.gemm_rowwise(M=48, row_tile=16)
+    gemm, norm = toys.gemm_rowwise(device, M=48, row_tile=16)
     assert gemm.n_aie_rows == 1
     region = toys.gemm_rowwise_region(gemm, norm, depth=16)
     profile = Profile()
     profile.add_entry(Entry(root=region))
     recording = toys.gemm_rowwise_recording("strided", gemm, norm)
-    result = fit(profile, [Timed(recording)], toys.NPU2)
+    result = fit(profile, [Timed(recording)], device)
     assert result.ok
 
 
-def test_more_buffer_descriptors_than_a_tile_holds_is_refused_before_any_build():
+def test_more_buffer_descriptors_than_a_tile_holds_is_refused_before_any_build(device):
     """A buffer descriptor count past the target model's per-tile limit.
 
     An implausibly deep, implausibly strided edge: refused by ``fit`` at
@@ -75,18 +75,18 @@ def test_more_buffer_descriptors_than_a_tile_holds_is_refused_before_any_build()
     profile = Profile()
     profile.add_entry(Entry(root=region))
     recording = gemv_add_recording("too-many-bds", gemv, add)
-    result = fit(profile, [Timed(recording)], toys.NPU2)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
 
 
-def test_resource_limits_come_from_the_target_model_not_a_constant():
+def test_resource_limits_come_from_the_target_model_not_a_constant(device):
     """The budget ``fit`` holds a design to is the target model's own.
 
     Not a number this test hardcodes; a toy that fits on npu2's eight
     columns may not on a four-column device.
     """
-    target = get_target_model(toys.NPU2.resolve())
+    target = get_target_model(device.resolve())
     gemv = GEMV(M=256, K=256, tile_size_input=4, tile_size_output=256)
     add = ElementwiseAdd(size=256, tile_size=256)
     region = Region(
@@ -99,6 +99,6 @@ def test_resource_limits_come_from_the_target_model_not_a_constant():
     profile = Profile()
     profile.add_entry(Entry(root=region))
     recording = gemv_add_recording("model-derived", gemv, add)
-    result = fit(profile, [Timed(recording)], toys.NPU2)
+    result = fit(profile, [Timed(recording)], device)
     assert target is not None
     assert result.ok

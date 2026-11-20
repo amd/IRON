@@ -7,7 +7,7 @@ import dataclasses
 import itertools
 
 import pytest
-from aie.iron.device import NPU2
+from aie.utils.compile.jit.operator import Unresolvable
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement, Region, refinement
@@ -18,31 +18,33 @@ from iron.operators.gemm import GEMM, Precision
 from iron.operators.gemv import GEMV
 from iron.operators.sample import Sample
 from iron.tests.support.declared import declared
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.packings import width_tunables
 from iron.tune.search import candidates, check, fit, measure, search
 
-NPU2_DEVICE = NPU2()
-
-pytestmark = pytest.mark.usefixtures("npu2")
+pytestmark = pytest.mark.usefixtures("device")
 
 
-def _smallest_cases():
-    """Return each catalog operator's own first declared case, its smallest by convention."""
+def _smallest_cases(device_name):
+    """Return each catalog operator's own first case declared for ``device_name``, its smallest by convention."""
     found = {}
-    for name, cls, case in declared(NPU2_DEVICE):
+    for name, cls, case in declared(DEVICES[device_name]()):
         found.setdefault(cls, (name, case))
     return found
 
 
-_CASES = _smallest_cases()
+# Each device's cases, the device passed to the ``device`` fixture.
 _PARAMS = [
-    pytest.param(cls, case, id=name)
-    for cls, (name, case) in sorted(_CASES.items(), key=lambda kv: kv[1][0])
+    pytest.param(device_name, cls, case, id=f"{device_name}-{name}")
+    for device_name in sorted(DEVICES)
+    for cls, (name, case) in sorted(
+        _smallest_cases(device_name).items(), key=lambda kv: kv[1][0]
+    )
 ]
-_PARAMS_WITH_TUNABLES = [p for p in _PARAMS if p.values[0].declaration.tunables]
+_PARAMS_WITH_TUNABLES = [p for p in _PARAMS if p.values[1].declaration.tunables]
 
 
 def _dims_only(cls, kwargs):
@@ -51,8 +53,8 @@ def _dims_only(cls, kwargs):
     return {name: value for name, value in kwargs.items() if name not in tunables}
 
 
-@pytest.mark.parametrize("cls,case", _PARAMS)
-def test_declared_domains_are_resolvable_candidates(cls, case, tmp_path):
+@pytest.mark.parametrize("device,cls,case", _PARAMS, indirect=["device"])
+def test_declared_domains_are_resolvable_candidates(cls, case, tmp_path, device):
     """Every distinct design an operator's declared domains resolve to is a candidate.
 
     The designs are found here by brute force over the domains' product:
@@ -60,9 +62,12 @@ def test_declared_domains_are_resolvable_candidates(cls, case, tmp_path):
     descriptors, kept once per design. A domain value no combination
     resolves at this shape is no design, so it is not asked for.
     """
-    op = cls(**_dims_only(cls, case.kwargs)).resolved(NPU2_DEVICE)
+    try:
+        op = cls(**_dims_only(cls, case.kwargs)).resolved(device)
+    except Unresolvable as e:  # a kernel this device's ISA has not
+        pytest.skip(str(e))
     recording = Recording.of_step(op)
-    domains = op._domains(NPU2_DEVICE)
+    domains = op._domains(device)
     profile = Profile()
     if cls.declaration.tunables:
         given = {n: vars(op)[n] for n in cls.declaration.tunables}
@@ -75,7 +80,7 @@ def test_declared_domains_are_resolvable_candidates(cls, case, tmp_path):
     designs = set()
     for combo in itertools.product(*domains.values()):
         try:
-            moved = op._with_tunables(**dict(zip(domains, combo))).resolved(NPU2_DEVICE)
+            moved = op._with_tunables(**dict(zip(domains, combo))).resolved(device)
             if not moved.has_sequence_override():
                 for buf in moved.buffers:
                     buf.transfers()
@@ -83,23 +88,23 @@ def test_declared_domains_are_resolvable_candidates(cls, case, tmp_path):
             continue
         designs.add(OperatorDesign(moved).identity)
     remaining = set(designs)
-    for edit in candidates([Timed(recording)], profile, NPU2_DEVICE):
+    for edit in candidates([Timed(recording)], profile, device):
         root = edit.apply(profile).entries()[-1].root
         if edit.touches == frozenset({0}) and len(root.parts) == 1:
             tuned = op._with_tunables(**(root.parts[0].tunables or {}))
-            remaining.discard(OperatorDesign(tuned.resolved(NPU2_DEVICE)).identity)
+            remaining.discard(OperatorDesign(tuned.resolved(device)).identity)
         if not remaining:
             break
     assert not remaining, f"{len(remaining)} of {len(designs)} designs not proposed"
 
 
 @unbuilt
-def test_a_small_m_may_resolve_to_gemv_or_gemm():
+def test_a_small_m_may_resolve_to_gemv_or_gemm(device):
     """A step's implementation domain, at a small ``M``, holds both ``GEMV`` and ``GEMM``."""
-    gemv = GEMV(M=128, K=128).resolved(NPU2_DEVICE)
+    gemv = GEMV(M=128, K=128).resolved(device)
     recording = Recording.of_step(gemv)
     profile = Profile()
-    found = list(candidates([Timed(recording)], profile, NPU2_DEVICE))
+    found = list(candidates([Timed(recording)], profile, device))
     implementations = {
         part.cls for e in found for part in e.apply(profile).entries()[-1].root.parts
     }
@@ -113,34 +118,40 @@ def test_a_tunable_is_exact_unless_declared_otherwise():
         refinement(GEMV, "M")
 
 
-def test_a_resolve_derived_tunable_is_never_a_width():
+def test_a_resolve_derived_tunable_is_never_a_width(device):
     """``a_depth``, filled by ``resolve()``, is never among a ``GEMV``'s width tunables."""
-    op = GEMV(M=128, K=128).resolved(NPU2_DEVICE)
+    op = GEMV(M=128, K=128).resolved(device)
     assert "a_depth" not in width_tunables(op)
 
 
 @pytest.mark.extensive
 @pytest.mark.parametrize(
-    "cls,case",
+    "device,cls,case",
     [
         # Decode's coded rows, written by the host, are not held no-worse yet.
-        pytest.param(*p.values, id=p.id, marks=unbuilt if p.id == "Decode" else ())
+        pytest.param(
+            *p.values, id=p.id, marks=unbuilt if p.id.endswith("-Decode") else ()
+        )
         for p in _PARAMS_WITH_TUNABLES
     ],
+    indirect=["device"],
 )
-@pytest.mark.supported_devices("npu2")
-def test_each_tunable_moved_alone_is_held_to_its_own_refinement(cls, case):
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_each_tunable_moved_alone_is_held_to_its_own_refinement(cls, case, device):
     """Each tunable moved alone off the recorded setting, where the others take it, is held to its own ``refinement``; the tuner's pick fits.
 
     An exact tunable is bit-identical at every value; a move of one declared
     ``exact=False`` is checked no worse, and taken or refused as worse.
     """
-    recorded = cls(**case.kwargs).resolved(NPU2_DEVICE)
+    try:
+        recorded = cls(**case.kwargs).resolved(device)
+    except Unresolvable as e:  # a kernel this device's ISA has not
+        pytest.skip(str(e))
     recording = Recording.of_step(recorded)
     given = {n: vars(recorded)[n] for n in cls.declaration.tunables}
     base = Profile()
     base.add(cls, **given)
-    domains = recorded._domains(NPU2_DEVICE)
+    domains = recorded._domains(device)
     for name in cls.declaration.tunables:
         rule = refinement(cls, name)
         for value in domains.get(name, ()):
@@ -154,40 +165,39 @@ def test_each_tunable_moved_alone_is_held_to_its_own_refinement(cls, case):
                     )
                 )
             )
-            if not fit(moved, [Timed(recording)], NPU2_DEVICE).ok:
+            if not fit(moved, [Timed(recording)], device).ok:
                 continue  # refused beside the recorded others: no setting
-            result = check(
-                moved, base, [Timed(recording)], NPU2_DEVICE, refinement=rule
-            )
+            result = check(moved, base, [Timed(recording)], device, refinement=rule)
             # An exact tunable holds at every value; another may be worse.
             assert result.ok or (
                 rule is Refinement.NO_WORSE and "worse" in (result.why or "")
             ), result.why
     calls = [Timed(recording)]
-    tuned = search(calls, base, NPU2_DEVICE, budget_s=1.0)
-    assert check(tuned, base, calls, NPU2_DEVICE, refinement=Refinement.NO_WORSE).ok
-    assert measure(tuned, base, calls, NPU2_DEVICE).ratio < 1.05
+    tuned = search(calls, base, device, budget_s=1.0)
+    assert check(tuned, base, calls, device, refinement=Refinement.NO_WORSE).ok
+    assert measure(tuned, base, calls, device).ratio < 1.05
 
 
 @pytest.mark.extensive
-def test_search_keeps_the_fastest_setting_it_measured_on_the_one_operator_toy():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_search_keeps_the_fastest_setting_it_measured_on_the_one_operator_toy(device):
     """The tuner, on the one-operator toy, keeps the fastest setting it measured, never asserting which one."""
-    op = GEMV(M=128, K=128).resolved(NPU2_DEVICE)
+    op = GEMV(M=128, K=128).resolved(device)
     recording = Recording.of_step(op)
     start = Profile()
     calls = [Timed(recording)]
-    tuned = search(calls, start, NPU2_DEVICE, budget_s=5.0)
-    assert check(tuned, start, calls, NPU2_DEVICE, refinement=Refinement.NO_WORSE).ok
-    assert measure(tuned, start, calls, NPU2_DEVICE).ratio < 1.05
+    tuned = search(calls, start, device, budget_s=5.0)
+    assert check(tuned, start, calls, device, refinement=Refinement.NO_WORSE).ok
+    assert measure(tuned, start, calls, device).ratio < 1.05
 
 
-def test_a_setting_the_array_cannot_hold_is_refused_before_any_build():
+def test_a_setting_the_array_cannot_hold_is_refused_before_any_build(device):
     """A setting the array can't hold (more columns than the device) is refused by ``fit`` before any build."""
-    op = GEMV(M=128, K=128).resolved(NPU2_DEVICE)
+    op = GEMV(M=128, K=128).resolved(device)
     recording = Recording.of_step(op)
     profile = Profile()
-    profile.add(GEMV, M=128, K=128, num_aie_columns=NPU2_DEVICE.cols * 2)
-    result = fit(profile, [Timed(recording)], NPU2_DEVICE)
+    profile.add(GEMV, M=128, K=128, num_aie_columns=device.cols * 2)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
 
@@ -208,7 +218,8 @@ def _logits_into_sample(precision: Precision) -> Recording:
     )
 
 
-def test_a_no_worse_change_upstream_of_a_selection_step_is_refused():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_no_worse_change_upstream_of_a_selection_step_is_refused(device):
     """A GEMM's logits moved from ``MEDIUM`` to ``HIGHEST`` precision, upstream of a ``Sample``: refused, since the logits it selects from differ.
 
     ``MEDIUM`` emulates bf16 through bfp16; ``HIGHEST`` is no worse against
@@ -218,7 +229,7 @@ def test_a_no_worse_change_upstream_of_a_selection_step_is_refused():
         Profile(),
         Profile(),
         [Timed(_logits_into_sample(Precision.HIGHEST))],
-        NPU2_DEVICE,
+        device,
         refinement=Refinement.NO_WORSE,
         base_calls=[Timed(_logits_into_sample(Precision.MEDIUM))],
     )

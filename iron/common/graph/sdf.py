@@ -719,9 +719,9 @@ class Derivation:
         writes, holds the objects passed to it that hold its elements (in
         order, so every one up to the last it needs), writes the object, and
         frees what no later object of its lane needs. A memtile must do that
-        much for any restaging; IRON's ``Staging`` plans the whole-lane joins
-        and splits among them, and whether IRON builds one is a capability of
-        its own. The producer's channels into the memtile are the edge's depth.
+        much for any restaging; IRON's ``Staging`` plans the joins, splits and
+        joins split again among them, and whether IRON builds one is a
+        capability of its own. The producer's channels into the memtile are the edge's depth.
         """
         programs, _, writes, reads, _ = built
         writer, readers = ends

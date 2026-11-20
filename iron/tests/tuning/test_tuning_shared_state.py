@@ -4,7 +4,6 @@
 """Transformation tests for shared persistent state across versions (the KV cache, an SSM state)."""
 
 import pytest
-from aie.iron.device import NPU2
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Refinement, StateLayout
@@ -13,13 +12,11 @@ from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, measure, search
 
-NPU2_DEVICE = NPU2()
-
-pytestmark = pytest.mark.usefixtures("npu2")
+pytestmark = pytest.mark.usefixtures("device")
 
 
 @unbuilt
-def test_a_state_layout_round_trips_and_applies_to_every_version(tmp_path):
+def test_a_state_layout_round_trips_and_applies_to_every_version(tmp_path, device):
     """One ``StateLayout`` for the persistent buffer every version that writes or reads it round-trips, and ``candidates`` proposes it."""
     graph = shared_kv_state()
     prefill = graph.record(x=(256,))
@@ -32,15 +29,15 @@ def test_a_state_layout_round_trips_and_applies_to_every_version(tmp_path):
     profile.save(path)
     loaded = Profile.load(path)
     assert loaded.state_layouts() == [layout]
-    found_prefill = list(candidates([Timed(prefill)], loaded, NPU2_DEVICE))
-    found_decode = list(candidates([Timed(decode)], loaded, NPU2_DEVICE))
+    found_prefill = list(candidates([Timed(prefill)], loaded, device))
+    found_decode = list(candidates([Timed(decode)], loaded, device))
     assert any(layout in e.apply(Profile()).state_layouts() for e in found_prefill)
     assert any(layout in e.apply(Profile()).state_layouts() for e in found_decode)
 
 
 @unbuilt
-@pytest.mark.supported_devices("npu2")
-def test_the_layout_holds_end_to_end_over_prefill_then_decode():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_the_layout_holds_end_to_end_over_prefill_then_decode(device):
     """The chosen layout is bit-identical to the untuned build over one real prefill-then-decode call sequence, state carried between them.
 
     ``check`` takes the graph's calls in order, state carried between them, so the real
@@ -58,7 +55,7 @@ def test_the_layout_holds_end_to_end_over_prefill_then_decode():
         tuned,
         base,
         [Timed(prefill), Timed(decode)],
-        NPU2_DEVICE,
+        device,
         refinement=Refinement.EXACT,
     )
     assert result.ok, result.why
@@ -70,7 +67,8 @@ def test_the_layout_holds_end_to_end_over_prefill_then_decode():
     raises=AssertionError,
     reason="candidates does not propose state layouts yet",
 )
-def test_the_tuner_prices_both_versions_jointly_and_keeps_one_layout_for_both():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_the_tuner_prices_both_versions_jointly_and_keeps_one_layout_for_both(device):
     """The tuner, searching over the prefill and decode calls together, keeps one ``StateLayout`` for ``kv``.
 
     The joint search serves both versions, no worse than where it started.
@@ -80,11 +78,11 @@ def test_the_tuner_prices_both_versions_jointly_and_keeps_one_layout_for_both():
     decode = graph.record(x=(512,))
     start = Profile()
     calls = [Timed(prefill), Timed(decode)]
-    tuned = search(calls, start, NPU2_DEVICE, budget_s=5.0)
+    tuned = search(calls, start, device, budget_s=5.0)
     kv_layouts = [layout for layout in tuned.state_layouts() if layout.buffer == "kv"]
     assert len(kv_layouts) == 1
-    assert check(tuned, start, calls, NPU2_DEVICE, refinement=Refinement.NO_WORSE).ok
-    assert measure(tuned, start, calls, NPU2_DEVICE).ratio < 1.05
+    assert check(tuned, start, calls, device, refinement=Refinement.NO_WORSE).ok
+    assert measure(tuned, start, calls, device).ratio < 1.05
 
 
 def test_two_layouts_naming_one_buffer_are_refused(tmp_path):
