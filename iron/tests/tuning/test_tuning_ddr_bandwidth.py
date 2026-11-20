@@ -1,16 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""DDR bandwidth: the device's read ceiling, and each weight-bound toy's share of it."""
+"""DDR bandwidth: the device's read ceiling, each weight-bound toy's share of it, and a phased call's period, which waits on the device's measured rates."""
 
 from __future__ import annotations
 
 import pytest
 
+from iron.common.declare.composition import Hold
+from iron.common.graph.sdf import analyze
 from iron.common.testing import run_test, vectors
+from iron.tests.support import toys_dataflow as toys
 from iron.tune.ddr import read_gemv
-
-pytestmark = [pytest.mark.extensive, pytest.mark.supported_devices("npu1", "npu2")]
 
 # (columns, channels) requested per nominal stream count; ``read_gemv`` takes
 # the widest the device's shim DMAs admit, so the achieved count (read back
@@ -28,6 +29,8 @@ def _timed(op) -> dict[str, float]:
     return timed
 
 
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("nominal_streams", sorted(_REQUESTED))
 def test_ddr_read_ceiling_against_stream_count(
     nominal_streams, record_property, device
@@ -41,6 +44,8 @@ def test_ddr_read_ceiling_against_stream_count(
         record_property(name, value)
 
 
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("nominal_streams", [1, 4, 8])
 def test_weight_bound_toy_reports_its_share_of_the_ceiling(
     nominal_streams, record_property, device
@@ -58,3 +63,12 @@ def test_weight_bound_toy_reports_its_share_of_the_ceiling(
     record_property("Ceiling bandwidth GB/s", ceiling["Bandwidth"])
     record_property("Toy bandwidth GB/s", toy["Bandwidth"])
     record_property("Toy share of ceiling", toy["Bandwidth"] / ceiling["Bandwidth"])
+
+
+def test_a_phased_period_waits_on_the_devices_measured_rates(device):
+    """``add -> SiLU -> mul`` with an edge through host memory runs in two phases: without the device's DDR rates, its period names what it waits on."""
+    add, silu, mul = toys.add_silu_mul(size=1 << 12, tile=128, cols=2)
+    region = toys.add_silu_mul_region(add, silu, mul).held(0, Hold.DDR)
+    recording = toys.add_silu_mul_recording("through_host", add, silu, mul)
+    with pytest.raises(NotImplementedError, match="measured DDR rates"):
+        analyze(region, recording, device).period
