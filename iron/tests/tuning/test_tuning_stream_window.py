@@ -16,17 +16,21 @@ import pytest
 from aie.dialects.aie import WireBundle, get_target_model
 
 from iron.common.declare import Profile
-from iron.common.declare.composition import Entry, Refinement, Region
+from iron.common.declare.composition import Configuration, Entry, Refinement, Region
 from iron.common.design import OperatorDesign
+from iron.common.graph.record import Recording
+from iron.common.graph.sdf import Derivation
 from iron.common.image.compose import SHIM_SHORT, fits, transported
 from iron.common.image.step import Edge, Fusion, FusionKind
+from iron.operators.copy import Copy
+from iron.tests.support import sequences
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     chain,
     fan_in_gate_up_mul,
     fan_out_norm_projections,
     fan_out_norm_qkv,
-    kv_write_then_read,
+    member,
     scan_with_state_output,
     shared_input_two_reads,
     skip_edge,
@@ -213,14 +217,40 @@ def test_a_window_whose_drains_outrun_the_shim_is_bit_identical(device):
     assert result.ok, result.why
 
 
-@unbuilt
 def test_a_data_mover_with_no_compute_core_still_counts_shim_channels(device):
-    """A data mover (``Copy``, no compute core) takes no core budget but is still priced on shim channels."""
-    recording, members = kv_write_then_read(position=0)
-    region = Region(members, ())
-    profile = Profile()
-    profile.add_entry(Entry(region))
-    result = fit(profile, [Timed(recording)], device)
+    """A data mover (``Copy``, no compute core) takes no core budget but is still priced on shim channels.
+
+    One more one-channel copy than the shim has receiving channels, all run
+    at once: the copies record no core, so the counts pass them, but each
+    drains an output of its own, which neither packets (only a sending
+    channel is shared) nor a drain join (one output's lanes) shares, so the
+    placer a pack's build takes refuses them before any build. Run one after
+    another, they share the channels over time and fit.
+    """
+    model = get_target_model(device.resolve())
+    row = next(r for r in range(model.rows()) if model.is_shim_noc_tile(0, r))
+    receives = sum(
+        model.get_num_dest_shim_mux_connections(c, row, WireBundle.DMA)
+        for c in range(model.columns())
+        if model.is_shim_noc_tile(c, row)
+    )
+    copies = [Copy(input_buffer_size=1024, num_channels=1) for _ in range(receives + 1)]
+    recording = Recording.of_steps(
+        "copies_past_the_shim",
+        sequences.steps(*((c, f"x{i}", f"y{i}") for i, c in enumerate(copies))),
+        [f"x{i}" for i in range(len(copies))],
+        [f"y{i}" for i in range(len(copies))],
+    )
+    parts = tuple(member(c) for c in copies)
+    derivation = Derivation(Region(parts), recording, device)
+    assert not any(recorded.cores for _, recorded in derivation.recorded)
+    calls = [Timed(recording)]
+    one_after_another = Profile()
+    one_after_another.add_entry(Entry(Configuration(parts=parts)))
+    assert fit(one_after_another, calls, device).ok
+    at_once = Profile()
+    at_once.add_entry(Entry(Configuration(parts=parts, concurrent=1)))
+    result = fit(at_once, calls, device, placements=("sequential",))
     assert not result.ok
-    assert result.stage == "counts"
-    assert "shim" in (result.why or "") or "channel" in (result.why or "")
+    assert result.stage == "placer"
+    assert "ShimNOCTile" in (result.why or "")
