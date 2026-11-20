@@ -200,6 +200,34 @@ def test_bounded_rows_past_a_wrap_fill_either_half():
         assert np.array_equal(got[:n], want), f"{n=}"
 
 
+class Prefix(iron.Graph):
+    """The first ``n`` rows of ``x``, ``n`` per call."""
+
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        return Copy.step(x[:n])
+
+
+@pytest.mark.parametrize("n", [0, 1, ROWS])
+def test_a_copy_bounded_at_zero_is_its_reference(n):
+    """A call bounded at 0 is a call: its reference moves no rows, as at 1 it moves one."""
+    x = np.random.default_rng(0).standard_normal((ROWS, HALF)).astype(bfloat16)
+    got = np.asarray(Prefix().reference(x, n=n), dtype=np.float32)
+    np.testing.assert_array_equal(got, x[:n].astype(np.float32))
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_copy_bounded_at_zero_runs_as_its_reference():
+    """A call bounded at 0 runs on the device and moves what its reference does: no rows."""
+    graph = Prefix()
+    net = graph.compile(x=(ROWS, HALF))
+    x = np.random.default_rng(1).standard_normal((ROWS, HALF)).astype(bfloat16)
+    for n in (0, 1):
+        got = np.asarray(net(x, n=n), dtype=np.float32).reshape(ROWS, HALF)
+        want = np.asarray(graph.reference(x, n=n), dtype=np.float32)
+        assert want.shape == (n, HALF)
+        np.testing.assert_array_equal(got[:n], want)
+
+
 @pytest.mark.parametrize("band_stride", [0, 1])
 def test_a_walk_by_a_per_call_repeat_and_length_is_its_reference(band_stride):
     table = np.arange(HK * WK * K2 * E, dtype=np.float32)
