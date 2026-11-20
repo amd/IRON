@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
+from aie.dialects.aie import WireBundle, get_target_model
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement, Region
@@ -22,6 +23,7 @@ from iron.common.image.step import Edge, Fusion, FusionKind
 from iron.tests.support.toys_edges import (
     chain,
     fan_in_gate_up_mul,
+    fan_out_norm_projections,
     fan_out_norm_qkv,
     kv_write_then_read,
     scan_with_state_output,
@@ -32,7 +34,7 @@ from iron.tests.support.toys_edges import (
 )
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import candidates, check, fit, measure, search
+from iron.tune.search import BUILT_PLACERS, candidates, check, fit, measure, search
 
 
 def _outside_reader_window():
@@ -168,6 +170,29 @@ def test_a_window_whose_drains_outrun_the_shim_joins_them_in_memtiles(device):
     profile.add_entry(Entry(region))
     result = fit(profile, [Timed(recording)], device)
     assert result.ok, result.why
+
+
+def test_a_window_draining_more_outputs_than_the_shim_receives_is_refused(device):
+    """A norm fanned into one more one-column projection than the shim has receiving channels is refused by the placer, before any build.
+
+    Each projection drains an output of its own, and a drain join joins only
+    one output's lanes, so no transport fits it under any placer the build
+    takes.
+    """
+    model = get_target_model(device.resolve())
+    row = next(r for r in range(model.rows()) if model.is_shim_noc_tile(0, r))
+    receives = sum(
+        model.get_num_dest_shim_mux_connections(c, row, WireBundle.DMA)
+        for c in range(model.columns())
+        if model.is_shim_noc_tile(c, row)
+    )
+    recording, region = fan_out_norm_projections(receives + 1)
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    result = fit(profile, [Timed(recording)], device, placements=tuple(BUILT_PLACERS))
+    assert not result.ok
+    assert result.stage == "placer"
+    assert "ShimNOCTile" in (result.why or "")
 
 
 @pytest.mark.supported_devices("npu2")
