@@ -612,7 +612,7 @@ class Graph:
         packing = Packing()
         if not check and profile is not None:
             recording, fused, packing = apply_profile(
-                recording, profile, require_device()
+                recording.ordered(profile), profile, require_device()
             )
             elf, torn = packaged(recording, profile)
             full_elf = elf if full_elf is None else full_elf

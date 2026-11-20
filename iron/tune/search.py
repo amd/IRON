@@ -912,8 +912,13 @@ def fit(
         if retuned:
             recording = dataclasses.replace(recording, steps=steps)
             recording.rebind(retuned)
-        # The rest is fitted as built: its version as its schedule runs it.
+        # The rest is fitted as built: its version as its schedule runs it,
+        # its regions' steps gathered (``Recording.ordered``).
         single = recording
+        try:
+            single.ordered(profile)
+        except ValueError as e:
+            return Fit(False, "analysis", str(e))
         try:
             with set_current_device(device):
                 recording = single.scheduled(profile)
@@ -946,6 +951,10 @@ def fit(
                 continue
             found = recording.occurrences(entry)
             if not found:
+                # Matched as recorded, its steps gathered into a region
+                # before it: it gives way, as an overlapping entry does.
+                if single.occurrences(entry):
+                    matched.add(index)
                 continue
             matched.add(index)
             inside = set(found[0])

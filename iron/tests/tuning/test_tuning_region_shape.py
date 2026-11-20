@@ -20,6 +20,7 @@ from iron.operators import GEMV, ElementwiseAdd
 from iron.operators.copy import Copy
 from iron.tests.support import toys_composition as toys
 from iron.tests.support.llama_model import small
+from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, measure, search
@@ -37,14 +38,7 @@ LLAMA1B_DECODE_ORDERS_PER_LAYER = 252
 
 
 def _qkv_region() -> Region:
-    return Region(
-        parts=(
-            Member(GEMV, dict(M=M, K=M)),
-            Member(GEMV, dict(M=M, K=M)),
-            Member(GEMV, dict(M=M, K=M)),
-        ),
-        edges=(),
-    )
+    return Region(parts=tuple(member(GEMV(M=M, K=M)) for _ in range(3)), edges=())
 
 
 @unbuilt
@@ -171,7 +165,6 @@ def test_llama_1b_decode_s_region_count_is_an_a_expectation(device):
     assert len(found) <= LLAMA1B_DECODE_CONVEX_SETS
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_a_reordered_region_is_bit_identical_to_the_recorded_order(device):
     recording = toys.qkv_among_rope_recording("qkv_b")
@@ -229,6 +222,21 @@ def test_a_non_convex_set_is_refused(device):
     recording = toys.qkv_among_rope_recording("non_convex")
     verdict = fit(profile, [Timed(recording)], device)
     assert not verdict.ok and verdict.stage == "analysis"
+
+
+def test_two_regions_each_depending_on_the_other_are_refused(device):
+    """``{a, c}`` and ``{b, d}`` as two regions, ``a -> d`` and ``b -> c``: each convex alone, their contraction a cycle.
+
+    No order runs each one's steps together.
+    """
+    a, b, c, d = toys.crossed_pairs()
+    recording = toys.crossed_pairs_recording("crossed", a, b, c, d)
+    profile = Profile()
+    profile.add_entry(Entry(root=Region(parts=(member(a), member(c)))))
+    profile.add_entry(Entry(root=Region(parts=(member(b), member(d)))))
+    verdict = fit(profile, [Timed(recording)], device)
+    assert not verdict.ok and verdict.stage == "analysis"
+    assert "cyclic" in (verdict.why or "")
 
 
 @unbuilt

@@ -35,11 +35,14 @@ from iron.operators import (
     Decode,
     ElementwiseAdd,
     ElementwiseMul,
+    ReLU,
     RMSNorm,
     RoPE,
     SelectiveScan,
+    Sigmoid,
     SiLU,
     Softmax,
+    Tanh,
 )
 from iron.operators.copy import Copy
 from iron.tests.support import fusable, sequences
@@ -561,6 +564,24 @@ def qkv_among_rope_recording(name: str, M: int = 64) -> Recording:
 def acyclic_contraction_recording(name: str) -> Recording:
     """Return ``a, b, c, d`` with ``a -> d`` and ``b -> c``: ``R1 = {a, c}``, ``R2 = {b, d}`` are each convex, their contraction a cycle."""
     a, b, c, d = (Copy(dtype=np.float32, input_buffer_size=64) for _ in range(4))
+    steps = sequences.steps(
+        (a, "x0", "o_a"), (b, "x1", "o_b"), (c, "o_b", "o_c"), (d, "o_a", "o_d")
+    )
+    return Recording.of_steps(name, steps, ["x0", "x1"], ["o_c", "o_d"])
+
+
+def crossed_pairs(M: int = 64) -> tuple[SiLU, Tanh, ReLU, Sigmoid]:
+    """Return ``a, b, c, d`` for ``crossed_pairs_recording``, each its own class so a region names them apart."""
+    return (
+        SiLU(size=M, tile_size=32),
+        Tanh(size=M, tile_size=32),
+        ReLU(size=M, tile_size=32),
+        Sigmoid(size=M, tile_size=32),
+    )
+
+
+def crossed_pairs_recording(name: str, a, b, c, d) -> Recording:
+    """Return ``a, b, c, d`` with ``a -> d`` and ``b -> c``: ``{a, c}`` and ``{b, d}`` are each convex, and each depends on the other."""
     steps = sequences.steps(
         (a, "x0", "o_a"), (b, "x1", "o_b"), (c, "o_b", "o_c"), (d, "o_a", "o_d")
     )
