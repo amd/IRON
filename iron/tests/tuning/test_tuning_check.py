@@ -3,17 +3,21 @@
 
 """``check`` and ``measure`` on the NPU: a composition held bit-identical to its steps run apart, and timed against them."""
 
+import numpy as np
 import pytest
 
 import iron
+from iron import Scratchpad
 from iron.common.declare import Profile
-from iron.common.declare.composition import Entry, Refinement, Region
+from iron.common.declare.composition import Entry, Refinement, Region, Schedule
 from iron.common.graph.record import Recording
 from iron.common.image.step import Edge
+from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.rms_norm import RMSNorm
-from iron.tests.support import sequences
+from iron.tests.support import sequences, toys_schedule
+from iron.tests.support.toys_check import MulUpToM, MulUpToN
 from iron.tests.support.toys_edges import chain, fan_out_norm_qkv, member
 from iron.tests.support.toys_settings import shared_kv_state, small_integer_weight
 from iron.tune.autotune import Timed
@@ -213,3 +217,170 @@ def test_a_state_written_wrong_is_caught_after_the_call_that_writes_it(device):
     )
     assert not result.ok
     assert "call 0" in (result.why or "") and "kv" in (result.why or "")
+
+
+class _Mul(iron.Graph):
+    """``x * y`` whole, with no per-call value."""
+
+    def body(self, x, y):
+        return ElementwiseMul.step(x, y, size=256, tile_size=64)
+
+
+@pytest.mark.parametrize("refinement", [Refinement.EXACT, Refinement.NO_WORSE])
+def test_a_call_and_its_base_call_each_run_at_their_own_values(device, refinement):
+    """A call bound by ``n`` held to a base call bound by ``m``: each runs at its own values and its own bound halved, paired in order."""
+    shapes = dict(x=(256,), y=(256,))
+    result = check(
+        Profile(),
+        Profile(),
+        [Timed(MulUpToN().record(**shapes), values={"n": 256})],
+        device,
+        refinement,
+        base_calls=[Timed(MulUpToM().record(**shapes), values={"m": 256})],
+    )
+    assert result.ok, result.why
+
+
+@pytest.mark.parametrize("refinement", [Refinement.EXACT, Refinement.NO_WORSE])
+def test_a_base_call_cutting_its_output_otherwise_than_its_call_is_refused(
+    device, refinement
+):
+    """The base call at ``m=128`` against its call at ``n=256``: their points cut ``out`` to other lengths, refused before any build."""
+    shapes = dict(x=(256,), y=(256,))
+    with pytest.raises(ValueError, match="select other extents of out"):
+        check(
+            Profile(),
+            Profile(),
+            [Timed(MulUpToN().record(**shapes), values={"n": 256})],
+            device,
+            refinement,
+            base_calls=[Timed(MulUpToM().record(**shapes), values={"m": 128})],
+        )
+
+
+class _WindowAtI(iron.Graph):
+    """Rows ``i`` to ``i + 4`` of ``x``, ``i`` per call."""
+
+    def body(self, x, *, i: Scratchpad[np.int32]):
+        return Copy.step(x[i : i + 4])
+
+
+class _WindowAtJ(iron.Graph):
+    """``_WindowAtI`` with its per-call start named ``j``."""
+
+    def body(self, x, *, j: Scratchpad[np.int32]):
+        return Copy.step(x[j : j + 4])
+
+
+@pytest.mark.parametrize("start", [2, 5])
+def test_a_base_call_at_its_own_window_reaches_the_device_run(device, start):
+    """The call's window starting at row 2, the base's at ``start``: one extent, so only the values tell them apart on the device."""
+    call = Timed(_WindowAtI().record(x=(16, 64)), values={"i": 2})
+    base = Timed(_WindowAtJ().record(x=(16, 64)), values={"j": start})
+    result = check(
+        Profile(), Profile(), [call], device, Refinement.EXACT, base_calls=[base]
+    )
+    if start == 2:
+        assert result.ok, result.why
+    else:
+        assert not result.ok
+        assert "out not bit-identical" in (result.why or "")
+
+
+class _TwoUpToCR(iron.Graph):
+    """``x * y`` over the first ``c`` elements and ``x * w`` over the first ``r``."""
+
+    def body(self, x, y, w, *, c: Scratchpad[np.int32], r: Scratchpad[np.int32]):
+        return (
+            ElementwiseMul.step(x, y[:c], size=256, tile_size=64),
+            ElementwiseMul.step(x, w[:r], size=256, tile_size=64),
+        )
+
+
+class _TwoUpToZM(iron.Graph):
+    """``_TwoUpToCR`` with its bounds named ``z`` and ``m``, which sort the other way round."""
+
+    def body(self, x, y, w, *, z: Scratchpad[np.int32], m: Scratchpad[np.int32]):
+        return (
+            ElementwiseMul.step(x, y[:z], size=256, tile_size=64),
+            ElementwiseMul.step(x, w[:m], size=256, tile_size=64),
+        )
+
+
+def test_halved_bounds_pair_by_the_output_extent_they_cut(device):
+    """Each halved bound pairs with the other side's that cuts the same output, whatever their names' order.
+
+    The call halves ``c`` then ``r`` (cutting ``out0`` then ``out1``), the
+    base ``m`` then ``z`` (``out1`` then ``out0``).
+    """
+    shapes = dict(x=(256,), y=(256,), w=(256,))
+    result = check(
+        Profile(),
+        Profile(),
+        [Timed(_TwoUpToCR().record(**shapes), values={"c": 256, "r": 256})],
+        device,
+        Refinement.EXACT,
+        base_calls=[Timed(_TwoUpToZM().record(**shapes), values={"z": 256, "m": 256})],
+    )
+    assert result.ok, result.why
+
+
+class _AddUpToM(iron.Graph):
+    """``x + y`` over the first ``m`` elements, ``m`` per call."""
+
+    def body(self, x, y, *, m: Scratchpad[np.int32]):
+        return ElementwiseAdd.step(x, y[:m], size=256, tile_size=64)
+
+
+def test_a_no_worse_call_is_held_to_its_base_s_reference_at_the_base_s_values(device):
+    """A multiply bound by ``n`` held no-worse to an add bound by ``m``: worse against the add's reference.
+
+    The outputs differ, so the reference is taken, at the base's own ``m``.
+    """
+    shapes = dict(x=(256,), y=(256,))
+    result = check(
+        Profile(),
+        Profile(),
+        [Timed(MulUpToN().record(**shapes), values={"n": 256})],
+        device,
+        Refinement.NO_WORSE,
+        base_calls=[Timed(_AddUpToM().record(**shapes), values={"m": 256})],
+    )
+    assert not result.ok
+    assert "out is worse" in (result.why or "")
+
+
+def test_an_exact_base_batching_what_its_call_runs_one_at_a_time_is_refused(device):
+    """A base running two decode steps a command, held exact to a profile running them one a command: refused before any build."""
+    gemv, add = toys_schedule.decode_step()
+    recording = toys_schedule.decode_step_recording("check_batched_base", gemv, add)
+    base = Profile()
+    base.add_schedule(Schedule(version=recording.version, calls_per_command=2))
+    with pytest.raises(ValueError, match="the base batches its calls"):
+        check(Profile(), base, [Timed(recording)], device, Refinement.EXACT)
+
+
+def test_an_exact_base_keeping_commands_in_flight_is_held_to_calls_one_at_a_time(
+    device,
+):
+    """A base keeping two decode commands in flight, one call each, against a profile running them one at a time: its calls run apart, bit-identical."""
+    gemv, add = toys_schedule.decode_step()
+    recording = toys_schedule.decode_step_recording("check_in_flight_base", gemv, add)
+    base = Profile()
+    base.add_schedule(Schedule(version=recording.version, commands_in_flight=2))
+    result = check(Profile(), base, [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+def test_a_base_call_checked_at_another_count_of_points_is_refused(device):
+    """A call bound per call (its values and its bound halved, two points) held to a base call with no bound (one point): refused before any build."""
+    shapes = dict(x=(256,), y=(256,))
+    with pytest.raises(ValueError, match="points pair with its call's in order"):
+        check(
+            Profile(),
+            Profile(),
+            [Timed(MulUpToN().record(**shapes), values={"n": 256})],
+            device,
+            Refinement.EXACT,
+            base_calls=[Timed(_Mul().record(**shapes))],
+        )
