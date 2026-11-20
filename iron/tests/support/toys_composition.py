@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 from ml_dtypes import bfloat16
 
+import iron
 from iron import Precision
 from iron.common.declare.composition import (
     Configuration,
@@ -196,6 +197,72 @@ def decode_attention_operator_recording(name: str, mha: MHA) -> Recording:
     """Return the recording of ``mha`` alone, decode's fused replacement for its graph."""
     steps = sequences.steps((mha, "Q", "K", "V", "out"))
     return Recording.of_steps(name, steps, ["Q", "K", "V"], ["out"])
+
+
+class PrefillAttention(iron.Graph):
+    """Prefill MHA's graph over the fused ``MHA``'s own ``Q``, ``K`` and ``V``: ``(Q * scale) K^T + causal mask -> Softmax -> P V``.
+
+    One head with no padded rows. ``mha``'s scale is a power of two, so
+    scaling ``Q`` on chip first is exact; the mask is its causal one, the
+    queries the keys' last rows, held as a weight. Its scores are of type
+    ``scores`` up to the softmax. Both matmuls sum in f32 at ``HIGHEST``, as
+    the MHA does (it never takes bfp16 macs). The mask add and the softmax
+    take two columns each, so the four steps fit npu1's 16 cores together.
+    """
+
+    def __init__(self, mha: MHA, scores: Any = bfloat16):
+        seq, keys, d = mha.seq_len, mha.kv_len, mha.d
+        self.sizes, self.scores = (seq, keys, d), scores
+        self.scale = iron.param(np.full(seq * d, mha.scale, dtype=bfloat16))
+        position = keys - seq + np.arange(seq)[:, None]
+        causal = np.where(np.arange(keys) > position, -np.inf, 0)
+        self.mask = iron.param(causal.astype(scores).reshape(-1))
+
+    def body(self, Q, K, V):
+        seq, keys, d = self.sizes
+        q = ElementwiseMul.step(Q.reshape(seq * d), self.scale)
+        scores = GEMM.step(
+            q.reshape(seq, d),
+            K.reshape(keys, d),
+            b_col_maj=True,
+            precision=Precision.HIGHEST,
+            output_dtype=self.scores,
+        )
+        masked = ElementwiseAdd.step(
+            scores.reshape(seq * keys),
+            self.mask,
+            tile_size=keys,
+            dtype=self.scores,
+            num_aie_columns=2,
+        )
+        p = Softmax.step(
+            masked.reshape(seq, keys), input_dtype=self.scores, num_aie_columns=2
+        )
+        out = GEMM.step(p, V.reshape(keys, d), precision=Precision.HIGHEST)
+        return out.reshape(1, seq, d)
+
+
+def prefill_attention_graph(
+    mha: MHA, scores: Any = bfloat16
+) -> tuple[Recording, Region]:
+    """Return ``PrefillAttention``'s recording at ``mha``'s inputs, and its four attention steps as one region.
+
+    QK^T's scores staged into the mask add, its rows streamed into the
+    softmax, whose rows are staged into P V's tiles; the scaling of Q runs
+    on its own.
+    """
+    recording = PrefillAttention(mha, scores).record(
+        **{b.name: tuple(b.shape) for b in mha.resolved().inputs}
+    )
+    region = Region(
+        parts=tuple(member(step.op) for step in recording.steps[1:]),
+        edges=(
+            CompositionEdge(0, "C", 1, "a", kind=EdgeKind.STAGED),
+            CompositionEdge(1, "y", 2, "x"),
+            CompositionEdge(2, "y", 3, "A", kind=EdgeKind.STAGED),
+        ),
+    )
+    return recording, region
 
 
 def prefill_attention_operator(
