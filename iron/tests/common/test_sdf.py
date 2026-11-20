@@ -11,12 +11,11 @@ import pytest
 from iron.common.graph.sdf import Ceiling, Channel, Event, Flow
 
 # A ceiling shaped as npu2's (Strix Halo) measures: flat to eight streams,
-# shared past them, small objects moving faster.
+# shared past them.
 CEILING = Ceiling(
     core_mhz=1800.0,
     mixed={2: 4.0, 8: 4.0, 16: 3.0},
-    mixed_object=8192,
-    objects={256: 4.4, 8192: 4.0, 32768: 4.0},
+    objects={256: 4.4, 4096: 4.0},
     read={1: 7.3},
     boundary=3600.0,
 )
@@ -256,21 +255,23 @@ def test_each_boundary_a_phased_call_crosses_pays_its_fixed_cost():
     assert flow.period(depths, costs, boundary=Fraction(5)) == phases_alone + 2 * 5
 
 
-def test_a_host_stream_of_small_objects_moves_at_the_objects_curves_gain():
-    """A stream's objects scale ``mixed``'s rate by the objects curve against ``mixed``'s own objects, linear between two measured sizes."""
-    assert CEILING.rate(4, 8192) == pytest.approx(4.0)
-    assert CEILING.rate(4, 256) == pytest.approx(4.4)
-    assert CEILING.rate(4, (256 + 8192) // 2) == pytest.approx(4.2)
-    assert CEILING.rate(4, 128) == pytest.approx(4.4)
+def test_streams_between_two_measured_counts_move_at_a_rate_between_theirs():
+    assert CEILING.rate(1) == pytest.approx(4.0)
+    assert CEILING.rate(4) == pytest.approx(4.0)
+    assert CEILING.rate(12) == pytest.approx(3.5)
 
 
 def test_streams_past_the_largest_measured_count_share_its_bandwidth():
-    assert CEILING.rate(12, 8192) == pytest.approx(3.5)
-    assert CEILING.rate(32, 8192) == pytest.approx(1.5)
-    assert CEILING.rate(32, 256) == pytest.approx(1.5 * 4.4 / 4.0)
+    assert CEILING.rate(32) == pytest.approx(1.5)
 
 
 @pytest.mark.parametrize("boundary", [3600.0, None])
 def test_a_ceiling_round_trips_through_what_the_store_keeps(boundary):
     ceiling = dataclasses.replace(CEILING, boundary=boundary)
     assert Ceiling.from_json(ceiling.as_json()) == ceiling
+
+
+def test_a_ceiling_stored_before_the_boundary_was_measured_keeps_its_rates():
+    kept = CEILING.as_json()
+    del kept["boundary"]
+    assert Ceiling.from_json(kept) == dataclasses.replace(CEILING, boundary=None)

@@ -17,7 +17,7 @@ them far. A tune writes its refit to ``<device>.json`` under the NPU cache
 Beside the terms, the device's DDR ceiling per power mode, as ``ddr.py``
 measures it (``sdf.Ceiling``): the bytes a host stream moves a core cycle,
 against how many run at once and an object's size, and what a phase
-boundary costs beyond its streams.
+boundary costs beyond its streams (none in one stored before it was).
 """
 
 from __future__ import annotations
@@ -71,13 +71,11 @@ class CostModel:
         return cls(terms=dict(prior), prior=prior)
 
     def ceiling(self) -> Ceiling | None:
-        """Return the DDR ceiling measured in the NPU's present power mode; None where none is, or it lacks a figure ``Ceiling`` holds."""
+        """Return the DDR ceiling measured in the NPU's present power mode; None where none is."""
         if not self.ddr:
             return None
         kept = self.ddr.get(pmode())
-        if kept is None or any(f.name not in kept for f in dataclasses.fields(Ceiling)):
-            return None
-        return Ceiling.from_json(kept)
+        return None if kept is None else Ceiling.from_json(kept)
 
     def predict(self, features: Mapping[str, float]) -> float:
         """Return the time, in us, ``features`` add beyond the steps' own."""

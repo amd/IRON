@@ -338,16 +338,6 @@ class Flow:
         return depths, None
 
 
-def _between(curve: Mapping[int, float], x: float) -> float:
-    """Return ``curve`` at ``x``: linear between the two measured points around it, the nearest one past either end."""
-    points = sorted(curve.items())
-    (x0, y0), (x1, y1) = (
-        max([p for p in points if p[0] <= x], default=points[0]),
-        min([p for p in points if p[0] >= x], default=points[-1]),
-    )
-    return y0 if x1 == x0 else y0 + (y1 - y0) * (x - x0) / (x1 - x0)
-
-
 @dataclass(frozen=True)
 class Ceiling:
     """A device's host streams in one power mode, as ``python -m iron.tune.ddr`` measures them.
@@ -359,9 +349,8 @@ class Ceiling:
     Attributes:
         core_mhz: The clock the cycles count (the runtime's ``core_mhz``).
         mixed: Against the streams running at once, half reading and half
-            writing, each object ``mixed_object`` bytes.
-        mixed_object: The bytes of ``mixed``'s objects.
-        objects: Against an object's bytes, at one count of streams.
+            writing.
+        objects: Against an object's elements, at one count of streams.
         read: Against the streams running at once, all reading.
         boundary: The cycles a phase boundary costs beyond its streams: a
             phased call's latency over a call all on chip, at no bytes. None
@@ -370,41 +359,40 @@ class Ceiling:
 
     core_mhz: float
     mixed: dict[int, float]
-    mixed_object: int
     objects: dict[int, float]
     read: dict[int, float]
     boundary: float | None
 
-    def rate(self, streams: int, nbytes: int) -> float:
-        """Return the bytes each of ``streams`` host streams running at once moves a cycle, its objects ``nbytes`` each.
+    def rate(self, streams: int) -> float:
+        """Return the bytes each of ``streams`` host streams running at once moves a cycle.
 
-        ``mixed`` at ``streams``, linear between two measured counts and past
-        the largest the bandwidth there shared among more, scaled by how much
-        faster an object of ``nbytes`` moves than one of ``mixed_object``
-        (``objects``, linear between two measured sizes).
+        ``mixed`` at ``streams``: linear between two measured counts, the
+        smallest's below them, and past the largest the bandwidth there
+        shared among more.
         """
-        top = max(self.mixed)
-        shared = (
-            self.mixed[top] * top / streams
-            if streams > top
-            else _between(self.mixed, streams)
+        measured = sorted(self.mixed.items())
+        (low, below), (high, above) = (
+            max([m for m in measured if m[0] <= streams], default=measured[0]),
+            min([m for m in measured if m[0] >= streams], default=measured[-1]),
         )
+        if streams > high:
+            return below * low / streams
         return (
-            shared
-            * _between(self.objects, nbytes)
-            / _between(self.objects, self.mixed_object)
+            below
+            if high == low
+            else below + (above - below) * (streams - low) / (high - low)
         )
 
     @classmethod
     def from_json(cls, data: Mapping) -> Ceiling:
-        """Return the ceiling ``as_json`` wrote."""
+        """Return the ceiling ``as_json`` wrote; one stored before the boundary was measured has none."""
+        boundary = data.get("boundary")
         return cls(
             core_mhz=float(data["core_mhz"]),
             mixed={int(k): float(v) for k, v in data["mixed"].items()},
-            mixed_object=int(data["mixed_object"]),
             objects={int(k): float(v) for k, v in data["objects"].items()},
             read={int(k): float(v) for k, v in data["read"].items()},
-            boundary=None if data["boundary"] is None else float(data["boundary"]),
+            boundary=None if boundary is None else float(boundary),
         )
 
     def as_json(self) -> dict:
@@ -501,8 +489,7 @@ class Analysis:
 
         Steps on one core cost each its own kernel's call, in their firing
         order. A host stream spends an object's bytes at the ceiling's rate
-        for the streams its phase runs at once and its objects' bytes
-        (``Ceiling.rate``).
+        for the streams its phase runs at once (``Ceiling.rate``).
 
         Raises:
             NotImplementedError: One core's body calls several kernels, in an
@@ -554,7 +541,7 @@ class Analysis:
             costs.append(row)
         for actor, nbytes in self.transfers.items():
             assert self.ceiling is not None, "host transfers are actors only with one"
-            rate = self.ceiling.rate(streams[phases[actor]], nbytes)
+            rate = self.ceiling.rate(streams[phases[actor]])
             for i in self.work[actor]:
                 costs[actor][i] = Fraction(nbytes / rate)
         return costs

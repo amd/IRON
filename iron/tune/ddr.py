@@ -51,7 +51,7 @@ CHANNELS = (1, 2, 3, 4, 6, 8)
 # Elements an object of the mixed curve's pass-throughs.
 MIXED_TILE = 4096
 # Elements an object, at OBJECT_CHANNELS pass-throughs.
-OBJECTS = (128, 256, 1024, 4096, 16384)
+OBJECTS = (256, 1024, 4096, 16384)
 OBJECT_CHANNELS = 3
 # A weight-bound GEMV's (columns, channels), as the bandwidth tests request.
 READ_WIDTHS = ((1, 1), (2, 1), (4, 1), (8, 1), (8, 2))
@@ -242,7 +242,7 @@ def measured(device, log: Callable[[str], object] = print) -> Ceiling:
         if tile == MIXED_TILE:
             mixed[2 * channels] = rate
         if channels == OBJECT_CHANNELS:
-            objects[tile * item] = rate
+            objects[tile] = rate
     for columns, channels in READ_WIDTHS:
         ops = [read_gemv(r, columns, channels, device) for r in READ_ROWS]
         streams = ops[0].num_aie_columns * ops[0].num_channels
@@ -259,7 +259,6 @@ def measured(device, log: Callable[[str], object] = print) -> Ceiling:
     return Ceiling(
         core_mhz=core_mhz,
         mixed=mixed,
-        mixed_object=MIXED_TILE * item,
         objects=objects,
         read=read,
         boundary=boundary,

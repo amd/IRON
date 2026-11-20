@@ -50,8 +50,7 @@ def test_a_models_ddr_rates_round_trip_by_power_mode(tmp_path):
     ceiling = Ceiling(
         core_mhz=1800.0,
         mixed={2: 4.02, 16: 2.99},
-        mixed_object=8192,
-        objects={256: 4.3, 8192: 4.02},
+        objects={256: 4.25, 4096: 4.02},
         read={1: 3.9},
         boundary=3600.0,
     )

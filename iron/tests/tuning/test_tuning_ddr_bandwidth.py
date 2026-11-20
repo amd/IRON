@@ -17,12 +17,11 @@ from iron.tests.support import toys_dataflow as toys
 from iron.tune.ddr import read_gemv
 
 # A ceiling shaped as npu2's (Strix Halo) measures: flat to eight streams,
-# shared past them, small objects moving faster.
+# shared past them.
 CEILING = Ceiling(
     core_mhz=1800.0,
     mixed={2: 4.0, 8: 4.0, 16: 3.0},
-    mixed_object=8192,
-    objects={256: 4.4, 8192: 4.0, 32768: 4.0},
+    objects={256: 4.4, 4096: 4.0},
     read={1: 7.3},
     boundary=3600.0,
 )
@@ -110,13 +109,3 @@ def test_each_boundary_adds_its_measured_cost_to_the_phased_period(edges, device
         edges * Fraction(CEILING.boundary)
     )
 
-
-# npu2's: its kernels are traced on it.
-@pytest.mark.supported_devices("npu2")
-def test_host_streams_move_their_fifos_objects_at_the_objects_curves_rate(device):
-    """Each host fill and drain moves its fifo's 256-byte objects; at a ceiling where those move faster than ``mixed``'s, the phased period is shorter."""
-    region, recording = _through_host(1 << 17, 1)
-    analysis = analyze(region, recording, device, ceiling=CEILING)
-    assert set(analysis.transfers.values()) == {128 * 2}
-    flat = dataclasses.replace(CEILING, objects={CEILING.mixed_object: 4.0})
-    assert analysis.period < analyze(region, recording, device, ceiling=flat).period
