@@ -68,7 +68,7 @@ def test_a_design_per_range_round_trips_as_variants(tmp_path, device):
     variants = Variants(
         values=("rows",),
         ranges=(
-            (((1, 256),), small),
+            (((0, 256),), small),
             (((257, 2048),), large),
         ),
     )
@@ -121,7 +121,7 @@ def test_a_variant_is_bit_identical_to_the_untuned_build_on_both_sides_of_its_bo
     small = Entry(root=Member(cls=GEMM, dims={"M": 256, "K": 256, "N": 256}))
     large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
     variants = Variants(
-        values=("rows",), ranges=((((1, 256),), small), (((257, 2048),), large))
+        values=("rows",), ranges=((((0, 256),), small), (((257, 2048),), large))
     )
     tuned = Profile()
     tuned.add_variants(variants)
@@ -166,7 +166,7 @@ def test_a_boundary_is_kept_only_where_its_saving_beats_a_switch_and_one_more_de
     small = Entry(root=Member(cls=GEMM, dims={"M": 256, "K": 256, "N": 256}))
     large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
     variants = Variants(
-        values=("rows",), ranges=((((1, 256),), small), (((257, 2048),), large))
+        values=("rows",), ranges=((((0, 256),), small), (((257, 2048),), large))
     )
     with_entry = Profile()
     with_entry.add_variants(variants)
@@ -176,7 +176,6 @@ def test_a_boundary_is_kept_only_where_its_saving_beats_a_switch_and_one_more_de
     assert variants in tuned.variants()
 
 
-@unbuilt
 def test_ranges_that_do_not_tile_the_value_space_are_refused(device):
     """Ranges that leave a gap in the per-call value's space are refused before any build."""
     g = RangedPair(K=256, N=256)
@@ -186,7 +185,7 @@ def test_ranges_that_do_not_tile_the_value_space_are_refused(device):
     gapped = Variants(
         values=("rows",),
         ranges=(
-            (((1, 200),), small),
+            (((0, 200),), small),
             (((400, 2048),), large),
         ),
     )
@@ -195,28 +194,28 @@ def test_ranges_that_do_not_tile_the_value_space_are_refused(device):
     result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
+    assert "do not tile" in (result.why or "")
 
 
-@unbuilt
 def test_more_variants_than_the_hosts_image_budget_is_refused(device):
     """More variant designs than ``fit``'s ``max_images`` (one more resident image apiece) is refused before any build."""
     g = RangedPair(K=256, N=256)
     recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
     ranges = tuple(
         (
-            ((lo, lo + 63),),
+            ((lo, 2048 if lo == 1984 else lo + 63),),
             Entry(root=Member(cls=GEMM, dims={"M": 64, "K": 256, "N": 256})),
         )
-        for lo in range(1, 2048, 64)
+        for lo in range(0, 2048, 64)
     )
     profile = Profile()
     profile.add_variants(Variants(values=("rows",), ranges=ranges))
     result = fit(profile, [Timed(recording)], device, max_images=4)
     assert not result.ok
     assert result.stage == "counts"
+    assert "images at once" in (result.why or "")
 
 
-@unbuilt
 def test_more_runtime_parameters_than_a_calls_scratchpad_is_refused(device):
     """More run-time parameters than a call's scratchpad holds is refused before any build."""
     g = RangedPair(K=256, N=256)
@@ -227,9 +226,9 @@ def test_more_runtime_parameters_than_a_calls_scratchpad_is_refused(device):
     result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
+    assert "scratchpad holds" in (result.why or "")
 
 
-@unbuilt
 def test_a_compile_time_value_that_varies_within_its_range_without_variants_is_refused(
     device,
 ):
@@ -241,9 +240,9 @@ def test_a_compile_time_value_that_varies_within_its_range_without_variants_is_r
     result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
+    assert "compile time" in (result.why or "")
 
 
-@unbuilt
 def test_a_runtime_parameter_in_a_pack_on_an_xclbin_is_refused(device):
     """A run-time-bound per-call parameter inside a pack (independent steps, no edges) is refused on an xclbin-per-step packaging before any build."""
     g = RangedPair(K=256, N=256)
