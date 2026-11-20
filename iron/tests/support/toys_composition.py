@@ -119,6 +119,31 @@ def prefill_attention_ops(
     return qk, add_mask, softmax, pv
 
 
+def prefill_scores_recording(
+    name: str, qk: GEMM, add_mask: ElementwiseAdd, softmax: Softmax
+) -> Recording:
+    """Return the recording of prefill's graph up to the softmax: ``Q K^T -> + causal mask -> Softmax``."""
+    steps = sequences.steps(
+        (qk, "Q", "Kt", "scores"),
+        (add_mask, "scores", "mask", "masked"),
+        (softmax, "masked", "p"),
+    )
+    return Recording.of_steps(name, steps, ["Q", "Kt", "mask"], ["p"])
+
+
+def prefill_scores_region(
+    qk: GEMM, add_mask: ElementwiseAdd, softmax: Softmax
+) -> Region:
+    """Return ``prefill_scores_recording``'s steps as one region: QK^T's column halves staged into the mask add's rows, which stream into the softmax."""
+    return Region(
+        parts=(member(qk), member(add_mask), member(softmax)),
+        edges=(
+            CompositionEdge(0, "C", 1, "a", kind=EdgeKind.STAGED),
+            CompositionEdge(1, "y", 2, "x"),
+        ),
+    )
+
+
 def prefill_attention_recording(
     name: str, qk: GEMM, add_mask: ElementwiseAdd, softmax: Softmax, pv: GEMM
 ) -> Recording:

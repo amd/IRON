@@ -854,8 +854,8 @@ class Operand:
     ) -> list[tuple[int, TensorAccessPattern, Value | None, int | None]]:
         """Return ``lanes``' transfers as its joined drains take them: a host lane a run, each round an object of each lane.
 
-        The run's pattern puts one axis of its lanes beside the first lane's
-        objects, held element for element to the lanes' own walks.
+        The run's pattern is the strided walk of those elements, held
+        element for element to the lanes' own walks.
 
         Raises:
             ValueError: A lane moves a per-call count or more than one
@@ -874,35 +874,12 @@ class Operand:
         index = np.arange(self.elements)
         out = []
         for host, run in enumerate(self.joined_drains()):
-            first = taps[run[0]]
             walks = [taps[k].gather(index).reshape(-1, elements) for k in run]
             want = np.stack(walks, axis=1).reshape(-1)
-            step = int(walks[1][0, 0] - walks[0][0, 0]) if len(run) > 1 else 0
-            # The first lane's dimensions, split where an object ends inside one.
-            dims = list(zip(first.sizes, first.strides, strict=True))
-            inner, at = 1, len(dims)
-            while at > 0 and inner < elements:
-                size, stride = dims[at - 1]
-                if inner * size <= elements:
-                    inner *= size
-                    at -= 1
-                    continue
-                f, rest = divmod(elements, inner)
-                if rest or size % f:
-                    break
-                dims[at - 1 : at] = [(size // f, stride * f), (f, stride)]
-                inner = elements
-            dims = [
-                (s, d) for s, d in dims[:at] + [(len(run), step)] + dims[at:] if s != 1
-            ]
+            found = _walk(want)
             joined = (
-                TensorAccessPattern(
-                    tuple(self.shape),
-                    first.offset,
-                    [s for s, _ in dims],
-                    [d for _, d in dims],
-                )
-                if inner == elements and len(dims) <= 4
+                TensorAccessPattern(tuple(self.shape), found[0], found[1], found[2])
+                if found is not None and len(found[1]) <= 4
                 else None
             )
             if (
@@ -1015,7 +992,11 @@ class Staging:
     into a slot of each of its ``sink`` lanes. One sink lane is a join, one
     source lane a split, and several of each (a ratio) a join split again. A
     round is as small as both sides' whole objects allow, so a split whose
-    lanes change from object to object splits rounds of several objects.
+    lanes change from object to object splits rounds of several objects. A
+    round holding the sink's elements in another order is read off its
+    memtile in the sink's (``walks``), as a strided walk of the joined
+    round: one GEMM's column halves into another operator's rows. A split
+    to more lanes than a memtile sends is a split of splits.
     Derived from both operands' ``transfers()`` and checked element for element
     against them, so every lane of ``sink`` reads, round by round, what the host
     round trip gives it. A per-call bound is honored only where both sides move
@@ -1023,15 +1004,17 @@ class Staging:
 
     ``groups`` holds, per group, its lanes of ``source`` in the order a round
     joins them and each one's slot of a round, in elements, then its lanes of
-    ``sink`` and their slots, in the order the round splits into them.
+    ``sink`` and their slots, in the order the round splits into them;
+    ``walks``, per group, the walk reading a joined round in that order, or
+    None where it is already.
 
     Raises:
         ValueError: The two are not one buffer, a side's lanes do not visit
             each element once or in whole objects, a bound is not honored as
-            above, no round reproduces ``sink``'s order, or a memtile cannot
-            take one: a split to more lanes than its DMA channels, or a round
-            past its memory. A join of more lanes than a memtile takes is a
-            join of joins.
+            above, no round holds ``sink``'s elements in an order one
+            memtile walk reads, or a round is past a memtile's memory. A join
+            of more lanes than a memtile takes is a join of joins, a split to
+            more than it sends a split of splits.
     """
 
     def __init__(self, source: Operand, sink: Operand) -> None:
@@ -1132,11 +1115,12 @@ class Staging:
         tm = get_target_model(dev.resolve())
         row = next(r for r in range(tm.rows()) if tm.is_mem_tile(0, r))
         self.fan_in = tm.get_num_dest_switchbox_connections(0, row, WireBundle.DMA)
-        channels_out = tm.get_num_source_switchbox_connections(0, row, WireBundle.DMA)
+        self.fan_out = tm.get_num_source_switchbox_connections(0, row, WireBundle.DMA)
         self.capacity = tm.get_mem_tile_size()
         self.item = bfp.itemsize(sink.dtype)
 
         self.groups: list[tuple[list[int], list[int], list[int], list[int]]] = []
+        self.walks: list[TensorAccessPattern | None] = []
         owner = np.empty(source.elements, dtype=np.int64)
         for lane, stream in enumerate(produced):
             owner[stream] = lane
@@ -1174,16 +1158,45 @@ class Staging:
                 given = [len(consumed[j]) // k for j in outs]
                 if rounds % k or any(s * self.item % 4 for s in taken + given):
                     continue
-                if np.array_equal(
-                    np.concatenate([produced[i].reshape(k, -1) for i in ins], axis=1),
-                    np.concatenate([consumed[j].reshape(k, -1) for j in outs], axis=1),
+                joined = np.concatenate(
+                    [produced[i].reshape(k, -1) for i in ins], axis=1
+                )
+                wanted = np.concatenate(
+                    [consumed[j].reshape(k, -1) for j in outs], axis=1
+                )
+                if np.array_equal(joined, wanted):
+                    walk = None
+                    break
+                # Each round's elements, read off the memtile in the sink's
+                # order: one walk, the same every round.
+                order = np.argsort(joined, axis=1)
+                at = np.take_along_axis(
+                    order,
+                    np.stack(
+                        [
+                            np.searchsorted(j[o], w)
+                            for j, o, w in zip(joined, order, wanted, strict=True)
+                        ]
+                    ).clip(0, joined.shape[1] - 1),
+                    axis=1,
+                )
+                found = _walk(at[0])
+                if (
+                    not np.array_equal(np.take_along_axis(joined, at, axis=1), wanted)
+                    or (at != at[0]).any()
+                    or found is None
+                    or found[0] != 0
+                    or len(found[1]) > 4
                 ):
+                    continue
+                walk = TensorAccessPattern((joined.shape[1],), 0, found[1], found[2])
+                if dev.dma_bd_fits(0, row, walk, sink.dtype):
                     break
             else:
                 raise ValueError(
                     f"{edge}: no round of lanes {ins} of {source.name}, joined "
-                    f"in turn, splits into lanes {outs} of {sink.name} in their "
-                    f"host order"
+                    f"in turn, holds lanes {outs} of {sink.name} in an order "
+                    f"one memtile walk reads in their host order"
                 )
             if sum(taken) * self.item > self.capacity:
                 raise ValueError(
@@ -1199,13 +1212,8 @@ class Staging:
                     f"{source.name} and {tile_c} of {sink.name}, not whole "
                     f"rounds of slots {taken} into {given}"
                 )
-            if len(outs) > channels_out:
-                raise ValueError(
-                    f"{edge}: lanes {ins} of {source.name} split into "
-                    f"{len(outs)} lanes of {sink.name} in one memtile, which "
-                    f"sends {channels_out}"
-                )
             self.groups.append((ins, taken, outs, given))
+            self.walks.append(walk)
 
     def build(self) -> list[ObjectFifo]:
         """Wire each group at memtiles over ends of ``source``'s lanes (``Operand.reader``).
@@ -1220,34 +1228,78 @@ class Staging:
         """
         source, sink = self.source, self.sink
         fifos: list[Any] = [None] * sink.lanes
-        for ins, taken, outs, given in self.groups:
+        for (ins, taken, outs, given), walk in zip(self.groups, self.walks):
             ends = [source.reader(k) for k in ins]
             if len(outs) == 1:
-                fifos[outs[0]] = self.joined(ends, taken, sink.obj_type)
+                fifos[outs[0]] = self.joined(ends, taken, sink.obj_type, walk)
                 continue
-            if len(ins) == 1 and taken[0] == math.prod(source.obj_shape):
+            if (
+                walk is None
+                and len(ins) == 1
+                and taken[0] == math.prod(source.obj_shape)
+            ):
                 end = ends[0]
             else:
-                end = self.joined(ends, taken, None).cons()
-            parts = end.split(
-                list(itertools.accumulate(given[:-1], initial=0)),
-                obj_types=[sink.obj_type] * len(outs),
-            )
-            for k, out in zip(outs, parts):
+                end = self.joined(ends, taken, None, walk).cons()
+            for k, out in zip(outs, self.split(end, given)):
                 fifos[k] = out
         return fifos
 
-    def joined(self, ends: list, slots: list[int], read_as: Any) -> ObjectFifo:
+    def split(self, end: Any, given: list[int]) -> list[ObjectFifo]:
+        """Return a memtile split of ``end``'s objects, a fifo a slot of ``given`` in turn, each of ``sink``'s ``obj_type``.
+
+        More slots than a memtile sends split in parts first, each part one
+        link's output and the next's input, on another memtile.
+        """
+        if len(given) > self.fan_out:
+            size = math.ceil(len(given) / math.ceil(len(given) / self.fan_out))
+            parts = [given[at : at + size] for at in range(0, len(given), size)]
+            spans = [sum(part) for part in parts]
+            return [
+                fifo
+                for part, fifo in zip(
+                    parts,
+                    end.split(
+                        list(itertools.accumulate(spans[:-1], initial=0)),
+                        obj_types=[
+                            np.ndarray[(span,), np.dtype[self.sink.dtype]]
+                            for span in spans
+                        ],
+                    ),
+                    strict=True,
+                )
+                for fifo in self.split(fifo.cons(), part)
+            ]
+        return end.split(
+            list(itertools.accumulate(given[:-1], initial=0)),
+            obj_types=[self.sink.obj_type] * len(given),
+        )
+
+    def joined(
+        self,
+        ends: list,
+        slots: list[int],
+        read_as: Any,
+        walk: TensorAccessPattern | None = None,
+    ) -> ObjectFifo:
         """Return a memtile fifo whose objects join ``ends``' objects.
 
         More ends than a memtile takes join in parts first, each part one
-        link's output and the next's input, on another memtile.
+        link's output and the next's input, on another memtile. A join's
+        output moves one end's slot at a time, so a walk across slots reads
+        the joined object out of one more memtile, forwarded whole.
 
         Args:
             ends: The producer ends joined into one fifo's objects.
             slots: Each end's slot of the joined object, in elements.
             read_as: The type its consumers read objects as, where given.
+            walk: How the memtile reads each joined object out, where not
+                in order.
         """
+        if walk is not None and len(ends) > 1:
+            return self.joined(
+                [self.joined(ends, slots, None).cons()], [sum(slots)], read_as, walk
+            )
         if len(ends) > self.fan_in:
             size = math.ceil(len(ends) / math.ceil(len(ends) / self.fan_in))
             starts = range(0, len(ends), size)
@@ -1260,12 +1312,14 @@ class Staging:
                 ],
                 [sum(slots[at : at + size]) for at in starts],
                 read_as,
+                walk,
             )
         obj = np.ndarray[(sum(slots),), np.dtype[self.sink.dtype]]
         fifo = ObjectFifo(
             obj,
             depth=2 if 2 * sum(slots) * self.item <= self.capacity else 1,
             consumer_obj_type=None if read_as in (None, obj) else read_as,
+            to_stream=walk,
         )
         # One source is a forward, which takes no offsets.
         offsets = list(itertools.accumulate(slots[:-1], initial=0))
@@ -1273,6 +1327,35 @@ class Staging:
             ends, fifo.prod(), AnyMemTile, offsets if len(ends) > 1 else [], []
         )
         return fifo
+
+
+def _walk(index: np.ndarray) -> tuple[int, list[int], list[int]] | None:
+    """Return ``(offset, sizes, strides)`` of the strided walk visiting ``index`` in order, outermost dimension first, or None where none does.
+
+    Each dimension is the longest run at one stride that divides what is
+    left into rows alike; the rows' starts are the next one out.
+    """
+    rest = np.asarray(index, dtype=np.int64)
+    sizes: list[int] = []
+    strides: list[int] = []
+    while len(rest) > 1:
+        step = int(rest[1] - rest[0])
+        off = np.flatnonzero(np.diff(rest) != step)
+        run = int(off[0]) + 1 if len(off) else len(rest)
+        for n in range(run, 1, -1):
+            if len(rest) % n:
+                continue
+            rows = rest.reshape(-1, n)
+            if np.array_equal(
+                rows - rows[:, :1], np.broadcast_to(step * np.arange(n), rows.shape)
+            ):
+                break
+        else:
+            return None
+        sizes.insert(0, n)
+        strides.insert(0, step)
+        rest = rows[:, 0]
+    return int(rest[0]), sizes or [1], strides or [1]
 
 
 def concrete(values, where) -> tuple[int, ...]:

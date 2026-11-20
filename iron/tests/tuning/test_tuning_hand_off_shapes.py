@@ -125,6 +125,7 @@ _BUILT = {
     "npu2": {
         "broadcast",
         "join_in_pairs",
+        "layout_transpose",
         "ratio_three_into_two",
         "ratio_two_into_three",
         "split_in_two",
