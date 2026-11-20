@@ -31,6 +31,7 @@ from aie import ir
 from aie.dialects.aie import get_target_model
 from aie.iron.device import Device
 from aie.utils import set_current_device
+from aie.utils.compile.jit.params import OperatorParam
 
 from ..common.declare import Profile
 from ..common.declare.composition import (
@@ -48,9 +49,10 @@ from ..common.declare.composition import (
 )
 from ..common.design import OperatorDesign
 from ..common.graph.carried import CarriedLoop
+from ..common.graph.coded import CodedWeight, encode_all
 from ..common.graph.compiled import _words
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
-from ..common.graph.fusion import composed, memory_waits
+from ..common.graph.fusion import composed, in_turn, memory_waits, narrowed
 from ..common.graph.record import Recording
 from ..common.graph.sdf import Derivation
 from ..common.image.compose import ANNEALED, SEQUENTIAL
@@ -58,6 +60,7 @@ from ..common.image.packaging import SCRATCHPAD_WORDS
 from ..common.image.step import Edge, EdgeKind, FusionKind, HandOff
 from .autotune import Point, Timed, refusal, settings
 from .cli import WATCHDOG_HEADROOM, watchdog_s
+from .costmodel import CostModel
 from .ddr import Ceiling
 from .fusions import (
     Applied,
@@ -66,6 +69,7 @@ from .fusions import (
     _bound_points,
     _random_tensor,
     compare_graphs,
+    design_cores,
     drawn_inputs,
     group_fit_verdict,
 )
@@ -263,8 +267,7 @@ _NOT_GENERATED = (
     "inflows",
     "a runtime plan's DDR burst lengths and transfer sizes",
     "nested regions",
-    "a configuration of one design, and its concurrency, width, residency, "
-    "switch and teardown",
+    "a configuration's concurrency, partial width, residency, switch and teardown",
     "widths differing between a region's members",
     "fission",
     "substitution",
@@ -376,11 +379,18 @@ def candidates(
     interleaved, and its packaging; ``fit`` refuses one that breaks a
     dependence.
 
-    Before the schedules, after each call's tunables, its configurations:
-    each window of consecutive steps a region's window may be, of two or
-    more designs, as one ``Configuration`` loaded together, each region the
-    profile composes inside it (at its first match) one part, every other
-    step a member.
+    Before the schedules, after each call's tunables, its configurations,
+    each the designs it loads together (``Configuration``): designs that
+    share an array (IRON's ``array_key``) are one device, so each array's
+    shapes alone, then the designs of each window of consecutive steps a
+    region's window may be, two or more, a shape once and each region the
+    profile composes whole in it (at each match it runs in a row) one part.
+    Each is narrowed to co-reside (``narrowed``): as recorded where its
+    designs' cores fit the array, else at the widest width at which they
+    do, the narrowest where none does, for ``fit`` to refuse. They are
+    yielded most saving first, by what their switches save as the device's
+    cost model prices them (``CostModel``), every step of their designs
+    run in them.
 
     Args:
         calls: The graph's calls, every version.
@@ -682,35 +692,138 @@ def candidates(
                             else Refinement.EXACT
                         ),
                     )
-        # Each region the profile composes, by its first match's first step.
-        pieces: dict[int, tuple[Region, tuple[int, ...]]] = {}
-        for entry in profile.entries():
+        piece_of: dict[int, tuple[Region, tuple[int, ...]]] = {}
+        design_of: dict[int, tuple] = {}
+        for k, entry in enumerate(profile.entries()):
             root = entry.root
             if not isinstance(root, Region):
                 continue
-            for match in recording.occurrences(entry)[:1]:
-                if match == tuple(range(match[0], match[0] + len(match))):
-                    pieces.setdefault(match[0], (root, match))
+            for match in recording.occurrences(entry):
+                if match == tuple(
+                    range(match[0], match[0] + len(match))
+                ) and not piece_of.keys() & set(match):
+                    piece_of.update({s: (root, match) for s in match})
+                    design_of.update({s: ("region", k) for s in match})
+        with set_current_device(device):
+            resolved = [step.op.resolved(device) for step in steps]
+            for s, op in enumerate(resolved):
+                design_of.setdefault(s, ("array", op.array_key()))
+            placed: dict[tuple, int] = {}
+            for op in resolved:
+                if op.array_key() not in placed:
+                    placed[op.array_key()] = design_cores(op)
+            cores_of: dict[tuple, int] = {}
+            for s, design in design_of.items():
+                if design[0] == "region" or design not in cores_of:
+                    cores_of[design] = (
+                        cores_of.get(design, 0) + placed[resolved[s].array_key()]
+                    )
+        # By the designs it loads together: its parts, and the step each of
+        # their steps is.
+        memberships: dict[frozenset, tuple[tuple[Region | Member, ...], list[int]]] = {}
+        for s, design in design_of.items():
+            if design[0] == "array" and frozenset([design]) not in memberships:
+                at = []
+                for t in range(len(steps)):
+                    if design_of[t] == design and all(
+                        members[t] != members[u] for u in at
+                    ):
+                        at.append(t)
+                memberships[frozenset([design])] = (
+                    tuple(members[t] for t in at),
+                    at,
+                )
         for lo in range(len(steps)):
             for hi in range(lo + 1, min(lo + cores, len(steps))):
                 if recording.crosses_host(lo, hi):
                     break
-                if all(m == members[lo] for m in members[lo : hi + 1]):
-                    continue  # one design: its own configuration already
+                if lo in piece_of and piece_of[lo][1][0] < lo:
+                    break  # it cuts a region the profile composes
+                if hi in piece_of and piece_of[hi][1][-1] > hi:
+                    continue
                 parts: list[Region | Member] = []
+                at = []
                 s = lo
                 while s <= hi:
-                    piece = pieces.get(s)
-                    if piece is not None and piece[1][-1] <= hi:
-                        parts.append(piece[0])
-                        s += len(piece[1])
-                    else:
+                    if s in piece_of:
+                        root, match = piece_of[s]
+                        parts.append(root)
+                        at += match
+                        s = match[-1] + 1
+                        continue
+                    if members[s] not in parts:
                         parts.append(members[s])
-                        s += 1
-                entry = Entry(Configuration(tuple(parts)))
-                if len(parts) > 1 and entry not in proposed:
-                    proposed.append(entry)
-                    yield AddEntry(entry, frozenset(range(lo, hi + 1)))
+                        at.append(s)
+                    s += 1
+                designs = frozenset(design_of[t] for t in at)
+                if len(designs) > 1:
+                    memberships.setdefault(designs, (tuple(parts), at))
+        model = CostModel.load(device.name)
+        if model is None:
+            model = CostModel()
+        offers: list[tuple[float, Configuration, frozenset[int]]] = []
+        for designs, (parts, at) in memberships.items():
+            configuration = Configuration(parts)
+            width = (
+                max(vars(resolved[s]).get("num_aie_columns") or 0 for s in at)
+                if len(designs) > 1
+                else 0
+            )
+            while True:
+                together: dict[tuple, int] = {}
+                with set_current_device(device):
+                    for s, m in zip(at, configuration.steps()):
+                        op = (
+                            steps[s].op._with_tunables(**m.tunables).resolved(device)
+                            if m.tunables
+                            else resolved[s]
+                        )
+                        if op.array_key() not in placed:
+                            placed[op.array_key()] = design_cores(op)
+                        together[design_of[s]] = placed[op.array_key()] + (
+                            together.get(design_of[s], 0)
+                            if design_of[s][0] == "region"
+                            else 0
+                        )
+                if sum(together.values()) <= cores or width <= 1:
+                    break
+                width -= 1
+                try:
+                    with set_current_device(device):
+                        narrow = narrowed(
+                            Configuration(parts, columns=width), tuple(at), recording
+                        )
+                except NotImplementedError:
+                    break  # a step declares no column count
+                configuration = dataclasses.replace(narrow, columns=None)
+            predicted = []
+            for merged in (frozenset(), designs):
+                group = {d: merged if d in merged else d for d in cores_of}
+                order = [group[design_of[s]] for s in range(len(steps))]
+                into = [b for a, b in zip([None, *order], order) if a != b]
+                predicted.append(
+                    model.predict(
+                        {
+                            "switches": len(into),
+                            "switch_cores": sum(
+                                sum(together.values()) if g == merged else cores_of[g]
+                                for g in into
+                            ),
+                            "packed_steps": sum(
+                                group[design_of[s]] == merged
+                                for s in range(len(steps))
+                                if len(merged) > 1
+                            ),
+                        }
+                    )
+                )
+            touches = frozenset(s for s in range(len(steps)) if design_of[s] in designs)
+            offers.append((predicted[0] - predicted[1], configuration, touches))
+        for _, configuration, touches in sorted(offers, key=lambda o: -o[0]):
+            entry = Entry(configuration)
+            if entry not in proposed:
+                proposed.append(entry)
+                yield AddEntry(entry, touches)
     versions = [t.recording.version for t in calls]
     for timed in calls:
         version = timed.recording.version
@@ -804,6 +917,16 @@ def fit(
     there, nothing is refused and the log says which. A pack (a region of
     no edges) on an xclbin per step reads no per-call value at run time: a
     dispatch parameter, which a pack's one sequence does not carry.
+
+    Each call's weights an operator reads coded by declaration (``Decode``),
+    with no flag to read them plain, must each code within its rows'
+    capacity: the counts refuse the first row that does not. A step that
+    reads its weight coded (under its coded flag, or fed on chip by a step
+    reading coded by declaration) must share its array (``array_key`` as
+    recorded) with no step reading plain: coding is part of the array, so
+    coding part of a shared array splits it, and a packing that fit runs
+    out of cores. A split proposed with it would be taken, but a split is
+    not representable yet, so the counts refuse every such profile.
 
     Its values' own choices, before any entry: no more values bound at run
     time than a call's scratchpad holds (``SCRATCHPAD_WORDS``, a word
@@ -1039,6 +1162,18 @@ def fit(
     scheduled: set[int] = set()
     for timed in calls:
         recording = timed.recording
+        coded = {
+            weight: recording.declared_coded(h)
+            for weight, h in recording.weights.values()
+            if isinstance(weight, CodedWeight)
+        }
+        for weight, why in encode_all(w for w, ops in coded.items() if ops).items():
+            return Fit(
+                False,
+                "counts",
+                f"{recording.name}: {type(coded[weight][0]).__name__} reads "
+                f"{weight.name} coded by declaration, and {why}",
+            )
         steps = list(recording.steps)
         retuned: dict[int, list] = {}
         for i, step in enumerate(steps):
@@ -1067,6 +1202,47 @@ def fit(
         if retuned:
             recording = dataclasses.replace(recording, steps=steps)
             recording.rebind(retuned)
+        # Each step that reads its weight coded: under its own flag, or fed
+        # on chip by a step reading coded by declaration (Decode).
+        coded = {
+            i
+            for i, step in enumerate(steps)
+            if any(
+                b.coded and isinstance(b.declared_coded, OperatorParam)
+                for b in step.op.buffers
+            )
+        }
+        for entry in profile.entries():
+            if isinstance(entry.root, Member):
+                continue
+            edges, _ = entry.root.wiring()
+            for match in timed.recording.occurrences(entry):
+                for k, m in enumerate(entry.root.steps()):
+                    if any(
+                        isinstance(b.declared_coded, OperatorParam)
+                        and (m.tunables or {}).get(b.declared_coded.name) is True
+                        for b in steps[match[k]].op.buffers
+                    ):
+                        coded.add(match[k])
+                for _, p, c in edges:
+                    if any(
+                        b.declared_coded is True for b in steps[match[p]].op.buffers
+                    ):
+                        coded.add(match[c])
+        with set_current_device(device):
+            arrays = [s.op.resolved(device).array_key() for s in timed.recording.steps]
+        for i in sorted(coded):
+            plain = [
+                j for j, key in enumerate(arrays) if key == arrays[i] and j not in coded
+            ]
+            if plain:
+                return Fit(
+                    False,
+                    "counts",
+                    f"{recording.name}: steps {i} and {plain[0]} share an array, and "
+                    f"coding the weight step {i} reads but not step {plain[0]}'s "
+                    f"splits it",
+                )
         # The rest is fitted as built: its version as its schedule runs it,
         # its regions' steps gathered (``Recording.ordered``).
         single = recording
@@ -1097,6 +1273,7 @@ def fit(
         ]
         for index, entry in enumerate(profile.entries()):
             region = entry.root
+            turns: tuple[tuple[int, int], ...] = ()
             if any(m.part is not None for m in region.steps()):
                 matched.add(index)
                 waiting.append(
@@ -1225,7 +1402,15 @@ def fit(
                 if isinstance(verdict, Fit):
                     return verdict
                 waiting += verdict
-                continue
+                if region.concurrent is not None or all(
+                    isinstance(p, Member) for p in region.parts
+                ):
+                    continue
+                try:
+                    region, turns = in_turn(region)
+                except NotImplementedError as e:
+                    waiting.append(str(e))
+                    continue
             if entry.scope.occurrences is not None:
                 waiting.append(
                     "an entry scoped to some runs of its shape is not built yet: "
@@ -1243,8 +1428,8 @@ def fit(
                 # Not a fold: the composer joins its cores, counted below.
                 fold = folds[0] if folds else None
                 if fold is not None:
-                    folded = apply_folds(recording, [fold]).steps[fold.steps[0]].op
                     with set_current_device(device):
+                        folded = apply_folds(recording, [fold]).steps[fold.steps[0]].op
                         refused = refusal(folded)
                     if refused is not None and set(placements) != {"sequential"}:
                         waiting.append(
@@ -1418,15 +1603,41 @@ def fit(
                 made = derivation.obj_elements[p].get(edge.output)
                 taken = derivation.obj_elements[c].get(edge.input)
                 if (
-                    edge.kind in (EdgeKind.STREAM, EdgeKind.CASCADE)
-                    and made is not None
-                    and taken is not None
-                    and made != taken
+                    edge.kind not in (EdgeKind.STREAM, EdgeKind.CASCADE)
+                    or made is None
+                    or taken is None
+                    or made == taken
                 ):
+                    continue
+                # One fifo delivers each object as a whole number of the
+                # reader's (the dialect's asymmetric fifo): a stream from one
+                # core to another, read nowhere else, in a region the
+                # composer streams (``compose.fused_configuration``).
+                if edge.kind is EdgeKind.CASCADE:
+                    why = "the cascade carries one object size"
+                elif made % taken:
+                    why = (
+                        "an asymmetric fifo delivers each object as a whole number "
+                        "of smaller ones"
+                    )
+                elif EdgeKind.STAGED in {e.kind for e in region.edges}:
+                    why = "beside staged edges the composer stages it too"
+                elif any({p, c} <= set(group) for group in region.workers):
+                    why = "on one worker its two ends are one buffer"
+                elif (p, edge.output) in kept or (
+                    sum(
+                        (q, e.output) == (p, edge.output)
+                        for e, q, _ in derivation.wired
+                    )
+                    > 1
+                ):
+                    why = "read elsewhere too, its fifo has one object size"
+                else:
+                    why = None
+                if why is not None:
                     unplaceable.append(
                         f"{edge}: a {edge.kind.value} whose ends' objects differ "
-                        f"({made} elements and {taken}) is not built yet; the "
-                        f"composer gives a fifo one object size"
+                        f"({made} elements and {taken}) is not built yet: {why}"
                     )
             kinds = {e.kind for e in region.edges if not e.across_calls}
             unplaceable += [
@@ -1460,7 +1671,7 @@ def fit(
             ordered = [
                 (position[a], position[b])
                 for a, b in memory_waits(recording, found[0], region.edges)
-            ]
+            ] + list(turns)
             tried = [s for s in placements if s in BUILT_PLACERS]
             refusals: list[str] = []
             with set_current_device(device):
@@ -1841,6 +2052,8 @@ def _configuration_fit(
         if refused is not None:
             return refused
     try:
+        with set_current_device(device):
+            configuration = narrowed(configuration, match, recording)
         derivation = Derivation(Region(configuration.parts), recording, device, values)
     except NotImplementedError as e:
         return [str(e)]
@@ -1861,6 +2074,18 @@ def _configuration_fit(
         own += sum(max(cores[steps[k]] for k in worker) for worker in workers)
     needed = own + sum(arrays.values())
     width = device.cols if configuration.columns is None else configuration.columns
+    wider = [
+        op
+        for op in derivation.ops
+        if "num_aie_columns" in op.declaration.tunables and op.num_aie_columns > width
+    ]
+    if wider:
+        return Fit(
+            False,
+            "counts",
+            f"{type(wider[0]).__name__} takes {wider[0].num_aie_columns} columns; "
+            f"its configuration has {width}",
+        )
     if needed > width * core_rows:
         return Fit(
             False,
@@ -1875,21 +2100,22 @@ def _configuration_fit(
     unbuilt = [
         f"building a configuration with {what} is not built yet"
         for what, kept in (
-            ("a partial width", configuration.columns is not None),
             ("buffers resident into the next", configuration.resident),
             (
                 "a switch other than a reload",
                 configuration.switch not in (None, Switch.RELOAD),
             ),
-            (
-                "regions among its parts",
-                not all(isinstance(p, Member) for p in configuration.parts),
-            ),
         )
         if kept
     ]
-    if unbuilt or configuration.concurrent is not None:
-        return unbuilt  # parts run at once are placed as their pack, in fit
+    if (
+        unbuilt
+        or configuration.concurrent is not None
+        or not all(isinstance(p, Member) for p in configuration.parts)
+    ):
+        # Parts run at once are placed as their pack, and regions among its
+        # parts as the one region they run in (``in_turn``), in fit.
+        return unbuilt
     with set_current_device(device):
         designs = {OperatorDesign(op).name: op for op in derivation.ops}
         refused = group_fit_verdict(list(designs.values()))
@@ -2603,8 +2829,9 @@ def search(
 
     In rounds, each from the profile the last one kept (``start`` first):
     each edit ``candidates`` yields from it is applied to it, fitted
-    (``fit``; one that waits or is refused is passed over) and measured in
-    place against it (``measure``); one under ``GAINS`` gains, and one
+    (``fit``; one that waits or is refused is passed over, as is one that
+    builds what the profile builds) and measured in place against it
+    (``measure``); one under ``GAINS`` gains, and one
     that does not build, or builds wrong, is refused and logged. The gainers are
     then taken best first, each applied to the profile so far (a region and
     a tunable edit of the same steps compose; a region over steps an earlier
@@ -2664,6 +2891,14 @@ def search(
                 )
                 continue
             try:
+                with set_current_device(device):
+                    same = all(
+                        Applied.of(c, edited, device).fingerprint(device)
+                        == Applied.of(c, base, device).fingerprint(device)
+                        for c in calls
+                    )
+                if same:
+                    continue  # it builds what its base builds
                 ratio = measure(
                     edited,
                     base,

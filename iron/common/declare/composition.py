@@ -21,6 +21,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Literal
 
+from aie.iron import In
 from aie.utils.compile.jit.params import Select
 
 from ..image.step import Edge, EdgeKind
@@ -184,9 +185,12 @@ class Region:
 
         An input whose stream its operator declares under a flag (``obj_shape=
         Select(flag, ...)``, one branch no stream: GEMV's ``feed_b``) is fed
-        on chip only in the form that streams it, so a stream or staged edge
-        into it sets that tunable so. A tunable the member names stays as it
-        names it.
+        on chip only in the form that streams it. Without a stream of its own
+        an input rides another's from the host, which an input fed on chip
+        does not carry. So a stream or staged edge into a step sets each such
+        tunable of its inputs so: the fed input's own, and its riders' (a fed
+        A streams GEMV's B as a fed B does). A tunable the member names stays
+        as it names it.
         """
         steps = self.steps()
         tunables = [dict(m.tunables or {}) for m in steps]
@@ -197,7 +201,7 @@ class Region:
             for operand in declaration.operands:
                 dims = operand.obj_dims
                 if (
-                    operand.name != e.input
+                    not isinstance(operand, In)
                     or dims is None
                     or len(dims) != 1
                     or not isinstance(dims[0], Select)

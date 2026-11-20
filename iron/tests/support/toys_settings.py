@@ -43,9 +43,13 @@ def coded_consumer_recording(name: str, decode: Decode, gemv: GEMV) -> Recording
 
 
 def small_integer_weight(shape: tuple[int, ...], seed: int) -> np.ndarray:
-    """Return small integers as bf16 at ``shape``, whose coded form is always well inside capacity."""
+    """Return small nonzero integers as bf16 at ``shape``, whose coded form is always well inside capacity.
+
+    Nonzero: a zero's exponent is outside a row's windows, an exception each, and a
+    long row holds more zeros than its capacity.
+    """
     rng = np.random.default_rng(seed)
-    return rng.integers(-8, 8, size=shape).astype(bfloat16)
+    return rng.choice(np.r_[-8:0, 1:9], size=shape).astype(bfloat16)
 
 
 def coded_consumer_recording_with_weight(
@@ -78,6 +82,7 @@ def coded_consumer_recording_with_weight(
                 tile_size_input=1,
                 tile_size_output=M // cols,
                 num_batches=num_batches,
+                repeat=num_batches or 1,
             )
 
     shape = (K,) if num_batches is None else (num_batches, K)

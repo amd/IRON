@@ -405,18 +405,30 @@ def test_candidates_finds_silu_mul_and_decodes_gemv_add_residuals(llama_recordin
 
 
 def test_mismatched_tile_sizes_stage_the_edge():
-    """A stream edge refuses SiLU's 1024-element tiles into ElementwiseMul's 512; a staged one forwards them through a memtile."""
+    """A stream edge refuses SiLU's 512-element tiles into ElementwiseMul's 1024; a staged one forwards them through a memtile."""
 
     class Mismatched(iron.Graph):
         def body(self, x):
-            gate = SiLU.step(x, tile_size=1024, num_aie_columns=1)
-            return ElementwiseMul.step(gate, W, tile_size=512, num_aie_columns=1)
+            gate = SiLU.step(x, tile_size=512, num_aie_columns=1)
+            return ElementwiseMul.step(gate, W, tile_size=1024, num_aie_columns=1)
 
     recording = Mismatched().record(x=(2048,))
     assert candidates(recording, (FusionKind.STREAM,)) == ()
     assert candidates(recording) == (
         Fusion(FusionKind.STAGED, (0, 1), (Edge(0, "y", 1, "a"),)),
     )
+
+
+def test_tiles_a_whole_number_of_the_readers_stream_the_edge():
+    """SiLU's 1024-element tiles into ElementwiseMul's 512 stream on one fifo, each delivered as two of the reader's."""
+
+    class Delivered(iron.Graph):
+        def body(self, x):
+            gate = SiLU.step(x, tile_size=1024, num_aie_columns=1)
+            return ElementwiseMul.step(gate, W, tile_size=512, num_aie_columns=1)
+
+    recording = Delivered().record(x=(2048,))
+    assert candidates(recording) == (fusable.stream(0, "y", "a"),)
 
 
 def test_an_edge_that_raises_raises_again_rather_than_caching_no_fusion():

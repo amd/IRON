@@ -854,7 +854,8 @@ def drawn_inputs(recording: Recording, seed: int) -> list[np.ndarray]:
 
     That step's operator's own test draw (``testing.draws`` with its
     ``test.draw``), so an input with preconditions meets them (a draw row's
-    temperature and top-k); a gather's ids in its table's rows; any other,
+    temperature and top-k), a coded one as its draw's coded rows
+    (``Operand.device_form``); a gather's ids in its table's rows; any other,
     or one whose draw is not its shape and type, seeded random bytes
     (``_random_tensor``).
     """
@@ -879,7 +880,7 @@ def drawn_inputs(recording: Recording, seed: int) -> list[np.ndarray]:
         if reader is not None:
             op, b = reader
             spec = {} if op.test is None or op.test.draw is None else op.test.draw(op)
-            t = draws(op, seed=seed, **spec)[b.name]
+            t = b.device_form(draws(op, seed=seed, **spec)[b.name])
             if t.size == math.prod(h.shape) and np.dtype(t.dtype) == np.dtype(h.dtype):
                 out.append(t.reshape(h.shape))
                 continue
