@@ -140,7 +140,7 @@ def test_a_depth_below_the_analyzed_minimum_is_refused_before_any_build(device):
     result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "analysis"
-    assert "depth" in (result.why or "") or "deadlock" in (result.why or "")
+    assert "deadlocks" in (result.why or "")
 
 
 def test_the_recorded_safe_depth_fits(device):

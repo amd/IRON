@@ -20,7 +20,8 @@ from iron.operators.gemm import GEMM
 from iron.tests.support.graphs import Project
 
 M, K, N = 512, 512, 512
-BOUNDS = (M, 1, 300, 64, 65, M, 17, 128, 3)
+# 0 runs a call that drains no row block; 8, 20 and 24 end inside one.
+BOUNDS = (M, 1, 300, 64, 65, M, 0, 17, 128, 3, 8, 0, 20, 24)
 
 
 @pytest.mark.parametrize(
@@ -44,6 +45,8 @@ def test_the_rows_of_a_bound_are_computed(full_elf):
         x = rng.standard_normal((M, K)).astype(bfloat16)
         w = rng.standard_normal((N, K)).astype(bfloat16)
         got = np.asarray(project(x, w, n=n)).reshape(M, N)
+        if n == 0:
+            continue  # no row to compare; the next call holds it to its own
         verdict = compare(
             got[:n],
             op.reference(x[:n], w),
