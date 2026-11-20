@@ -676,11 +676,11 @@ class Recording:
             or weights.keys() != kept.keys()
             or again.states.keys() != self.states.keys()
             or not all(
-                w is kept[n]
+                w is k
                 or isinstance(w, np.ndarray)
-                and isinstance(kept[n], np.ndarray)
-                and np.array_equal(w, kept[n])
-                for n, w in weights.items()
+                and isinstance(k, np.ndarray)
+                and np.array_equal(w, k)
+                for w, k in ((w, kept[n]) for n, w in weights.items())
             )
         ):
             raise ValueError(
