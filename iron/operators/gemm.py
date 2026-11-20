@@ -645,12 +645,15 @@ class GEMM(Operator):
         # A B fill the compiler splits is not overlapped: 12 of 16 BDs assumes one.
         b_unrolled = not all(self.B.fits(tap) for tap in B_tiles)
 
-        def fill(col, c_row, tg):
+        # A bounded call's padding tiles make no C, so no drain in a block
+        # proves its fills done before their descriptors are reused: each is
+        # awaited instead.
+        def fill(col, c_row, tg, awaited):
             tile_offset = (c_row * self.n_shim_mem_a + col) % (M // mem_tile_m_A)
             if col < n_aie_rows:
                 A_tile = A_rows[tile_offset].repeat(n_c_col_tiles_per_core)
-                self.A.fill(A_tile, lane=col, group=tg)
-            self.B.fill(B_tiles[col], lane=col, group=tg)
+                self.A.fill(A_tile, lane=col, group=tg, wait=awaited)
+            self.B.fill(B_tiles[col], lane=col, group=tg, wait=awaited)
 
         C_grid = (
             TensorAccessPattern.full((N, M)).tile((n, m))
@@ -705,12 +708,12 @@ class GEMM(Operator):
                         self.C.drain(C_tile, lane=col, group=tg, wait=True)
                     if not b_unrolled:
                         for tile_row in range(current_tb_n_rows):
-                            fill(col, row_base + tile_row, tg)
+                            fill(col, row_base + tile_row, tg, trimmed is not None)
                 if b_unrolled:
                     # Row-block first: column-first hangs on a full task queue.
                     for tile_row in range(current_tb_n_rows):
                         for col in range(n_aie_cols):
-                            fill(col, row_base + tile_row, tg)
+                            fill(col, row_base + tile_row, tg, trimmed is not None)
                 if b_unrolled or tb > 0 or (tb == 0 and pingpong > 0):
                     rt.finish(tg)
                     tg = rt.task_group()
