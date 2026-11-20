@@ -119,7 +119,11 @@ def place(module: str, placer: str = SEQUENTIAL) -> tuple[str, str | None]:
     if done.returncode == 0:
         return "fits", None
     crashed = done.returncode < 0 or "Stack dump" in done.stderr
-    return ("crash" if crashed else "refused"), done.stderr[-4000:]
+    if crashed:
+        return "crash", done.stderr[-4000:]
+    # A refusal's error leads its diagnostic; the op dump after it can run long.
+    start = done.stderr.find(first_error(done.stderr))
+    return "refused", done.stderr[max(start, 0) :][:4000]
 
 
 @dataclasses.dataclass
