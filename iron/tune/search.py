@@ -50,7 +50,7 @@ from ..common.declare.composition import (
 from ..common.design import OperatorDesign
 from ..common.graph.carried import CarriedLoop
 from ..common.graph.coded import CodedWeight, encode_all
-from ..common.graph.compiled import _words
+from ..common.graph.compiled import CompiledGraph, _words
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
 from ..common.graph.fusion import composed, in_turn, memory_waits, narrowed
 from ..common.graph.record import Recording
@@ -72,7 +72,7 @@ from .fusions import (
     drawn_inputs,
     group_fit_verdict,
 )
-from .measure import Cache, Timing
+from .measure import Cache, Spent, Timing
 
 
 class Edit(Protocol):
@@ -2133,22 +2133,24 @@ def check(
     """Hold ``calls`` built under ``profile`` to ``base_calls`` built under ``base``, run on the NPU on the same inputs.
 
     ``profile`` must fit first (``fit``). Each call is built both ways
-    (``Applied``, the profile's composition entries included) and run on the
-    same seeded inputs and states at its values and at each of its bounds
-    halved; every output within its bound, carried buffer and state must be
-    bit-identical (``compare_graphs``, every point marked known so nothing
-    is timed). A version whose schedule runs several calls a command or
-    keeps commands in flight runs its draws so batched instead, against them
-    called one at a time (``_batched``). Calls that hold state run in order
-    instead, each side's
-    states carried into its next call (``_in_order``). A call checked apart
-    that carries values to the next (``Recording.carry``) and is not given
-    them starts each at both ends of its recorded range (``Recording.limits``),
-    as a first call may. Held to ``NO_WORSE``,
-    each call is instead no worse than the base's against its reference
-    (``_no_worse``), each side's calls one at a time; a version the profile
-    batches then holds its batches bit-identical to its calls one at a time
-    (``_batched``), as ``EXACT`` does.
+    (``Applied``, the profile's composition entries included) and each side
+    run on the same seeded inputs and states at its own call's points: its
+    values (each of its points', ``Timed.timed_points``), then those with
+    each of its bounds halved (``_bound_points``), a base call's points
+    paired with its call's in order. Every output within its bound, carried
+    buffer and state must be bit-identical (``_bit_identical``). A version
+    whose schedule runs several calls a command or keeps commands in flight
+    runs its draws so batched instead, against them called one at a time
+    (``_batched``). Calls that hold state run in order instead, each side at
+    its own values, its states carried into its next call (``_in_order``).
+    A call checked apart that carries values to the next
+    (``Recording.carry``) and is not given them starts each at both ends of
+    its recorded range (``_started``), as a first call may. Held to
+    ``NO_WORSE``, each call is instead no worse than the base's against its
+    reference at each pair of points (``_no_worse``), each side's calls one
+    at a time; a version the profile batches then holds its batches
+    bit-identical to its calls one at a time (``_batched``), as ``EXACT``
+    does.
 
     Args:
         profile: The profile checked.
@@ -2166,7 +2168,9 @@ def check(
         ValueError: ``profile`` does not fit, an entry matches none of the
             calls (``fit``), a call leaves the host nothing to compare, or
             ``base_calls`` does not pair with ``calls`` as above (or pairs
-            calls of one version with base calls of several).
+            calls of one version with base calls of several, holds other
+            states, or is checked at another count of points than its
+            call).
         NotImplementedError: What is not checked yet: a no-worse call that
             carries state (``_no_worse``), a call checked apart that carries
             a value to the next with no range recorded to start it in, and
@@ -2221,75 +2225,113 @@ def check(
                 f"{new.name} {sorted(n for n, *_ in returned)}: not one result to "
                 f"hold them to"
             )
+        holds, holding = (
+            {(h.name, tuple(h.shape), np.dtype(h.dtype)) for _, h in r.states.values()}
+            for r in (was, new)
+        )
+        if holds != holding:
+            raise ValueError(
+                f"{was.name} holds states {sorted(n for n, *_ in holds)} and "
+                f"{new.name} {sorted(n for n, *_ in holding)}: not one set of "
+                f"states to start them from"
+            )
+    checked = []
+    for call, old in pairs:
+        _, batching = _one_at_a_time(profile, call.recording.version)
+        if refinement is Refinement.EXACT and not batching:
+            call, old = _started(call), _started(old)
+        own = [
+            [v for _, v in side.timed_points()]
+            + _bound_points(side.recording, side.values)
+            for side in (old, call)
+        ]
+        if len(own[0]) != len(own[1]):
+            raise ValueError(
+                f"{old.recording.name} is checked at {len(own[0])} points and "
+                f"{call.recording.name} at {len(own[1])}: a base call's points "
+                f"pair with its call's in order, one for one"
+            )
+        checked.append((call, old, list(zip(*own, strict=True)), batching))
     if refinement is Refinement.NO_WORSE:
-        for call, old in pairs:
-            one, batching = _one_at_a_time(profile, call.recording.version)
+        for call, old, at, batching in checked:
+            one, _ = _one_at_a_time(profile, call.recording.version)
             held, _ = _one_at_a_time(base, old.recording.version)
-            why = _no_worse(one, held, call, old, device)
+            why = _no_worse(one, held, call, old, device, at)
             if why is None and batching:
-                why = _batched(profile, one, call, call, device, batching[0])
+                why = _batched(
+                    profile,
+                    one,
+                    call,
+                    call,
+                    device,
+                    batching[0],
+                    [(v, v) for _, v in at],
+                )
             if why is not None:
                 return Check(False, refinement, why)
         return Check(True, refinement)
     apart = []
-    for call, old in pairs:
-        _, batching = _one_at_a_time(profile, call.recording.version)
+    for call, old, at, batching in checked:
         if not batching:
-            apart.append((call, old))
+            apart.append((call, old, at))
             continue
-        why = _batched(profile, base, call, old, device, batching[0])
+        why = _batched(profile, base, call, old, device, batching[0], at)
         if why is not None:
             return Check(False, refinement, why)
-    started = []
-    for call, old in apart:
-        recording = call.recording
-        unfed = sorted(set(recording.carry) - set(call.values))
-        # A carry no caller starts starts at each end of its recorded range, so
-        # an offset read wrongly at one end shows at the other.
-        ends = {
-            name: sorted(
-                {
-                    k
-                    for limit in recording.limits
-                    if limit.plus is None and limit.expression.value.name == name
-                    for k in (limit.lo, limit.hi - 1)
-                    if limit.evaluate({name: k}) == k
-                }
-            )
-            for name in unfed
-        }
-        bare = [name for name, at in ends.items() if not at]
-        if bare:
-            raise NotImplementedError(
-                f"{recording.name}: checking calls that carry {', '.join(bare)} "
-                f"from one to the next, one call apart, is not built yet: no first "
-                f"call starts the carry, and no recorded range says where it may"
-            )
-        if unfed:
-            points = [
-                {**call.values, **{name: at[k] for name, at in ends.items()}}
-                for k in (0, -1)
-            ]
-            for point in points:
-                recording.check_limits(point)
-            call, old = (
-                dataclasses.replace(
-                    side,
-                    values=points[0],
-                    points=tuple(Point(1 / len(points), p) for p in points),
-                )
-                for side in (call, old)
-            )
-        started.append((call, old))
-    apart = started
-    if len(apart) > 1 and any(call.recording.states for call, _ in apart):
-        why = _in_order(profile, base, apart, device)
+    if len(apart) > 1 and any(call.recording.states for call, _, _ in apart):
+        why = _in_order(profile, base, [(call, old) for call, old, _ in apart], device)
         return Check(why is None, refinement, why)
-    for call, old in apart:
-        why = _bit_identical(profile, base, call, old, device)
+    for call, old, at in apart:
+        why = _bit_identical(profile, base, call, old, device, at)
         if why is not None:
             return Check(False, refinement, why)
     return Check(True, refinement)
+
+
+def _started(call: Timed) -> Timed:
+    """Return ``call`` at its two points: each value it carries and is not given at both ends of its recorded range.
+
+    The carry is ``Recording.carry``, the range ``Recording.limits``. A
+    first call may start it anywhere in that range, so an offset read
+    wrongly at one end shows at the other.
+
+    Raises:
+        NotImplementedError: It carries a value it is not given and no
+            recorded range says where it may start.
+    """
+    recording = call.recording
+    unfed = sorted(set(recording.carry) - set(call.values))
+    ends = {
+        name: sorted(
+            {
+                k
+                for limit in recording.limits
+                if limit.plus is None and limit.expression.value.name == name
+                for k in (limit.lo, limit.hi - 1)
+                if limit.evaluate({name: k}) == k
+            }
+        )
+        for name in unfed
+    }
+    bare = [name for name, at in ends.items() if not at]
+    if bare:
+        raise NotImplementedError(
+            f"{recording.name}: checking calls that carry {', '.join(bare)} "
+            f"from one to the next, one call apart, is not built yet: no first "
+            f"call starts the carry, and no recorded range says where it may"
+        )
+    if not unfed:
+        return call
+    points = [
+        {**call.values, **{name: at[k] for name, at in ends.items()}} for k in (0, -1)
+    ]
+    for point in points:
+        recording.check_limits(point)
+    return dataclasses.replace(
+        call,
+        values=points[0],
+        points=tuple(Point(1 / len(points), p) for p in points),
+    )
 
 
 def _one_at_a_time(
@@ -2320,25 +2362,25 @@ def _batched(
     old: Timed,
     device: Device,
     schedule: Schedule,
+    at: Sequence[tuple[Mapping[str, int], Mapping[str, int]]],
 ) -> str | None:
-    """Return how ``call``'s draws, run as ``schedule`` batches them under ``profile``, first differ from them called one at a time under ``base``, or None.
+    """Return how ``call``'s draws, run as ``schedule`` batches them under ``profile``, first differ from ``old``'s apart under ``base``, or None.
 
     ``calls * (2 * commands_in_flight + 1)`` calls, ``calls`` the version's
     a command (``Recording.calls``: back to back, or merged into one), each on
-    its seeded draw, in turn at the call's values and at each of its bounds
-    halved (``_bound_points``), so calls of one command differ, from one set
-    of seeded states:
+    its seeded draw, in turn at each pair of points ``at`` (``old``'s, then
+    ``call``'s), so calls of one command differ, from one set of seeded
+    states:
     batched through ``CarriedLoop.calls`` (where the version carries values,
     the first call's, the Emit giving the rest), ``calls`` a command and
     ``commands_in_flight`` commands in flight; apart each an ordinary call.
-    Every returned output of each call, and every state after the last, must
-    be bit-identical.
+    Every returned output of each call within its bound, and every state
+    after the last, must be bit-identical.
 
     Raises:
         NotImplementedError: ``base`` batches the version's calls too.
     """
     recording = call.recording
-    points = [dict(call.values), *_bound_points(recording, dict(call.values))]
     with set_current_device(device):
         graphs = (
             Applied.of(old, base, device).built(device),
@@ -2351,7 +2393,7 @@ def _batched(
         )
     per, depth = graphs[1].recording.calls, schedule.commands_in_flight
     draws = [drawn_inputs(recording, seed) for seed in range(per * (2 * depth + 1))]
-    at = [points[k % len(points)] for k in range(len(draws))]
+    paired = [at[k % len(at)] for k in range(len(draws))]
     rng = np.random.default_rng(len(draws))
     states = {h.name: _random_tensor(h, rng) for _, h in recording.states.values()}
     owns = [{h.name: s for s, h in g.recording.states.values()} for g in graphs]
@@ -2360,19 +2402,33 @@ def _batched(
             for name, content in states.items():
                 graph.write(own[name], content)
         apart = []
-        for tensors, values in zip(draws, at, strict=True):
+        for tensors, (values, _) in zip(draws, paired, strict=True):
             graphs[0](*tensors, **values)
-            apart.append(graphs[0].returned())
+            returned = graphs[0].returned()
+            apart.append(
+                {
+                    h.name: returned[h.name][h.valid_index(values)]
+                    for h in old.recording.returned
+                }
+            )
         with set_current_device(device):
             loop = CarriedLoop(graphs[1], graphs[1], depth)
             batched = loop.calls(
                 [
                     (tensors, values) if k == 0 or graphs[1].emit is None else ((), {})
-                    for k, (tensors, values) in enumerate(zip(draws, at, strict=True))
+                    for k, (tensors, (_, values)) in enumerate(
+                        zip(draws, paired, strict=True)
+                    )
                 ]
             )
-        for k, (want, got) in enumerate(zip(apart, batched, strict=True)):
-            differ = [n for n in want if not np.array_equal(want[n], got[n])]
+        for k, (want, got, (_, values)) in enumerate(
+            zip(apart, batched, paired, strict=True)
+        ):
+            differ = [
+                h.name
+                for h in recording.returned
+                if not np.array_equal(want[h.name], got[h.name][h.valid_index(values)])
+            ]
             if differ:
                 return (
                     f"{recording.name}: call {k} of {len(draws)}, {per} a command "
@@ -2397,33 +2453,95 @@ def _batched(
 
 
 def _bit_identical(
-    profile: Profile, base: Profile, call: Timed, old: Timed, device: Device
+    profile: Profile,
+    base: Profile,
+    call: Timed,
+    old: Timed,
+    device: Device,
+    at: Sequence[tuple[Mapping[str, int], Mapping[str, int]]],
 ) -> str | None:
-    """Return how ``call`` under ``profile`` first differs from ``old`` under ``base`` (``compare_graphs``), or None."""
+    """Return how ``call`` under ``profile`` first differs from ``old`` under ``base``, or None.
+
+    Each runs at its own of each pair of points ``at`` (``old``'s, then
+    ``call``'s). Both take one seeded draw of ``old``'s inputs, and before
+    each point one set of seeded states, by name (``_differ``).
+    """
+    recording = old.recording
+    inputs = drawn_inputs(recording, 0)
+    rng = np.random.default_rng(1)
+    states = {h.name: _random_tensor(h, rng) for _, h in recording.states.values()}
     with set_current_device(device):
-        before = Applied.of(old, base, device).built(device)
-        after = Applied.of(call, profile, device).built(device)
-        known = Compared(
-            {tuple(sorted(v.items())): (0.0, None) for _, v in old.timed_points()}
+        graphs = (
+            Applied.of(old, base, device).built(device),
+            Applied.of(call, profile, device).built(device),
         )
+        begun = time.perf_counter()
+        owns = [{h.name: s for s, h in g.recording.states.values()} for g in graphs]
         try:
-            compare_graphs(
-                old,
-                before,
-                after,
-                timing=Timing(rounds=1, calls=1),
-                known=known,
-                log=logger.info,
-            )
-        except NotBitIdentical as e:
-            return str(e)
+            for values in at:
+                for graph, own, given in zip(graphs, owns, values, strict=True):
+                    for name, content in states.items():
+                        graph.write(own[name], content)
+                    graph(*inputs, **given)
+                differ = _differ(*graphs, old.recording, call.recording, values)
+                if differ:
+                    return (
+                        f"{call.recording.name}: {', '.join(differ)} not "
+                        f"bit-identical to it as before at {values[1]}"
+                        + ("" if values[0] == values[1] else f" (before {values[0]})")
+                    )
+        finally:
+            for graph in graphs:
+                graph.release()
+            Spent.charge(timing_s=time.perf_counter() - begun)
     return None
 
 
+def _differ(
+    before: CompiledGraph,
+    after: CompiledGraph,
+    old: Recording,
+    new: Recording,
+    at: tuple[Mapping[str, int], Mapping[str, int]],
+) -> list[str]:
+    """Return what ``after``'s last call, built from ``new`` and run at ``at[1]``, left the host other than ``before``'s, from ``old`` at ``at[0]``, by name.
+
+    Each output within its bound (past it an operator may write whole
+    tiles), each buffer carried to the next call and each state; a name
+    only one side leaves differs too.
+    """
+    left = []
+    for graph, recording, values in ((before, old, at[0]), (after, new, at[1])):
+        held = {h.name: graph.read(h)[h.valid_index(values)] for h in recording.outputs}
+        held.update(
+            (h.ref().root, graph.read(h))
+            for step in recording.steps
+            for h in step.slots
+            if h.ref().root in recording.feedback and h.ref().nbytes is None
+        )
+        held.update((h.name, graph.read(s)) for s, h in graph.recording.states.values())
+        left.append(held)
+    return [
+        name
+        for name in dict.fromkeys([*left[0], *left[1]])
+        if name not in left[0]
+        or name not in left[1]
+        or not np.array_equal(left[0][name], left[1][name])
+    ]
+
+
 def _no_worse(
-    profile: Profile, base: Profile, call: Timed, old: Timed, device: Device
+    profile: Profile,
+    base: Profile,
+    call: Timed,
+    old: Timed,
+    device: Device,
+    at: Sequence[tuple[Mapping[str, int], Mapping[str, int]]],
 ) -> str | None:
     """Return why ``call`` under ``profile`` is worse than ``old`` under ``base`` against the recording's reference, or None where it is no worse.
+
+    Each runs at its own of each pair of points ``at`` (``old``'s, then
+    ``call``'s), on every draw.
 
     A change upstream of a step that ``selects`` is held bit-identical
     instead, in what the selecting step reads as in every output: an error
@@ -2486,7 +2604,6 @@ def _no_worse(
         )
         if b.fills
     }
-    values = dict(call.values)
     given = {
         h.name: call.contents[h.ref().root]
         for h in recording.inputs
@@ -2515,57 +2632,61 @@ def _no_worse(
                         tensors[h.name] = (
                             tensors[h.name].astype(np.float64) * scale
                         ).astype(h.dtype)
-            got = []
-            for graph, side in zip(graphs, (old, call), strict=True):
-                graph(*(tensors[h.name] for h in side.recording.inputs), **values)
-                read = {
-                    h.name: np.array(graph.read(h)[h.valid_index(values)])
-                    for h in side.recording.returned
-                }
-                for step in side.recording.steps:
-                    for slot in step.slots:
-                        if slot.ref().root in watched and slot.ref().nbytes is None:
-                            read.setdefault(
-                                f"{slot.ref().root} (selected from)",
-                                np.array(graph.read(slot)),
-                            )
-                got.append(read)
-            if watched:
-                differ = sorted(
-                    name
-                    for name in got[0].keys() | got[1].keys()
-                    if name not in got[0]
-                    or name not in got[1]
-                    or got[0][name].view(np.uint8).tobytes()
-                    != got[1][name].view(np.uint8).tobytes()
-                )
-                if differ:
-                    return (
-                        f"{recording.name}: the change reaches step {selecting[0]} "
-                        f"({type(recording.steps[selecting[0]].op).__name__}), "
-                        f"which selects, so only an exact change is taken there; "
-                        f"on draw {draw} {', '.join(differ)} differ"
+            for point in at:
+                where = f" at {dict(point[1])}" if point[1] else ""
+                got = []
+                for graph, side, values in zip(graphs, (old, call), point, strict=True):
+                    graph(*(tensors[h.name] for h in side.recording.inputs), **values)
+                    read = {
+                        h.name: np.array(graph.read(h)[h.valid_index(values)])
+                        for h in side.recording.returned
+                    }
+                    for step in side.recording.steps:
+                        for slot in step.slots:
+                            if slot.ref().root in watched and slot.ref().nbytes is None:
+                                read.setdefault(
+                                    f"{slot.ref().root} (selected from)",
+                                    np.array(graph.read(slot)),
+                                )
+                    got.append(read)
+                if watched:
+                    differ = sorted(
+                        name
+                        for name in got[0].keys() | got[1].keys()
+                        if name not in got[0]
+                        or name not in got[1]
+                        or got[0][name].view(np.uint8).tobytes()
+                        != got[1][name].view(np.uint8).tobytes()
                     )
-                continue
-            want, _ = old.recording.reference(tensors, values)
-            for h, ref in zip(old.recording.returned, want, strict=True):
-                u, t = got[0][h.name], got[1][h.name]
-                if np.array_equal(u.view(np.uint8), t.view(np.uint8)):
+                    if differ:
+                        return (
+                            f"{recording.name}: the change reaches step "
+                            f"{selecting[0]} "
+                            f"({type(recording.steps[selecting[0]].op).__name__}), "
+                            f"which selects, so only an exact change is taken "
+                            f"there; on draw {draw}{where} {', '.join(differ)} differ"
+                        )
                     continue
-                exact = np.asarray(ref, dtype=np.float64)
-                errors = [np.abs(x.astype(np.float64) - exact) for x in (u, t)]
-                ms = [float(np.mean(e**2)) for e in errors]
-                tail = [float(np.quantile(e, NO_WORSE_QUANTILE)) for e in errors]
-                if (
-                    not np.isfinite([*ms, *tail]).all()
-                    or ms[1] > ms[0]
-                    or tail[1] > tail[0]
-                ):
-                    return (
-                        f"{recording.name}: {h.name} is worse than before on draw "
-                        f"{draw}: mean square {ms[1]:.3g} against {ms[0]:.3g}, "
-                        f"{NO_WORSE_QUANTILE} |e| {tail[1]:.3g} against {tail[0]:.3g}"
-                    )
+                want, _ = old.recording.reference(tensors, point[0])
+                for h, ref in zip(old.recording.returned, want, strict=True):
+                    u, t = got[0][h.name], got[1][h.name]
+                    if np.array_equal(u.view(np.uint8), t.view(np.uint8)):
+                        continue
+                    exact = np.asarray(ref, dtype=np.float64)
+                    errors = [np.abs(x.astype(np.float64) - exact) for x in (u, t)]
+                    ms = [float(np.mean(e**2)) for e in errors]
+                    tail = [float(np.quantile(e, NO_WORSE_QUANTILE)) for e in errors]
+                    if (
+                        not np.isfinite([*ms, *tail]).all()
+                        or ms[1] > ms[0]
+                        or tail[1] > tail[0]
+                    ):
+                        return (
+                            f"{recording.name}: {h.name} is worse than before on "
+                            f"draw {draw}{where}: mean square {ms[1]:.3g} against "
+                            f"{ms[0]:.3g}, {NO_WORSE_QUANTILE} |e| {tail[1]:.3g} "
+                            f"against {tail[0]:.3g}"
+                        )
     finally:
         for graph in graphs:
             graph.release()
@@ -2580,11 +2701,12 @@ def _in_order(
 ) -> str | None:
     """Run each pair's call under ``profile`` and its base call under ``base``, in order, states carried; return the first difference, or None.
 
-    Each side carries its states into its next call. Each version is built once each way, so a repeated call keeps what it
-    carries. The calls start from one set of seeded states, shared by name
-    across versions, and each takes seeded inputs at its own values; after
+    Each side carries its states into its next call. Each version is built
+    once each way, so a repeated call keeps what it carries. The calls start
+    from one set of seeded states, shared by name across versions, and each
+    side takes the call's seeded inputs at its own call's values; after
     each, every output within its bound, carried buffer and state must be
-    bit-identical.
+    bit-identical (``_differ``).
     """
     rng = np.random.default_rng(0)
     seeded: dict[str, np.ndarray] = {}
@@ -2606,38 +2728,18 @@ def _in_order(
             graphs = built[version]
             inputs = drawn_inputs(recording, k)
             owns = [{h.name: s for s, h in g.recording.states.values()} for g in graphs]
-            for graph, own, states in zip(graphs, owns, sides):
+            at = (old.values, call.values)
+            for graph, own, states, values in zip(graphs, owns, sides, at, strict=True):
                 for name, state in own.items():
                     graph.write(state, states[name])
-                graph(*inputs, **call.values)
-            before, after = graphs
-            carried = [
-                h
-                for step in recording.steps
-                for h in step.slots
-                if h.ref().root in recording.feedback and h.ref().nbytes is None
-            ]
-            differ = [
-                h.name
-                for h in recording.outputs
-                if not np.array_equal(
-                    before.read(h)[h.valid_index(call.values)],
-                    after.read(h)[h.valid_index(call.values)],
-                )
-            ] + [
-                h.name
-                for h in carried
-                if not np.array_equal(before.read(h), after.read(h))
-            ]
+                graph(*inputs, **values)
+            differ = _differ(graphs[0], graphs[1], old.recording, recording, at)
             for graph, own, states in zip(graphs, owns, sides):
                 states.update((n, graph.read(s).copy()) for n, s in own.items())
-            differ += [
-                n for n in owns[0] if not np.array_equal(sides[0][n], sides[1][n])
-            ]
             if differ:
                 return (
                     f"{recording.name}, call {k} of {len(pairs)}: "
-                    f"{', '.join(dict.fromkeys(differ))} not bit-identical"
+                    f"{', '.join(differ)} not bit-identical"
                 )
     finally:
         for graphs in built.values():

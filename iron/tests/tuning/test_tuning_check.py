@@ -3,9 +3,11 @@
 
 """``check`` and ``measure`` on the NPU: a composition held bit-identical to its steps run apart, and timed against them."""
 
+import numpy as np
 import pytest
 
 import iron
+from iron import Scratchpad
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement, Region
 from iron.common.graph.record import Recording
@@ -213,3 +215,68 @@ def test_a_state_written_wrong_is_caught_after_the_call_that_writes_it(device):
     )
     assert not result.ok
     assert "call 0" in (result.why or "") and "kv" in (result.why or "")
+
+
+class _MulUpToN(iron.Graph):
+    """``x * y`` over the first ``n`` elements, ``n`` per call."""
+
+    def body(self, x, y, *, n: Scratchpad[np.int32]):
+        return ElementwiseMul.step(x, y[:n], size=256, tile_size=64)
+
+
+class _MulUpToM(iron.Graph):
+    """``_MulUpToN`` with its per-call bound named ``m``, as the operator a graph replaces names its own."""
+
+    def body(self, x, y, *, m: Scratchpad[np.int32]):
+        return ElementwiseMul.step(x, y[:m], size=256, tile_size=64)
+
+
+class _Mul(iron.Graph):
+    """``x * y`` whole, with no per-call value."""
+
+    def body(self, x, y):
+        return ElementwiseMul.step(x, y, size=256, tile_size=64)
+
+
+@pytest.mark.parametrize("refinement", [Refinement.EXACT, Refinement.NO_WORSE])
+def test_a_call_and_its_base_call_each_run_at_their_own_values(device, refinement):
+    """A call bound by ``n`` held to a base call bound by ``m``: each runs at its own values and its own bound halved, paired in order."""
+    shapes = dict(x=(256,), y=(256,))
+    result = check(
+        Profile(),
+        Profile(),
+        [Timed(_MulUpToN().record(**shapes), values={"n": 256})],
+        device,
+        refinement,
+        base_calls=[Timed(_MulUpToM().record(**shapes), values={"m": 256})],
+    )
+    assert result.ok, result.why
+
+
+def test_a_base_call_at_other_values_than_its_call_is_caught(device):
+    """The base call at ``m=128`` against its call at ``n=256``: the call's own values are run, so its ``out`` differs."""
+    shapes = dict(x=(256,), y=(256,))
+    result = check(
+        Profile(),
+        Profile(),
+        [Timed(_MulUpToN().record(**shapes), values={"n": 256})],
+        device,
+        Refinement.EXACT,
+        base_calls=[Timed(_MulUpToM().record(**shapes), values={"m": 128})],
+    )
+    assert not result.ok
+    assert "out not bit-identical" in (result.why or "")
+
+
+def test_a_base_call_checked_at_another_count_of_points_is_refused(device):
+    """A call bound per call (its values and its bound halved, two points) held to a base call with no bound (one point): refused before any build."""
+    shapes = dict(x=(256,), y=(256,))
+    with pytest.raises(ValueError, match="points pair with its call's in order"):
+        check(
+            Profile(),
+            Profile(),
+            [Timed(_MulUpToN().record(**shapes), values={"n": 256})],
+            device,
+            Refinement.EXACT,
+            base_calls=[Timed(_Mul().record(**shapes))],
+        )
