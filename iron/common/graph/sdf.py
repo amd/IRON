@@ -69,12 +69,18 @@ class Channel:
         initial: Objects on it before the call starts (a carried value).
         phase: The runtime phase its transfer runs in: it is read only once
             every edge of an earlier phase has had all it moves written.
+        floor: Objects it holds whatever its depth: its producer's own end
+            buffers, for a core-to-core fifo. Where the two ends share
+            memory the lowering makes one pool as deep as the deeper end;
+            apart, each end its own pool, more again. A period counts it; a
+            deadlock does not, so a depth that runs runs on either.
     """
 
     producer: int
     consumer: int
     initial: int = 0
     phase: int = 0
+    floor: int = 0
 
 
 class Flow:
@@ -209,13 +215,15 @@ class Flow:
         before what it releases), and an access waits, besides on its actor,
         until what it takes is there: an acquire, until the edge last
         changed. A call's end is its last actor's; the period is the time
-        between the last two calls' ends.
+        between the last two calls' ends. An edge holds at least its
+        ``floor``.
 
         Raises:
             NotImplementedError: An edge runs in a later phase.
         """
         if any(c.phase for c in self.channels):
             raise NotImplementedError("a period over phases is not modelled yet")
+        depths = {e: max(depths[e], c.floor) for e, c in enumerate(self.channels)}
         filled = [c.initial for c in self.channels]
         changed = [Fraction(0)] * len(self.channels)
         clock = [Fraction(0)] * len(self.programs)
@@ -392,22 +400,38 @@ class Analysis:
         assert period is not None, "the ceiling depths run"
         return period
 
-    @property
+    @functools.cached_property
     def knee_depth(self) -> dict[Edge, int]:
-        """Per edge, the shallowest depth from its minimum at which a call takes ``period``.
+        """Per edge, the shallowest depth from its minimum at which a call takes ``period``, every other edge as deep as more cannot matter.
+
+        A core-to-core edge holds what its producer's own end buffers too
+        (``Channel.floor``), which the device runs ahead into, so a depth
+        below that end's buffers gains nothing over them (``add -> SiLU ->
+        mul`` at 2**18 elements: depth 2 against 1 measures 0.99 to 1.01,
+        where the reading end alone says 0.81). The floor is the pool the
+        two ends share, the least either placement gives, so the knee holds
+        whichever the placer picks.
 
         Raises:
-            NotImplementedError: Always, for now: a core-to-core edge also
-                holds what its producer's own end buffers, which the device
-                runs ahead into and the analysis does not count, so a knee
-                over the reading end alone overstates what depth buys
-                (``add -> SiLU -> mul`` at 2**18 elements: depth 2 against 1
-                measures 0.99 to 1.01, where the reading end alone says 0.81).
+            ValueError: The region cannot run at any depth (``why``).
+            NotImplementedError: As ``period``.
         """
-        raise NotImplementedError(
-            "a knee depth needs the producer end's buffers, which the analysis "
-            "does not count yet"
-        )
+        target = self.period
+        ceiling = self.flow.ceiling(self.fixed)
+        knees = {}
+        for edge, es in self.channels.items():
+            depth = self.min_depth[edge]
+            top = max(ceiling[e] for e in es)
+            while (
+                depth < top
+                and self.flow.period(
+                    {**ceiling, **dict.fromkeys(es, depth)}, self.costs
+                )
+                != target
+            ):
+                depth += 1
+            knees[edge] = depth
+        return knees
 
 
 class Derivation:
@@ -1109,6 +1133,7 @@ class Derivation:
                             actor,
                             initial=self.objects[inp] if carried else 0,
                             phase=phases[n] if phases else 0,
+                            floor=out.prod().depth,
                         )
                     )
                     e = len(channels) - 1
