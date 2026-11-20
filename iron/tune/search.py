@@ -714,11 +714,12 @@ def candidates(
         memberships: dict[frozenset, tuple[tuple[Region | Member, ...], list[int]]] = {}
         for s, design in design_of.items():
             if design[0] == "array" and frozenset([design]) not in memberships:
-                at = [
-                    t
-                    for t in range(len(steps))
-                    if design_of[t] == design and members[t] not in members[:t]
-                ]
+                at = []
+                for t in range(len(steps)):
+                    if design_of[t] == design and all(
+                        members[t] != members[u] for u in at
+                    ):
+                        at.append(t)
                 memberships[frozenset([design])] = (
                     tuple(members[t] for t in at),
                     at,
@@ -2807,15 +2808,15 @@ def search(
                     "search: %s refused at %s: %s", edit, fitted.stage, fitted.why
                 )
                 continue
-            with set_current_device(device):
-                same = all(
-                    Applied.of(c, edited, device).fingerprint(device)
-                    == Applied.of(c, base, device).fingerprint(device)
-                    for c in calls
-                )
-            if same:
-                continue  # it builds what its base builds
             try:
+                with set_current_device(device):
+                    same = all(
+                        Applied.of(c, edited, device).fingerprint(device)
+                        == Applied.of(c, base, device).fingerprint(device)
+                        for c in calls
+                    )
+                if same:
+                    continue  # it builds what its base builds
                 ratio = measure(
                     edited,
                     base,

@@ -22,14 +22,14 @@ from iron.common.declare.composition import (
 )
 from iron.common.declare.profile import Profile
 from iron.common.graph.record import Recording
-from iron.common.image.step import EdgeKind
+from iron.common.image.step import EdgeKind, HandOff
 from iron.operators.relu import ReLU
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
 from iron.tests.support import sequences, toys_schedule
 from iron.tests.support.fusable import gemv_silu_mul, gemv_silu_mul_recording
 from iron.tests.support.toys_composition import independent_regions_recording
-from iron.tests.support.toys_edges import member
+from iron.tests.support.toys_edges import combination_toy, member
 from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import AddEntry, candidates, check, fit, search
@@ -412,6 +412,27 @@ def test_the_designs_saving_most_switches_are_proposed_first_narrowed_to_co_resi
     assert [m.cls for m in parts] == [ReLU, Tanh, Sigmoid]
     assert all(m.tunables["num_aie_columns"] < device.cols for m in parts)
     assert fit(first.apply(Profile()), calls, device).ok
+
+
+def test_each_array_of_one_shape_is_proposed_by_its_shape(device):
+    """The through-memory toy's copies share one shape on arrays of other widths: each configuration proposed names that shape, and fits or is refused."""
+    _, recording, _, _ = combination_toy(
+        device, HandOff.SPLIT, "through_memory", "memtile", "min", "same", "recorded"
+    )
+    calls = [Timed(recording)]
+    proposed = []
+    try:
+        for edit in candidates(calls, Profile(), device):
+            if isinstance(edit, AddEntry) and isinstance(
+                edit.entry.root, Configuration
+            ):
+                proposed.append(edit)
+    except NotImplementedError:
+        pass
+    assert proposed
+    for edit in proposed:
+        assert edit.entry.root.parts == (member(recording.steps[0].op),)
+        fit(edit.apply(Profile()), calls, device)
 
 
 def test_a_configuration_over_the_arrays_cores_is_refused(device):
