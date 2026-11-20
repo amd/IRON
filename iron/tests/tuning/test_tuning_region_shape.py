@@ -41,7 +41,6 @@ def _qkv_region() -> Region:
     return Region(parts=tuple(member(GEMV(M=M, K=M)) for _ in range(3)), edges=())
 
 
-@unbuilt
 def test_a_convex_non_contiguous_set_round_trips_reordered(tmp_path, device):
     """``{Q, K, V}`` among the RoPE steps: convex, not consecutive, reordered to be."""
     region = _qkv_region()
@@ -191,7 +190,6 @@ def test_fission_of_a_reduction_is_no_worse(device):
 
 
 @pytest.mark.extensive
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_search_keeps_the_reordering_that_pays(device):
     region = _qkv_region()
@@ -203,8 +201,10 @@ def test_search_keeps_the_reordering_that_pays(device):
     with_entry.add_entry(entry)
     ratio = measure(with_entry, start, calls, device).ratio
     tuned = search(calls, start, device)
+    # Where the reordering pays, what search keeps is at least as fast (it may
+    # take the steps otherwise, as a window over them all, and pass this one over).
     if ratio < 0.95:
-        assert entry in tuned.entries()
+        assert measure(tuned, with_entry, calls, device).ratio < 1.05
     if ratio > 1.05:
         assert entry not in tuned.entries()
     result = check(tuned, start, calls, device, Refinement.EXACT)

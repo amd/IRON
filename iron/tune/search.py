@@ -258,7 +258,6 @@ NO_WORSE_QUANTILE = 0.999
 
 # What candidates does not propose yet, named where it stops.
 _NOT_GENERATED = (
-    "regions of steps that are not consecutive",
     "inflows",
     "a runtime plan's DDR burst lengths and transfer sizes",
     "nested regions",
@@ -336,7 +335,9 @@ def candidates(
     """Yield every edit of ``profile`` that ``calls`` admit on ``device``.
 
     A region edit names a window of consecutive recorded steps, no host step
-    inside it and no more steps than the array has cores, with an edge for
+    inside it and no more steps than the array has cores, or the steps of
+    such a window its edges join to both its ends, where a legal order moves
+    the others out of the way (``Recording.gatherable``), with an edge for
     each hand-off the recording makes inside it: one step the only writer of
     a whole, streamed buffer, a later step reading it whole, the two ends one
     buffer; or, the buffer state the graph holds, any step of the window
@@ -351,7 +352,10 @@ def candidates(
     edit composes with an edit of the same steps' tunables. Each region
     follows at every other column count its members' domains share, every
     member at it, whatever its call gave (a region's widths override those, as a
-    fusion's tunables do). Then each fold IRON admits (``fold_candidates``),
+    fusion's tunables do). Then each buffer's readers, as many as the array
+    has cores and independent of one another, as a region run at once where
+    a legal order gathers them and they are not consecutive already. Then
+    each fold IRON admits (``fold_candidates``),
     its steps on one worker. Then each shape's tunables: a one-member region per setting
     ``autotune.settings`` resolves (the recorded one first), touching every
     step of that shape. Each entry is yielded once, from the first call that
@@ -551,6 +555,38 @@ def candidates(
                         ),
                     )
                 )
+                # The steps the window's edges join to both its ends, the
+                # others between moved out of the way where an order keeps
+                # every dependence.
+                joined = {0}
+                for _ in range(hi - lo):
+                    joined |= {
+                        end
+                        for e in entry.root.edges
+                        if {e.producer, e.consumer} & joined
+                        for end in (e.producer, e.consumer)
+                    }
+                if hi - lo in joined and len(joined) <= hi - lo:
+                    gathered = sorted(lo + i for i in joined)
+                    if recording.gatherable(gathered):
+                        at = {lo + i: k for k, i in enumerate(sorted(joined))}
+                        part = Entry(
+                            Region(
+                                tuple(members[s] for s in gathered),
+                                tuple(
+                                    dataclasses.replace(
+                                        e,
+                                        producer=at[lo + e.producer],
+                                        consumer=at[lo + e.consumer],
+                                    )
+                                    for e in entry.root.edges
+                                    if e.producer in joined
+                                ),
+                            )
+                        )
+                        if part not in proposed:
+                            proposed.append(part)
+                            yield AddEntry(part, frozenset(gathered))
                 if entry in proposed:
                     continue
                 proposed.append(entry)
@@ -573,6 +609,26 @@ def candidates(
                     if widened not in proposed:
                         proposed.append(widened)
                         yield AddEntry(widened, touches)
+        # Each buffer's readers independent of one another, run at once.
+        readers, _ = recording.users()
+        dependences = recording.dependences()
+        for reading in readers.values():
+            together: list[int] = []
+            for s in dict.fromkeys(r for r in reading if r >= 0):
+                if len(together) < cores and all(
+                    (t, s) not in dependences for t in together
+                ):
+                    together.append(s)
+            if (
+                len(together) < 2
+                or together == list(range(together[0], together[-1] + 1))
+                or not recording.gatherable(together)
+            ):
+                continue
+            entry = Entry(Region(tuple(members[s] for s in together)))
+            if entry not in proposed:
+                proposed.append(entry)
+                yield AddEntry(entry, frozenset(together))
         with set_current_device(device):
             folds = fold_candidates(recording)
         for fold in folds:
