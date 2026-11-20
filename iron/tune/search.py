@@ -2136,8 +2136,10 @@ def check(
     (``Applied``, the profile's composition entries included) and each side
     run on the same seeded inputs and states at its own call's points: its
     values (each of its points', ``Timed.timed_points``), then those with
-    each of its bounds halved (``_bound_points``), a base call's points
-    paired with its call's in order. Every output within its bound, carried
+    each of its bounds halved (``_bound_points``). A base call's values pair
+    with its call's in order, and its halved bounds with the call's that cut
+    the same returned output extents (else by name); each pair must cut
+    every returned output alike. Every output within its bound, carried
     buffer and state must be bit-identical (``_bit_identical``). A version
     whose schedule runs several calls a command or keeps commands in flight
     runs its draws so batched instead, against them called one at a time
@@ -2169,8 +2171,9 @@ def check(
             calls (``fit``), a call leaves the host nothing to compare, or
             ``base_calls`` does not pair with ``calls`` as above (or pairs
             calls of one version with base calls of several, holds other
-            states, or is checked at another count of points than its
-            call).
+            states, is checked at points that do not pair with its call's,
+            or, held ``EXACT``, batches calls its call runs one at a
+            time).
         NotImplementedError: What is not checked yet: a no-worse call that
             carries state (``_no_worse``), a call checked apart that carries
             a value to the next with no range recorded to start it in, and
@@ -2238,20 +2241,73 @@ def check(
     checked = []
     for call, old in pairs:
         _, batching = _one_at_a_time(profile, call.recording.version)
+        _, holding = _one_at_a_time(base, old.recording.version)
+        if refinement is Refinement.EXACT and holding and not batching:
+            raise ValueError(
+                f"{old.recording.name}: the base batches its calls and "
+                f"{call.recording.name}'s profile runs them one at a time; an "
+                f"exact check runs a base batched only beside a batched call"
+            )
         if refinement is Refinement.EXACT and not batching:
             call, old = _started(call), _started(old)
-        own = [
-            [v for _, v in side.timed_points()]
-            + _bound_points(side.recording, side.values)
-            for side in (old, call)
+        timed, halved = [], []
+        for side in (old, call):
+            timed.append([v for _, v in side.timed_points()])
+            # A halved bound is known across the two sides by the returned
+            # output extents it cuts, else by its name.
+            by = {}
+            for point in _bound_points(side.recording, side.values):
+                name = next(k for k in point if point[k] != side.values[k])
+                cuts = frozenset(
+                    (h.name, axis)
+                    for h in side.recording.returned
+                    for axis, bound in h.valid.items()
+                    if bound.value.name == name
+                )
+                by[cuts or name] = (name, point)
+            halved.append(by)
+        unpaired = [
+            sorted(n for k, (n, _) in mine.items() if k not in theirs)
+            for mine, theirs in ((halved[0], halved[1]), (halved[1], halved[0]))
         ]
-        if len(own[0]) != len(own[1]):
+        if len(timed[0]) != len(timed[1]) or any(unpaired):
             raise ValueError(
-                f"{old.recording.name} is checked at {len(own[0])} points and "
-                f"{call.recording.name} at {len(own[1])}: a base call's points "
-                f"pair with its call's in order, one for one"
+                f"{old.recording.name} is checked at "
+                f"{len(timed[0]) + len(halved[0])} points and "
+                f"{call.recording.name} at {len(timed[1]) + len(halved[1])}"
+                + (
+                    f", halving {unpaired[0]} and {unpaired[1]}, which cut no "
+                    f"output extent the other side's bounds cut"
+                    if any(unpaired)
+                    else ""
+                )
+                + ": a base call's points pair with its call's in order, one "
+                "for one"
             )
-        checked.append((call, old, list(zip(*own, strict=True)), batching))
+        at = list(zip(*timed, strict=True)) + [
+            (halved[0][k][1], point) for k, (_, point) in halved[1].items()
+        ]
+        returned = {h.name: h for h in call.recording.returned}
+        for values in [(old.values, call.values), *at]:
+            wrong = []
+            for h in old.recording.returned:
+                cut = [
+                    tuple(
+                        len(range(*c.indices(n)))
+                        for c, n in zip(side.valid_index(v), side.shape, strict=True)
+                    )
+                    for side, v in ((h, values[0]), (returned[h.name], values[1]))
+                ]
+                if cut[0] != cut[1]:
+                    wrong.append(f"{h.name} ({cut[0]} against {cut[1]})")
+            if wrong:
+                raise ValueError(
+                    f"{old.recording.name} at {dict(values[0])} and "
+                    f"{call.recording.name} at {dict(values[1])} select other "
+                    f"extents of {', '.join(wrong)}: a pair of points cuts each "
+                    f"returned output alike"
+                )
+        checked.append((call, old, at, batching))
     if refinement is Refinement.NO_WORSE:
         for call, old, at, batching in checked:
             one, _ = _one_at_a_time(profile, call.recording.version)
