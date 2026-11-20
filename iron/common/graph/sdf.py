@@ -1220,9 +1220,11 @@ class Derivation:
                     writer[fifo] = actor
                 elif actor not in readers.setdefault(fifo, []):
                     readers[fifo].append(actor)
-        # Steps on one worker: lane k's producer core and its reader are one
-        # actor, running their programs in the worker's firing order; lanes
-        # past the other step's run alone, restaged as a memtile would.
+        # Steps on one worker: a lane's producer core and its reader are one
+        # actor, running their programs in the worker's firing order. Where
+        # the lanes differ, a reader joins the producer lane whose first
+        # element its own first is (``Staging.pairs``); the rest run alone,
+        # restaged as a memtile would.
         lead: dict[int, int] = {}
         # A step spliced into its producer's cores: each core and its stage.
         for cores in self.spliced.values():
@@ -1249,7 +1251,23 @@ class Derivation:
                         f"{edge}: steps on one core whose lanes do not pair one "
                         f"core to one core are not modelled yet"
                     )
-                for out, inp in zip(outs, ins):
+                pairs = list(zip(outs, ins))
+                if len(outs) != len(ins):
+                    produced, consumed = (
+                        self._streams(
+                            next(
+                                b for b in self.recorded[q][0].op.buffers if b.name == n
+                            )
+                        )
+                        for q, n in ((p, edge.output), (c, edge.input))
+                    )
+                    starts = {int(stream[0]): k for k, stream in enumerate(produced)}
+                    pairs = [
+                        (outs[starts[int(stream[0])]], ins[j])
+                        for j, stream in enumerate(consumed)
+                        if int(stream[0]) in starts
+                    ]
+                for out, inp in pairs:
                     first = writer[out]
                     while first in lead:
                         first = lead[first]

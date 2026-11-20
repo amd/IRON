@@ -364,8 +364,8 @@ def fused_configuration(
             continue
         fed = {}
         # A stream within one worker group whose lanes do not meet: restaged
-        # in L1, its links on the producer lanes' cores (``Staging.on_cores``).
-        held: dict[str, list[Any]] = {}
+        # in L1, linked on its lanes' cores once share() makes them.
+        held: list[str] = []
         for e in incoming.get(j, ()):
             if e.kind is EdgeKind.CASCADE:
                 continue
@@ -385,25 +385,7 @@ def fused_configuration(
                         f"{e}: a restage held in L1 of an output read elsewhere "
                         f"too, or bound without its fifos, is not built yet"
                     )
-                # Its links name the producer's cores' tiles, which a joined
-                # core keeps only from the first body it runs.
-                (group,) = [g for g in fusion.workers if e.producer in g]
-                if group[0] != e.producer or any(
-                    c.consumer == e.producer for c in cascades
-                ):
-                    raise NotImplementedError(
-                        f"{e}: a restage held in L1 whose producer is not first "
-                        f"on its cores (a step or a cascade's relay runs before "
-                        f"it there) is not built yet"
-                    )
-                held[e.input] = [
-                    next(
-                        w
-                        for w in arrays[e.producer].workers
-                        if any(h.object_fifo is fifo for h in w.fifos)
-                    ).tile
-                    for fifo in source.lane_fifos
-                ]
+                held.append(e.input)
             fed[e.input] = source
         arrays[j] = BuiltArray(
             design,
@@ -411,7 +393,7 @@ def fused_configuration(
             own,
             fed=fed,
             staged=fusion.kind is FusionKind.STAGED,
-            cores=held,
+            held=held,
             depths={
                 **{
                     e.output: chosen[e]
@@ -540,6 +522,25 @@ def fused_configuration(
             arrays,
             before,
             after,
+        )
+    # Each restage held in L1 links on the cores its lanes run on, joined.
+    cores = [w for j in fusion.steps for w in arrays[j].workers]
+    for e in joined_in:
+        (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
+        (sink,) = [b for b in arrays[e.consumer].op.buffers if b.name == e.input]
+        restage = sink.restage
+        if restage is None or not restage.held:
+            continue
+        restage.wire(
+            *(
+                [
+                    next(
+                        w for w in cores if any(h.object_fifo is f for h in w.fifos)
+                    ).tile
+                    for f in fifos
+                ]
+                for fifos in (source.lane_fifos, sink.staged)
+            )
         )
     for send, receive in relays:
         CascadeFlow(joined[id(send)], joined[id(receive)])
@@ -841,10 +842,15 @@ def share(
     for e in edges:
         (made,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
         (taken,) = [b for b in arrays[e.consumer].op.buffers if b.name == e.input]
-        # Restaged on the cores (``Staging``), lane k of each is on core k.
+        # Restaged on the cores (``Staging``), a sink lane is on the core of
+        # the source lane its first piece leads.
         restaged |= taken.staged is not None
-        reads = made.lane_fifos if taken.staged is None else taken.staged
-        for lane, (fifo, read) in enumerate(zip(made.lane_fifos, reads)):
+        pairs = (
+            list(zip(made.lane_fifos, made.lane_fifos))
+            if taken.restage is None
+            else [(made.lane_fifos[k], taken.staged[j]) for k, j in taken.restage.pairs]
+        )
+        for lane, (fifo, read) in enumerate(pairs):
             ends = [
                 [
                     w

@@ -2034,23 +2034,20 @@ def _restaged_on_cores(
 ) -> str | None:
     """Return why ``edge``'s restage, held in L1 on the cores its two steps share, is past one of them under every placement; else None.
 
-    Lane k of either step runs on core k. Each group ``Staging`` plans is
-    held as ``Staging.on_cores`` builds it: a link on a core, a join on its
-    consumer lane's core, a split, or a join split again, on its first
-    producer lane's, its pool the edge's chosen depth in rounds, or the
-    objects a producer lane moves a call as the composer chooses it, and a
-    call's rounds at least. Only the lanes leading a round meet it in place,
-    at best (on the link's core or a neighbour reaching its memory: a core
-    reaches a later slot only as a strided view); every other lane takes a
-    channel and a buffer descriptor a round on the link's core, and the
-    core's own non-leading lane a channel each way. The pool holds a lock
-    pair a slot. A join split again counts no channels here, since another
-    plan could join each sink lane's sources on its own core. Each core also
-    holds its two steps' fifos to and from off the array or a memtile, a
+    Counted as ``Staging`` holds it lane by lane: a source lane cut into
+    several pieces distributes them from its core, and a sink lane taking
+    several joins them on its own core, on its source lane's where its first
+    piece leads that lane's slot (``Staging.pairs``), else alone. Each pool
+    is the edge's chosen depth in rounds, or the objects a source lane moves
+    a call as the composer chooses it, and a call's rounds at least. A piece
+    leading a pool, its sink lane's only one or its source lane whole, may
+    meet it in place (on the pool's core or a neighbour's); a distributed
+    piece a sink lane joins, and any other, takes a channel and a buffer
+    descriptor a round at each end. A pool holds a lock pair a slot. Each core
+    also holds its steps' fifos to and from off the array or a memtile, a
     lock pair each and a channel and descriptors for each; one an on-chip
-    stream or cascade carries may be free in the fused build (in one core,
-    or in a neighbour's memory), so it is not counted. These are lower
-    bounds: what a plan adds the placer counts.
+    stream or cascade carries may be free in the fused build, so it is not
+    counted. These are lower bounds: what a placement adds the placer counts.
 
     Args:
         derivation: The region's derivation.
@@ -2064,14 +2061,13 @@ def _restaged_on_cores(
         memory, buffer descriptors or locks, or None.
 
     Raises:
-        NotImplementedError: What ``Staging.on_cores`` or the composer does
-            not build: a restage ``Staging`` does not plan, a round read in
-            another order than it is joined, an output also read elsewhere,
-            or a producer not first on its cores.
+        NotImplementedError: What ``Staging.held_fifos`` or the composer
+            does not build: a restage ``Staging`` does not plan, a round
+            read in another order than it is joined, a slot of several
+            objects, or an output also read elsewhere.
     """
     p, c = ends
     region = derivation.region
-    (group,) = [g for g in region.workers if edge.producer in g]
     # Not built, yet still counted: what is past a core under every plan is
     # refused all the same.
     unbuilt = (
@@ -2080,11 +2076,6 @@ def _restaged_on_cores(
             (e.producer, e.output) == (edge.producer, edge.output) for e in region.edges
         )
         != 1
-        or group[0] != edge.producer
-        or any(
-            e.kind is EdgeKind.CASCADE and e.consumer == edge.producer
-            for e in region.edges
-        )
     )
     (source,) = [
         b for b in derivation.recorded[p][0].op.buffers if b.name == edge.output
@@ -2092,22 +2083,27 @@ def _restaged_on_cores(
     (sink,) = [b for b in derivation.recorded[c][0].op.buffers if b.name == edge.input]
     try:
         with set_current_device(derivation.device):
-            staging = Staging(source, sink)
+            staging = Staging(source, sink, held=True)
     except ValueError as e:
         raise NotImplementedError(
             f"{edge}: a restage held in L1 that Staging does not plan is not "
             f"built yet: {e}"
         ) from e
-    if any(walk is not None for walk in staging.walks):
-        raise NotImplementedError(
-            f"{edge}: a restage held in L1 reading a round in another order "
-            f"than it is joined is not built yet"
-        )
+    produce, consume = math.prod(source.obj_shape), math.prod(sink.obj_shape)
+    planned = not (
+        any(walk is not None for walk in staging.walks)
+        or any(t != produce for _, taken, _, _ in staging.groups for t in taken)
+        or any(g != consume for _, _, _, given in staging.groups for g in given)
+    )
     chosen = edge.depth
     if chosen is None:
-        per_object = math.prod(source.obj_shape)
-        chosen = max(-(-n // per_object) for n in source.moved_per_lane().values())
+        chosen = max(-(-n // produce) for n in source.moved_per_lane().values())
+    deep = max([chosen, *staging.rounds])
     lanes = (derivation.lanes[p][edge.output], derivation.lanes[c][edge.input])
+    # Source lane k on core k; a sink lane on its pair's core, else its own.
+    paired = {j: k for k, j in staging.pairs}
+    core = [paired.get(j, len(lanes[0]) + j) for j in range(len(lanes[1]))]
+    cores = len(lanes[0]) + len(lanes[1])
     on_chip = {
         fifo
         for e, q, r in derivation.wired
@@ -2117,35 +2113,52 @@ def _restaged_on_cores(
             *derivation.lanes[r].get(e.input, []),
         )
     }
-    cores = max(len(lanes[0]), len(lanes[1]))
     inputs, outputs, held, bds, locks = ([0] * cores for _ in range(5))
-    handles: list[list] = [[] for _ in range(cores)]
-    for step, fifos in zip(ends, lanes):
-        for k, fifo in enumerate(fifos):
+    for step, fifos, at in ((p, lanes[0], range(len(lanes[0]))), (c, lanes[1], core)):
+        for k, fifo in zip(at, fifos):
             (worker,) = [
-                core.owner
-                for core in derivation.recorded[step][1].cores
-                if any(h.object_fifo is fifo for h in core.owner.fifos)
+                w.owner
+                for w in derivation.recorded[step][1].cores
+                if any(h.object_fifo is fifo for h in w.owner.fifos)
             ]
-            handles[k] += [h for h in worker.fifos if h.object_fifo not in on_chip]
-    for k, own in enumerate(handles):
-        for h in own:
-            held[k] += h.depth * math.prod(h.shape) * bfp.itemsize(h.dtype)
+            for h in worker.fifos:
+                if h.object_fifo in on_chip or h.object_fifo in (*lanes[0], *lanes[1]):
+                    continue
+                held[k] += h.depth * math.prod(h.shape) * bfp.itemsize(h.dtype)
+                locks[k] += 2
+                bds[k] += h.depth
+                inputs[k] += h.handle_type == "cons"
+                outputs[k] += h.handle_type == "prod"
+    # Unplanned, the steps' own fifos alone are counted.
+    pieces = staging.pieces if planned else []
+    cut = Counter(k for k, *_ in pieces)
+    taking = Counter(j for _, j, *_ in pieces)
+    for k in cut:
+        if cut[k] > 1:
+            held[k] += deep * produce * staging.item
+            locks[k] += 2 * cut[k]
+    # A sink lane joins its pieces, or forwards a whole source lane, into a
+    # pool on its core; one distributed piece alone is the sink's fifo.
+    joins = {j for k, j, *_ in pieces if taking[j] > 1 or cut[k] == 1}
+    for j in joins:
+        held[core[j]] += deep * consume * staging.item
+        locks[core[j]] += 2 * taking[j]
+    for k, j, at, to, size in pieces:
+        # In place at best: the leading piece of a distribute a sink lane
+        # reads whole, or a whole source lane leading a join.
+        whole = cut[k] == 1
+        if (not whole and at == 0 and taking[j] == 1) or (whole and to == 0):
+            continue
+        outputs[k] += 1
+        inputs[core[j]] += 1
+        bds[k] += deep
+        bds[core[j]] += deep
+        if whole:
+            held[k] += deep * produce * staging.item
             locks[k] += 2
-            bds[k] += h.depth
-            inputs[k] += h.handle_type == "cons"
-            outputs[k] += h.handle_type == "prod"
-    for (ins, taken, outs, _), rounds in zip(staging.groups, staging.rounds):
-        at = outs[0] if len(outs) == 1 else ins[0]
-        deep = max(chosen, rounds)
-        held[at] += deep * sum(taken) * staging.item
-        locks[at] += 2 * max(len(ins), len(outs))
-        ratio = len(ins) > 1 and len(outs) > 1
-        arrive = 0 if ratio else len(ins) - 1 + (at in outs[1:])
-        leave = 0 if ratio else len(outs) - 1 + (at in ins[1:])
-        inputs[at] += arrive
-        outputs[at] += leave
-        bds[at] += deep * (arrive + leave)
+        elif taking[j] == 1:
+            held[core[j]] += deep * size * staging.item
+            locks[core[j]] += 2
     col, row = 0, next(r for r in range(model.rows()) if model.is_core_tile(0, r))
     for k in range(cores):
         for what, n, most in (
@@ -2168,10 +2181,11 @@ def _restaged_on_cores(
                     f"{edge}, restaged in L1, takes {n} {what} on core {k} of its "
                     f"steps' worker, however it is placed; a core tile has {most}"
                 )
-    if unbuilt:
+    if unbuilt or not planned:
         raise NotImplementedError(
-            f"{edge}: a restage held in L1 of an output read elsewhere too, or "
-            f"whose producer is not first on its cores, is not built yet"
+            f"{edge}: a restage held in L1 of an output read elsewhere too, "
+            f"reading a round in another order, or a slot of several objects, "
+            f"is not built yet"
         )
     return None
 

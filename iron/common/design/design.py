@@ -161,8 +161,7 @@ class BuiltArray:
             (``Operand.feed``).
         staged: A fed input whose lanes do not meet its source's is staged
             through memtiles rather than refused.
-        cores: Fed input name -> the core tiles its restage is held in L1
-            on, a lane of its source's each (``Operand.feed``).
+        held: Fed inputs whose restage is held in L1 (``Operand.feed``).
         depths: Operand name -> the depth a composition chose for an edge's
             reading end (``Operand.chosen_depth``): a fed input's own end,
             the end an output's lanes bind for their first on-chip reader, or
@@ -193,7 +192,7 @@ class BuiltArray:
         dispatch: Mapping[str, object] | None = None,
         fed: Mapping[str, Operand | ObjectFifo] | None = None,
         staged: bool = False,
-        cores: Mapping[str, Sequence[Any]] | None = None,
+        held: Collection[str] = (),
         depths: Mapping[str, int] | None = None,
         packeted: Collection[str] = (),
         splices: Collection[str] = (),
@@ -231,7 +230,7 @@ class BuiltArray:
         for name, source in fed.items():
             # A restage held in L1 holds its rounds at the edge's chosen depth.
             operands[name].chosen_depth = (depths or {}).get(name)
-            operands[name].feed(source, staged=staged, cores=(cores or {}).get(name))
+            operands[name].feed(source, staged=staged, held=name in held)
         for mine, built in zip(op.buffers, view.buffers):
             built.fed_from, built.staged = mine.fed_from, mine.staged
             built.chosen_depth = (depths or {}).get(mine.name)

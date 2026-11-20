@@ -77,6 +77,7 @@ _REFUSED_COMBOS = {
         (HandOff.RATIO, "skip", "l1", "min", "same", "smaller"),
         (HandOff.SPLIT, "skip", "l1", "min", "same", "recorded"),
         (HandOff.BROADCAST, "skip", "l1", "knee", "same", "recorded"),
+        (HandOff.RATIO, "fan_in", "l1", "more", "same", "recorded"),
     },
 }
 

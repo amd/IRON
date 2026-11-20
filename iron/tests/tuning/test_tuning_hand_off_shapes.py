@@ -296,7 +296,7 @@ HELD_IN_L1 = {
 # Each device's L1-held shapes the composer builds bit-identical there.
 _BUILT_IN_L1: dict[str, set[str]] = {
     "npu1": set(),
-    "npu2": {"join_rows_into_one", "split_into_rows"},
+    "npu2": {"join_rows_into_one", "ratio_two_into_three_rows", "split_into_rows"},
 }
 
 
@@ -397,13 +397,19 @@ def test_a_restage_held_in_l1_is_as_deep_as_its_chosen_depth(device):
     assert [f.depth for f in sink.staged] == [3]
 
 
-def test_a_restage_held_in_l1_whose_producer_is_not_first_on_its_cores_waits(
-    device,
-):
-    """A join held in L1 whose producer shares its cores with an earlier step would link on a tile no core runs on: not built yet."""
+def test_a_restage_held_in_l1_links_on_the_core_its_reader_runs_on(device):
+    """A join held in L1 whose producer shares its cores with an earlier step links on the core the three run on, whichever body leads it."""
     recording, region = held_in_l1(*join_rows_after_rows())
-    with pytest.raises(NotImplementedError, match="not first on its cores"):
-        _composed_in_l1(recording, region)
+    arrays = _composed_in_l1(recording, region)
+    (sink,) = [b for b in arrays[2].op.buffers if b.name == "x"]
+    (fifo,) = sink.staged
+    (core,) = [
+        w
+        for a in arrays
+        for w in a.workers
+        if any(h.object_fifo is fifo for h in w.fifos)
+    ]
+    assert fifo.delegate_tile is core.tile
 
 
 def test_a_restage_held_in_l1_counts_no_channel_for_edges_on_chip(device):
