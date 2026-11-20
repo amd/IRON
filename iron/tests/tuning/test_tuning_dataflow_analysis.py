@@ -8,10 +8,11 @@ from aie.dialects.aie import get_target_model
 
 from iron.common.declare.composition import Edge, Region
 from iron.common.declare.profile import Profile
+from iron.common.graph.record import Recording
 from iron.common.graph.sdf import Derivation, analyze
-from iron.common.image.step import HandOff
+from iron.common.image.step import EdgeKind, HandOff
 from iron.operators import MHA
-from iron.tests.support import toys_composition
+from iron.tests.support import sequences, toys_composition
 from iron.tests.support import toys_dataflow as toys
 from iron.tests.support.llama_model import small
 from iron.tests.support.toys_edges import member
@@ -151,3 +152,30 @@ def test_a_step_is_derived_as_its_resolved_operator(device):
         return
     derivation = Derivation(region, recording, device)
     assert derivation.ops[0].B_kv == op.resolved(device).B_kv
+
+
+def test_each_channel_runs_in_the_phase_its_reader_runs_in(device):
+    """Every channel is read in the phase its reader runs in, as the composer groups them.
+
+    ``add -> SiLU`` through host memory, with no phases chosen, and ``add``
+    and ``SiLU`` into ``mul`` on chip: the composer runs ``SiLU`` and
+    ``mul`` later.
+    """
+    add, silu, mul = toys.add_silu_mul(size=128, tile=128, cols=1)
+    steps = sequences.steps(
+        (add, "a", "b", "h"), (silu, "h", "s"), (mul, "s", "h", "out")
+    )
+    recording = Recording.of_steps("skip_through_host", steps, ["a", "b"], ["out"])
+    region = Region(
+        (member(add), member(silu), member(mul)),
+        (
+            Edge(0, "y", 1, "x", kind=EdgeKind.DDR),
+            Edge(0, "y", 2, "b", kind=EdgeKind.STAGED),
+            Edge(1, "y", 2, "a", kind=EdgeKind.STAGED),
+        ),
+    )
+    flow = analyze(region, recording, device).flow
+    assert flow.phases is not None and any(flow.phases)
+    assert [c.phase for c in flow.channels] == [
+        flow.phases[c.consumer] for c in flow.channels
+    ]
