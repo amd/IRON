@@ -6,12 +6,15 @@
 from __future__ import annotations
 
 import iron
+from iron import Precision
 from iron.common.graph.record import Recording
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
+from iron.operators.silu import SiLU
 from iron.tests.support import sequences
 
 
@@ -96,6 +99,41 @@ class Wide(iron.Graph):
             for op in (ReLU, Tanh, Sigmoid):
                 x = op.step(x, num_aie_columns=self.columns, num_channels=2)
         return x
+
+
+class PreNormMLP(iron.Graph):
+    """A transformer's pre-norm MLP: ``x + down(silu(up(rms_norm(x))))``.
+
+    Its two projections share one GEMM array (the same tiles and columns at
+    other shapes), so four arrays serve its five steps, each a switch apart
+    run alone; a region over all five holds the GEMM's cores once a
+    projection.
+
+    Args:
+        hidden: The model's width, ``x``'s last axis and ``down``'s output.
+        ffn: The MLP's width, ``up``'s output.
+        columns: The GEMMs' columns, and the elementwise steps'.
+        tile: The GEMMs' ``tile_m``, ``tile_k`` and ``tile_n``.
+    """
+
+    def __init__(self, hidden: int, ffn: int, columns: int, tile: int = 64) -> None:
+        self.hidden = hidden
+        self.ffn = ffn
+        self.columns = columns
+        self.tile = tile
+
+    def body(self, x, up, down):
+        tiles = dict(
+            tile_m=self.tile,
+            tile_k=self.tile,
+            tile_n=self.tile,
+            num_aie_columns=self.columns,
+            precision=Precision.MEDIUM,
+        )
+        h = RMSNorm.step(x, num_aie_columns=self.columns)
+        h = SiLU.step(GEMM.step(h, up, **tiles), num_aie_columns=self.columns)
+        h = GEMM.step(h, down, **tiles)
+        return ElementwiseAdd.step(h, x, num_aie_columns=self.columns)
 
 
 def decode_step(add_cols=2) -> tuple[GEMV, ElementwiseAdd]:
