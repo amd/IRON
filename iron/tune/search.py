@@ -16,6 +16,7 @@ against the incumbent, and keeps the set that gains most.
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import logging
 import math
 import subprocess
@@ -792,7 +793,19 @@ def fit(
     watchdog is readable and every step has a cached standalone time
     (``measure.Cache``), outrun the watchdog over ``WATCHDOG_HEADROOM`` as
     the tuner's preflight holds a command; where either is unknown, as
-    there, nothing is refused and the log says which.
+    there, nothing is refused and the log says which. A pack (a region of
+    no edges) on an xclbin per step reads no per-call value at run time: a
+    dispatch parameter, which a pack's one sequence does not carry.
+
+    Its values' own choices, before any entry: no more values bound at run
+    time than a call's scratchpad holds (``SCRATCHPAD_WORDS``, a word
+    each); each set of variants' ranges tiling what a call may take of its
+    values (``Recording.value_range``, an extent's 0 included: a call
+    bounded at 0 runs), as boxes inside it, none
+    overlapping, holding all of it; a value bound at compile time served
+    by one design a value; and no more images held at once than
+    ``max_images``, a version holding a design per range of each set of
+    variants over its values.
 
     A refusal from any stage of any entry wins over what is not fitted yet;
     only where nothing refuses is the first of those raised.
@@ -807,10 +820,11 @@ def fit(
     Raises:
         ValueError: An entry matches none of the calls' steps, a schedule
             none of their versions, a schedule orders a part its entries do
-            not name, or a region names other than a phase per edge.
+            not name, a region names other than a phase per edge, or a
+            binding or a set of variants names a value no call gives.
         NotImplementedError: What is not fitted yet, where nothing refuses:
-            images held at once, a schedule's choices past its packaging,
-            variants, bindings, fusion or packing entries, a configuration
+            a schedule's choices past its packaging, a variant's entries, a
+            value bound other than at run time, fusion or packing entries, a configuration
             the composer does not build, an entry rooted at a step, scoped
             to some runs of its shape, splitting a step by
             fission, a placer setting the build does not take
@@ -820,14 +834,90 @@ def fit(
     waiting = [
         f"fitting {kind} is not built yet"
         for kind, kept in (
-            ("images held at once", max_images is not None),
-            ("variants", profile.variants()),
-            ("bindings", profile.bindings()),
+            ("a variant's entries", profile.variants()),
+            (
+                "a value bound other than at run time",
+                any(b.how != "runtime" for b in profile.bindings()),
+            ),
             ("fusion entries", profile.fusions()),
             ("packing entries", profile.packings()),
         )
         if kept
     ]
+    runtime = [b.value for b in profile.bindings() if b.how == "runtime"]
+    if len(runtime) > SCRATCHPAD_WORDS:
+        return Fit(
+            False,
+            "counts",
+            f"{len(runtime)} values are bound at run time, a scratchpad word each; "
+            f"a call's scratchpad holds {SCRATCHPAD_WORDS}",
+        )
+    given = {v.name for timed in calls for v in timed.recording.values}
+    for name in [b.value for b in profile.bindings()] + [
+        n for variants in profile.variants() for n in variants.values
+    ]:
+        if name not in given:
+            raise ValueError(
+                f"the profile binds or varies {name!r}, which no call gives"
+            )
+    images = 0
+    versions: set[Version] = set()
+    for timed in calls:
+        recording = timed.recording
+        if recording.version in versions:
+            continue
+        versions.add(recording.version)
+        names = {v.name for v in recording.values}
+        admitted = {n: recording.value_range(n) for n in names}
+        designs = 1
+        spans: dict[str, list[tuple[int, int]]] = {}
+        for variants in profile.variants():
+            if not set(variants.values) <= names:
+                continue
+            spaces = [admitted[name] for name in variants.values]
+            unbounded = [n for n, s in zip(variants.values, spaces) if s is None]
+            if unbounded:
+                return Fit(
+                    False,
+                    "counts",
+                    f"{recording.name} bounds {unbounded[0]} by no limit, so no "
+                    f"ranges tile it",
+                )
+            boxes = [box for box, _ in variants.ranges]
+            why = _untiled(boxes, [s for s in spaces if s is not None])
+            if why is not None:
+                return Fit(
+                    False,
+                    "counts",
+                    f"the ranges over {', '.join(variants.values)} in "
+                    f"{recording.name} do not tile what a call may take: {why}",
+                )
+            designs += len(variants.ranges) - 1
+            for k, name in enumerate(variants.values):
+                spans.setdefault(name, []).extend(box[k] for box in boxes)
+        images += designs
+        for binding in profile.bindings():
+            if binding.how != "compile" or binding.value not in names:
+                continue
+            whole = admitted[binding.value]
+            for lo, hi in spans.get(binding.value) or (
+                [] if whole is None else [whole]
+            ):
+                if lo != hi:
+                    return Fit(
+                        False,
+                        "counts",
+                        f"{binding.value} is bound at compile time, a design a value, "
+                        f"but one design serves {lo} to {hi}; give it a design per "
+                        f"value (Variants)",
+                    )
+    if max_images is not None and images > max_images:
+        return Fit(
+            False,
+            "counts",
+            f"its calls hold {images} images at once, a design apiece; the host "
+            f"holds {max_images}",
+        )
     model = get_target_model(device.resolve())
     rows = range(model.rows())
     mem_row = next(r for r in rows if model.is_mem_tile(0, r))
@@ -1049,6 +1139,31 @@ def fit(
                         "a phased region on an xclbin per step: phases run in turn "
                         "as a full ELF's sequences",
                     )
+                if (
+                    xclbin
+                    and part is region
+                    and isinstance(part, Region)
+                    and not part.edges
+                    and len(part.steps()) > 1
+                ):
+                    compiled = {
+                        b.value for b in profile.bindings() if b.how == "compile"
+                    }
+                    for s in found[0]:
+                        op = recording.steps[s].op
+                        read = [
+                            b.expression.value.name
+                            for b in recording.bindings
+                            if b.op is op and b.expression.value.name not in compiled
+                        ]
+                        if read:
+                            return Fit(
+                                False,
+                                "analysis",
+                                f"step {s} ({type(op).__name__}) reads per-call "
+                                f"value {read[0]!r} at run time, a dispatch parameter "
+                                f"on an xclbin per step, which a pack does not carry",
+                            )
             at = 0
             for part in region.parts if not isinstance(region, Member) else (region,):
                 spans.append(found[0][at : at + len(part.steps())])
@@ -1594,6 +1709,32 @@ def _independent(
                     f"steps {span}: what runs at once must be independent, no "
                     f"written data shared",
                 )
+    return None
+
+
+def _untiled(
+    boxes: Sequence[tuple[tuple[int, int], ...]], space: Sequence[tuple[int, int]]
+) -> str | None:
+    """Return how ``boxes``, ranges of per-call values, fail to tile ``space``, the values a call may take; None where they tile it.
+
+    Each lies inside it, none overlaps another, and together they hold as
+    many values as it does, so no value is left out.
+    """
+    for box in boxes:
+        if len(box) != len(space):
+            return f"a range names {len(box)} values, not {len(space)}"
+        if any(
+            lo > hi or lo < least or hi > most
+            for (lo, hi), (least, most) in zip(box, space)
+        ):
+            return f"{box} is not within {tuple(space)}"
+    for a, b in itertools.combinations(boxes, 2):
+        if all(max(x[0], y[0]) <= min(x[1], y[1]) for x, y in zip(a, b)):
+            return f"{a} and {b} overlap"
+    held = sum(math.prod(hi - lo + 1 for lo, hi in box) for box in boxes)
+    whole = math.prod(most - least + 1 for least, most in space)
+    if held != whole:
+        return f"they hold {held} of the {whole} values within {tuple(space)}"
     return None
 
 

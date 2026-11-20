@@ -923,6 +923,38 @@ class Recording:
         """
         return any(lo < s.at <= hi for s in self.host)
 
+    def value_range(self, name: str) -> tuple[int, int] | None:
+        """Return the least and the largest per-call value ``name`` every limit on it alone admits, or None where no limit bounds it.
+
+        Raises:
+            ValueError: The limits on it admit no value.
+        """
+        on = [
+            limit
+            for limit in self.limits
+            if limit.plus is None
+            and limit.expression.value.name == name
+            and limit.expression.linear
+            and limit.expression.scale > 0
+        ]
+        if not on:
+            return None
+        least = max(
+            -(-(limit.lo - limit.expression.bias) // limit.expression.scale)
+            for limit in on
+        )
+        most = min(
+            (limit.hi - 1 - limit.expression.bias) // limit.expression.scale
+            for limit in on
+        )
+        if least > most or not all(
+            limit.lo <= limit.evaluate({name: at}) < limit.hi
+            for limit in on
+            for at in (least, most)
+        ):
+            raise ValueError(f"{self.name}: the limits on {name} admit no value")
+        return least, most
+
     def check_limits(self, values: Mapping[str, int]) -> None:
         """Raise ``IndexError`` if ``values`` index or bound a view outside it."""
         for limit in self.limits:
