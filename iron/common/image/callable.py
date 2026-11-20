@@ -147,6 +147,8 @@ class FullELFRun:
         self._params: list[ParameterScratchpad] | None = None
         # Bound to or from another run's scratchpad: a loop holds it.
         self.wired = False
+        # The argument kinds this run holds a buffer of its own for.
+        self.owned: dict[str, XRTTensor] = {}
 
     def bind(self, index: int, bo: pyxrt.bo | None) -> None:
         """Run with ``bo`` as argument ``index``, refusing a released tensor's None."""
@@ -400,9 +402,22 @@ class FullELFCallable(ImageCallable):
         FullELFCallable._holding[id(self)] = self
         return self._run
 
-    def new_run(self) -> FullELFRun:
-        """Another run over this callable's buffers; each holds a copy of the ctrlcode."""
-        return self._make_run()
+    def new_run(self, owned: Collection[str] = ()) -> FullELFRun:
+        """Another run over this callable's buffers; each holds a copy of the ctrlcode.
+
+        Args:
+            owned: The argument kinds (``"input"``, ``"output"``) the run takes
+                a buffer of its own for, so runs in flight do not share the
+                host's; the scratch banks stay shared, as commands on one
+                context run in turn.
+        """
+        made = self._make_run()
+        shared = self._arguments()
+        for kind in owned:
+            tensor = XRTTensor(tuple(shared[kind].shape), dtype=shared[kind].dtype)
+            made.owned[kind] = tensor
+            made.bind(self._argument_index[kind], tensor.buffer_object())
+        return made
 
     def release(self, *, force: bool = False) -> bool:
         """Free ``run`` and unload the image, returning True unless it is in use.
@@ -497,34 +512,42 @@ class FullELFCallable(ImageCallable):
             )
         return path
 
-    def get_buffer(self, ref: BufferRef):
+    def get_buffer(self, ref: BufferRef, run: FullELFRun | None = None):
         """Return the bytes ``ref`` names, and the rest of their last coherence line.
 
+        In ``run``'s own buffer where it holds one for their argument (``new_run``).
         See ``_line_view``.
         """
         self._follow_arena()
-        if ref not in self._buffer_cache:
+        key = (ref, None if run is None else id(run))
+        if key not in self._buffer_cache:
             kind, offset, length = ref.place(self.op.layout)
             if kind == "scratch":
                 kind, offset = self.op.buffer_sizes.scratch_argument(offset, length)
             dtype = self.op.buffer_dtype(ref)
-            self._buffer_cache[ref] = _line_view(
-                self._arguments()[kind], offset, length, dtype
+            owned = {} if run is None else run.owned
+            self._buffer_cache[key] = _line_view(
+                owned.get(kind, self._arguments()[kind]), offset, length, dtype
             )
-        return self._buffer_cache[ref]
+        return self._buffer_cache[key]
 
-    def get_storage(self, root: str):
-        """Return the buffer and the rest of its last coherence line (``_line_view``)."""
+    def get_storage(self, root: str, run: FullELFRun | None = None):
+        """Return the buffer and the rest of its last coherence line (``_line_view``).
+
+        In ``run``'s own buffer where it holds one for its argument (``new_run``).
+        """
         self._follow_arena()
-        if root not in self._storage_cache:
+        key = (root, None if run is None else id(run))
+        if key not in self._storage_cache:
             kind, offset, length = self.op.layout[root]
             if kind == "scratch":
                 kind, offset = self.op.buffer_sizes.scratch_argument(offset, length)
             dtype = self.op.buffer_dtype(BufferRef(root))
-            self._storage_cache[root] = _line_view(
-                self._arguments()[kind], offset, length, dtype
+            owned = {} if run is None else run.owned
+            self._storage_cache[key] = _line_view(
+                owned.get(kind, self._arguments()[kind]), offset, length, dtype
             )
-        return self._storage_cache[root]
+        return self._storage_cache[key]
 
     def _follow_arena(self) -> None:
         if not self._arena_grew():
@@ -553,6 +576,8 @@ class FullELFCallable(ImageCallable):
         """
         self._sync_inputs()
         for run in runs:
+            for tensor in run.owned.values():
+                tensor.to("npu")
             run.start(idle)
 
     def wait(self, *runs: FullELFRun) -> None:

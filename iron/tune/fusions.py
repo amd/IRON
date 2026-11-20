@@ -961,6 +961,9 @@ class Applied:
     ) -> Applied:
         """Return ``call`` under ``profile`` on ``dev``.
 
+        Where its version's schedule runs several calls a command, the derived
+        version running them (``Recording.repeated``).
+
         Its weights coded as ``Graph.compile`` codes them (``Recording.code_weights``),
         in ``call``'s recording itself: how a weight is read is its recording's, the
         same under every profile. ``required``: a packing group that does not place
@@ -968,7 +971,18 @@ class Applied:
         """
         begun = time.perf_counter()
         call.recording.code_weights()
-        recording, fused, packing = apply_profile(call.recording, profile, dev)
+        recording = call.recording
+        per = max(
+            (
+                s.calls_per_command
+                for s in profile.schedules()
+                if s.version == recording.version
+            ),
+            default=1,
+        )
+        if per > 1:
+            recording = recording.repeated(per)
+        recording, fused, packing = apply_profile(recording, profile, dev)
         out = cls(
             recording,
             fused,

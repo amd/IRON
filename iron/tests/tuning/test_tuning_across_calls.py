@@ -11,8 +11,10 @@ from iron.common.declare.composition import Configuration, Entry, Refinement, Sc
 from iron.common.declare.profile import Profile
 from iron.tests.support import toys_schedule
 from iron.tests.support.tools import DEVICES
+from iron.tests.support.toys_edges import kv_write_then_read
 from iron.tests.support.tuning import scheduled_by_candidates, unbuilt
 from iron.tune.autotune import Timed
+from iron.tune.cli import watchdog_s
 from iron.tune.search import check, fit, search
 
 DEVICE = DEVICES["npu2"]()
@@ -93,7 +95,6 @@ def test_derived_size_merging_two_calls_round_trips_and_is_proposed(tmp_path):
     ).schedules() == [schedule]
 
 
-@unbuilt
 def test_several_calls_per_command_are_bit_identical_to_one_per_command():
     """Two and four calls per command are bit-identical to the same calls run one per command, one command at a time."""
     recording = _decode_recording()
@@ -123,7 +124,6 @@ def test_a_merge_into_a_larger_shape_is_no_worse_where_it_reorders_a_reduction()
     assert result.ok, result.why
 
 
-@unbuilt
 def test_residency_across_calls_is_bit_identical_to_reloading():
     """State (KV tail) kept resident across calls is bit-identical to reloading it each call."""
     recording = _kv_recording()
@@ -135,7 +135,6 @@ def test_residency_across_calls_is_bit_identical_to_reloading():
     assert result.ok, result.why
 
 
-@unbuilt
 def test_per_call_parameters_updated_inside_one_command_are_bit_identical():
     """Per-call parameters (position, valid length) updated between calls inside one command, no new dispatch, are bit-identical to a dispatch each."""
     recording = _kv_recording()
@@ -147,7 +146,25 @@ def test_per_call_parameters_updated_inside_one_command_are_bit_identical():
     assert result.ok, result.why
 
 
-@unbuilt
+@pytest.mark.parametrize("calls_per_command", [2, 3])
+def test_per_call_values_of_calls_in_one_command_are_each_their_own(calls_per_command):
+    """A cache write then a read bounded per call, several calls a command, bit-identical to a command each.
+
+    Each call reads its own count (the call's and its bound halved, in
+    turn), from a cache state the calls before wrote on the device.
+    """
+    recording, _ = kv_write_then_read(3)
+    call = Timed(recording, values={"n": 4})
+    base = Profile()
+    profile = Profile()
+    profile.add_schedule(
+        Schedule(version=recording.version, calls_per_command=calls_per_command)
+    )
+    assert fit(profile, [call], DEVICE).ok
+    result = check(profile, base, [call], DEVICE, Refinement.EXACT)
+    assert result.ok, result.why
+
+
 def test_commands_in_flight_are_bit_identical_to_one_at_a_time():
     """1, 2 and 3 commands in flight from the host are bit-identical to one command finishing before the next is submitted."""
     recording = _decode_recording()
@@ -217,6 +234,10 @@ def test_state_resident_across_a_teardown_is_refused():
 @unbuilt
 def test_a_command_longer_than_the_watchdog_is_refused():
     """A command whose calls_per_command exceeds the driver's watchdog (IRON's preflight checks 2x the longest) is refused before any build."""
+    if watchdog_s() is None:
+        pytest.skip(
+            "the driver's watchdog is not readable, so fit holds no command to it"
+        )
     recording = _decode_recording()
     profile = Profile()
     profile.add_schedule(

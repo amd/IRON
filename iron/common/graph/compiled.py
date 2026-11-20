@@ -1037,9 +1037,15 @@ class CompiledGraph:
         tensor,
         release: Callable[[np.ndarray], None] | None = None,
         piece_bytes: int = UPLOAD_PIECE,
+        run: FullELFRun | None = None,
     ) -> None:
-        view = self.callable.get_storage(name).numpy_view()[: np.size(tensor)]
-        _store(view, tensor, release, piece_bytes)
+        call = self.callable
+        if run is None:
+            storage = call.get_storage(name)
+        else:
+            assert isinstance(call, FullELFCallable), "a run is a full ELF's"
+            storage = call.get_storage(name, run)
+        _store(storage.numpy_view()[: np.size(tensor)], tensor, release, piece_bytes)
 
     def upload(
         self,
@@ -1115,6 +1121,21 @@ class CompiledGraph:
             for h in s.writes:
                 self._storage(h).to("npu")
 
+    def returned(self, run: FullELFRun | None = None) -> dict[str, np.ndarray]:
+        """Return a copy of each output the last call returned, by name, from ``run``'s own buffers where it holds them."""
+        call = self.callable
+        out = {}
+        for h in self.recording.returned:
+            if run is None:
+                buf = call.get_buffer(h.ref())
+            else:
+                assert isinstance(call, FullELFCallable), "a run is a full ELF's"
+                buf = call.get_buffer(h.ref(), run)
+            out[h.name] = np.array(buf.numpy()[: int(np.prod(h.shape))]).reshape(
+                h.shape
+            )
+        return out
+
     def start(self, run: FullELFRun, /, *tensors, **values) -> None:
         """Start a call of this full ELF on ``run`` without waiting for it.
 
@@ -1186,7 +1207,7 @@ class CompiledGraph:
                 tensor = np.concatenate(
                     [e(tensor, self._address(e.buffer), values) for e in held]
                 )
-            self._copy_in(handle.name, tensor)
+            self._copy_in(handle.name, tensor, run=run)
         self._write_values(values, run)
 
     def _address(self, name: str) -> int:
