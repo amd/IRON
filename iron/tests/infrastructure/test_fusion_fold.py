@@ -278,6 +278,15 @@ def test_feed_b_leaves_no_channel_for_a_finish():
     assert fold_candidates(rec2) == ()
 
 
+def test_a_fold_the_fused_operator_s_validation_refuses_is_no_candidate():
+    """A GEMV fed B into SiLU, whose fused operator GEMV's validation refuses (feed_b holds both channels, A cannot carry it): no fold, and nothing raises."""
+    gemv = GEMV(M=2048, K=2048, num_aie_columns=4, feed_b=True)
+    silu = SiLU(size=2048, num_aie_columns=8, tile_size=256)
+    steps = sequences.steps((gemv, "A", "B", "mid"), (silu, "mid", "out"))
+    rec = Recording.of_steps("feed_b_unary", steps, ["A", "B"], ["out"])
+    assert fold_candidates(rec) == ()
+
+
 def test_gemv_rides_a_when_feed_b_leaves_no_channel():
     """feed_b's two channels leave none free, but A's own tile (one column's whole share, one call's only tile) can carry the residual's row re-read instead."""
     gemv = GEMV(

@@ -15,13 +15,10 @@ import pytest
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Configuration, Entry, Refinement, Region
-from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import interleaved_kv_write, kv_write_then_read
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, search
-
-DEVICE = DEVICES["npu2"]()
 
 TABLE_ROWS = 8
 POSITIONS = {
@@ -39,7 +36,9 @@ def _region(position: int):
 
 
 @pytest.mark.parametrize("position", sorted(POSITIONS))
-def test_a_write_then_read_region_round_trips_at_every_position(position, tmp_path):
+def test_a_write_then_read_region_round_trips_at_every_position(
+    position, tmp_path, device
+):
     """A region holding the writer and the reader, sharing the cache buffer the analysis orders them by.
 
     Round-trips at the first, a middle and the last position.
@@ -54,7 +53,7 @@ def test_a_write_then_read_region_round_trips_at_every_position(position, tmp_pa
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates([call], start, DEVICE)
+        for edit in candidates([call], start, device)
     )
 
 
@@ -62,7 +61,7 @@ def test_a_write_then_read_region_round_trips_at_every_position(position, tmp_pa
     "footprint", ["lo", "lo_plus_one", "hi_minus_one", "hi", "recorded"]
 )
 def test_footprints_round_trip_at_the_boundary_positions_and_as_a_hull(
-    footprint, tmp_path
+    footprint, tmp_path, device
 ):
     """Footprints checked at lo, lo+1, hi-1, hi, the recorded value, and as a hull over the whole per-call range."""
     at = {
@@ -79,11 +78,11 @@ def test_footprints_round_trip_at_the_boundary_positions_and_as_a_hull(
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates([call], start, DEVICE)
+        for edit in candidates([call], start, device)
     )
 
 
-def test_two_interleaved_writers_round_trip_with_element_disjointness_named():
+def test_two_interleaved_writers_round_trip_with_element_disjointness_named(device):
     """Paired K and V writers at interleaved elements: their hulls overlap, so disjointness is named element by element."""
     recording, members = interleaved_kv_write(position=1, table_rows=TABLE_ROWS)
     region = Region(members, ())
@@ -93,20 +92,20 @@ def test_two_interleaved_writers_round_trip_with_element_disjointness_named():
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, DEVICE)
+        for edit in candidates([Timed(recording)], start, device)
     )
 
 
 @unbuilt
 @pytest.mark.parametrize("position", sorted(POSITIONS))
-@pytest.mark.supported_devices("npu2")
-def test_write_then_read_is_bit_identical_to_the_steps_run_apart(position):
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_write_then_read_is_bit_identical_to_the_steps_run_apart(position, device):
     """The write-then-read region is bit-identical to the same steps run apart, at each position."""
     call, region = _region(POSITIONS[position])
     profile = Profile()
     profile.add_entry(Entry(region))
     base = Profile()
-    result = check(profile, base, [call], DEVICE, Refinement.EXACT)
+    result = check(profile, base, [call], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -116,18 +115,18 @@ def test_write_then_read_is_bit_identical_to_the_steps_run_apart(position):
     raises=AssertionError,
     reason="the composer does not build steps that depend through memory with no edge yet",
 )
-@pytest.mark.supported_devices("npu2")
-def test_tuner_keeps_the_region_where_it_pays():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_tuner_keeps_the_region_where_it_pays(device):
     """The tuner, on the write-then-read toy alone, keeps the region (no host round trip between the steps) where it pays."""
     call, _ = _region(POSITIONS["middle"])
     start = Profile()
-    found = search([call], start, DEVICE, budget_s=60.0)
+    found = search([call], start, device, budget_s=60.0)
     assert any(
         isinstance(e.root, Region) and len(e.root.steps()) > 1 for e in found.entries()
     )
 
 
-def test_two_configurations_sharing_a_memory_dependence_at_once_is_refused():
+def test_two_configurations_sharing_a_memory_dependence_at_once_is_refused(device):
     """A writer and a reader of the same cache buffer, named concurrent across two configurations, are refused before any build.
 
     The dependence through the shared buffer is no longer a ``Region.order``
@@ -141,7 +140,7 @@ def test_two_configurations_sharing_a_memory_dependence_at_once_is_refused():
     profile = Profile()
     profile.add_entry(Entry(Configuration(parts=(write,), concurrent=1)))
     profile.add_entry(Entry(Configuration(parts=(read,), concurrent=1)))
-    result = fit(profile, [Timed(recording, values={"n": position + 1})], DEVICE)
+    result = fit(profile, [Timed(recording, values={"n": position + 1})], device)
     assert not result.ok
     assert result.stage == "analysis"
     assert "independent" in (result.why or "") or "shared" in (result.why or "")

@@ -246,7 +246,8 @@ values, weights, state and profiles are named. The rules:
     on-chip, their lanes meeting directly (`Operand.feed`); one output may
     feed several consumers.
   - `staged`: as `stream`, an edge whose lanes differ in count, tile or
-    order joined or split through memtiles (`Staging`).
+    order joined, split, or joined and split again through memtiles
+    (`Staging`).
   - `pack`: independent steps issued concurrently.
   - `fold`: a consumer's kernel run in its producer's cores
     (`Operator.fold`).
