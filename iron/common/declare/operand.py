@@ -326,17 +326,29 @@ class Operand:
             self.lane_fifos = made
             self.lane_handles = [host.cons() for host in hosts]
             return [f.prod() for f in made]
-        if self.drains and self.delivers is not None:
+        # A delivered stream's chosen depth counts its producer's objects, as
+        # the analysis and fit do: it deepens the producer's end, and the
+        # reader's end keeps the lane's own depth.
+        delivered = self.drains and self.delivers is not None
+        if delivered:
             objectfifo_kwargs.setdefault("consumer_obj_type", self.delivers)
         made = [
-            ObjectFifo(obj_type, depth=depth, **objectfifo_kwargs)
+            ObjectFifo(
+                obj_type,
+                depth=(
+                    self.chosen_depth
+                    if delivered and self.chosen_depth is not None
+                    else depth
+                ),
+                **objectfifo_kwargs,
+            )
             for _ in range(self.lanes)
         ]
         self.lane_fifos = made
         if self.drains:
             spliced = self.splices and join is not None
             # Spliced, the first on-chip reader is each core's stage.
-            reading = None if spliced else self.chosen_depth
+            reading = None if spliced else depth if delivered else self.chosen_depth
             self.bind([f.cons(reading, tile=t) for f, t in zip(made, lane_tiles)])
             if join is not None:
                 self.join = join

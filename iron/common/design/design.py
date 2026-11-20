@@ -253,7 +253,12 @@ class BuiltArray:
                             for f in fifos
                         )
                         if built.splices and built.join is not None
-                        else any(h.depth != chosen for h in built.lane_handles)
+                        # A delivered stream's depth is its producer's end's.
+                        else (
+                            any(f.depth != chosen for f in built.lane_fifos)
+                            if built.delivers is not None
+                            else any(h.depth != chosen for h in built.lane_handles)
+                        )
                     )
                 )
             ):

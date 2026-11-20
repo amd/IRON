@@ -10,13 +10,16 @@ from aie.iron.trace import Scope
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Member, Refinement, Region
+from iron.common.design import OperatorDesign
+from iron.common.graph.fusion import composed
 from iron.common.graph.record import Recording
 from iron.common.graph.sdf import Derivation, analyze
+from iron.common.image.compose import fused_configuration
 from iron.common.image.step import Edge, EdgeKind
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs
-from iron.tests.support import sequences
+from iron.tests.support import sequences, toys_edges
 from iron.tests.support import toys_dataflow as toys
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
@@ -255,3 +258,68 @@ def test_tuner_picks_token_sizes_that_pay(device):
     analysis = analyze(tuned_entry.root, recording, device)
     least = analysis.min_depth[tuned_edge]
     assert (least if tuned_edge.depth is None else tuned_edge.depth) >= least
+
+
+def _skip_into_larger_objects(depth: int) -> tuple[Recording, Region]:
+    """Return the skip toy, its GEMV's two-element objects delivered to the second add 256 at a time, that edge ``depth`` deep."""
+    recording, members, _ = toys_edges.skip_add_gemv_add()
+    return recording, Region(
+        members,
+        (
+            Edge(0, "y", 1, "B"),
+            Edge(1, "C", 2, "a", depth=depth),
+            toys_edges.skip_add_gemv_add_edge(depth=4),
+        ),
+    )
+
+
+def _delivered(device, reader: str, depth: int | None):
+    """Compose the delivered stream ``reader`` names at ``depth`` as the build does; return the region and its producer's output operand."""
+    if reader == "smaller":
+        gemm, norm = toys.gemm_rowwise(device, M=16, row_tile=16)
+        recording = toys.gemm_rowwise_recording("delivered-depth", gemm, norm)
+        region = toys.gemm_rowwise_region(gemm, norm, depth=depth)
+        step = 0
+    else:
+        recording, region = _skip_into_larger_objects(depth)
+        step = 1
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    assert fit(profile, [Timed(recording)], device).ok
+    _, (fusion,) = composed(recording, profile)
+    designs = [
+        OperatorDesign(recording.steps[s].op.resolved(device)) for s in fusion.steps
+    ]
+    _, arrays = fused_configuration("delivered", fusion, designs)
+    (made,) = [b for b in arrays[fusion.steps.index(step)].op.buffers if b.name == "C"]
+    assert made.delivers is not None
+    return made
+
+
+# GEMM beside another operator waits on npu1 (see ``_GEMM_BESIDE``).
+@pytest.mark.parametrize(
+    ("device", "reader"),
+    [
+        pytest.param(
+            name,
+            reader,
+            id=f"device_{name}-reader_{reader}",
+            marks=unbuilt if (name, reader) == ("npu1", "smaller") else (),
+        )
+        for name in sorted(DEVICES)
+        for reader in ("smaller", "larger")
+    ],
+    indirect=["device"],
+)
+def test_a_delivered_streams_chosen_depth_counts_its_producers_objects(reader, device):
+    """A stream whose ends take objects of other sizes, at a chosen depth: its producer's end that many of its own objects deep.
+
+    As the analysis and fit count it. GEMM's 16-row tile delivered a row at a time to a norm (its reader's
+    objects smaller), and GEMV's two-element objects delivered 256 at a time
+    to an add (its reader's larger). Its reader's end keeps the depth it has
+    with no depth chosen.
+    """
+    made = _delivered(device, reader, 3)
+    own = _delivered(device, reader, None)
+    assert [f.depth for f in made.lane_fifos] == [3] * made.lanes
+    assert [h.depth for h in made.lane_handles] == [h.depth for h in own.lane_handles]
