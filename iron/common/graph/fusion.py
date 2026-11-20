@@ -199,19 +199,6 @@ def _stream_runs(recording: Recording) -> list[Fusion]:
     return found
 
 
-def _pack_conflicts(recording: Recording) -> set[tuple[int, int]]:
-    """Index pairs ``(i, j)``, ``i < j``, whose steps are not independent: one writes a host buffer root the other reads or writes too."""
-    uses = [step.roots() for step in recording.steps]
-    reads = [set(r) for r, _ in uses]
-    writes = [set(w) for _, w in uses]
-    conflicts: set[tuple[int, int]] = set()
-    for i in range(len(recording.steps)):
-        for j in range(i + 1, len(recording.steps)):
-            if writes[i] & (reads[j] | writes[j]) or writes[j] & reads[i]:
-                conflicts.add((i, j))
-    return conflicts
-
-
 def memory_waits(
     recording: Recording, match: Sequence[int], edges: Sequence[Edge]
 ) -> tuple[tuple[int, int], ...]:
@@ -247,10 +234,10 @@ def memory_waits(
 def _pack_runs(recording: Recording) -> list[Fusion]:
     """Every maximal run of consecutive, pairwise independent steps.
 
-    ``_pack_conflicts``, no host step crossing it, and all of their contiguous
+    ``Recording.dependences``, no host step crossing it, and all of their contiguous
     sub-runs of 2+, overlapping ones included.
     """
-    conflicts = _pack_conflicts(recording)
+    conflicts = recording.dependences()
     n = len(recording.steps)
     found: list[Fusion] = []
     start = 0

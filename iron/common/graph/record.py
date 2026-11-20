@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import heapq
 import itertools
 import logging
 import math
@@ -20,7 +21,7 @@ from aie.utils import bfp
 from aie.utils.compile.jit.params import OperatorParam
 
 from ..declare import Operator, Value
-from ..declare.composition import Entry
+from ..declare.composition import Entry, Region
 from ..declare.operand import concrete
 from ..declare.operator import graph_recorder
 from ..declare.profile import Profile, Version
@@ -453,6 +454,8 @@ class Recording:
     def scheduled(self, profile: Profile) -> Recording:
         """Return the version ``profile``'s schedules for this one build: its calls back to back (``repeated``), merged (``merged``), or this one.
 
+        Each in the order ``profile``'s regions take (``ordered``).
+
         Raises:
             NotImplementedError: A schedule names a derived version other than
                 calls merged into one, both merges calls and runs several a
@@ -478,11 +481,78 @@ class Recording:
                 f"steps are not built yet: an entry names a step's shape, which a "
                 f"merge changes"
             )
+        recording = self.ordered(profile)
         if per > 1:
-            return self.repeated(per)
+            return recording.repeated(per)
         if merged > 1:
-            return self.merged(merged)
-        return self
+            return recording.merged(merged)
+        return recording
+
+    def ordered(self, profile: Profile) -> Recording:
+        """Return this recording reordered so each region the composer builds runs its steps together.
+
+        The regions are the composer's matches of ``profile``'s region
+        entries: each entry's in turn, each but those overlapping one before
+        it, those an order can gather (``gatherable``). Each is contracted to
+        one node of the steps' dependences, the nodes run in topological
+        order, earliest recorded first, and each region's steps in recorded
+        order: so steps move only where a region needs them to. A match no
+        order gathers stays as it is, for ``fit`` to refuse or the composer to
+        wait on.
+
+        Raises:
+            ValueError: Two regions each depend on the other through their
+                steps, so their contraction is cyclic and no order runs each
+                one's steps together.
+        """
+        regions: list[tuple[int, ...]] = []
+        taken: set[int] = set()
+        for entry in profile.entries():
+            if not isinstance(entry.root, Region):
+                continue
+            for match in self.occurrences(entry):
+                if taken & set(match):
+                    continue
+                taken.update(match)
+                if len(match) > 1 and self.gatherable(match):
+                    regions.append(match)
+        if all(r == tuple(range(r[0], r[-1] + 1)) for r in regions):
+            return self
+        node = list(range(len(self.steps)))
+        members: dict[int, tuple[int, ...]] = {s: (s,) for s in node}
+        for steps in regions:
+            for s in steps:
+                node[s] = steps[0]
+            members[steps[0]] = steps
+            for s in steps[1:]:
+                del members[s]
+        after: dict[int, set[int]] = {n: set() for n in members}
+        needs = {n: 0 for n in members}
+        for i, j in self.dependences():
+            a, b = node[i], node[j]
+            if a != b and b not in after[a]:
+                after[a].add(b)
+                needs[b] += 1
+        ready = [n for n, k in needs.items() if k == 0]
+        heapq.heapify(ready)
+        order: list[int] = []
+        while ready:
+            n = heapq.heappop(ready)
+            order += members[n]
+            for m in after[n]:
+                needs[m] -= 1
+                if needs[m] == 0:
+                    heapq.heappush(ready, m)
+        if len(order) < len(self.steps):
+            stuck = [members[n] for n, k in needs.items() if k and len(members[n]) > 1]
+            raise ValueError(
+                f"{self.name}: the regions over steps {stuck[0]} and "
+                f"{stuck[-1]} each depend on the other: their contraction is "
+                f"cyclic, so no order runs each one's steps together"
+            )
+        if order == list(range(len(self.steps))):
+            return self
+        return dataclasses.replace(self, steps=[self.steps[s] for s in order])
 
     def merged(self, calls: int) -> Recording:
         """Return the derived version running ``calls`` of this one's calls as one call, each step over the calls' data at once (``Operator.merged``).
@@ -804,6 +874,46 @@ class Recording:
             for h in host_step.writes:
                 writers.setdefault(h.ref().root, []).append(-1)
         return readers, writers
+
+    def dependences(self) -> set[tuple[int, int]]:
+        """Index pairs ``(i, j)``, ``i < j``, whose steps are not independent: one writes a host buffer root the other reads or writes too."""
+        uses = [step.roots() for step in self.steps]
+        reads = [set(r) for r, _ in uses]
+        writes = [set(w) for _, w in uses]
+        return {
+            (i, j)
+            for i in range(len(self.steps))
+            for j in range(i + 1, len(self.steps))
+            if writes[i] & (reads[j] | writes[j]) or writes[j] & reads[i]
+        }
+
+    def gatherable(self, steps: Sequence[int]) -> bool:
+        """Whether an order keeping every dependence (``dependences``) runs ``steps`` together.
+
+        Their set is convex, no step outside it depending on one of them and
+        having one depend on it, and no host step runs among them.
+        """
+        lo, hi = steps[0], steps[-1]
+        if self.crosses_host(lo, hi):
+            return False
+        if list(steps) == list(range(lo, hi + 1)):
+            return True
+        inside = set(steps)
+        preds: dict[int, set[int]] = {}
+        succs: dict[int, set[int]] = {}
+        for i, j in self.dependences():
+            if lo <= i and j <= hi:
+                preds.setdefault(j, set()).add(i)
+                succs.setdefault(i, set()).add(j)
+        ancestors: set[int] = set()
+        descendants: set[int] = set()
+        for found, links in ((ancestors, preds), (descendants, succs)):
+            frontier = list(steps)
+            while frontier:
+                for nxt in links.get(frontier.pop(), set()) - inside - found:
+                    found.add(nxt)
+                    frontier.append(nxt)
+        return not ancestors & descendants
 
     def crosses_host(self, lo: int, hi: int) -> bool:
         """Whether a host step runs between steps ``lo`` and ``hi`` (inclusive).
