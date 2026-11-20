@@ -12,7 +12,7 @@ from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import check, fit, search
 
-pytestmark = pytest.mark.usefixtures("npu2")
+pytestmark = pytest.mark.usefixtures("device")
 
 
 def _three_on_one_worker(order: tuple[int, ...]) -> tuple[Region, tuple]:
@@ -40,18 +40,18 @@ def _three_on_one_worker(order: tuple[int, ...]) -> tuple[Region, tuple]:
 
 
 @unbuilt
-@pytest.mark.supported_devices("npu2")
-def test_a_valid_firing_order_runs_bit_identical():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_valid_firing_order_runs_bit_identical(device):
     """``add``, ``SiLU``, ``mul`` on one worker, in their dependence order: bit-identical to apart."""
     region, (add, silu, mul) = _three_on_one_worker((0, 1, 2))
     profile = Profile()
     profile.add_entry(Entry(root=region))
     recording = toys.add_silu_mul_recording("worker-valid", add, silu, mul)
-    result = check(profile, Profile(), [Timed(recording)], toys.NPU2, Refinement.EXACT)
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
-def test_an_invalid_firing_order_is_refused_statically():
+def test_an_invalid_firing_order_is_refused_statically(device):
     """The same three actors fired out of dependence order.
 
     ``mul`` before ``SiLU`` produces its input: refused by ``fit`` at
@@ -61,13 +61,13 @@ def test_an_invalid_firing_order_is_refused_statically():
     profile = Profile()
     profile.add_entry(Entry(root=region))
     recording = toys.add_silu_mul_recording("worker-invalid", add, silu, mul)
-    result = fit(profile, [Timed(recording)], toys.NPU2)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "analysis"
 
 
 @unbuilt
-def test_one_actor_split_across_workers_round_trips():
+def test_one_actor_split_across_workers_round_trips(device):
     """``mul``'s work split by rows into two fissioned parts, each on its own worker: a fission named by ``Member.part``, and it fits."""
     add, silu, mul = toys.add_silu_mul(size=512, tile=256)
     lo = Member(
@@ -86,13 +86,13 @@ def test_one_actor_split_across_workers_round_trips():
     profile = Profile()
     profile.add_entry(Entry(root=region))
     recording = toys.add_silu_mul_recording("split-mul", add, silu, mul)
-    result = fit(profile, [Timed(recording)], toys.NPU2)
+    result = fit(profile, [Timed(recording)], device)
     assert result.ok
 
 
 @unbuilt
-@pytest.mark.supported_devices("npu2")
-def test_a_qk_softmax_pv_style_pipeline_on_one_core():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_qk_softmax_pv_style_pipeline_on_one_core(device):
     """``Q·K -> softmax step -> P·V`` on one core, a fixed firing order: bit-identical to apart."""
     add, silu, mul = toys.add_silu_mul(size=256, tile=128)
     members = (
@@ -120,14 +120,14 @@ def test_a_qk_softmax_pv_style_pipeline_on_one_core():
     profile = Profile()
     profile.add_entry(Entry(root=region))
     recording = toys.add_silu_mul_recording("qkv-style", add, silu, mul)
-    result = check(profile, Profile(), [Timed(recording)], toys.NPU2, Refinement.EXACT)
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
 @pytest.mark.extensive
 @unbuilt
-@pytest.mark.supported_devices("npu2")
-def test_tuner_keeps_the_mapping_that_pays():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_tuner_keeps_the_mapping_that_pays(device):
     """``search``, run on the three-actor toy alone, keeps a dependence-respecting order.
 
     Passes ``check`` against the start, exact.
@@ -137,8 +137,8 @@ def test_tuner_keeps_the_mapping_that_pays():
     profile.add_entry(Entry(root=region))
     recording = toys.add_silu_mul_recording("searched-mapping", add, silu, mul)
     calls = [Timed(recording)]
-    tuned = search(calls, profile, toys.NPU2)
-    verdict = check(tuned, profile, calls, toys.NPU2, Refinement.EXACT)
+    tuned = search(calls, profile, device)
+    verdict = check(tuned, profile, calls, device, Refinement.EXACT)
     assert verdict.ok, verdict.why
     order = tuned.entries()[0].root.workers[0]
     assert order.index(0) < order.index(1) < order.index(2)

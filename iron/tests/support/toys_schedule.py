@@ -53,19 +53,38 @@ def two_gemv_window_recording(name, norm, gate, up) -> Recording:
 
 
 class Alternating(iron.Graph):
-    """ReLU and Tanh in turn, eight steps: every step a switch apart (ported from ``test_tune_packings.py``)."""
+    """ReLU and Tanh in turn, eight steps at ``columns`` columns: every step a switch apart (ported from ``test_tune_packings.py``).
+
+    Args:
+        columns: Each step's columns, the array's width on the device tuned.
+    """
+
+    def __init__(self, columns: int) -> None:
+        self.columns = columns
 
     def body(self, x):
         from iron.operators.relu import ReLU
         from iron.operators.tanh import Tanh
 
         for _ in range(4):
-            x = Tanh.step(ReLU.step(x, num_aie_columns=8), num_aie_columns=8)
+            x = Tanh.step(
+                ReLU.step(x, num_aie_columns=self.columns),
+                num_aie_columns=self.columns,
+            )
         return x
 
 
 class Wide(iron.Graph):
-    """ReLU, Tanh and Sigmoid at eight columns and two channels, twice: 48 cores together, so packed only narrowed (ported from ``test_tune_packings.py``)."""
+    """ReLU, Tanh and Sigmoid at ``columns`` columns and two channels, twice: six cores a column, so packed only narrowed.
+
+    Ported from ``test_tune_packings.py``.
+
+    Args:
+        columns: Each step's columns, the array's width on the device tuned.
+    """
+
+    def __init__(self, columns: int) -> None:
+        self.columns = columns
 
     def body(self, x):
         from iron.operators.relu import ReLU
@@ -74,7 +93,7 @@ class Wide(iron.Graph):
 
         for _ in range(2):
             for op in (ReLU, Tanh, Sigmoid):
-                x = op.step(x, num_aie_columns=8, num_channels=2)
+                x = op.step(x, num_aie_columns=self.columns, num_channels=2)
         return x
 
 

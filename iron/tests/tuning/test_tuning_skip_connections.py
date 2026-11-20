@@ -13,7 +13,6 @@ import pytest
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement, Region
-from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     HELDS,
     diamond_qkv_merge,
@@ -26,8 +25,6 @@ from iron.tests.support.toys_edges import (
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, search
-
-DEVICE = DEVICES["npu2"]()
 
 
 def _residual_region(held: str | None = None):
@@ -51,7 +48,9 @@ def _short_skip_region(held: str | None = None, depth: int = 4):
 
 @unbuilt
 @pytest.mark.parametrize("held", HELDS)
-def test_a_residual_skip_round_trips_for_every_way_of_holding_it(held, tmp_path):
+def test_a_residual_skip_round_trips_for_every_way_of_holding_it(
+    held, tmp_path, device
+):
     """A region with a skip edge, its depth and held place realized, round-trips; ``candidates`` proposes each feasible holding."""
     recording, region = _residual_region(held=held)
     entry = Entry(region)
@@ -63,11 +62,11 @@ def test_a_residual_skip_round_trips_for_every_way_of_holding_it(held, tmp_path)
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, DEVICE)
+        for edit in candidates([Timed(recording)], start, device)
     )
 
 
-def test_a_reconvergent_diamond_round_trips():
+def test_a_reconvergent_diamond_round_trips(device):
     """Attention's Q/K/V branches rejoining (a diamond) round-trips, and ``candidates`` proposes the fan-out and the merge."""
     recording, region = diamond_qkv_merge()
     entry = Entry(region)
@@ -76,7 +75,7 @@ def test_a_reconvergent_diamond_round_trips():
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, DEVICE)
+        for edit in candidates([Timed(recording)], start, device)
     )
 
 
@@ -88,35 +87,35 @@ def test_a_reconvergent_diamond_round_trips():
         for h in HELDS
     ],
 )
-@pytest.mark.supported_devices("npu2")
-def test_a_residual_skip_is_bit_identical_for_every_way_of_holding_it(held):
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_residual_skip_is_bit_identical_for_every_way_of_holding_it(held, device):
     """The residual window, held each way, is bit-identical to the same steps run apart."""
     recording, region = _residual_region(held=held)
     profile = Profile()
     profile.add_entry(Entry(region))
     base = Profile()
-    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
-@pytest.mark.supported_devices("npu2")
-def test_a_reconvergent_diamond_is_bit_identical():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_reconvergent_diamond_is_bit_identical(device):
     """The Q/K/V diamond is bit-identical to the norm, the two projections and the merge run apart."""
     recording, region = diamond_qkv_merge()
     profile = Profile()
     profile.add_entry(Entry(region))
     base = Profile()
-    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
 @pytest.mark.extensive
-@pytest.mark.supported_devices("npu2")
-def test_tuner_picks_the_way_of_holding_that_pays():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_tuner_picks_the_way_of_holding_that_pays(device):
     """The tuner, on the residual toy alone, picks the held place that pays."""
     recording, _ = _residual_region()
     start = Profile()
-    found = search([Timed(recording)], start, DEVICE, budget_s=60.0)
+    found = search([Timed(recording)], start, device, budget_s=60.0)
     assert any(
         isinstance(e.root, Region)
         and (
@@ -127,7 +126,7 @@ def test_tuner_picks_the_way_of_holding_that_pays():
 
 
 @unbuilt
-def test_a_depth_below_the_analyzed_minimum_is_refused_before_any_build():
+def test_a_depth_below_the_analyzed_minimum_is_refused_before_any_build(device):
     """A skip edge shallower than the dataflow analysis's minimum is refused before any build.
 
     Add -> GEMV -> Add held on a 2-deep broadcast edge hangs the device; a
@@ -136,17 +135,17 @@ def test_a_depth_below_the_analyzed_minimum_is_refused_before_any_build():
     recording, region = _short_skip_region(depth=1)
     profile = Profile()
     profile.add_entry(Entry(region))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "analysis"
     assert "depth" in (result.why or "") or "deadlock" in (result.why or "")
 
 
 @unbuilt
-def test_the_recorded_safe_depth_fits():
+def test_the_recorded_safe_depth_fits(device):
     """The same skip edge at a depth of 4, which runs safely, is not refused by the analysis."""
     recording, region = _short_skip_region(depth=4)
     profile = Profile()
     profile.add_entry(Entry(region))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert result.ok, result.why

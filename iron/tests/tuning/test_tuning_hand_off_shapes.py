@@ -20,39 +20,45 @@ from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement, Region
 from iron.common.graph.sdf import analyze
 from iron.common.image.step import EdgeKind, HandOff
-from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     broadcast_weight_to_columns,
     fan_out_norm_qkv,
-    join_8_into_4,
+    join_in_pairs,
     layout_transpose,
-    ratio_4_into_6,
-    ratio_6_into_4,
+    ratio_three_into_two,
+    ratio_two_into_three,
     slices_qkv,
-    split_4_into_8,
+    split_in_two,
 )
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, search
 
-DEVICE = DEVICES["npu2"]()
-
 SHAPES = {
-    "join_8_into_4": join_8_into_4,
-    "split_4_into_8": split_4_into_8,
-    "ratio_4_into_6": ratio_4_into_6,
-    "ratio_6_into_4": ratio_6_into_4,
+    "join_in_pairs": join_in_pairs,
+    "split_in_two": split_in_two,
+    "ratio_two_into_three": ratio_two_into_three,
+    "ratio_three_into_two": ratio_three_into_two,
     "broadcast": broadcast_weight_to_columns,
     "slices_qkv": slices_qkv,
     "layout_transpose": layout_transpose,
 }
 
+# The toys whose lane counts are the device's columns', so take the device.
+SIZED = {
+    "join_in_pairs",
+    "split_in_two",
+    "ratio_two_into_three",
+    "ratio_three_into_two",
+    "broadcast",
+}
+
 # A name's edges and the HandOff every one of them realizes.
 _REALIZES = {
-    "join_8_into_4": HandOff.JOIN,
-    "split_4_into_8": HandOff.SPLIT,
-    "ratio_4_into_6": HandOff.RATIO,
-    "ratio_6_into_4": HandOff.RATIO,
+    "join_in_pairs": HandOff.JOIN,
+    "split_in_two": HandOff.SPLIT,
+    "ratio_two_into_three": HandOff.RATIO,
+    "ratio_three_into_two": HandOff.RATIO,
     "broadcast": HandOff.BROADCAST,
     "slices_qkv": HandOff.SLICES,
     "layout_transpose": HandOff.LAYOUT,
@@ -65,7 +71,7 @@ _DERIVED = set(SHAPES) - {"slices_qkv"}
 # Any ratio and broadcast are representable gaps today (operand.py:260-299):
 # searchable, strict xfail, compiler-failure entries once the hardware could
 # run them and the compiler refuses.
-REPRESENTABLE_GAPS = {"ratio_4_into_6", "ratio_6_into_4", "broadcast"}
+REPRESENTABLE_GAPS = {"ratio_two_into_three", "ratio_three_into_two", "broadcast"}
 
 
 @pytest.mark.parametrize(
@@ -76,10 +82,10 @@ REPRESENTABLE_GAPS = {"ratio_4_into_6", "ratio_6_into_4", "broadcast"}
         for s in sorted(SHAPES)
     ],
 )
-@pytest.mark.usefixtures("npu2")
-def test_a_hand_off_shape_round_trips_through_the_profile(shape, tmp_path):
+@pytest.mark.usefixtures("device")
+def test_a_hand_off_shape_round_trips_through_the_profile(shape, tmp_path, device):
     """Each hand-off shape round-trips through the profile, and ``candidates`` proposes it."""
-    recording, region = SHAPES[shape]()
+    recording, region = SHAPES[shape](device) if shape in SIZED else SHAPES[shape]()
     entry = Entry(region)
     profile = Profile()
     profile.add_entry(entry)
@@ -89,11 +95,11 @@ def test_a_hand_off_shape_round_trips_through_the_profile(shape, tmp_path):
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, DEVICE)
+        for edit in candidates([Timed(recording)], start, device)
     )
 
 
-@pytest.mark.usefixtures("npu2")
+@pytest.mark.usefixtures("device")
 @pytest.mark.parametrize(
     "shape",
     [
@@ -101,10 +107,10 @@ def test_a_hand_off_shape_round_trips_through_the_profile(shape, tmp_path):
         for name in sorted(SHAPES)
     ],
 )
-def test_the_analysis_derives_the_named_hand_off(shape):
+def test_the_analysis_derives_the_named_hand_off(shape, device):
     """The dataflow analysis derives every edge of each toy as the hand-off its lane counts realize; the toy never states it."""
-    recording, region = SHAPES[shape]()
-    analysis = analyze(region, recording, DEVICE)
+    recording, region = SHAPES[shape](device) if shape in SIZED else SHAPES[shape]()
+    analysis = analyze(region, recording, device)
     assert all(analysis.hand_off[edge] is _REALIZES[shape] for edge in region.edges)
 
 
@@ -112,48 +118,50 @@ def test_the_analysis_derives_the_named_hand_off(shape):
     "shape",
     [
         # The rest the composer does not build yet.
-        s if s in ("broadcast", "join_8_into_4") else pytest.param(s, marks=unbuilt)
+        s if s in ("broadcast", "join_in_pairs") else pytest.param(s, marks=unbuilt)
         for s in sorted(SHAPES)
     ],
 )
-@pytest.mark.supported_devices("npu2")
-def test_a_hand_off_shape_is_bit_identical_to_the_steps_run_apart(shape):
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_hand_off_shape_is_bit_identical_to_the_steps_run_apart(shape, device):
     """Each hand-off shape is bit-identical to the same steps run apart."""
-    recording, region = SHAPES[shape]()
+    recording, region = SHAPES[shape](device) if shape in SIZED else SHAPES[shape]()
     profile = Profile()
     profile.add_entry(Entry(region))
     base = Profile()
-    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
 @unbuilt
-@pytest.mark.supported_devices("npu2")
-def test_the_4_into_8_split_builds_correctly_or_is_refused_statically_never_hangs():
-    """A 4 -> 8 split that once hung either builds correctly or ``fit`` refuses it before any build."""
-    recording, region = split_4_into_8()
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_split_into_every_column_builds_correctly_or_is_refused_statically_never_hangs(
+    device,
+):
+    """A split from half the columns into all of them (npu2's 4 -> 8, which once hung) either builds correctly or ``fit`` refuses it before any build."""
+    recording, region = split_in_two(device)
     profile = Profile()
     profile.add_entry(Entry(region))
-    verdict = fit(profile, [Timed(recording)], DEVICE)
+    verdict = fit(profile, [Timed(recording)], device)
     if verdict.ok:
         base = Profile()
-        result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
+        result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
         assert result.ok, result.why
 
 
 @pytest.mark.extensive
-@pytest.mark.supported_devices("npu2")
-def test_tuner_keeps_the_shape_that_pays_against_narrowing_to_equal_lanes():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_tuner_keeps_the_shape_that_pays_against_narrowing_to_equal_lanes(device):
     """The tuner keeps the join/split shape where it pays, priced against narrowing to equal lanes."""
-    recording, _ = join_8_into_4()
+    recording, _ = join_in_pairs(device)
     start = Profile()
-    found = search([Timed(recording)], start, DEVICE, budget_s=60.0)
+    found = search([Timed(recording)], start, device, budget_s=60.0)
     assert any(isinstance(e.root, Region) and e.root.edges for e in found.entries())
 
 
-def test_a_restage_over_a_memtiles_memory_is_refused_before_any_build():
+def test_a_restage_over_a_memtiles_memory_is_refused_before_any_build(device):
     """A join restaged through a memtile and held deeper than the memtile's memory is refused before any build."""
-    recording, region = join_8_into_4()
+    recording, region = join_in_pairs(device)
     (edge,) = region.edges
     region = dataclasses.replace(
         region,
@@ -161,44 +169,44 @@ def test_a_restage_over_a_memtiles_memory_is_refused_before_any_build():
     )
     profile = Profile()
     profile.add_entry(Entry(region))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
     assert "memtile" in (result.why or "")
 
 
 @unbuilt
-def test_a_restage_over_a_memtiles_channels_is_refused_before_any_build():
+def test_a_restage_over_a_memtiles_channels_is_refused_before_any_build(device):
     """A restage past a memtile's channel budget is refused before any build."""
-    recording, region = fan_out_norm_qkv(columns=(8, 8, 8))
+    recording, region = fan_out_norm_qkv(columns=(device.cols,) * 3)
     profile = Profile()
     profile.add_entry(Entry(region))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
     assert "channel" in (result.why or "")
 
 
 @pytest.mark.parametrize("shape", sorted(REPRESENTABLE_GAPS))
-def test_any_ratio_and_broadcast_are_representable_but_unbuilt(shape):
+def test_any_ratio_and_broadcast_are_representable_but_unbuilt(shape, device):
     """Any-ratio and broadcast hand-offs round-trip and are proposed (searchable), but IRON does not build them yet."""
-    recording, region = SHAPES[shape]()
+    recording, region = SHAPES[shape](device) if shape in SIZED else SHAPES[shape]()
     entry = Entry(region)
     profile = Profile()
     profile.add_entry(entry)
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, DEVICE)
+        for edit in candidates([Timed(recording)], start, device)
     )
 
 
-@pytest.mark.supported_devices("npu2")
-def test_feed_refuses_a_held_input_broadcast_flips_it():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_feed_refuses_a_held_input_broadcast_flips_it(device):
     """Broadcast flips ``test_operand_lanes.py``'s ``feed_refuses_a_held_input``: a replicated input is fed where a plain stream is refused."""
-    recording, region = broadcast_weight_to_columns()
+    recording, region = broadcast_weight_to_columns(device)
     profile = Profile()
     profile.add_entry(Entry(region))
     base = Profile()
-    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why

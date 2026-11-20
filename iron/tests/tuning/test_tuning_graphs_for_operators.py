@@ -28,7 +28,7 @@ from iron.tests.support.tuning import unbuilt, waits_on_a_kernel
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, measure, search
 
-pytestmark = pytest.mark.usefixtures("npu2")
+pytestmark = pytest.mark.usefixtures("device")
 
 KV_LEN, HEAD_DIM, ROWS = 128, 64, 32
 SEQ = 32
@@ -96,7 +96,7 @@ def _axpy_region() -> Region:
 
 
 @unbuilt
-def test_the_decode_graph_round_trips_as_an_entry_and_is_proposed(tmp_path, npu2):
+def test_the_decode_graph_round_trips_as_an_entry_and_is_proposed(tmp_path, device):
     region = _decode_region()
     entry = Entry(root=region)
     profile = Profile()
@@ -109,12 +109,12 @@ def test_the_decode_graph_round_trips_as_an_entry_and_is_proposed(tmp_path, npu2
     calls = [Timed(recording)]
     assert any(
         entry in edit.apply(Profile()).entries()
-        for edit in candidates(calls, Profile(), npu2)
+        for edit in candidates(calls, Profile(), device)
     )
 
 
 @unbuilt
-def test_the_prefill_graph_round_trips_as_an_entry_and_is_proposed(tmp_path, npu2):
+def test_the_prefill_graph_round_trips_as_an_entry_and_is_proposed(tmp_path, device):
     region = _prefill_region()
     entry = Entry(root=region)
     profile = Profile()
@@ -127,12 +127,12 @@ def test_the_prefill_graph_round_trips_as_an_entry_and_is_proposed(tmp_path, npu
     calls = [Timed(recording)]
     assert any(
         entry in edit.apply(Profile()).entries()
-        for edit in candidates(calls, Profile(), npu2)
+        for edit in candidates(calls, Profile(), device)
     )
 
 
 @unbuilt
-def test_the_axpy_graph_round_trips_as_an_entry_and_is_proposed(tmp_path, npu2):
+def test_the_axpy_graph_round_trips_as_an_entry_and_is_proposed(tmp_path, device):
     region = _axpy_region()
     entry = Entry(root=region)
     profile = Profile()
@@ -145,12 +145,12 @@ def test_the_axpy_graph_round_trips_as_an_entry_and_is_proposed(tmp_path, npu2):
     calls = [Timed(recording)]
     assert any(
         entry in edit.apply(Profile()).entries()
-        for edit in candidates(calls, Profile(), npu2)
+        for edit in candidates(calls, Profile(), device)
     )
 
 
 @unbuilt
-def test_every_known_mha_mapping_composes_as_the_graph(npu2):
+def test_every_known_mha_mapping_composes_as_the_graph(device):
     """Replaces ``tests/applications/test_attention_shapes.py``: every known mapping composes, decode and prefill."""
     decode_entry = Entry(
         root=_decode_region(
@@ -167,7 +167,7 @@ def test_every_known_mha_mapping_composes_as_the_graph(npu2):
     )
     assert any(
         decode_entry in edit.apply(Profile()).entries()
-        for edit in candidates([Timed(decode_recording)], Profile(), npu2)
+        for edit in candidates([Timed(decode_recording)], Profile(), device)
     )
 
     prefill_entry = Entry(
@@ -185,11 +185,11 @@ def test_every_known_mha_mapping_composes_as_the_graph(npu2):
     )
     assert any(
         prefill_entry in edit.apply(Profile()).entries()
-        for edit in candidates([Timed(prefill_recording)], Profile(), npu2)
+        for edit in candidates([Timed(prefill_recording)], Profile(), device)
     )
 
 
-def test_prefill_s_float32_scores_do_not_fit_the_bf16_mask_add(npu2):
+def test_prefill_s_float32_scores_do_not_fit_the_bf16_mask_add(device):
     """GEMM can keep ``Q K^T`` in float32 (``output_dtype``), but the mask's ElementwiseAdd reads only bf16.
 
     The two ends are then not one buffer, which the analysis refuses: the
@@ -210,10 +210,10 @@ def test_prefill_s_float32_scores_do_not_fit_the_bf16_mask_add(npu2):
     )
     region = _prefill_region(SEQ, KV_LEN, HEAD_DIM, scores_dtype=np.float32)
     with pytest.raises(ValueError, match="not one buffer"):
-        analyze(region, recording, npu2)
+        analyze(region, recording, device)
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
     "rows, kv_len",
     [
@@ -227,17 +227,17 @@ def test_prefill_s_float32_scores_do_not_fit_the_bf16_mask_add(npu2):
     ids=["padding_free_of_nan", "stale_past_bound", "mid_block_start"],
 )
 @unbuilt
-def test_decode_graph_is_no_worse_than_its_own_untuned_build(rows, kv_len, npu2):
+def test_decode_graph_is_no_worse_than_its_own_untuned_build(rows, kv_len, device):
     qk, softmax, pv = toys.decode_attention_ops(kv_len, HEAD_DIM, rows)
     recording = toys.decode_attention_recording("decode_bounded", qk, softmax, pv)
     region = _decode_region(kv_len, HEAD_DIM, rows)
     profile, base = Profile(), Profile()
     profile.add_entry(Entry(root=region))
-    result = check(profile, base, [Timed(recording)], npu2, Refinement.NO_WORSE)
+    result = check(profile, base, [Timed(recording)], device, Refinement.NO_WORSE)
     assert result.ok, result.why
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
     "position",
     [
@@ -246,7 +246,7 @@ def test_decode_graph_is_no_worse_than_its_own_untuned_build(rows, kv_len, npu2)
         pytest.param(32703, id="position_32703", marks=waits_on_a_kernel),
     ],
 )
-def test_decode_graph_holds_deep_cache_accuracy(position, npu2):
+def test_decode_graph_holds_deep_cache_accuracy(position, device):
     """Ports the deep-cache positions of ``iron/tests/operators/test_mha_long_context.py``: ``kv_len`` is the cache read up to ``position``."""
     kv_len = position + 1
     qk, softmax, pv = toys.decode_attention_ops(kv_len, HEAD_DIM, ROWS)
@@ -256,24 +256,24 @@ def test_decode_graph_holds_deep_cache_accuracy(position, npu2):
     region = _decode_region(kv_len, HEAD_DIM, ROWS)
     profile, base = Profile(), Profile()
     profile.add_entry(Entry(root=region))
-    result = check(profile, base, [Timed(recording)], npu2, Refinement.NO_WORSE)
+    result = check(profile, base, [Timed(recording)], device, Refinement.NO_WORSE)
     assert result.ok, result.why
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @unbuilt
-def test_prefill_graph_is_no_worse_than_its_own_untuned_build(npu2):
+def test_prefill_graph_is_no_worse_than_its_own_untuned_build(device):
     qk, add_mask, softmax, pv = toys.prefill_attention_ops(SEQ, KV_LEN, HEAD_DIM)
     recording = toys.prefill_attention_recording("prefill", qk, add_mask, softmax, pv)
     profile, base = Profile(), Profile()
     profile.add_entry(Entry(root=_prefill_region()))
-    result = check(profile, base, [Timed(recording)], npu2, Refinement.NO_WORSE)
+    result = check(profile, base, [Timed(recording)], device, Refinement.NO_WORSE)
     assert result.ok, result.why
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @unbuilt
-def test_decode_graph_is_no_worse_than_the_fused_mha_it_replaces(npu2):
+def test_decode_graph_is_no_worse_than_the_fused_mha_it_replaces(device):
     """Held to the fused ``MHA`` operator it replaces, at the same sizes, the graph's float32 scores are no worse."""
     qk, softmax, pv = toys.decode_attention_ops(KV_LEN, HEAD_DIM, ROWS)
     graph_recording = toys.decode_attention_recording("decode_vs_mha", qk, softmax, pv)
@@ -285,16 +285,16 @@ def test_decode_graph_is_no_worse_than_the_fused_mha_it_replaces(npu2):
         profile,
         Profile(),
         [Timed(graph_recording)],
-        npu2,
+        device,
         Refinement.NO_WORSE,
         base_calls=[Timed(operator_recording)],
     )
     assert result.ok, result.why
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @unbuilt  # GEMM's float32 scores staged into the mask add
-def test_prefill_graph_is_no_worse_than_the_fused_mha_it_replaces(npu2):
+def test_prefill_graph_is_no_worse_than_the_fused_mha_it_replaces(device):
     """Held to the fused ``MHA`` operator it replaces, scores matched to its own float32 setting, the graph is no worse."""
     qk, add_mask, softmax, pv = toys.prefill_attention_ops(
         SEQ, KV_LEN, HEAD_DIM, scores=np.float32
@@ -312,16 +312,16 @@ def test_prefill_graph_is_no_worse_than_the_fused_mha_it_replaces(npu2):
         profile,
         Profile(),
         [Timed(graph_recording)],
-        npu2,
+        device,
         Refinement.NO_WORSE,
         base_calls=[Timed(operator_recording)],
     )
     assert result.ok, result.why
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @unbuilt
-def test_a_bf16_mul_then_add_hand_off_is_refused_against_the_fused_axpy(npu2):
+def test_a_bf16_mul_then_add_hand_off_is_refused_against_the_fused_axpy(device):
     """``AXPY`` keeps ``scalar_factor * x`` at float32 before the add; the graph's bf16 ``mid`` is refused against it."""
     mul, add = toys.axpy_ops()
     graph_recording = toys.axpy_recording("axpy_vs_fused", mul, add)
@@ -334,7 +334,7 @@ def test_a_bf16_mul_then_add_hand_off_is_refused_against_the_fused_axpy(npu2):
         profile,
         Profile(),
         [Timed(graph_recording, contents={"a": constant_a})],
-        npu2,
+        device,
         Refinement.NO_WORSE,
         base_calls=[Timed(operator_recording)],
     )
@@ -342,9 +342,9 @@ def test_a_bf16_mul_then_add_hand_off_is_refused_against_the_fused_axpy(npu2):
 
 
 @pytest.mark.extensive
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @unbuilt  # a batched GEMV's B streams on no fifo of its own
-def test_search_composes_the_decode_graph_where_it_pays(npu2):
+def test_search_composes_the_decode_graph_where_it_pays(device):
     region = _decode_region()
     entry = Entry(root=region)
     qk, softmax, pv = toys.decode_attention_ops(KV_LEN, HEAD_DIM, ROWS)
@@ -353,20 +353,20 @@ def test_search_composes_the_decode_graph_where_it_pays(npu2):
     start = Profile()
     with_entry = Profile()
     with_entry.add_entry(entry)
-    ratio = measure(with_entry, start, calls, npu2).ratio
-    tuned = search(calls, start, npu2)
+    ratio = measure(with_entry, start, calls, device).ratio
+    tuned = search(calls, start, device)
     if ratio < 0.95:
         assert entry in tuned.entries()
     if ratio > 1.05:
         assert entry not in tuned.entries()
-    result = check(tuned, start, calls, npu2, Refinement.NO_WORSE)
+    result = check(tuned, start, calls, device, Refinement.NO_WORSE)
     assert result.ok, result.why
 
 
 @pytest.mark.extensive
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @unbuilt
-def test_search_composes_the_prefill_graph_where_it_pays(npu2):
+def test_search_composes_the_prefill_graph_where_it_pays(device):
     region = _prefill_region()
     entry = Entry(root=region)
     qk, add_mask, softmax, pv = toys.prefill_attention_ops(SEQ, KV_LEN, HEAD_DIM)
@@ -377,20 +377,20 @@ def test_search_composes_the_prefill_graph_where_it_pays(npu2):
     start = Profile()
     with_entry = Profile()
     with_entry.add_entry(entry)
-    ratio = measure(with_entry, start, calls, npu2).ratio
-    tuned = search(calls, start, npu2)
+    ratio = measure(with_entry, start, calls, device).ratio
+    tuned = search(calls, start, device)
     if ratio < 0.95:
         assert entry in tuned.entries()
     if ratio > 1.05:
         assert entry not in tuned.entries()
-    result = check(tuned, start, calls, npu2, Refinement.NO_WORSE)
+    result = check(tuned, start, calls, device, Refinement.NO_WORSE)
     assert result.ok, result.why
 
 
 @pytest.mark.extensive
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @unbuilt
-def test_search_composes_the_axpy_graph_where_it_pays(npu2):
+def test_search_composes_the_axpy_graph_where_it_pays(device):
     region = _axpy_region()
     entry = Entry(root=region)
     mul, add = toys.axpy_ops()
@@ -399,11 +399,11 @@ def test_search_composes_the_axpy_graph_where_it_pays(npu2):
     start = Profile()
     with_entry = Profile()
     with_entry.add_entry(entry)
-    ratio = measure(with_entry, start, calls, npu2).ratio
-    tuned = search(calls, start, npu2)
+    ratio = measure(with_entry, start, calls, device).ratio
+    tuned = search(calls, start, device)
     if ratio < 0.95:
         assert entry in tuned.entries()
     if ratio > 1.05:
         assert entry not in tuned.entries()
-    result = check(tuned, start, calls, npu2, Refinement.NO_WORSE)
+    result = check(tuned, start, calls, device, Refinement.NO_WORSE)
     assert result.ok, result.why

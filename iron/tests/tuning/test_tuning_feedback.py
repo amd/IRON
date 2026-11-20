@@ -22,7 +22,6 @@ from iron.common.graph.record import Recording
 from iron.common.image.step import Edge
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.tests.support import sequences
-from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     cross_call_trail,
     member,
@@ -32,8 +31,6 @@ from iron.tests.support.toys_edges import (
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, search
-
-DEVICE = DEVICES["npu2"]()
 
 _ACCUMULATOR_SIZE = 256
 
@@ -84,7 +81,7 @@ CYCLES = {
         for c in sorted(CYCLES)
     ],
 )
-def test_a_cycle_with_its_initial_values_round_trips(cycle, tmp_path):
+def test_a_cycle_with_its_initial_values_round_trips(cycle, tmp_path, device):
     """A cycle with its initial values round-trips through the profile, and ``candidates`` proposes it."""
     recording, region = CYCLES[cycle]()
     entry = Entry(region)
@@ -96,7 +93,7 @@ def test_a_cycle_with_its_initial_values_round_trips(cycle, tmp_path):
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, DEVICE)
+        for edit in candidates([Timed(recording)], start, device)
     )
 
 
@@ -120,14 +117,14 @@ def test_a_cycle_with_its_initial_values_round_trips(cycle, tmp_path):
         for c in sorted(CYCLES)
     ],
 )
-@pytest.mark.supported_devices("npu2")
-def test_a_cycle_is_bit_identical_to_the_steps_or_calls_run_apart(cycle):
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_cycle_is_bit_identical_to_the_steps_or_calls_run_apart(cycle, device):
     """A cycle's output is bit-identical to the same steps, or calls, run apart one after another."""
     recording, region = CYCLES[cycle]()
     profile = Profile()
     profile.add_entry(Entry(region))
     base = Profile()
-    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -137,12 +134,12 @@ def test_a_cycle_is_bit_identical_to_the_steps_or_calls_run_apart(cycle):
     raises=AssertionError,
     reason="candidates does not propose a self-loop over a carried buffer yet",
 )
-@pytest.mark.supported_devices("npu2")
-def test_tuner_keeps_the_cycle_where_it_pays():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_tuner_keeps_the_cycle_where_it_pays(device):
     """The tuner, on the scan-state toy alone, keeps the cycle where it pays (fewer dispatches per token)."""
     recording, _ = _scan_region()
     start = Profile()
-    found = search([Timed(recording)], start, DEVICE, budget_s=60.0)
+    found = search([Timed(recording)], start, device, budget_s=60.0)
     assert any(
         isinstance(e.root, Region)
         and any(edge.producer == edge.consumer for edge in e.root.edges)
@@ -150,32 +147,32 @@ def test_tuner_keeps_the_cycle_where_it_pays():
     )
 
 
-def test_a_cycle_without_enough_initial_values_is_refused_before_any_build():
+def test_a_cycle_without_enough_initial_values_is_refused_before_any_build(device):
     """A cycle whose recording carries no initial value for the accumulator is refused before any build: the deadlock the analysis catches."""
     recording, region = _running_accumulator(carried=False)
     profile = Profile()
     profile.add_entry(Entry(region))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "analysis"
     assert "deadlock" in (result.why or "") or "initial" in (result.why or "")
 
 
 @unbuilt
-def test_the_recorded_initial_value_fits():
+def test_the_recorded_initial_value_fits(device):
     """The same accumulator, its recording carrying the accumulator's initial value, is not refused by the analysis."""
     recording, region = _running_accumulator(carried=True)
     profile = Profile()
     profile.add_entry(Entry(region))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert result.ok, result.why
 
 
 @unbuilt
-def test_the_analysis_bounds_the_cycles_throughput():
+def test_the_analysis_bounds_the_cycles_throughput(device):
     """The analysis's bound on a cycle's throughput (one trip around the loop) is recorded alongside the fit."""
     recording, region = _scan_region()
     profile = Profile()
     profile.add_entry(Entry(region))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert result.ok

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import numpy as np
-from aie.iron.device import from_name
+from aie.iron.device import Device
 
 import iron
 from iron import Precision, Scratchpad
@@ -20,9 +20,6 @@ from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 from iron.tests.support import sequences
 from iron.tests.support.toys_edges import member
-
-NPU2 = from_name("npu2", n_cols=8)
-NPU2_SMALL = from_name("npu2", n_cols=2)
 
 
 def add_silu_mul(size: int = 512, tile: int = 128, cols: int = 1):
@@ -117,12 +114,12 @@ def rate_skip(
 
 
 def gemm_rowwise(
+    dev: Device,
     M: int = 64,
     K: int = 64,
     N: int = 64,
     row_tile: int = 16,
     cols: int = 1,
-    dev=NPU2,
 ):
     """Return a GEMM whose ``tile_m``-row output tiles feed one row a firing into a row-wise norm.
 
@@ -177,12 +174,12 @@ class BoundedRows(iron.Graph):
 
 
 def gemm_into_gemm(
+    dev: Device,
     M: int,
     width: int,
     producer_tile: int,
     consumer_tile: int,
     cols: int = 1,
-    dev=NPU2,
 ):
     """Return two GEMMs chained, the first's ``C`` feeding the second's ``A`` directly.
 

@@ -15,15 +15,16 @@ from iron.common.graph.sdf import analyze
 from iron.common.image.step import HandOff
 from iron.tests.support import toys_dataflow as toys
 from iron.tests.support import toys_edges
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.fusions import Applied
 from iron.tune.search import check, fit, measure, search
 
-pytestmark = pytest.mark.usefixtures("npu2")
+pytestmark = pytest.mark.usefixtures("device")
 
 
-def _held_where_it_can_be(role, shape, depth, rate):
+def _held_where_it_can_be(device, role, shape, depth, rate):
     """Return the combination toy, its distinguished edge held in L1 where its derived hand-off streams as is, else in a memtile, and the edge's minimum depth.
 
     A stream edge's lanes meet as they are, so only an equal or broadcast
@@ -32,15 +33,17 @@ def _held_where_it_can_be(role, shape, depth, rate):
     where the value waits). An L1 hold the analysis does not model yet stays
     in the memtile.
     """
-    staged = toys_edges.combination_toy(shape, role, "memtile", depth, rate, "recorded")
+    staged = toys_edges.combination_toy(
+        device, shape, role, "memtile", depth, rate, "recorded"
+    )
     _, recording, region, index = staged
-    analysis = analyze(region, recording, toys.NPU2)
+    analysis = analyze(region, recording, device)
     if analysis.hand_off[region.edges[index]] in (HandOff.EQUAL, HandOff.BROADCAST):
         _, held, joined, at = toys_edges.combination_toy(
-            shape, role, "l1", depth, rate, "recorded"
+            device, shape, role, "l1", depth, rate, "recorded"
         )
         try:
-            analysis = analyze(joined, held, toys.NPU2)
+            analysis = analyze(joined, held, device)
         except NotImplementedError:
             pass  # held in the memtile instead
         else:
@@ -104,31 +107,33 @@ _BUILT_MINIMUMS = {
         for rate in toys_edges.RATES
     ],
 )
-@pytest.mark.supported_devices("npu2")
-def test_minimum_depth_runs_bit_identical(role, shape, rate):
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_minimum_depth_runs_bit_identical(role, shape, rate, device):
     """Every role, shape and rate, at its distinguished edge's minimum depth: ``check`` holds it bit-identical to the steps run apart."""
-    recording, region, index, minimum = _held_where_it_can_be(role, shape, "min", rate)
+    recording, region, index, minimum = _held_where_it_can_be(
+        device, role, shape, "min", rate
+    )
     region = toys_edges.with_resolved_depth(region, index, minimum)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = check(profile, Profile(), [Timed(recording)], toys.NPU2, Refinement.EXACT)
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
 @pytest.mark.parametrize("rate", toys_edges.RATES)
 @pytest.mark.parametrize("shape", toys_edges.SHAPES)
 @pytest.mark.parametrize("role", toys_edges.ROLES)
-def test_depth_below_minimum_is_refused_before_any_build(role, shape, rate):
+def test_depth_below_minimum_is_refused_before_any_build(role, shape, rate, device):
     """Every role, shape and rate, one short of the minimum: ``fit`` refuses it at stage ``"analysis"``, before any build, and at the minimum it does not."""
     recording, region, index, minimum = _held_where_it_can_be(
-        role, shape, "min_minus_one", rate
+        device, role, shape, "min_minus_one", rate
     )
     at_minimum = Profile()
     at_minimum.add_entry(
         Entry(root=toys_edges.with_resolved_depth(region, index, minimum))
     )
     try:
-        result = fit(at_minimum, [Timed(recording)], toys.NPU2)
+        result = fit(at_minimum, [Timed(recording)], device)
         assert result.ok, result.why
     except NotImplementedError:
         pass  # Not built yet, which is no refusal.
@@ -136,27 +141,27 @@ def test_depth_below_minimum_is_refused_before_any_build(role, shape, rate):
     profile.add_entry(
         Entry(root=toys_edges.with_resolved_depth(region, index, minimum - 1))
     )
-    result = fit(profile, [Timed(recording)], toys.NPU2)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "analysis"
     assert "deadlock" in (result.why or "")
 
 
 @pytest.mark.parametrize("role", toys_edges.ROLES)
-def test_depth_over_l1_or_memtile_is_refused(role):
+def test_depth_over_l1_or_memtile_is_refused(role, device):
     """Every role, at an implausibly deep hold: ``fit`` refuses it at stage ``"counts"``, before any build."""
     _, recording, region, index = toys_edges.combination_toy(
-        toys_edges.SHAPES[0], role, "memtile", "more", "same", "recorded"
+        device, toys_edges.SHAPES[0], role, "memtile", "more", "same", "recorded"
     )
     region = toys_edges.with_resolved_depth(region, index, 1 << 20)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, [Timed(recording)], toys.NPU2)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
 
 
-def test_skip_diamond_minimum_depth_is_one():
+def test_skip_diamond_minimum_depth_is_one(device):
     """The residual-add skip/broadcast window, its skip read through an end one deep, runs on npu2: the analysis's minimum is that one.
 
     Measured: the skip's fifo lowers as ``[2, 2, 1]`` (the add's own two,
@@ -165,48 +170,49 @@ def test_skip_diamond_minimum_depth_is_one():
     """
     region, first, norm, second = toys.broadcast_skip(depth=None)
     recording = toys.broadcast_skip_recording("known-answer", first, norm, second)
-    analysis = analyze(region, recording, toys.NPU2)
+    analysis = analyze(region, recording, device)
     skip_edge = region.edges[1]
     assert analysis.min_depth[skip_edge] == 1
 
 
-@pytest.mark.supported_devices("npu2")
-def test_skip_diamond_minimum_depth_runs_bit_identical():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_skip_diamond_minimum_depth_runs_bit_identical(device):
     """The residual-add skip/broadcast window, its skip at its minimum: ``check`` holds it bit-identical to the steps run apart."""
     region, first, norm, second = toys.broadcast_skip(depth=1)
     profile = Profile()
     profile.add_entry(Entry(root=region))
     recording = toys.broadcast_skip_recording("depth-one", first, norm, second)
-    result = check(profile, Profile(), [Timed(recording)], toys.NPU2, Refinement.EXACT)
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
 _HANG_S = 60
 
 
-def _run_rate_skip(depth: int) -> None:
-    """Build ``toys.rate_skip`` at skip depth ``depth`` and run it once on npu2: the target a hang-safe child runs."""
+def _run_rate_skip(device_name: str, depth: int) -> None:
+    """Build ``toys.rate_skip`` at skip depth ``depth`` and run it once on ``device_name``'s NPU: the target a hang-safe child runs."""
+    device = DEVICES[device_name]()
     region, recording = toys.rate_skip(depth=depth)
     profile = Profile()
     profile.add_entry(Entry(region))
     rng = np.random.default_rng(0)
     inputs = [rng.standard_normal(h.shape).astype(h.dtype) for h in recording.inputs]
-    with set_current_device(toys.NPU2):
-        graph = Applied.of(Timed(recording), profile, toys.NPU2).built(toys.NPU2)
+    with set_current_device(device):
+        graph = Applied.of(Timed(recording), profile, device).built(device)
         graph(*inputs)
         graph.release()
 
 
-@pytest.mark.supported_devices("npu2")
-def test_rate_skip_runs_bit_identical_at_its_minimum():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_rate_skip_runs_bit_identical_at_its_minimum(device):
     """A skip around a norm that takes four of its producer's tiles a row: the analysis's minimum (four) is safe, the window bit-identical there."""
     region, recording = toys.rate_skip()
-    minimum = analyze(region, recording, toys.NPU2).min_depth[region.edges[1]]
+    minimum = analyze(region, recording, device).min_depth[region.edges[1]]
     assert minimum == 4
     region, recording = toys.rate_skip(depth=minimum)
     profile = Profile()
     profile.add_entry(Entry(region))
-    result = check(profile, Profile(), [Timed(recording)], toys.NPU2, Refinement.EXACT)
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -218,17 +224,17 @@ def test_rate_skip_runs_bit_identical_at_its_minimum():
     "below the analysis's minimum of four",
 )
 @pytest.mark.extensive
-@pytest.mark.supported_devices("npu2")
-def test_rate_skip_deadlocks_one_below_its_minimum_opt_in_device_check():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_rate_skip_deadlocks_one_below_its_minimum_opt_in_device_check(device):
     """One below the analysis's minimum really deadlocks on the device, confirming the analysis is tight and not merely safe.
 
     Run in a spawned child killed past ``_HANG_S``: the deliberate exception
     to "a hang always fails a test".
     """
     region, recording = toys.rate_skip()
-    minimum = analyze(region, recording, toys.NPU2).min_depth[region.edges[1]]
+    minimum = analyze(region, recording, device).min_depth[region.edges[1]]
     child = multiprocessing.get_context("spawn").Process(
-        target=_run_rate_skip, args=(minimum - 1,)
+        target=_run_rate_skip, args=(device.resolve().name, minimum - 1)
     )
     child.start()
     child.join(_HANG_S)
@@ -239,8 +245,8 @@ def test_rate_skip_deadlocks_one_below_its_minimum_opt_in_device_check():
 
 
 @pytest.mark.extensive
-@pytest.mark.supported_devices("npu2")
-def test_tuner_keeps_a_depth_at_or_past_the_minimum():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_tuner_keeps_a_depth_at_or_past_the_minimum(device):
     """``search``, run on the chain toy alone, keeps a depth at or past the analysis's minimum and passes ``check`` against the start, exact."""
     add, silu, mul = toys.add_silu_mul()
     region = toys.add_silu_mul_region(add, silu, mul, depth=1)
@@ -248,19 +254,19 @@ def test_tuner_keeps_a_depth_at_or_past_the_minimum():
     profile.add_entry(Entry(root=region))
     recording = toys.add_silu_mul_recording("searched-depth", add, silu, mul)
     calls = [Timed(recording)]
-    tuned = search(calls, profile, toys.NPU2)
-    verdict = check(tuned, profile, calls, toys.NPU2, Refinement.EXACT)
+    tuned = search(calls, profile, device)
+    verdict = check(tuned, profile, calls, device, Refinement.EXACT)
     assert verdict.ok, verdict.why
     tuned_entry = tuned.entries()[0]
     tuned_edge = tuned_entry.root.edges[0]
-    analysis = analyze(tuned_entry.root, recording, toys.NPU2)
+    analysis = analyze(tuned_entry.root, recording, device)
     assert tuned_edge.depth is not None
     assert tuned_edge.depth >= analysis.min_depth[tuned_edge]
 
 
 @unbuilt
-@pytest.mark.supported_devices("npu2")
-def test_each_depth_up_to_the_knee_is_measured_against_the_next():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_each_depth_up_to_the_knee_is_measured_against_the_next(device):
     """The chain toy at every depth from the analysis's minimum to its knee, each measured against the next by ``measure``'s paired runs.
 
     The measured knee (the depth past which a further measured pair gains
@@ -272,7 +278,7 @@ def test_each_depth_up_to_the_knee_is_measured_against_the_next():
     recording = toys.add_silu_mul_recording("measured-depth", add, silu, mul)
     calls = [Timed(recording)]
     base_region = toys.add_silu_mul_region(add, silu, mul)
-    analysis = analyze(base_region, recording, toys.NPU2)
+    analysis = analyze(base_region, recording, device)
     minimum = max(analysis.min_depth.values())
     knee = max(analysis.knee_depth.values())
     for depth in range(minimum, knee):
@@ -284,9 +290,9 @@ def test_each_depth_up_to_the_knee_is_measured_against_the_next():
         deeper.add_entry(
             Entry(root=toys.add_silu_mul_region(add, silu, mul, depth=depth + 1))
         )
-        measured = measure(deeper, shallower, calls, toys.NPU2)
+        measured = measure(deeper, shallower, calls, device)
         assert measured.ratio <= 1.0
     at_knee = toys.add_silu_mul_region(add, silu, mul, depth=knee)
-    assert list(analyze(at_knee, recording, toys.NPU2).knee_depth.values()) == list(
+    assert list(analyze(at_knee, recording, device).knee_depth.values()) == list(
         analysis.knee_depth.values()
     )

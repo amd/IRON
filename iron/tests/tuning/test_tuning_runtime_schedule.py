@@ -23,12 +23,9 @@ from iron.common.declare.profile import Profile
 from iron.common.image.step import EdgeKind
 from iron.tests.support import toys_schedule
 from iron.tests.support.fusable import gemv_silu_mul, gemv_silu_mul_recording
-from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, search
-
-DEVICE = DEVICES["npu2"]()
 
 
 def _window_region(
@@ -76,7 +73,7 @@ def _skip_region(phases=None):
 
 
 @unbuilt
-def test_waits_axis_round_trips_and_is_proposed(tmp_path):
+def test_waits_axis_round_trips_and_is_proposed(tmp_path, device):
     """``RuntimePlan.waits`` (barrier, per_channel) round-trips through a profile and is a candidate."""
     for waits in ("barrier", "per_channel"):
         region, recording = _window_region(waits=waits)
@@ -89,12 +86,12 @@ def test_waits_axis_round_trips_and_is_proposed(tmp_path):
         start = Profile()
         assert any(
             entry in edit.apply(start).entries()
-            for edit in candidates([Timed(recording)], start, DEVICE)
+            for edit in candidates([Timed(recording)], start, device)
         )
 
 
 @unbuilt
-def test_overlap_axis_round_trips_and_is_proposed(tmp_path):
+def test_overlap_axis_round_trips_and_is_proposed(tmp_path, device):
     """``RuntimePlan.overlap`` (none, prefetch, pipelined) round-trips and is a candidate."""
     for overlap in ("none", "prefetch", "pipelined"):
         region, recording = _window_region(overlap=overlap)
@@ -107,12 +104,12 @@ def test_overlap_axis_round_trips_and_is_proposed(tmp_path):
         start = Profile()
         assert any(
             entry in edit.apply(start).entries()
-            for edit in candidates([Timed(recording)], start, DEVICE)
+            for edit in candidates([Timed(recording)], start, device)
         )
 
 
 @unbuilt
-def test_chunks_axis_round_trips_and_is_proposed(tmp_path):
+def test_chunks_axis_round_trips_and_is_proposed(tmp_path, device):
     """``RuntimePlan.chunks`` (phases repeated within one call) round-trips and is a candidate."""
     for chunks in (1, 2, 4):
         region, recording = _window_region(chunks=chunks)
@@ -125,14 +122,14 @@ def test_chunks_axis_round_trips_and_is_proposed(tmp_path):
         start = Profile()
         assert any(
             entry in edit.apply(start).entries()
-            for edit in candidates([Timed(recording)], start, DEVICE)
+            for edit in candidates([Timed(recording)], start, device)
         )
 
 
 @unbuilt
-def test_in_flight_axis_round_trips_and_is_proposed(tmp_path):
+def test_in_flight_axis_round_trips_and_is_proposed(tmp_path, device):
     """``RuntimePlan.in_flight`` (tasks per channel; None for the queue depth) round-trips and is a candidate."""
-    depth = get_target_model(DEVICE.resolve()).get_dma_task_queue_depth()
+    depth = get_target_model(device.resolve()).get_dma_task_queue_depth()
     for in_flight in (1, depth // 2 or 1, depth):
         region, recording = _window_region(in_flight=in_flight)
         entry = Entry(root=region)
@@ -144,12 +141,12 @@ def test_in_flight_axis_round_trips_and_is_proposed(tmp_path):
         start = Profile()
         assert any(
             entry in edit.apply(start).entries()
-            for edit in candidates([Timed(recording)], start, DEVICE)
+            for edit in candidates([Timed(recording)], start, device)
         )
 
 
 @unbuilt
-def test_chained_axis_round_trips_and_is_proposed(tmp_path):
+def test_chained_axis_round_trips_and_is_proposed(tmp_path, device):
     """``RuntimePlan.chained`` (one task with chained BDs vs many tasks) round-trips and is a candidate."""
     for chained in (False, True):
         region, recording = _window_region(chained=chained)
@@ -162,12 +159,12 @@ def test_chained_axis_round_trips_and_is_proposed(tmp_path):
         start = Profile()
         assert any(
             entry in edit.apply(start).entries()
-            for edit in candidates([Timed(recording)], start, DEVICE)
+            for edit in candidates([Timed(recording)], start, device)
         )
 
 
 @unbuilt
-def test_burst_and_transfer_bytes_round_trip_and_are_proposed(tmp_path):
+def test_burst_and_transfer_bytes_round_trip_and_are_proposed(tmp_path, device):
     """``RuntimePlan.burst`` and ``transfer_bytes`` (DDR access shape) round-trip and are candidates."""
     for burst, transfer_bytes in ((None, None), (256, 4096), (512, 8192)):
         gemv, silu, mul = gemv_silu_mul(M=256, cols=4, tile=64)
@@ -192,12 +189,12 @@ def test_burst_and_transfer_bytes_round_trip_and_are_proposed(tmp_path):
         start = Profile()
         assert any(
             entry in edit.apply(start).entries()
-            for edit in candidates([Timed(recording)], start, DEVICE)
+            for edit in candidates([Timed(recording)], start, device)
         )
 
 
 @unbuilt
-def test_phase_boundaries_round_trip_and_are_proposed(tmp_path):
+def test_phase_boundaries_round_trip_and_are_proposed(tmp_path, device):
     """``Region.phases`` boundaries on the skip toy (one phase a GEMV's row, two past it) round-trip and are candidates."""
     region, recording = _skip_region(phases=(0, 1, 2, 2))
     entry = Entry(root=region)
@@ -209,13 +206,13 @@ def test_phase_boundaries_round_trip_and_are_proposed(tmp_path):
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, DEVICE)
+        for edit in candidates([Timed(recording)], start, device)
     )
 
 
 @unbuilt
-@pytest.mark.supported_devices("npu2")
-def test_window_schedule_is_bit_identical_with_no_hang():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_window_schedule_is_bit_identical_with_no_hang(device):
     """The window at every ``RuntimePlan`` setting is bit-identical to the steps run apart, and does not hang."""
     base_region, recording = _window_region()
     base_profile = Profile()
@@ -225,14 +222,14 @@ def test_window_schedule_is_bit_identical_with_no_hang():
         profile = Profile()
         profile.add_entry(Entry(root=region))
         result = check(
-            profile, base_profile, [Timed(recording)], DEVICE, Refinement.EXACT
+            profile, base_profile, [Timed(recording)], device, Refinement.EXACT
         )
         assert result.ok, result.why
 
 
 @unbuilt
-@pytest.mark.supported_devices("npu2")
-def test_skip_phases_are_bit_identical_with_no_hang():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_skip_phases_are_bit_identical_with_no_hang(device):
     """The skip toy at a phase boundary past its held edge is bit-identical to the steps run apart, and does not hang."""
     base_region, recording = _skip_region()
     base_profile = Profile()
@@ -240,7 +237,7 @@ def test_skip_phases_are_bit_identical_with_no_hang():
     region, _ = _skip_region(phases=(0, 1, 2, 2))
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = check(profile, base_profile, [Timed(recording)], DEVICE, Refinement.EXACT)
+    result = check(profile, base_profile, [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
@@ -250,12 +247,12 @@ def test_skip_phases_are_bit_identical_with_no_hang():
     raises=AssertionError,
     reason="candidates does not propose runtime plans yet",
 )
-@pytest.mark.supported_devices("npu2")
-def test_tuner_keeps_the_schedule_that_pays():
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_tuner_keeps_the_schedule_that_pays(device):
     """The tuner, on the window toy alone, keeps the ``RuntimePlan`` setting that pays."""
     _, recording = _window_region()
     start = Profile()
-    found = search([Timed(recording)], start, DEVICE, budget_s=60.0)
+    found = search([Timed(recording)], start, device, budget_s=60.0)
     assert any(
         isinstance(e.root, Region) and e.root.runtime is not None
         for e in found.entries()
@@ -263,58 +260,58 @@ def test_tuner_keeps_the_schedule_that_pays():
 
 
 @unbuilt
-def test_a_consumer_scheduled_before_its_producer_is_refused():
+def test_a_consumer_scheduled_before_its_producer_is_refused(device):
     """A schedule ordering a consumer before its producer is refused before any build."""
     region, recording = _window_region()
     profile = Profile()
     profile.add_entry(Entry(root=region))
     # Order the multiply (part 2) before the GEMV (part 0) it depends on.
     profile.add_schedule(Schedule(version=recording.version, order=((2, 0),)))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "analysis"
     assert "before" in (result.why or "")
 
 
 @unbuilt
-def test_a_channel_reused_before_a_sure_await_is_refused():
+def test_a_channel_reused_before_a_sure_await_is_refused(device):
     """A channel reused before its task's await is refused before any build, not left to hang the command."""
     region, recording = _window_region(waits="per_channel", in_flight=1, chained=False)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage in ("counts", "analysis")
     assert "reused" in (result.why or "") or "await" in (result.why or "")
 
 
 @unbuilt
-def test_more_tasks_in_flight_than_a_channels_queue_is_refused():
+def test_more_tasks_in_flight_than_a_channels_queue_is_refused(device):
     """``in_flight`` past the channel's task queue depth is refused by counts, before any build."""
-    depth = get_target_model(DEVICE.resolve()).get_dma_task_queue_depth()
+    depth = get_target_model(device.resolve()).get_dma_task_queue_depth()
     region, recording = _window_region(in_flight=depth + 1)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
     assert "queue" in (result.why or "")
 
 
 @unbuilt
-def test_more_buffer_descriptors_than_a_tile_has_is_refused():
+def test_more_buffer_descriptors_than_a_tile_has_is_refused(device):
     """A chunked, chained schedule past a tile's buffer-descriptor budget is refused by counts."""
     region, recording = _window_region(chunks=4096, chained=True)
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
     assert "descriptor" in (result.why or "") or "BD" in (result.why or "")
 
 
 @unbuilt
-def test_a_skip_crossing_a_phase_boundary_unheld_is_refused():
+def test_a_skip_crossing_a_phase_boundary_unheld_is_refused(device):
     """A skip edge on the stream, held in no memtile or DDR, crossing a phase boundary is refused before any build."""
     add, norm, proj, add2 = toys_schedule.skip()
     members = (
@@ -335,7 +332,7 @@ def test_a_skip_crossing_a_phase_boundary_unheld_is_refused():
     )
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, [Timed(recording)], DEVICE)
+    result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "analysis"
     assert "phase" in (result.why or "")

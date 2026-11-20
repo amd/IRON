@@ -11,7 +11,6 @@ from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement
 from iron.common.graph.sdf import analyze
 from iron.common.image.step import HandOff
-from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     all_combinations,
     combination_toy,
@@ -21,8 +20,6 @@ from iron.tests.support.toys_edges import (
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, search
-
-DEVICE = DEVICES["npu2"]()
 
 COMBOS = all_combinations()
 AXES = ("shape", "role", "held", "depth", "rate", "size")
@@ -60,7 +57,7 @@ def test_the_cover_covers_every_axis_pair_and_the_known_triple():
     )
 
 
-def test_varying_one_axis_yields_distinct_toys_for_every_role():
+def test_varying_one_axis_yields_distinct_toys_for_every_role(device):
     """For each role, varying shape, held, rate or size alone yields distinct (recorded operators, Region) pairs.
 
     ``depth`` is excluded here: a combo's depth is a name (min−1, min, knee,
@@ -83,6 +80,7 @@ def test_varying_one_axis_yields_distinct_toys_for_every_role():
             for value in axis_values:
                 kwargs = dict(fixed, **{axis_name: value})
                 _, recording, region, _ = combination_toy(
+                    device,
                     kwargs["shape"],
                     role,
                     kwargs["held"],
@@ -97,20 +95,21 @@ def test_varying_one_axis_yields_distinct_toys_for_every_role():
                 seen.append(key)
 
 
-@pytest.mark.usefixtures("npu2")
 @pytest.mark.parametrize("combo", COMBOS, ids=_combo_id)
-def test_each_toys_region_matches_its_own_recording(combo):
+def test_each_toys_region_matches_its_own_recording(combo, device):
     """Each toy's region matches exactly one run of its own recording's steps, so a test of it tests the steps it names."""
-    _, recording, region, _ = combination_toy(*combo)
+    _, recording, region, _ = combination_toy(device, *combo)
     assert len(recording.occurrences(Entry(region))) == 1
 
 
 @unbuilt
 @pytest.mark.parametrize("combo", COMBOS, ids=_combo_id)
-def test_each_toy_round_trips_through_the_profile_and_is_proposed(combo, tmp_path):
+def test_each_toy_round_trips_through_the_profile_and_is_proposed(
+    combo, tmp_path, device
+):
     """Each toy's region round-trips through the profile, and ``candidates`` yields an edit that produces it."""
     shape, role, held, depth, rate, size = combo
-    _, recording, region, _ = combination_toy(*combo)
+    _, recording, region, _ = combination_toy(device, *combo)
     entry = Entry(region)
     profile = Profile()
     profile.add_entry(entry)
@@ -120,14 +119,14 @@ def test_each_toy_round_trips_through_the_profile_and_is_proposed(combo, tmp_pat
     start = Profile()
     assert any(
         entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, DEVICE)
+        for edit in candidates([Timed(recording)], start, device)
     )
 
 
 @unbuilt
 @pytest.mark.parametrize("combo", COMBOS, ids=_combo_id)
-@pytest.mark.supported_devices("npu2")
-def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(combo):
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(combo, device):
     """Each toy, at its depth resolved from the analysis, is bit-identical to the steps run apart; below the minimum it is refused.
 
     The depth is resolved from ``analyze`` inside this test body, never at
@@ -136,8 +135,8 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(combo):
     recording, says what minimum/knee are here.
     """
     shape, role, held, depth, rate, size = combo
-    _, recording, region, index = combination_toy(*combo)
-    analysis = analyze(region, recording, DEVICE)
+    _, recording, region, index = combination_toy(device, *combo)
+    analysis = analyze(region, recording, device)
     edge = region.edges[index]
     value = depth_from_bounds(
         depth, analysis.min_depth[edge], analysis.knee_depth[edge]
@@ -145,23 +144,23 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(combo):
     resolved = with_resolved_depth(region, index, value)
     profile = Profile()
     profile.add_entry(Entry(resolved))
-    verdict = fit(profile, [Timed(recording)], DEVICE)
+    verdict = fit(profile, [Timed(recording)], device)
     if depth == "min_minus_one":
         assert not verdict.ok
         assert verdict.stage == "analysis"
         return
     assert verdict.ok, verdict.why
     base = Profile()
-    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
 @pytest.mark.extensive
 @pytest.mark.parametrize("combo", COMBOS, ids=_combo_id)
-@pytest.mark.supported_devices("npu2")
-def test_each_toy_is_searched_and_the_result_passes_check(combo):
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_each_toy_is_searched_and_the_result_passes_check(combo, device):
     """The tuner, run on each toy alone, keeps a profile that passes ``check`` against the start, exact."""
-    _, recording, _, _ = combination_toy(*combo)
+    _, recording, _, _ = combination_toy(device, *combo)
     # A bounded toy runs at the most its per-call value may be.
     call = Timed(
         recording,
@@ -170,6 +169,6 @@ def test_each_toy_is_searched_and_the_result_passes_check(combo):
         },
     )
     start = Profile()
-    found = search([call], start, DEVICE, budget_s=10.0)
-    result = check(found, start, [call], DEVICE, Refinement.EXACT)
+    found = search([call], start, device, budget_s=10.0)
+    result = check(found, start, [call], device, Refinement.EXACT)
     assert result.ok, result.why
