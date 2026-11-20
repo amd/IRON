@@ -370,6 +370,14 @@ class Profile:
         """Return the per-call variants."""
         return list(self._variants)
 
+    def remove_variants(self, variants: Variants) -> None:
+        """Remove the set of variants ``variants``.
+
+        Raises:
+            ValueError: ``variants`` is not one of its sets.
+        """
+        self._variants.remove(variants)
+
     def add_binding(self, binding: Binding) -> None:
         """Add how a per-call value reaches a design."""
         self._bindings.append(binding)

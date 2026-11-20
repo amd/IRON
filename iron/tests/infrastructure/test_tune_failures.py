@@ -39,6 +39,33 @@ def test_place_tells_a_fit_from_a_refusal(npu2):
     assert verdict == "refused" and "no available compute tiles" in diagnostic
 
 
+def test_a_refusal_keeps_its_error_ahead_of_a_long_op_dump(npu2):
+    """A refused module's diagnostic leads with its error, not the tail of the op dump the verifier prints after it."""
+    blocks = "".join(
+        f"^bd{i}: aie.dma_bd(%buf : memref<256xi32> offset = 0 len = 256) "
+        f"aie.next_bd ^bd{(i + 1) % 64}\n"
+        for i in range(64)
+    )
+    module = (
+        "aie.device(npu2) { %t = aie.tile(0, 2) "
+        "%buf = aie.buffer(%t) : memref<256xi32> "
+        '%mem = aie.mem(%t) { %d = aie.dma_start("MM2S", 0, ^bd0, ^bd0)\n'
+        f"{blocks}}} }}"
+    )
+    verdict, diagnostic = place(module)
+    assert verdict == "refused" and "has more than 16 blocks" in diagnostic
+
+
+def test_a_placement_past_its_time_is_a_hang_not_a_refusal(npu2):
+    """``aie-opt`` still placing past ``seconds`` is ended and named a hang, so a stuck placer costs a bounded wait and never reads as a refused design."""
+    wide = [
+        cls(size=8192, num_aie_columns=8, num_channels=2, tile_size=256).resolved(npu2)
+        for cls in (ReLU, Tanh, Sigmoid)
+    ]
+    verdict, diagnostic = place(_module(*wide), seconds=0.001)
+    assert verdict == "hang" and "ran past" in diagnostic
+
+
 def test_device_timeout_recognizes_the_drivers_own_ends():
     """A timeout, and amdxdna 2.27's abort once its recovery takes the command."""
     assert device_timeout(

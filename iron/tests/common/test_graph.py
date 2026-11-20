@@ -7,6 +7,7 @@ A graph function run on handles produces a runlist, buffer names and
 sizes, and value bindings; nothing here needs a toolchain.
 """
 
+import dataclasses
 import inspect
 import re
 import subprocess
@@ -25,6 +26,7 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Carried, Precision, Profile, Scratchpad
+from iron.common.declare.composition import Schedule
 from iron.common.graph import Handle
 from iron.common.graph.handle import Dense
 from iron.common.graph.record import Recording
@@ -45,6 +47,7 @@ from iron.operators.softmax import Softmax
 from iron.tests.support import sequences
 from iron.tests.support.graphs import Chain, Walk
 from iron.tests.support.llama_model import llama_1b, small
+from iron.tests.support.toys_settings import RangedPair
 from iron.tests.support.xrt import without_xrt
 
 E, H = 2048, 8192
@@ -1826,3 +1829,105 @@ def test_a_per_call_value_s_default_is_given_when_left_out():
     np.testing.assert_array_equal(Defaulted().reference(x), x + x)
     with pytest.raises(TypeError, match=r"\['m'\] unknown"):
         Defaulted().reference(x, m=2)
+
+
+class _TwoProjections(iron.Graph):
+    """Two held weights' GEMVs, one after the other, over each row of ``x``."""
+
+    def __init__(self):
+        self.a, self.b = iron.param(z(256, 256)), iron.param(z(256, 256))
+
+    def body(self, x):
+        rows = x.shape[0]
+        h = GEMV.step(self.a, x, num_batches=rows, repeat=rows)
+        return GEMV.step(self.b, h, num_batches=rows, repeat=rows)
+
+
+def test_a_capacity_is_recorded_again_over_the_leading_rows_of_the_same_buffers():
+    """At ``rows <= 256`` the projection is recorded again at 256 rows, reading and writing the first 256 of the call's own."""
+    recording = RangedPair(K=256, N=256).record(x=(2048, 256), w=(256, 256), y=(2048,))
+    small = recording.at_capacity({"rows": 256})
+    gemm, copy = (s.op for s in small.steps)
+    assert (gemm.M, copy.input_buffer_size) == (256, 2048)
+    assert small.version == recording.version
+    assert [(h.name, h.shape) for h in small.inputs + small.returned] == [
+        (h.name, h.shape) for h in recording.inputs + recording.returned
+    ]
+    row = 256 * 2
+    assert small.steps[0].refs() == (
+        BufferRef("x", 0, 256 * row),
+        BufferRef("w"),
+        BufferRef("out0", 0, 256 * row),
+    )
+    assert small.pinned["x"] == small.pinned["out0"] == 2048 * row
+    small.check_limits({"rows": 256, "valid": 256})
+    with pytest.raises(IndexError, match="rows"):
+        small.check_limits({"rows": 257, "valid": 256})
+    assert recording.at_capacity({"rows": 2048}) is recording
+
+
+def test_a_half_chunk_runs_each_half_of_the_rows_as_a_call_of_its_own():
+    """``half_chunk`` records the graph again at half the rows and runs it over each half, each call's hand-off its own."""
+    recording = _TwoProjections().record(x=(8, 256))
+    profile = Profile()
+    profile.add_schedule(Schedule(version=recording.version, size="half_chunk"))
+    halves = recording.scheduled(profile)
+    assert [s.op.num_batches for s in halves.steps] == [4, 4, 4, 4]
+    assert halves.version == recording.version
+    half = 4 * 256 * 2
+    reads = [s.refs()[1] for s in halves.steps]
+    writes = [s.refs()[2] for s in halves.steps]
+    assert (reads[0], reads[2]) == (BufferRef("x", 0, half), BufferRef("x", half, half))
+    assert (writes[1], writes[3]) == (
+        BufferRef("out", 0, half),
+        BufferRef("out", half, half),
+    )
+    assert reads[1] == writes[0] and reads[3] == writes[2] and reads[1] != reads[3]
+    with pytest.raises(ValueError, match="derived version"):
+        halves.split(2)
+    with pytest.raises(ValueError, match="do not divide"):
+        _TwoProjections().record(x=(3, 256)).split(2)
+
+
+def test_only_a_graph_s_recording_is_recorded_again_and_its_graph_is_no_part_of_it():
+    """A recording keeps the graph that made it out of its identity; one built of steps has none to record again."""
+    graph = _TwoProjections()
+    recording = graph.record(x=(8, 256))
+    assert recording.graph is graph
+    assert dataclasses.replace(recording, graph=None) == recording
+    assert "graph" not in repr(recording)
+    steps = Recording.of_step(GEMV(M=256, K=256, num_aie_columns=1))
+    with pytest.raises(ValueError, match="built of steps"):
+        steps.split(2)
+
+
+class _RowsAndCopy(iron.Graph):
+    """A projection of ``x``'s first ``rows``, and a copy of ``x``'s rows of eight, whole or its first ``valid``."""
+
+    def __init__(self, bounded_copy: bool):
+        self.bounded_copy = bounded_copy
+
+    def body(self, x, w, *, rows: Scratchpad[np.int32], valid: Scratchpad[np.int32]):
+        projected = GEMM.step(x[:rows], w, b_col_maj=True, precision=Precision.MEDIUM)
+        flat = x.reshape(x.shape[0] * x.shape[1] // 8, 8)
+        return projected, Copy.step(flat[:valid] if self.bounded_copy else flat)
+
+
+@pytest.mark.parametrize("bounded_copy", [False, True])
+def test_a_capacity_is_refused_where_a_step_reads_the_input_past_the_bounds(
+    bounded_copy,
+):
+    """``x`` shrunk to 256 rows would leave rows the copy reads unread, whole or bounded by another value: refused."""
+    recording = _RowsAndCopy(bounded_copy).record(x=(2048, 256), w=(256, 256))
+    with pytest.raises(NotImplementedError, match="other than through a bound"):
+        recording.at_capacity({"rows": 256})
+
+
+def test_a_graph_changed_since_its_recording_is_not_recorded_again():
+    """A param rebound after recording would make the re-recorded design differ from the one it is checked against: refused."""
+    graph = _TwoProjections()
+    recording = graph.record(x=(8, 256))
+    assert recording.split(2).steps
+    graph.a = iron.param(np.ones((256, 256), dtype=bfloat16))
+    with pytest.raises(ValueError, match="changed since it was recorded"):
+        recording.split(2)

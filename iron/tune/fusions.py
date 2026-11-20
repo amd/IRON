@@ -454,7 +454,7 @@ def group_fit_verdict(
             verdict = record.read_text()
         else:
             outcome, diagnostic = place(text, placer)
-            if outcome == "crash":
+            if outcome in ("crash", "hang"):
                 if ledger is not None:
                     dev = ops[0].dev
                     ledger.record(
@@ -466,7 +466,11 @@ def group_fit_verdict(
                         + " in one device",
                         module=text,
                     )
-                diagnostic = f"the compiler crashed: {first_error(diagnostic or '')}"
+                diagnostic = (
+                    f"the compiler hung: {diagnostic}"
+                    if outcome == "hang"
+                    else f"the compiler crashed: {first_error(diagnostic or '')}"
+                )
             verdict = "fits" if outcome == "fits" else f"refused: {diagnostic}"
             write(record, verdict)
         if verdict == "fits":
@@ -982,8 +986,10 @@ class Applied:
     ) -> Applied:
         """Return ``call`` under ``profile`` on ``dev``.
 
-        The version its schedule builds (``Recording.scheduled``), and the
-        commands it keeps in flight.
+        The design its values select where ``profile`` has variants
+        (``Recording.selected``), refused where a point it is timed at lies
+        in another range, the version its schedule builds
+        (``Recording.scheduled``), and the commands it keeps in flight.
 
         Its weights coded as ``Graph.compile`` codes them (``Recording.code_weights``),
         in ``call``'s recording itself: how a weight is read is its recording's, the
@@ -991,13 +997,16 @@ class Applied:
         refuses the build rather than running unpacked (``Packing.required``).
 
         Raises:
-            NotImplementedError: Its schedule's version is not built yet
-                (``Recording.scheduled``).
+            NotImplementedError: Its variant or its schedule's version is not
+                built yet (``Recording.selected``, ``Recording.scheduled``).
         """
         begun = time.perf_counter()
         call.recording.code_weights()
+        selected, profile = call.recording.selected(
+            profile, call.values, [values for _, values in call.timed_points()]
+        )
         recording, fused, packing = apply_profile(
-            call.recording.scheduled(profile), profile, dev
+            selected.scheduled(profile), profile, dev
         )
         out = cls(
             recording,

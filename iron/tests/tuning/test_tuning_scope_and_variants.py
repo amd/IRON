@@ -5,6 +5,7 @@
 
 import pytest
 
+import iron
 from iron.common.declare import Profile
 from iron.common.declare.composition import (
     Binding,
@@ -18,22 +19,38 @@ from iron.common.declare.composition import (
 )
 from iron.common.graph.record import Recording
 from iron.common.image.packaging import SCRATCHPAD_WORDS
+from iron.common.image.step import BufferRef, SequenceStep
 from iron.operators.copy import Copy
+from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
-from iron.tests.support.toys_settings import RangedPair
+from iron.tests.support.toys_settings import (
+    RangedPair,
+    coded_consumer_recording_with_weight,
+    small_integer_weight,
+)
 from iron.tests.support.tuning import unbuilt
-from iron.tune.autotune import Timed
+from iron.tune.autotune import Point, Timed
+from iron.tune.fusions import Applied
 from iron.tune.search import candidates, check, fit, measure, search
 
 pytestmark = pytest.mark.usefixtures("device")
 
 
-def _gemv_toys(device):
-    """Return the same GEMV shape's two recordings: a decode-sized occurrence and a prompt-chunk-sized one."""
-    decode = GEMV(M=2048, K=2048).resolved(device)
-    chunk = GEMV(M=2048, K=2048, num_batches=8).resolved(device)
-    return Recording.of_step(decode), Recording.of_step(chunk)
+def _gemv_decode(device):
+    """Return a decode-sized GEMV's recording."""
+    return Recording.of_step(GEMV(M=2048, K=2048).resolved(device))
+
+
+class _Projection(iron.Graph):
+    """One held weight's GEMV over a decode step's vector, or each row of a prompt chunk."""
+
+    def __init__(self, M: int, K: int):
+        self.w = iron.param(small_integer_weight((M, K), 0))
+
+    def body(self, x):
+        rows = x.shape[0] if len(x.shape) == 2 else None
+        return GEMV.step(self.w, x, num_batches=rows, repeat=rows or 1)
 
 
 @unbuilt
@@ -41,7 +58,7 @@ def test_scope_entries_round_trip_by_version_occurrence_and_device_part(
     tmp_path, device
 ):
     """A ``Scope`` (versions, occurrences, device part) round-trips through the profile, and ``candidates`` proposes each."""
-    decode_rec, _ = _gemv_toys(device)
+    decode_rec = _gemv_decode(device)
     member = Member(cls=GEMV, dims={"M": 2048, "K": 2048})
     by_version = Entry(
         root=member, scope=Scope(versions=frozenset({decode_rec.version}))
@@ -103,7 +120,6 @@ def test_a_binding_names_how_a_per_call_value_reaches_the_design(tmp_path, devic
     )
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_a_variant_is_bit_identical_to_the_untuned_build_on_both_sides_of_its_boundary(
     device,
@@ -111,8 +127,9 @@ def test_a_variant_is_bit_identical_to_the_untuned_build_on_both_sides_of_its_bo
     """A variant is bit-identical to the single bounded baseline at each side of its boundary.
 
     A call's ``values`` carries ``rows`` at one specific number: one call at 256 (the
-    small variant's own range) and one at 257 (the large variant's), both held to the
-    one baseline design bounded at the full 2048.
+    small variant's own range, the graph re-recorded at 256 rows of ``x``) and one at
+    257 (the large variant's), both held to the one baseline design bounded at the full
+    2048. ``valid``, which no variant is over, is at its full 256 in both.
     """
     g = RangedPair(K=256, N=256)
     recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
@@ -125,22 +142,25 @@ def test_a_variant_is_bit_identical_to_the_untuned_build_on_both_sides_of_its_bo
     )
     tuned = Profile()
     tuned.add_variants(variants)
-    at_small = Timed(recording, values={"rows": 256})
-    at_large = Timed(recording, values={"rows": 257})
+    at_small = Timed(recording, values={"rows": 256, "valid": 256})
+    at_large = Timed(recording, values={"rows": 257, "valid": 256})
     for call in (at_small, at_large):
         result = check(tuned, baseline, [call], device, refinement=Refinement.EXACT)
         assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_a_derived_chunk_size_is_checked_against_its_base(device):
+def test_a_derived_chunk_size_is_checked_against_its_base(device, request):
     """``Schedule.size`` naming a smaller derived chunk is bit-identical against the chunk's own base, run at the full length.
 
     Running fewer rows of a prompt chunk is a shorter call, not a reordered reduction, so
-    this is held to bit identity.
+    this is held to bit identity. The half chunk is the graph re-recorded at four of the
+    chunk's eight rows, run twice over them.
     """
-    _, chunk = _gemv_toys(device)
+    if not device.can_dispatch_full_elf:
+        # fit waits on a derived version on an xclbin per step.
+        request.applymarker(unbuilt)
+    chunk = _Projection(2048, 2048).record(x=(8, 2048))
     base = Profile()
     derived = Profile()
     derived.add_schedule(Schedule(version=chunk.version, size="half_chunk"))
@@ -176,6 +196,152 @@ def test_a_boundary_is_kept_only_where_its_saving_beats_a_switch_and_one_more_de
     assert variants in tuned.variants()
 
 
+@pytest.mark.parametrize(
+    "order",
+    [
+        "read_before_last_write",
+        "read_unwritten_part",
+        "read_after_writes",
+        "read_written_part_first",
+        "unwritten_part_unread",
+    ],
+)
+def test_an_output_read_where_a_call_has_not_written_it_breaks_a_merge(device, order):
+    """A returned output written in parts outlasts the call where a step reads part of it this call has not yet written.
+
+    Read before the write of its second half, or a half no step writes, each call reads
+    what the call before left there, so merging calls is refused before any build.
+    Read only where this call already wrote it, or with a half no step writes and none
+    reads, it is the host's after each call, and the merge waits on what is not built
+    rather than being refused.
+    """
+    add = ElementwiseAdd(size=256, tile_size=128, num_aie_columns=1)
+    first, second = BufferRef("out", 0, 512), BufferRef("out", 512, 512)
+    writes = [
+        SequenceStep(add, (BufferRef("x"), BufferRef("x"), first)),
+        SequenceStep(add, (BufferRef("x"), BufferRef("x"), second)),
+    ]
+    reads = SequenceStep(add, (BufferRef("x"), second, BufferRef("t")))
+    reads_first = SequenceStep(add, (BufferRef("x"), first, BufferRef("t")))
+    steps = {
+        "read_before_last_write": [writes[0], reads, writes[1]],
+        "read_unwritten_part": [writes[0], reads],
+        "read_after_writes": [*writes, reads],
+        "read_written_part_first": [writes[0], reads_first, writes[1]],
+        "unwritten_part_unread": [writes[0], reads_first],
+    }[order]
+    recording = Recording.of_steps(
+        "halves", steps, ["x"], ["out", "t"], pinned={"out": 1024}
+    )
+    profile = Profile()
+    profile.add_schedule(Schedule(version=recording.version, size="merged_2x"))
+    if order in (
+        "read_after_writes",
+        "read_written_part_first",
+        "unwritten_part_unread",
+    ):
+        with pytest.raises(NotImplementedError, match="part of out"):
+            fit(profile, [Timed(recording)], device)
+        return
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "analysis"
+    assert "breaks a dependence" in (result.why or "")
+
+
+def test_a_call_whose_points_span_more_than_one_range_is_refused_before_any_build(
+    device,
+):
+    """A call at ``rows=256`` timed at 64 and at 1024 would run the 256-row design past its capacity: refused, not built."""
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    small = Entry(root=Member(cls=GEMM, dims={"M": 256, "K": 256, "N": 256}))
+    large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
+    tuned = Profile()
+    tuned.add_variants(
+        Variants(
+            values=("rows",), ranges=((((0, 256),), small), (((257, 2048),), large))
+        )
+    )
+    points = (Point(0.5, {"rows": 64}), Point(0.5, {"rows": 1024}))
+    call = Timed(recording, values={"rows": 256, "valid": 256}, points=points)
+    with pytest.raises(NotImplementedError, match="span more than one range"):
+        Applied.of(call, tuned, device)
+    within = Timed(recording, values={"rows": 256, "valid": 256}, points=points[:1])
+    assert Applied.of(within, tuned, device).recording.steps[0].op.M == 256
+
+
+def test_a_range_whose_capacity_the_graph_cannot_record_is_refused(device):
+    """A range up to 100 rows records a GEMM of 100 rows, which GEMM refuses: a design not legal at that capacity, refused before any build."""
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    small = Entry(root=Member(cls=GEMM, dims={"M": 100, "K": 256, "N": 256}))
+    large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
+    profile = Profile()
+    profile.add_variants(
+        Variants(
+            values=("rows",), ranges=((((0, 100),), small), (((101, 2048),), large))
+        )
+    )
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "counts"
+    assert "not legal" in (result.why or "")
+
+
+def test_a_call_whose_points_span_more_than_one_range_waits_in_fit(device):
+    """``fit`` holds a call's points to one range as building it does, so a call spanning two waits there rather than fitting."""
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    small = Entry(root=Member(cls=GEMM, dims={"M": 256, "K": 256, "N": 256}))
+    large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
+    tuned = Profile()
+    tuned.add_variants(
+        Variants(
+            values=("rows",), ranges=((((0, 256),), small), (((257, 2048),), large))
+        )
+    )
+    points = (Point(0.5, {"rows": 64}), Point(0.5, {"rows": 1024}))
+    call = Timed(recording, values={"rows": 256, "valid": 256}, points=points)
+    with pytest.raises(NotImplementedError, match="span more than one range"):
+        fit(tuned, [call], device)
+    within = Timed(recording, values={"rows": 256, "valid": 256}, points=points[:1])
+    assert fit(tuned, [within], device).ok
+
+
+def test_a_half_chunk_of_a_graph_reading_a_coded_weight_waits(device):
+    """A graph reading a coded weight, coded as a build codes it, splits into a half chunk not yet: it waits, and is not refused."""
+    recording = coded_consumer_recording_with_weight(
+        rows=1,
+        num_aie_columns=1,
+        weight=small_integer_weight((128, 128), 0),
+        num_batches=2,
+    )
+    recording.code_weights()
+    profile = Profile()
+    profile.add_schedule(Schedule(version=recording.version, size="half_chunk"))
+    with pytest.raises(NotImplementedError, match="a coded weight"):
+        fit(profile, [Timed(recording)], device)
+
+
+def test_a_malformed_range_entry_is_raised_not_refused_as_illegal(device):
+    """An entry that names a step's tunable among its dims is an error in the profile, not a design illegal at its capacity."""
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    malformed = Entry(
+        root=Member(cls=GEMM, dims={"M": 256, "K": 256, "N": 256, "tile_m": 64})
+    )
+    large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
+    profile = Profile()
+    profile.add_variants(
+        Variants(
+            values=("rows",), ranges=((((0, 256),), malformed), (((257, 2048),), large))
+        )
+    )
+    with pytest.raises(ValueError, match="dims name its tunables"):
+        fit(profile, [Timed(recording)], device)
+
+
 def test_ranges_that_do_not_tile_the_value_space_are_refused(device):
     """Ranges that leave a gap in the per-call value's space are refused before any build."""
     g = RangedPair(K=256, N=256)
@@ -195,6 +361,24 @@ def test_ranges_that_do_not_tile_the_value_space_are_refused(device):
     assert not result.ok
     assert result.stage == "counts"
     assert "do not tile" in (result.why or "")
+
+
+def test_a_design_not_legal_at_its_ranges_capacity_is_refused(device):
+    """A range's entry naming a step its capacity does not record (512 rows where at most 256 run) is refused before any build."""
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    wrong = Entry(root=Member(cls=GEMM, dims={"M": 512, "K": 256, "N": 256}))
+    large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
+    profile = Profile()
+    profile.add_variants(
+        Variants(
+            values=("rows",), ranges=((((0, 256),), wrong), (((257, 2048),), large))
+        )
+    )
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "counts"
+    assert "not legal" in (result.why or "")
 
 
 def test_more_variants_than_the_hosts_image_budget_is_refused(device):
