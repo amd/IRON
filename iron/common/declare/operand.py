@@ -247,34 +247,29 @@ class Operand:
             readers: Several consumer ends a lane instead of one, each lane
                 then its own list of them; refused on an output, which has
                 one producer.
-            tiles: Places each lane's host end and returns the fifo itself,
-                one per lane, rather than an end.
+            tiles: Places each lane's host end. An output then returns the
+                fifo itself, one per lane, rather than an end; an input
+                returns the ends its build reads each lane through (its own
+                fifo's, or a fed one's), as without ``tiles``.
             obj_type: The fifo element type; this operand's own when None.
             join: Joins each lane of an output in a memtile from its cores'
                 fifos.
             objectfifo_kwargs: Reach every lane's ``ObjectFifo(...)``.
 
         Raises:
-            ValueError: ``readers`` and ``tiles`` are both given, ``readers``
-                is asked of an output, ``tiles`` does not name one tile a
-                lane, or ``join`` is asked of an input.
+            ValueError: ``readers`` is asked of an output, ``tiles`` does not
+                name one tile a lane, or ``join`` is asked of an input.
         """
-        if readers is not None and tiles is not None:
-            raise ValueError(f"{self.name}.fifos(): readers= and tiles= do not combine")
         if join is not None and not self.drains:
             raise ValueError(f"{self.name} is an input: join= joins an output's lanes")
         source, staged = self.fed_from, self.staged
         if isinstance(source, ObjectFifo):
             # The composition made the fifo, and its depth with it.
             reading = source.depth
-            if tiles is not None:
-                return [source]
             if readers is None:
                 return [source.cons(reading)]
             return [[source.cons(reading) for _ in range(readers)]]
         if source is not None:
-            if tiles is not None:
-                return list(source.lane_fifos if staged is None else staged)
             exact = self.chosen_depth is not None
             reading = self.chosen_depth if exact else depth
             ends = [
@@ -365,8 +360,6 @@ class Operand:
                 return made
             return [f.prod() for f in made]
         self.bind([f.prod(tile=t, port=port) for f, t in zip(made, lane_tiles)])
-        if tiles is not None:
-            return made
         if readers is None:
             return [f.cons() for f in made]
         return [[f.cons() for _ in range(readers)] for f in made]

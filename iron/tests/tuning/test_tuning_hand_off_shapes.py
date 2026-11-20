@@ -24,6 +24,7 @@ from iron.common.graph.fusion import composed
 from iron.common.graph.sdf import analyze
 from iron.common.image.compose import fits, fused_configuration, transported
 from iron.common.image.step import Edge, EdgeKind, Fusion, FusionKind, HandOff
+from iron.tests.support import toys_dataflow
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     broadcast_weight_to_columns,
@@ -424,3 +425,27 @@ def test_a_restage_held_in_l1_of_an_output_kept_too_waits(device):
     profile.add_entry(Entry(region))
     with pytest.raises(NotImplementedError):
         fit(profile, [Timed(recording)], device)
+
+
+@pytest.mark.parametrize(
+    "device",
+    [pytest.param("npu2", id="device_npu2")],
+    indirect=True,
+)
+@pytest.mark.supported_devices("npu2")
+def test_a_gemms_output_streams_into_anothers_a(device):
+    """One GEMM's C streamed into another's A, tile for tile, is bit-identical to the two run apart.
+
+    The consumer's memtile splits the producer's lanes through their bound
+    ends, so no end of theirs is left without a reader.
+    """
+    producer, consumer = toys_dataflow.gemm_into_gemm(
+        device, M=256, width=64, producer_tile=64, consumer_tile=64
+    )
+    recording = toys_dataflow.gemm_into_gemm_recording(
+        "gemm_into_gemm", producer, consumer
+    )
+    profile = Profile()
+    profile.add_entry(Entry(toys_dataflow.gemm_into_gemm_region(producer, consumer)))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
