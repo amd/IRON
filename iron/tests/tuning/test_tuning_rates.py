@@ -107,7 +107,7 @@ def test_per_call_bounded_token_count_is_a_valid_kv_length(device):
     assert analysis.repetition == {0: 1, 1: 16}
 
 
-@pytest.mark.parametrize("n", [16, 32, 48])
+@pytest.mark.parametrize("n", [0, 16, 20, 32, 48])
 def test_a_bounded_gemms_loops_are_read_off_its_words(n, device):
     """A GEMM over the first ``n`` of 48 rows: its loops' trips are the words its program reads at the call, not solved from the objects it moves.
 
@@ -128,7 +128,8 @@ def test_a_bounded_gemms_loops_are_read_off_its_words(n, device):
         if scope is not core:
             loops.append(derivation.read[id(scope)])
         nested += reversed([s for s in scope.body if isinstance(s, Scope)])
-    assert loops == [n // 16, 1, 1, 3 - n // 16, 1]
+    blocks = -(-n // 16)
+    assert loops == [blocks, 1, 1, 3 - blocks, 1]
 
 
 def _bounded_rows_region(columns: int, kind: EdgeKind) -> tuple[Recording, Region]:
@@ -161,22 +162,24 @@ def test_a_bounded_gemm_draining_every_tile_into_valid_rows_is_refused(device):
     assert "objects written a call" in result.why
 
 
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("n", [16, 32, 48])
-def test_a_valid_kv_length_streamed_into_its_rows_is_bit_identical(n, device):
-    """``BoundedRows``' GEMM over the first ``n`` of 48 rows streamed into its norm a row at a time: bit-identical to the steps run apart.
+def test_a_valid_kv_length_streamed_into_its_rows_is_refused_past_whole_tiles(device):
+    """``BoundedRows``' GEMM streamed into its norm a row at a time: refused at the analysis, for every call it serves.
 
-    One column tile a lane, so its C drains only the row blocks the call
-    computes and its padding tiles make none.
+    Its C drains the 16-row blocks a call computes, the norm the call's
+    ``n`` rows: at ``n = 16, 32, 48`` they balance, but at ``n = 1`` one
+    block, 16 rows, meets one row read, the other 15 left for the next
+    call. One image serves every ``n`` the recording admits.
     """
     recording, region = _bounded_rows_region(64, EdgeKind.STREAM)
     assert recording.steps[0].op.resolved(device).drains_bounded
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    calls = [Timed(recording, {"n": n})]
-    assert fit(profile, calls, device).ok
-    result = check(profile, Profile(), calls, device, Refinement.EXACT)
-    assert result.ok, result.why
+    for n in (16, 48):
+        result = fit(profile, [Timed(recording, {"n": n})], device)
+        assert not result.ok
+        assert result.stage == "analysis"
+        assert "at n = 1," in result.why
+        assert "objects written a call" in result.why
 
 
 # Where GEMM composes beside another operator: npu1 builds GEMM on an array

@@ -252,6 +252,9 @@ logger = logging.getLogger(__name__)
 
 # A measured ratio under this gains: past the paired timing's noise.
 GAINS = 0.95
+# The admitted values of a per-call value a region's balance is held at
+# every one of; past it, both ends of its range and an odd stride across it.
+BALANCED_POINTS = 64
 # How an edit is priced: IRON's verify timing, lighter than measure's own.
 PRICING = Timing(rounds=4, calls=10)
 
@@ -1545,6 +1548,45 @@ def fit(
                     continue
                 if analysis.why is not None:
                     return Fit(False, "analysis", analysis.why)
+                # One image serves every call: its edges balance at each value
+                # the recording admits, not the call's alone.
+                unbalanced = waits = None
+                for name in sorted(v.name for v in recording.values):
+                    admitted = recording.value_range(name)
+                    if admitted is None:
+                        continue
+                    lo, hi = admitted
+                    stride = max(1, (hi - lo) // BALANCED_POINTS) | 1
+                    for at in sorted(
+                        {lo, lo + 1, hi - 1, hi, *range(lo, hi + 1, stride)}
+                        & set(range(lo, hi + 1))
+                    ):
+                        if timed.values.get(name) == at:
+                            continue
+                        try:
+                            why = (
+                                Derivation(
+                                    region,
+                                    recording,
+                                    device,
+                                    {**timed.values, name: at},
+                                )
+                                .analysis()
+                                .why
+                            )
+                        except NotImplementedError as e:
+                            waits = waits or f"at {name} = {at}, {e}"
+                            continue
+                        if why is not None:
+                            unbalanced = f"at {name} = {at}, {why}"
+                            break
+                    if unbalanced is not None:
+                        break
+                if unbalanced is not None:
+                    return Fit(False, "analysis", unbalanced)
+                if waits is not None:
+                    waiting.append(waits)
+                    continue
                 for edge, p, c in derivation.wired:
                     if edge.kind not in (EdgeKind.STREAM, EdgeKind.CASCADE):
                         continue
