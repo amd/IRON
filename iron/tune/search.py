@@ -50,7 +50,7 @@ from ..common.design import OperatorDesign
 from ..common.graph.carried import CarriedLoop
 from ..common.graph.compiled import _words
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
-from ..common.graph.fusion import composed, memory_waits
+from ..common.graph.fusion import composed, memory_waits, narrowed
 from ..common.graph.record import Recording
 from ..common.graph.sdf import Derivation
 from ..common.image.compose import ANNEALED, SEQUENTIAL
@@ -1837,6 +1837,8 @@ def _configuration_fit(
         if refused is not None:
             return refused
     try:
+        with set_current_device(device):
+            configuration = narrowed(configuration, match, recording)
         derivation = Derivation(Region(configuration.parts), recording, device, values)
     except NotImplementedError as e:
         return [str(e)]
@@ -1857,6 +1859,18 @@ def _configuration_fit(
         own += sum(max(cores[steps[k]] for k in worker) for worker in workers)
     needed = own + sum(arrays.values())
     width = device.cols if configuration.columns is None else configuration.columns
+    wider = [
+        op
+        for op in derivation.ops
+        if "num_aie_columns" in op.declaration.tunables and op.num_aie_columns > width
+    ]
+    if wider:
+        return Fit(
+            False,
+            "counts",
+            f"{type(wider[0]).__name__} takes {wider[0].num_aie_columns} columns; "
+            f"its configuration has {width}",
+        )
     if needed > width * core_rows:
         return Fit(
             False,
@@ -1871,7 +1885,6 @@ def _configuration_fit(
     unbuilt = [
         f"building a configuration with {what} is not built yet"
         for what, kept in (
-            ("a partial width", configuration.columns is not None),
             ("buffers resident into the next", configuration.resident),
             (
                 "a switch other than a reload",

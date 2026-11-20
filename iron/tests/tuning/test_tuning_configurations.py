@@ -222,7 +222,6 @@ def test_concurrency_at_once_of_consecutive_steps_is_bit_identical(device):
     assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_disjoint_columns_concurrency_is_bit_identical(device):
     """Two designs on disjoint columns at once (``Configuration.concurrent`` with a ``columns`` width each) are bit-identical to each alone."""
@@ -250,7 +249,6 @@ def test_disjoint_columns_concurrency_is_bit_identical(device):
     assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_width_partial_columns_is_bit_identical(device):
     """``Configuration.columns`` (a partial width) is bit-identical to the full-width configuration."""
@@ -409,6 +407,29 @@ def test_members_running_at_once_sharing_written_data_is_refused(device):
     assert not result.ok
     assert result.stage == "analysis"
     assert "independent" in (result.why or "") or "shared" in (result.why or "")
+
+
+def test_a_member_given_more_columns_than_its_configuration_is_refused(device):
+    """A configuration at a partial width narrows its members to fit; one given a wider width itself is refused by counts, before any build."""
+    gemv, silu, mul = gemv_silu_mul(M=256, cols=4, tile=64)
+    profile = Profile()
+    profile.add_entry(
+        Entry(
+            root=Configuration(
+                parts=(
+                    Member(
+                        type(gemv), {"M": gemv.M, "K": gemv.K}, {"num_aie_columns": 4}
+                    ),
+                ),
+                columns=2,
+            )
+        )
+    )
+    recording = gemv_silu_mul_recording("config_member_too_wide", gemv, silu, mul)
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "counts"
+    assert "columns" in (result.why or "")
 
 
 def test_residency_across_a_teardown_is_refused(device):
