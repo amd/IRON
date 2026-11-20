@@ -22,6 +22,7 @@ from ..declare.composition import (
 from ..declare.profile import Profile
 from ..design import BuiltArray, OperatorDesign
 from ..image.step import Edge, EdgeKind, Fusion, FusionKind
+from .fusion_tunables import retuned
 from .record import Recording
 
 # How a producer's output can feed a consumer's input, by the pair's
@@ -556,8 +557,17 @@ def composed(
                     )
                 ) and (match[e.producer], e.output) not in kept:
                     kept.append((match[e.producer], e.output))
+                # As the region builds them: at its members' tunables, an
+                # earlier entry's winning, as below.
                 p, c = (
-                    recording.steps[match[i]].op.resolved()
+                    retuned(
+                        recording.steps[match[i]].op,
+                        {
+                            **(root.parts[i].tunables or {}),
+                            **tunables.get(match[i], {}),
+                        },
+                        None,
+                    )
                     for i in (e.producer, e.consumer)
                 )
                 # Steps on one core meet lane by lane, or the consumer runs
