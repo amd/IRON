@@ -97,8 +97,8 @@ def signature(kind: Kind, diagnostic: str) -> str:
     return f"{kind.value}: {words.strip()[:200]}"
 
 
-def place(module: str) -> tuple[str, str | None]:
-    """Run the fit pipeline on ``module`` in an ``aie-opt`` of its own, so a compiler crash ends that process, not the caller.
+def place(module: str, placer: str = SEQUENTIAL) -> tuple[str, str | None]:
+    """Run the fit pipeline on ``module`` under ``placer`` in an ``aie-opt`` of its own, so a compiler crash ends that process, not the caller.
 
     ``("fits", None)``, ``("refused", diagnostic)`` or ``("crash", diagnostic)``.
     """
@@ -108,7 +108,7 @@ def place(module: str) -> tuple[str, str | None]:
         done = subprocess.run(
             [
                 str(Path(aie_config.aiecc_path()).with_name("aie-opt")),
-                f"--pass-pipeline={_FIT_PIPELINE.format(placer=SEQUENTIAL)}",
+                f"--pass-pipeline={_FIT_PIPELINE.format(placer=placer)}",
                 f.name,
                 "-o",
                 "/dev/null",

@@ -56,6 +56,7 @@ from iron.common.graph.compiled import (
 from iron.common.graph.fusion import admits, candidates
 from iron.common.graph.record import Recording
 from iron.common.image.compose import (
+    SEQUENTIAL,
     SHIM_SHORT,
     Packing,
     fused_configuration,
@@ -392,8 +393,9 @@ def group_fit_verdict(
     cascades: Sequence[tuple[int, str, int, str]] = (),
     phases: Sequence[int] | None = None,
     packet_fills: bool = True,
+    placer: str = SEQUENTIAL,
 ) -> str | None:
-    """Why the placer refuses ``ops``' resolved designs sharing one device configuration (plain, or as ``kind``'s fusion wires ``edges``).
+    """Why ``placer`` refuses ``ops``' resolved designs sharing one device configuration (plain, or as ``kind``'s fusion wires ``edges``).
 
     Each output ``kept`` drains to the host too (``Fusion.kept``), each
     output ``depths`` names is built at that depth, and each of ``waits``
@@ -435,10 +437,12 @@ def group_fit_verdict(
         if isinstance(found, str):
             return found  # composing itself refused; no placement pass to cache
         text, record = found
+        if placer != SEQUENTIAL:
+            record = record.with_name(f"{record.name}-{placer}")
         if record.exists():
             verdict = record.read_text()
         else:
-            outcome, diagnostic = place(text)
+            outcome, diagnostic = place(text, placer)
             if outcome == "crash":
                 if ledger is not None:
                     dev = ops[0].dev

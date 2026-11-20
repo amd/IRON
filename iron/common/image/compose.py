@@ -67,9 +67,9 @@ SEQUENTIAL, ANNEALED = "sequential_placer", "sa_placer"
 # The sequential placer's diagnostic where no shim tile has a channel left.
 SHIM_SHORT = "DMA channel(s) free"
 
-# Each packed group's placer and the diagnostic where none routes it, by its
-# designs' identities.
-_placed: dict[tuple[str, ...], tuple[str, str | None]] = {}
+# Each packed group's or lone fusion's placer and the diagnostic where none
+# routes it, by its designs' identities or the fusion's symbol.
+_placed: dict[Hashable, tuple[str, str | None]] = {}
 
 
 class CoResidenceError(ValueError):
@@ -1058,7 +1058,9 @@ class Composition:
         """Return ``packing``'s groups that place and route as one device.
 
         A group the default placer cannot route is placed by the annealing one where
-        that routes it (``Packing.annealed``); one neither routes (an operator's
+        that routes it (``Packing.annealed``), as is a fusion in no group (a
+        cascade chain the default placer, which never moves a placed peer,
+        cannot lay out); one neither routes (an operator's
         mapping changed since the profile was tuned) runs unpacked, with a warning. A
         group naming a fusion's own symbol builds it fused, its other members beside
         it (``fits``'s ``fusion``); one naming more than one fusion is not yet
@@ -1112,6 +1114,23 @@ class Composition:
             groups.append(tuple(kept))
             if placer == ANNEALED:
                 annealed.update(kept)
+        packed = {n for group in groups for n in group}
+        for window, (member_designs, fusion) in self.fusions.items():
+            if window in packed:
+                continue
+            # A fusion's symbol does not spell its edges' kinds or transport.
+            key = (window, tuple(e.kind for e in fusion.edges), fusion.packets)
+            if key not in _placed:
+                designs = dict(zip((str(j) for j in fusion.steps), member_designs))
+                refused = fits(designs, fusion=fusion)
+                if refused is None:
+                    _placed[key] = (SEQUENTIAL, None)
+                elif fits(designs, fusion=fusion, placer=ANNEALED) is None:
+                    _placed[key] = (ANNEALED, None)
+                else:
+                    _placed[key] = (SEQUENTIAL, refused)
+            if _placed[key][0] == ANNEALED:
+                annealed.add(window)
         return Packing(tuple(groups), tuple(sorted(annealed)))
 
     @property

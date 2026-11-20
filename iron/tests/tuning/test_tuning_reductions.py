@@ -14,7 +14,7 @@ from iron.common.graph.sdf import analyze
 from iron.common.image.step import HandOff
 from iron.tests.support import toys_composition as toys
 from iron.tests.support.tools import DEVICES
-from iron.tests.support.tuning import reached_by_candidates
+from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import check, fit, measure, search
 
@@ -36,6 +36,20 @@ def _chain_splits(name: str) -> list[int]:
 # Each device's GEMM cascade reducers, by the splits its array chains.
 GEMM_CHAINS = [
     pytest.param(name, splits, id=f"device_{name}-splits_{splits}")
+    for name in sorted(DEVICES)
+    for splits in _chain_splits(name)
+]
+
+# Where the GEMM cascade reducers place. On npu1 IRON composes them onto GEMM's
+# one-column array, where no placer lays out the cascades yet.
+_PLACES = {"npu1": False, "npu2": True}
+GEMM_FITS = [
+    pytest.param(
+        name,
+        splits,
+        id=f"device_{name}-splits_{splits}",
+        marks=() if _PLACES[name] else unbuilt,
+    )
     for name in sorted(DEVICES)
     for splits in _chain_splits(name)
 ]
@@ -174,3 +188,20 @@ def test_the_gemm_cascade_reducer_runs_core_to_core(splits, device):
     assert analysis.why is None
     assert all(analysis.hand_off[e] is HandOff.EQUAL for e in region.edges)
 
+
+@pytest.mark.parametrize(("device", "splits"), GEMM_FITS, indirect=["device"])
+def test_a_gemm_cascade_reducer_fits_by_the_annealing_placer(splits, device):
+    """The sequential placer, which never moves a placed cascade peer, refuses the chain; the annealing one the build falls back to places it.
+
+    So the fit takes it, where under the sequential placer alone it refuses.
+    """
+    recording = toys.reduction_recording(
+        f"gemm_fit_{splits}",
+        toys.gemm_k_split_partials(GEMM_M, GEMM_K, GEMM_N, splits),
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=toys.cascade_reducer_region(recording)))
+    verdict = fit(profile, [Timed(recording)], device)
+    assert verdict.ok, verdict.why
+    sequential = fit(profile, [Timed(recording)], device, placements=("sequential",))
+    assert not sequential.ok and sequential.stage == "placer"
