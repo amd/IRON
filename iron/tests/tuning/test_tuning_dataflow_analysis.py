@@ -6,10 +6,12 @@
 import pytest
 from aie.dialects.aie import get_target_model
 
+from iron.common.declare.composition import Edge, Region
 from iron.common.graph.sdf import analyze
 from iron.common.image.step import HandOff
 from iron.tests.support import toys_composition
 from iron.tests.support import toys_dataflow as toys
+from iron.tests.support.toys_edges import member
 
 pytestmark = pytest.mark.usefixtures("device")
 
@@ -109,3 +111,18 @@ def test_a_step_spliced_into_its_producers_cores_holds_each_cores_call(device):
     assert analysis.repetition == {0: 4, 1: 4}
     assert analysis.min_depth[edge] == 4
     assert analysis.deadlock({edge: 3}) is not None
+
+
+def test_a_spliced_step_s_output_streams_on_its_producers_lanes(device):
+    """The mask add spliced into QK^T's cores writes the scores on QK^T's lanes, not its own build's: streamed into the softmax's lanes, they restage."""
+    qk, add_mask, softmax, _ = toys_composition.prefill_attention_ops()
+    recording = toys_composition.prefill_scores_recording(
+        "spliced_scores", qk, add_mask, softmax
+    )
+    region = Region(
+        (member(qk), member(add_mask), member(softmax)),
+        (Edge(0, "C", 1, "a"), Edge(1, "y", 2, "x")),
+        workers=((0, 1),),
+    )
+    analysis = analyze(region, recording, device)
+    assert analysis.hand_off[region.edges[1]] is HandOff.RATIO
