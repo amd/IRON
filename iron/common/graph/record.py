@@ -328,13 +328,15 @@ class Recording:
     def repeated(self, calls: int) -> Recording:
         """Return the derived version running ``calls`` of this one's calls back to back, one command.
 
-        Call ``j``'s inputs, returned outputs and per-call values are its own,
-        each named with the suffix ``CALL_SUFFIX.format(j)``: each binding's
-        word is written once a call, the IRON-side layout of a slot set per
-        call that mlir-aie's scratchpad management replaces (PLAN step 2).
-        Everything else (weights, states, the buffers carried to the next
-        call, intermediates) is one buffer every call uses in turn, so what
-        one call carries the next reads on the device.
+        Call ``j``'s inputs, returned outputs, intermediates and per-call
+        values are its own, each named with the suffix
+        ``CALL_SUFFIX.format(j)``: each binding's word is written once a call,
+        the IRON-side layout of a slot set per call that mlir-aie's scratchpad
+        management replaces (PLAN step 2), and each call's regions compose as
+        one call's do, where an intermediate the next call writes again would
+        read, to a region, as read past it. Everything else (weights, states,
+        the buffers carried to the next call) is one buffer every call uses in
+        turn, so what one call carries the next reads on the device.
 
         Raises:
             NotImplementedError: It carries values (their next a call's
@@ -366,7 +368,11 @@ class Recording:
         kept = set(self.feedback) | {h.ref().root for _, h in self.states.values()}
         own = {
             h.buffer.name: h.buffer
-            for h in (*self.inputs, *self.returned)
+            for h in (
+                *self.inputs,
+                *self.returned,
+                *(h for s in self.steps for h in s.slots if h.role == "intermediate"),
+            )
             if h.buffer.name not in kept
         }
         steps: list[Step] = []
