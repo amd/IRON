@@ -20,6 +20,7 @@ from iron.tests.support.toys_edges import (
 )
 from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
+from iron.tune.ddr import Ceiling
 from iron.tune.search import check, fit, search
 
 COMBOS = all_combinations()
@@ -186,7 +187,14 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(combo, dev
             v.name: limit.hi - 1 for v, limit in zip(recording.values, recording.limits)
         },
     )
-    analysis = analyze(region, recording, device, call.values)
+    ceiling = Ceiling.stored(device.name)
+    analysis = analyze(
+        region,
+        recording,
+        device,
+        call.values,
+        None if ceiling is None else ceiling.mixed,
+    )
     edge = region.edges[index]
     value = depth_from_bounds(
         depth, analysis.min_depth[edge], analysis.knee_depth[edge]
