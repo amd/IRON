@@ -404,7 +404,6 @@ class GEMM(Operator):
         input_dtype, output_dtype = self.input_dtype, self.output_dtype
         wider = self.wider_accumulator
 
-        A_l2_ty = self.A.obj_type
         B_l2_ty = self.B.obj_type
         A_l1_ty = np.ndarray[(m, k), np.dtype[input_dtype]]
         B_l1_ty = np.ndarray[(k, n), np.dtype[input_dtype]]
@@ -421,7 +420,13 @@ class GEMM(Operator):
         else:
             fifo_depth_out = FIFO_DEPTH
 
-        A_l3l2_fifos: list[Any] = [None] * self.n_shim_mem_a
+        # Each lane's fifo into its memtile split: the host's, or an on-chip feed's.
+        A_l3l2_fifos = self.A.fifos(
+            FIFO_DEPTH,
+            tiles=[
+                Tile(a_cols[i], 0) if pinned else None for i in range(self.n_shim_mem_a)
+            ],
+        )
         A_l2l1_fifos: list[Any] = [None] * n_aie_rows
         B_l3l2_fifos: list[Any] = [None] * n_aie_cols
         B_l2l1_fifos: list[Any] = [None] * n_aie_cols
@@ -437,7 +442,6 @@ class GEMM(Operator):
         rtps = [Rtp(read) for _ in range(n_aie_rows * n_aie_cols)]
 
         for i in range(self.n_shim_mem_a):
-            A_l3l2_fifos[i] = ObjectFifo(A_l2_ty, depth=FIFO_DEPTH)
             # Fewer A shims than rows: a shim's tiles split over several rows.
             start_row = i * n_A_tiles_per_shim
             stop_row = start_row + n_A_tiles_per_shim
@@ -568,12 +572,6 @@ class GEMM(Operator):
                     )
                 )
 
-        self.A.bind(
-            [
-                f.prod(tile=Tile(a_cols[c], 0) if pinned else None)
-                for c, f in enumerate(A_l3l2_fifos)
-            ]
-        )
         self.B.bind(
             [
                 f.prod(tile=Tile(c, 0) if pinned else None)
