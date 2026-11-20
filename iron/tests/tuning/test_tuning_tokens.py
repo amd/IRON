@@ -49,9 +49,21 @@ def _gemm_into_rows(b_col_maj: bool, kind: EdgeKind) -> tuple[Region, GEMM, RMSN
     return region, gemm, norm
 
 
-@unbuilt
+# Where GEMM's tiles stream or restage into rows. npu1 builds GEMM on an array
+# narrower than the device, which a configuration beside another operator's
+# does not take.
+_LAYOUT_FITS = [
+    pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
+    for name in sorted(DEVICES)
+]
+
+
+@pytest.mark.parametrize("device", _LAYOUT_FITS, indirect=True)
 def test_row_tiles_into_a_rowwise_consumer_fit_as_is(device):
-    """``GEMM``'s row-major ``C`` (one tile a row) feeding ``RMSNorm`` directly: the analysis derives ``HandOff.EQUAL``, no restage, and it fits."""
+    """``GEMM``'s row-major ``C`` (one tile a row) feeding ``RMSNorm`` directly: the analysis derives ``HandOff.EQUAL``, no restage, and it fits.
+
+    One stream delivers each 64-row tile a row at a time (an asymmetric fifo).
+    """
     region, gemm, norm = _gemm_into_rows(b_col_maj=False, kind=EdgeKind.STREAM)
     profile = Profile()
     profile.add_entry(Entry(root=region))
@@ -68,14 +80,6 @@ def _tiles_into_rows(kind: EdgeKind) -> tuple[Recording, Region]:
     return recording, dataclasses.replace(
         region, edges=(dataclasses.replace(edge, kind=kind),)
     )
-
-
-# Where the tiles' restage fits. npu1 builds GEMM on an array narrower than the
-# device, which a configuration beside another operator's does not take.
-_LAYOUT_FITS = [
-    pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
-    for name in sorted(DEVICES)
-]
 
 
 @pytest.mark.parametrize("device", _LAYOUT_FITS, indirect=True)

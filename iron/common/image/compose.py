@@ -16,6 +16,7 @@ import itertools
 import logging
 import math
 from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 from aie import ir
@@ -287,6 +288,40 @@ def fused_configuration(
         (source,) = [b for b in made.buffers if b.name == e.output]
         per_object = math.prod(source.obj_shape)
         chosen[e] = max(-(-n // per_object) for n in source.moved_per_lane().values())
+    # A stream whose reader takes each object its producer sends as a whole
+    # number of smaller ones: one fifo, each end at its own object size.
+    delivered: dict[tuple[int, str], Any] = {}
+    for e in fusion.edges:
+        if (
+            fusion.kind is FusionKind.STAGED
+            or e.kind is not EdgeKind.STREAM
+            or (e.producer, e.output) in kept
+            or any({e.producer, e.consumer} <= set(g) for g in fusion.workers)
+            or sum(
+                (d.producer, d.output) == (e.producer, e.output) for d in fusion.edges
+            )
+            != 1
+        ):
+            continue
+        (made,) = [
+            b
+            for b in designs[fusion.steps.index(e.producer)].op.buffers
+            if b.name == e.output
+        ]
+        (taken,) = [
+            b
+            for b in designs[fusion.steps.index(e.consumer)].op.buffers
+            if b.name == e.input
+        ]
+        if not (made.streamed and taken.streamed):
+            continue
+        sizes = math.prod(made.obj_shape), math.prod(taken.obj_shape)
+        if (
+            sizes[0] != sizes[1]
+            and sizes[0] % sizes[1] == 0
+            and np.dtype(made.dtype) == np.dtype(taken.dtype)
+        ):
+            delivered[(e.producer, e.output)] = taken.obj_type
     arrays: dict[int, BuiltArray] = {}
     scalars = [None] * len(designs) if dispatch is None else dispatch
     # A member's buffers on-chip edges carry stay circuits: fed inputs, and
@@ -345,7 +380,13 @@ def fused_configuration(
                     for (p, _), e in first_reader.items()
                     if p == j and e in chosen and (p, e.output) not in kept
                 },
-                **{e.input: chosen[e] for e in incoming.get(j, ()) if e in chosen},
+                # A delivered stream's depth counts the producer's objects;
+                # its reader takes its own, at its own depth.
+                **{
+                    e.input: chosen[e]
+                    for e in incoming.get(j, ())
+                    if e in chosen and (e.producer, e.output) not in delivered
+                },
             },
             packeted=(
                 [
@@ -369,6 +410,7 @@ def fused_configuration(
                 if fusion.drains is not None and fusion.drains > 1
                 else None
             ),
+            delivers={o: t for (p, o), t in delivered.items() if p == j},
         )
         for producer, output in fusion.kept:
             if producer == j:

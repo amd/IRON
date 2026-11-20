@@ -81,7 +81,11 @@ class Operand:
     move ``along`` that output's lanes, in its host order. An output drained
     only to the host whose ``drain_join`` is above one joins each run of that
     many lanes in a memtile into one host lane (``joined_drains``), so it
-    takes fewer of the shim's receiving channels.
+    takes fewer of the shim's receiving channels. An output whose first
+    on-chip reader takes smaller objects than its own ``delivers`` that
+    reader's object type: each lane's fifo sends whole objects and its
+    reader receives them a smaller object at a time (the dialect's
+    asymmetric fifo).
     """
 
     def __init__(self, member: Any, op: Operator) -> None:
@@ -103,6 +107,7 @@ class Operand:
         self.into: Operand | None = None
         self.read_lanes: set[int] = set()
         self.drain_join = 1
+        self.delivers: type[np.ndarray] | None = None
         self._decl = member.of(op)
 
     def __getattr__(self, name: str) -> Any:
@@ -325,6 +330,8 @@ class Operand:
             self.lane_fifos = made
             self.lane_handles = [host.cons() for host in hosts]
             return [f.prod() for f in made]
+        if self.drains and self.delivers is not None:
+            objectfifo_kwargs.setdefault("consumer_obj_type", self.delivers)
         made = [
             ObjectFifo(obj_type, depth=depth, **objectfifo_kwargs)
             for _ in range(self.lanes)
@@ -453,11 +460,15 @@ class Operand:
         source.feeds.append(self)
 
     def _mismatch(self, source: Operand) -> str | None:
-        """Return how ``source``'s lanes fail to meet this input's as they are, or None where each lane carries the same objects in the same order."""
-        if len(source.handles) != self.lanes or source.obj_type != self.obj_type:
+        """Return how ``source``'s lanes fail to meet this input's as they are, or None where each lane carries the same elements in order.
+
+        In this input's objects: the source's own, or those it ``delivers``.
+        """
+        delivered = source.obj_type if source.delivers is None else source.delivers
+        if len(source.handles) != self.lanes or delivered != self.obj_type:
             return (
                 f"{source.name} streams {len(source.handles)} lanes of "
-                f"{source.obj_type}, but {self.name} reads {self.lanes} lanes of "
+                f"{delivered}, but {self.name} reads {self.lanes} lanes of "
                 f"{self.obj_type}"
             )
         mine = {lane: tap for lane, tap, _, _ in self.transfers()}
