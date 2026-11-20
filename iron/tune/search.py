@@ -1244,8 +1244,8 @@ def fit(
                 # Not a fold: the composer joins its cores, counted below.
                 fold = folds[0] if folds else None
                 if fold is not None:
-                    folded = apply_folds(recording, [fold]).steps[fold.steps[0]].op
                     with set_current_device(device):
+                        folded = apply_folds(recording, [fold]).steps[fold.steps[0]].op
                         refused = refusal(folded)
                     if refused is not None and set(placements) != {"sequential"}:
                         waiting.append(

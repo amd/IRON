@@ -9,6 +9,7 @@ import logging
 
 import pytest
 from aie.dialects.aie import WireBundle, get_target_model
+from aie.utils import set_current_device
 
 from iron.common.declare.composition import (
     Edge as CompositionEdge,
@@ -30,7 +31,7 @@ from iron.operators import (
     SiLU,
     Softmax,
 )
-from iron.tests.support import sequences
+from iron.tests.support import sequences, toys_schedule
 from iron.tests.support import toys_composition as toys
 from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import reached_by_candidates, unbuilt
@@ -69,6 +70,16 @@ def _named_region_and_recording(name: str) -> tuple[Region, object]:
     region = _joined_region(member(producer), member(consumer), output, input)
     recording = recording_fn(name, producer, consumer)
     return region, recording
+
+
+def test_a_fold_is_fitted_on_the_device_given_with_none_bound(device):
+    """IRON's fold of a ReLU into a Tanh, each at the array's width and two channels, is fitted on the device ``fit`` is given, none bound as current."""
+    recording = toys_schedule.Wide(device.cols).record(x=(8192,))
+    relu, tanh = (recording.steps[s].op for s in (0, 1))
+    profile = Profile()
+    profile.add_entry(Entry(_joined_region(member(relu), member(tanh), "y", "x")))
+    with set_current_device(None):
+        assert fit(profile, [Timed(recording)], device).ok
 
 
 @pytest.mark.parametrize("name", toys.PAIR_TOYS)
