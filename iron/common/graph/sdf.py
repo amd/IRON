@@ -37,11 +37,14 @@ from aie.utils import bfp, set_current_device
 
 from ..declare import Operator
 from ..declare.composition import Entry, Region
+from ..declare.profile import Profile
 from ..design import BuiltArray, OperatorDesign, configuration
 from ..elementwise import Elementwise
+from ..image import compose
 from ..image.compose import Spliced, cascade_cores, splice
 from ..image.step import BufferRef, Edge, EdgeKind, HandOff
 from .clock import kernel_cycles
+from .fusion import composed
 from .record import Recording
 
 
@@ -102,13 +105,19 @@ class Flow:
     Args:
         channels: The edges.
         programs: Per actor, its accesses in order.
+        phases: Per actor, the phase whose sequence runs it, as the build
+            groups its steps' transfers; None where that is not known.
     """
 
     def __init__(
-        self, channels: Sequence[Channel], programs: Sequence[Sequence[Event]]
+        self,
+        channels: Sequence[Channel],
+        programs: Sequence[Sequence[Event]],
+        phases: Sequence[int] | None = None,
     ) -> None:
         self.channels = tuple(channels)
         self.programs = tuple(tuple(p) for p in programs)
+        self.phases = None if phases is None else tuple(phases)
 
     def written(self, channel: int) -> int:
         """Return the objects a call writes on ``channel``."""
@@ -222,16 +231,22 @@ class Flow:
         between the last two calls' ends. An edge holds at least its
         ``floor``.
 
+        A phased call runs its phases in turn, once: an actor of a later
+        phase starts only once every actor of an earlier one has finished,
+        as the build awaits each phase's transfers before it issues the
+        next's, and a call's command ends before the next call's starts.
+
         Raises:
-            NotImplementedError: An edge runs in a later phase: a phase
-                starts empty, and its host transfers, which the analysis
-                does not time, bound it where its kernels are light.
+            NotImplementedError: An edge runs in a later phase where the
+                actors' phases are not known.
         """
-        if any(c.phase for c in self.channels):
+        phases = self.phases or (0,) * len(self.programs)
+        if any(c.phase for c in self.channels) and self.phases is None:
             raise NotImplementedError(
-                "a period over phases is not modelled yet: a phase starts empty "
-                "and its host transfers, which the analysis does not time, bound it"
+                "a period over phases the composer does not group is not modelled yet"
             )
+        if any(phases):
+            calls = 1
         depths = {e: max(depths[e], c.floor) for e, c in enumerate(self.channels)}
         filled = [c.initial for c in self.channels]
         changed = [Fraction(0)] * len(self.channels)
@@ -239,11 +254,18 @@ class Flow:
         at = [0] * len(self.programs)
         ends = [Fraction(0)] * calls
         lengths = [len(p) for p in self.programs]
+        # Per actor, the actors of an earlier phase it waits to finish.
+        earlier = [
+            [b for b, q in enumerate(phases) if q < p and lengths[b]] for p in phases
+        ]
         while True:
             best: tuple[Fraction, int] | None = None
             for a, program in enumerate(self.programs):
                 if at[a] == lengths[a] * calls:
                     continue
+                if any(at[b] < lengths[b] * calls for b in earlier[a]):
+                    continue
+                start = max((clock[b] for b in earlier[a]), default=Fraction(0))
                 i = at[a] % lengths[a]
                 event = program[i]
                 e = event.channel
@@ -254,9 +276,9 @@ class Flow:
                     ) >= event.count
                     if not free:
                         continue
-                    when = max(clock[a], changed[e]) + cost
+                    when = max(clock[a], start, changed[e]) + cost
                 else:
-                    when = clock[a] + cost
+                    when = max(clock[a], start) + cost
                 if best is None or when < best[0]:
                     best = (when, a)
             if best is None:
@@ -346,6 +368,13 @@ class Analysis:
             one its member calls, for steps on one core in their firing
             order; several where one core's body calls several, in an order
             its accesses do not record; none for no kernel.
+        transfers: Per actor the host runs, a shim stream filling or
+            draining a fifo, the bytes each of its objects moves; where
+            ``rates`` is given, every host transfer is one.
+        rates: The bytes a host stream moves a core cycle, against how many
+            run at once (``iron.tune.ddr``'s ``Ceiling.mixed``); None where
+            the device's are not measured, and its transfers take no time.
+        device: The device's name, which a missing measurement is named by.
     """
 
     tokens: dict[Edge, tuple[tuple[int, ...], tuple[int, ...]]]
@@ -363,6 +392,9 @@ class Analysis:
     scalars: list[tuple[tuple, ...]] = field(repr=False, compare=False)
     work: list[list[int]] = field(repr=False, compare=False)
     fired: list[list[tuple[int, ...]]] = field(repr=False, compare=False)
+    transfers: dict[int, int] = field(repr=False, compare=False)
+    rates: Mapping[int, float] | None = field(repr=False, compare=False)
+    device: str = field(repr=False, compare=False)
 
     def deadlock(self, depths: Mapping[Edge, int]) -> str | None:
         """Return why the region deadlocks with ``depths`` on the edges it names and the minimum on every other, or None where it runs.
@@ -382,15 +414,26 @@ class Analysis:
         """Per actor, the cycles it spends before each access: one call of its kernel, traced alone on its own NPU, before each access of its work.
 
         Steps on one core cost each its own kernel's call, in their firing
-        order.
+        order. A host stream spends an object's bytes at ``rates``' figure
+        for the streams its phase runs at once, linear between two measured
+        counts and the bandwidth past the largest shared among more.
 
         Raises:
             NotImplementedError: One core's body calls several kernels, in an
                 order its accesses do not record, a kernel takes scalars its
-                core computes at run time (its operator passes none), or a
+                core computes at run time (its operator passes none), a
                 kernel is built for an NPU other than the one attached
-                (``kernel_cycles``).
+                (``kernel_cycles``), or the call runs in phases and the
+                device's DDR rates are not measured.
         """
+        phases = self.flow.phases or (0,) * len(self.flow.programs)
+        if any(phases) and self.rates is None:
+            raise NotImplementedError(
+                f"a period over phases waits on {self.device}'s measured DDR rates "
+                f"(python -m iron.tune.ddr, in its power mode)"
+            )
+        streams = Counter(phases[a] for a in self.transfers)
+        measured = sorted(self.rates.items()) if self.rates else []
         costs = []
         for kernels, scalars, work, fired, program in zip(
             self.kernels,
@@ -424,16 +467,35 @@ class Analysis:
                         )
                     row[i] = Fraction(kernel_cycles(kernels[k], scalars[k]))
             costs.append(row)
+        for actor, nbytes in self.transfers.items():
+            n = streams[phases[actor]]
+            (low, below), (high, above) = (
+                max([m for m in measured if m[0] <= n], default=measured[0]),
+                min([m for m in measured if m[0] >= n], default=measured[-1]),
+            )
+            rate = (
+                below * low / n
+                if n > high
+                else (
+                    below + (above - below) * (n - low) / (high - low)
+                    if high > low
+                    else below
+                )
+            )
+            for i in self.work[actor]:
+                costs[actor][i] = Fraction(nbytes / rate)
         return costs
 
     @functools.cached_property
     def period(self) -> Fraction:
         """The cycles a call takes in steady state with every edge as deep as more cannot matter: the bound its slowest actor or cycle sets.
 
+        A call in phases runs them end to end, once (``Flow.period``).
+
         Raises:
             ValueError: The region cannot run at any depth (``why``).
-            NotImplementedError: An edge runs in a later phase, or a core
-                calls several kernels (``costs``).
+            NotImplementedError: An edge runs in a phase the composer does
+                not group, or ``costs`` does not price the call.
         """
         if self.why is not None:
             raise ValueError(f"the region cannot run at any depth: {self.why}")
@@ -487,7 +549,8 @@ class Derivation:
     it), carried through the links to the fifos the cores touch. A region edge joins the producer's output lanes to the
     consumer's input lanes as searched channels; a step's own fifos keep the
     depth its build chose; a lane fed from or drained to outside the region
-    is unbounded.
+    is unbounded, unless the device's DDR rates are given: then a host
+    stream fills or drains it, an actor that takes time.
 
     A buffer the recording carries from one call to the next (its feedback,
     or a state the graph holds) arrives whole, so its edge starts the call
@@ -511,6 +574,8 @@ class Derivation:
         recording: The recording its steps are matched in.
         device: The device every operator is built for.
         values: The call's per-call values, by name (``Timed.values``).
+        rates: The device's measured DDR rates (``Analysis.rates``); where
+            given, each host transfer is an actor that takes time.
 
     Raises:
         NotImplementedError: What the analysis does not model yet: a
@@ -530,13 +595,17 @@ class Derivation:
         recording: Recording,
         device: Device,
         values: Mapping[str, int] | None = None,
+        rates: Mapping[int, float] | None = None,
     ) -> None:
         matches = recording.occurrences(Entry(region))
         if not matches:
             raise ValueError("the region matches none of the recording's steps")
         self.region = region
+        self.recording = recording
+        self.match = matches[0]
         self.device = device
         self.values = dict(values or {})
+        self.rates = None if rates is None else dict(rates)
         self.wired, _ = region.wiring()
         groups = [set(group) for group in region.workers]
         # A carry across calls is no splice within the call: its initial
@@ -775,6 +844,46 @@ class Derivation:
                             )
         self.links = [link for _, recorded in self.recorded for link in recorded.links]
         self._through_links(self.links)
+
+    def _actor_phases(
+        self, of_step: Sequence[int], channels: Sequence[Channel], actors: int
+    ) -> list[int] | None:
+        """Return each actor's phase as the build's phased fusion groups it (``compose.phases``), or None where the composer does not group the steps.
+
+        A region without chosen phases or a DDR edge runs in one. A core or
+        memtile link is its step's. An actor the analysis adds (a host
+        stream, a memtile restaging an edge) is that of the actors it writes
+        to, or, writing to none, of those it reads from.
+        """
+        if self.region.phases is None and not any(
+            e.kind is EdgeKind.DDR for e in self.region.edges
+        ):
+            return [0] * actors
+        alone = Profile()
+        alone.add_entry(Entry(self.region))
+        arrays = {s: array for s, (array, _) in zip(self.match, self.recorded)}
+        try:
+            with set_current_device(self.device):
+                _, fused = composed(self.recording, alone)
+                (fusion,) = [f for f in fused if set(f.steps) == set(self.match)]
+                step = compose.phases(fusion, arrays)
+        except (NotImplementedError, ValueError):
+            return None
+        phase = {a: step[self.match[i]] for a, i in enumerate(of_step)}
+        while len(phase) < actors:
+            known = dict(phase)
+            for a in range(actors):
+                readers = {c.consumer for c in channels if c.producer == a}
+                writers = {c.producer for c in channels if c.consumer == a}
+                if a in known:
+                    continue
+                if readers and readers <= known.keys():
+                    phase[a] = min(known[r] for r in readers)
+                elif not readers and writers and writers <= known.keys():
+                    phase[a] = max(known[w] for w in writers)
+            if phase == known:
+                return None
+        return [phase[a] for a in range(actors)]
 
     def _evaluate(self, recording: Recording, expression: Any) -> int:
         """Return graph ``expression`` at this call: its value as the call gives it, else the largest every limit of the recording on it admits.
@@ -1210,6 +1319,8 @@ class Derivation:
         repetition: dict[int, int] = {}
         # Per actor, the step whose core it is; None for a link.
         actor_step: list[int | None] = []
+        # Per core or link, the step it is of.
+        of_step: list[int] = []
         solved = self._all_trips()
         actor_of: dict[int, int] = {}
         for i, (array, recorded) in enumerate(self.recorded):
@@ -1218,6 +1329,7 @@ class Derivation:
                 trips = solved[id(core)]
                 actor_of[id(core.owner)] = len(programs)
                 actor_step.append(i)
+                of_step.append(i)
                 actor_kernels.append(
                     tuple(
                         f for f in core.owner.fn_args if isinstance(f, ExternalFunction)
@@ -1244,6 +1356,7 @@ class Derivation:
                 actor_kernels.append(())
                 actor_scalars.append(())
                 actor_step.append(None)
+                of_step.append(i)
                 programs.append(self._link_events(link))
                 fires.append([()] * len(programs[-1]))
                 made_by.append([len(programs) - 1] * len(programs[-1]))
@@ -1255,8 +1368,11 @@ class Derivation:
                     writer[fifo] = actor
                 elif actor not in readers.setdefault(fifo, []):
                     readers[fifo].append(actor)
-        # Steps on one worker: each lane's producer core and its reader are one
-        # actor, running their programs in the worker's firing order.
+        # Steps on one worker: a lane's producer core and its reader are one
+        # actor, running their programs in the worker's firing order. Where
+        # the lanes differ, a reader joins the producer lane whose first
+        # element its own first is (``Staging.pairs``); the rest run alone,
+        # restaged as a memtile would.
         lead: dict[int, int] = {}
         # A step spliced into its producer's cores: each core and its stage.
         for cores in self.spliced.values():
@@ -1275,8 +1391,7 @@ class Derivation:
                 outs = self.lanes[p].get(edge.output, [])
                 ins = self.lanes[c].get(edge.input, [])
                 if (
-                    len(outs) != len(ins)
-                    or any(len(readers.get(f, [])) != 1 for f in ins)
+                    any(len(readers.get(f, [])) != 1 for f in ins)
                     or any(actor_step[writer[f]] is None for f in outs)
                     or any(actor_step[readers[f][0]] is None for f in ins)
                 ):
@@ -1284,7 +1399,23 @@ class Derivation:
                         f"{edge}: steps on one core whose lanes do not pair one "
                         f"core to one core are not modelled yet"
                     )
-                for out, inp in zip(outs, ins):
+                pairs = list(zip(outs, ins))
+                if len(outs) != len(ins):
+                    produced, consumed = (
+                        self._streams(
+                            next(
+                                b for b in self.recorded[q][0].op.buffers if b.name == n
+                            )
+                        )
+                        for q, n in ((p, edge.output), (c, edge.input))
+                    )
+                    starts = {int(stream[0]): k for k, stream in enumerate(produced)}
+                    pairs = [
+                        (outs[starts[int(stream[0])]], ins[j])
+                        for j, stream in enumerate(consumed)
+                        if int(stream[0]) in starts
+                    ]
+                for out, inp in pairs:
                     first = writer[out]
                     while first in lead:
                         first = lead[first]
@@ -1335,6 +1466,8 @@ class Derivation:
         hand_off: dict[Edge, HandOff] = {}
         feeds = Counter((p, edge.output) for edge, p, _ in self.wired)
         slice_at = {(c, name): at for c, name, at in self.slices}
+        # Per actor the host runs, the fifo it fills or drains.
+        hosted: dict[int, ObjectFifo] = {}
         phases = self.region.phases
         uncarried = [
             f"{edge} carries {self.refs[p][edge.output].root} into the next call "
@@ -1405,6 +1538,7 @@ class Derivation:
                         ]
                     )
                     writer[inp] = source
+                    hosted[source] = inp
                     for actor in readers[inp]:
                         channels.append(Channel(source, actor, phase=phase))
                         e = len(channels) - 1
@@ -1500,11 +1634,46 @@ class Derivation:
                     writes.setdefault(out, []).append(e)
                     reads[(inp, actor)] = e
                     edge_channels.setdefault(edge, []).append(e)
+        if self.rates is not None:
+            # The region's own host transfers: a fill into a fifo no edge
+            # feeds, a drain from one no edge reads.
+            for _, recorded in self.recorded:
+                for transfer in recorded.transfers:
+                    fifo = transfer.fifo
+                    if transfer.kind == "fill":
+                        taken = fifo in writer or not readers.get(fifo)
+                        taken = taken or any((fifo, a) in reads for a in readers[fifo])
+                    else:
+                        taken = (
+                            fifo not in writer or fifo in writes or readers.get(fifo)
+                        )
+                    if taken or fifo not in self.objects:
+                        continue
+                    hosted[len(programs)] = fifo
+                    if transfer.kind == "fill":
+                        writer[fifo] = len(programs)
+                    else:
+                        readers[fifo] = [len(programs)]
+                    programs.append(
+                        [
+                            (fifo, transfer.kind == "fill", acquire, 1)
+                            for _ in range(self.objects[fifo])
+                            for acquire in (True, False)
+                        ]
+                    )
+        chosen = self.region.step_phases()
         for fifo in writer.keys() & readers.keys():
             if fifo in writes or any((fifo, a) in reads for a in readers[fifo]):
                 continue
             for actor in readers[fifo]:
-                channels.append(Channel(writer[fifo], actor))
+                # A step's own fifo, or a host stream into or out of it, runs
+                # in the step's phase, as the region's edges into it do.
+                step = next(
+                    of_step[a] for a in (actor, writer[fifo]) if a < len(of_step)
+                )
+                channels.append(
+                    Channel(writer[fifo], actor, phase=chosen[step] if chosen else 0)
+                )
                 e = len(channels) - 1
                 writes.setdefault(fifo, []).append(e)
                 reads[(fifo, actor)] = e
@@ -1547,7 +1716,9 @@ class Derivation:
                 )
             )
             fired.append([follows[i] for i in work[-1]])
-        flow = Flow(channels, events)
+        flow = Flow(
+            channels, events, self._actor_phases(of_step, channels, len(events))
+        )
         why = flow.balance()
         depths, deadlock = flow.minimum_depths(fixed)
         tokens = {}
@@ -1597,6 +1768,13 @@ class Derivation:
             scalars=actor_scalars,
             work=work,
             fired=fired,
+            transfers={
+                a: math.prod(f.shape) * np.dtype(f.dtype).itemsize
+                for a, f in hosted.items()
+                if self.rates is not None
+            },
+            rates=self.rates,
+            device=self.device.name,
         )
 
 
@@ -1605,6 +1783,7 @@ def analyze(
     recording: Recording,
     device: Device,
     values: Mapping[str, int] | None = None,
+    rates: Mapping[int, float] | None = None,
 ) -> Analysis:
     """Analyze ``region`` of ``recording`` on ``device``, the device every operator is built for, for one call at ``values``.
 
@@ -1614,6 +1793,7 @@ def analyze(
         device: The device.
         values: The call's per-call values, by name; one it leaves out is
             the largest the recording's limits admit (``Derivation``).
+        rates: The device's measured DDR rates (``Analysis.rates``).
 
     Raises:
         NotImplementedError: What the analysis does not model yet
@@ -1621,4 +1801,4 @@ def analyze(
         ValueError: The region matches none of the recording's steps, or a
             per-call value the call leaves out is bounded nowhere.
     """
-    return Derivation(region, recording, device, values).analysis()
+    return Derivation(region, recording, device, values, rates).analysis()

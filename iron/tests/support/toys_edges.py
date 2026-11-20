@@ -551,6 +551,89 @@ def layout_transpose(rows=64, cols=128, tile=32):
     return recording, region
 
 
+def held_in_l1(
+    recording: Recording, region: Region, depth: int = 2
+) -> tuple[Recording, Region]:
+    """Return ``recording`` and ``region`` with every edge held in L1 ``depth`` deep, its two steps on one worker (``Region.held``).
+
+    A chosen depth keeps the composer's join of the steps' cores rather than
+    IRON's fold of them (``composed_folds``).
+    """
+    for index in range(len(region.edges)):
+        region = region.held(index, Hold.L1).deepened(index, depth)
+    return recording, region
+
+
+def join_rows_into_one(size=256, rows=2):
+    """RMSNorm's ``rows`` row lanes joined into one SiLU lane: ``HandOff.JOIN`` with each step taking one input."""
+    norm = RMSNorm(rows=rows, tile_size=size, num_aie_columns=rows)
+    silu = SiLU(size=rows * size, num_aie_columns=1, tile_size=rows * size)
+    steps = sequences.steps((norm, "x", "mid"), (silu, "mid", "out"))
+    recording = Recording.of_steps("toy_join_rows", steps, ["x"], ["out"])
+    region = Region((member(norm), member(silu)), (Edge(0, "y", 1, "x"),))
+    return recording, region
+
+
+def split_into_rows(size=256, rows=2, keep=False):
+    """One SiLU lane split into RMSNorm's ``rows`` row lanes: ``HandOff.SPLIT`` with each step taking one input.
+
+    ``keep`` drains the SiLU's output to the host too.
+    """
+    silu = SiLU(size=rows * size, num_aie_columns=1, tile_size=rows * size)
+    norm = RMSNorm(rows=rows, tile_size=size, num_aie_columns=rows)
+    steps = sequences.steps((silu, "x", "mid"), (norm, "mid", "out"))
+    recording = Recording.of_steps(
+        "toy_split_rows", steps, ["x"], ["out", "mid"] if keep else ["out"]
+    )
+    region = Region((member(silu), member(norm)), (Edge(0, "y", 1, "x"),))
+    return recording, region
+
+
+def join_rows_after_rows(size=256):
+    """SiLU's two lanes into RMSNorm's two rows, joined into one SiLU lane: a join whose producer is not first on its cores, held in L1 with its input."""
+    first = SiLU(size=2 * size, num_aie_columns=2, tile_size=size)
+    norm = RMSNorm(rows=2, tile_size=size, num_aie_columns=2)
+    last = SiLU(size=2 * size, num_aie_columns=1, tile_size=2 * size)
+    steps = sequences.steps((first, "x", "h"), (norm, "h", "mid"), (last, "mid", "out"))
+    recording = Recording.of_steps("toy_join_after_rows", steps, ["x"], ["out"])
+    region = Region(
+        (member(first), member(norm), member(last)),
+        (Edge(0, "y", 1, "x"), Edge(1, "y", 2, "x")),
+    )
+    return recording, region
+
+
+def join_of_two_streams(size=256):
+    """Two SiLUs streamed core to core into an add's two inputs, the add's two lanes joined into one SiLU lane: the add takes no input from off the array."""
+    left = SiLU(size=2 * size, num_aie_columns=2, tile_size=size)
+    right = SiLU(size=2 * size, num_aie_columns=2, tile_size=size)
+    add = ElementwiseAdd(size=2 * size, num_aie_columns=2, tile_size=size)
+    last = SiLU(size=2 * size, num_aie_columns=1, tile_size=2 * size)
+    steps = sequences.steps(
+        (left, "p", "a"), (right, "q", "b"), (add, "a", "b", "h"), (last, "h", "out")
+    )
+    recording = Recording.of_steps("toy_join_of_streams", steps, ["p", "q"], ["out"])
+    region = Region(
+        tuple(member(s.op) for s in recording.steps),
+        (
+            Edge(0, "y", 2, "a"),
+            Edge(1, "y", 2, "b"),
+            Edge(2, "y", 3, "x", kind=EdgeKind.STREAM, depth=2),
+        ),
+    ).held(2, Hold.L1)
+    return recording, region
+
+
+def ratio_two_into_three_rows(size=96):
+    """SiLU at two columns into SiLU at three: ``HandOff.RATIO`` with each step taking one input."""
+    first = SiLU(size=6 * size, num_aie_columns=2, tile_size=3 * size)
+    second = SiLU(size=6 * size, num_aie_columns=3, tile_size=2 * size)
+    steps = sequences.steps((first, "x", "mid"), (second, "mid", "out"))
+    recording = Recording.of_steps("toy_ratio_rows", steps, ["x"], ["out"])
+    region = Region((member(first), member(second)), (Edge(0, "y", 1, "x"),))
+    return recording, region
+
+
 # ---------------------------------------------------------------------------
 # Combinations: one builder over the edge axes.
 # ---------------------------------------------------------------------------

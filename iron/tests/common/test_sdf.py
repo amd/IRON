@@ -5,6 +5,8 @@
 
 from fractions import Fraction
 
+import pytest
+
 from iron.common.graph.sdf import Channel, Event, Flow
 
 
@@ -198,3 +200,28 @@ def test_a_deadlocking_depth_has_no_period():
     )
     costs = [[Fraction(1), Fraction(1)], [Fraction(1), Fraction(1)]]
     assert flow.period({0: 1}, costs) is None
+
+
+def test_a_later_phase_starts_once_the_earlier_one_has_finished():
+    """A host drain after the producer, then a host fill before the consumer a phase later: the call is the two phases end to end, once.
+
+    The producer writes four objects at two each, drained at one each; the
+    fill, a phase later, writes them at one each, read at three each.
+    """
+    write = [Event(0, True, True, 1), Event(0, True, False, 1)] * 4
+    drain = [Event(0, False, True, 1), Event(0, False, False, 1)] * 4
+    fill = [Event(1, True, True, 1), Event(1, True, False, 1)] * 4
+    read = [Event(1, False, True, 1), Event(1, False, False, 1)] * 4
+    flow = Flow(
+        [Channel(0, 1), Channel(2, 3, phase=1)],
+        [write, drain, fill, read],
+        phases=[0, 0, 1, 1],
+    )
+    costs = [[Fraction(0), Fraction(c)] * 4 for c in (2, 1, 1, 3)]
+    assert flow.period({0: 2, 1: 2}, costs) == (2 * 4 + 1) + (1 + 3 * 4)
+
+
+def test_edges_of_a_later_phase_without_the_actors_phases_are_not_timed():
+    flow = Flow([Channel(0, 1, phase=1)], _timed_pair()[0].programs)
+    with pytest.raises(NotImplementedError, match="the composer does not group"):
+        flow.period({0: 2}, _timed_pair()[1])

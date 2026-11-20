@@ -20,6 +20,7 @@ from iron.tests.support.toys_edges import (
 )
 from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
+from iron.tune.ddr import Ceiling
 from iron.tune.search import check, fit, search
 
 COMBOS = all_combinations()
@@ -44,6 +45,8 @@ _BUILT_COMBOS = {
         ),
         (HandOff.EQUAL, "fan_out", "memtile", "min", "different", "smaller"),
         (HandOff.EQUAL, "skip", "memtile", "min_minus_one", "same", "recorded"),
+        (HandOff.SLICES, "skip", "ddr", "min_minus_one", "same", "recorded"),
+        (HandOff.RATIO, "diamond", "ddr", "min_minus_one", "same", "recorded"),
         (HandOff.SPLIT, "through_memory", "memtile", "min", "same", "recorded"),
         (HandOff.LAYOUT, "feedback", "memtile", "min", "same", "recorded"),
         (HandOff.EQUAL, "chain", "l1", "min_minus_one", "same", "recorded"),
@@ -52,6 +55,32 @@ _BUILT_COMBOS = {
             (shape, "feedback", "l1", "min_minus_one", "same", "recorded")
             for shape in (HandOff.EQUAL, HandOff.JOIN, HandOff.SLICES, HandOff.SPLIT)
         ),
+        (HandOff.SPLIT, "diamond", "l1", "min_minus_one", "different", "smaller"),
+        (HandOff.BROADCAST, "diamond", "l1", "min_minus_one", "same", "recorded"),
+        *(
+            (shape, role, "l1", "min_minus_one", "same", "recorded")
+            for shape, role in (
+                (HandOff.JOIN, "chain"),
+                (HandOff.SPLIT, "fan_in"),
+                (HandOff.SPLIT, "skip"),
+                (HandOff.SLICES, "diamond"),
+                (HandOff.LAYOUT, "fan_out"),
+                (HandOff.LAYOUT, "fan_in"),
+                (HandOff.LAYOUT, "skip"),
+            )
+        ),
+    },
+}
+
+# Each device's combos fit refuses at every depth before any build, however
+# placed: a restage held in L1 past a core tile's channels.
+_REFUSED_COMBOS = {
+    "npu1": set(),
+    "npu2": {
+        (HandOff.RATIO, "skip", "l1", "min", "same", "smaller"),
+        (HandOff.SPLIT, "skip", "l1", "min", "same", "recorded"),
+        (HandOff.BROADCAST, "skip", "l1", "knee", "same", "recorded"),
+        (HandOff.RATIO, "fan_in", "l1", "more", "same", "recorded"),
     },
 }
 
@@ -155,13 +184,16 @@ def test_each_toy_round_trips_and_is_reached_by_candidate_edits(
 
 
 @pytest.mark.parametrize(
-    ("device", "combo"),
+    ("device", "combo", "refused"),
     [
         pytest.param(
             name,
             combo,
+            combo in _REFUSED_COMBOS[name],
             id=f"device_{name}-{_combo_id(combo)}",
-            marks=() if combo in _BUILT_COMBOS[name] else unbuilt,
+            marks=(
+                () if combo in _BUILT_COMBOS[name] | _REFUSED_COMBOS[name] else unbuilt
+            ),
         )
         for name in sorted(DEVICES)
         for combo in COMBOS
@@ -169,8 +201,12 @@ def test_each_toy_round_trips_and_is_reached_by_candidate_edits(
     indirect=["device"],
 )
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(combo, device):
+def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(
+    combo, refused, device
+):
     """Each toy, at its depth resolved from the analysis, is bit-identical to the steps run apart; below the minimum it is refused.
+
+    A toy past a core's channels (``refused``) is refused at every depth.
 
     The depth is resolved from ``analyze`` inside this test body, never at
     collection or in the toy builder: a hard-coded depth is not the minimum
@@ -186,7 +222,14 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(combo, dev
             v.name: limit.hi - 1 for v, limit in zip(recording.values, recording.limits)
         },
     )
-    analysis = analyze(region, recording, device, call.values)
+    ceiling = Ceiling.stored(device.name)
+    analysis = analyze(
+        region,
+        recording,
+        device,
+        call.values,
+        None if ceiling is None else ceiling.mixed,
+    )
     edge = region.edges[index]
     value = depth_from_bounds(
         depth, analysis.min_depth[edge], analysis.knee_depth[edge]
@@ -198,6 +241,11 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(combo, dev
     if depth == "min_minus_one":
         assert not verdict.ok
         assert verdict.stage == "analysis"
+        return
+    if refused:
+        assert not verdict.ok
+        assert verdict.stage == "counts"
+        assert "restaged in L1" in (verdict.why or "")
         return
     assert verdict.ok, verdict.why
     base = Profile()
