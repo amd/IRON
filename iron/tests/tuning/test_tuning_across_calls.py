@@ -118,6 +118,16 @@ def test_several_calls_per_command_are_bit_identical_to_one_per_command(device):
         assert result.ok, result.why
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_four_calls_a_command_are_held_no_worse_as_their_calls_one_at_a_time(device):
+    """Held to ``NO_WORSE``, four calls a command are each no worse than one a command, and their batches bit-identical to them."""
+    recording = _decode_recording()
+    profile = Profile()
+    profile.add_schedule(Schedule(version=recording.version, calls_per_command=4))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.NO_WORSE)
+    assert result.ok, result.why
+
+
 @pytest.mark.supported_devices("npu2")
 def test_calls_merged_into_one_are_bit_identical_to_one_a_command(device):
     """Two and four calls of an elementwise step merged into one call at that many times the size are bit-identical to them one a command."""
