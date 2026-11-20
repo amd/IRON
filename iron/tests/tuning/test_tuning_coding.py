@@ -21,6 +21,7 @@ from iron.common.image.step import Edge
 from iron.operators.decode import Decode
 from iron.operators.gemv import GEMV
 from iron.tests.support import sequences
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_settings import (
     coded_consumer,
     coded_consumer_recording,
@@ -41,7 +42,18 @@ def _wide_weight(M: int, K: int) -> np.ndarray:
     return np.tile(row, (M, 1))
 
 
-def _coded_region(M: int, K: int, rows: int, num_aie_columns: int) -> Region:
+def _coded_region(
+    M: int,
+    K: int,
+    rows: int,
+    num_aie_columns: int,
+    workers: tuple[tuple[int, ...], ...] = ((0, 1),),
+) -> Region:
+    """Return ``Decode`` into the ``GEMV`` it feeds, a lane each to a lane each.
+
+    The ``GEMV`` reads the decode's rows as its tiles. On one worker by default;
+    ``workers=()`` runs the decode on cores of its own.
+    """
     return Region(
         parts=(
             Member(
@@ -54,13 +66,14 @@ def _coded_region(M: int, K: int, rows: int, num_aie_columns: int) -> Region:
                 dims=dict(M=M, K=K),
                 tunables=dict(
                     num_aie_columns=num_aie_columns,
-                    tile_size_input=1,
+                    num_channels=1,
+                    tile_size_input=rows,
                     tile_size_output=M // num_aie_columns,
                 ),
             ),
         ),
         edges=(Edge(0, "out", 1, "A"),),
-        workers=((0, 1),),
+        workers=workers,
     )
 
 
@@ -121,10 +134,22 @@ def test_coding_is_proposed_wherever_capacity_holds_at_that_width(tmp_path, devi
     )
 
 
-@unbuilt
+@pytest.mark.parametrize(
+    "device",
+    [
+        pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
+        for name in sorted(DEVICES)
+    ],
+    indirect=True,
+)
+# On one worker a core holds its call's rows, 32 at four columns; on cores of
+# its own, at one column the decode's lanes meet the GEMV's as they are.
+@pytest.mark.parametrize(
+    ("workers", "columns"), [(((0, 1),), 4), ((), 1)], ids=["one_worker", "own_cores"]
+)
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_coded_weights_are_bit_identical_to_plain(device):
-    """A coded weight, decoded on chip by a ``Decode`` sharing a worker with its consumer, is bit-identical to the plain weight the untuned build reads.
+def test_coded_weights_are_bit_identical_to_plain(workers, columns, device):
+    """A coded weight decoded on chip, on its consumer's cores or its own, is bit-identical to the plain weight the untuned build reads.
 
     The recording carries a real weight (``coded_consumer_recording_with_weight``): both
     lossless coding and its legality depend on the weight's own values, not only the
@@ -132,12 +157,16 @@ def test_coded_weights_are_bit_identical_to_plain(device):
     """
     weight = small_integer_weight((128, 128), 0)
     recording = coded_consumer_recording_with_weight(
-        rows=1, num_aie_columns=1, weight=weight
+        rows=1, num_aie_columns=columns, weight=weight
     )
     base = Profile()
     coded_profile = Profile()
     coded_profile.add_entry(
-        Entry(root=_coded_region(M=128, K=128, rows=1, num_aie_columns=1))
+        Entry(
+            root=_coded_region(
+                M=128, K=128, rows=1, num_aie_columns=columns, workers=workers
+            )
+        )
     )
     result = check(
         coded_profile,
@@ -158,7 +187,8 @@ def test_coding_is_kept_only_where_ddr_bytes_saved_beat_the_decode_cost(device):
     Both calls run the same ``Decode`` into ``GEMV`` toy and the same real weight
     (``coded_consumer_recording_with_weight``), so the same ``_coded_region`` Region is
     held to each: only ``num_batches`` differs, amortizing the one decoded weight over
-    more of the ``GEMV``'s compute (a prompt chunk) rather than a single row.
+    more of the ``GEMV``'s compute (a prompt chunk) rather than a single row. The decode
+    runs on cores of its own: on its consumer's, a core would hold its call's 512 rows.
     """
     weight = small_integer_weight((2048, 8192), 0)
     weight_bound = coded_consumer_recording_with_weight(
@@ -170,7 +200,7 @@ def test_coding_is_kept_only_where_ddr_bytes_saved_beat_the_decode_cost(device):
     start = Profile()
     with_entry = Profile()
     with_entry.add_entry(
-        Entry(root=_coded_region(M=2048, K=8192, rows=1, num_aie_columns=4))
+        Entry(root=_coded_region(M=2048, K=8192, rows=1, num_aie_columns=4, workers=()))
     )
 
     weight_bound_calls = [Timed(weight_bound)]
@@ -192,7 +222,6 @@ def test_coding_is_kept_only_where_ddr_bytes_saved_beat_the_decode_cost(device):
     )
 
 
-@unbuilt
 def test_a_width_where_a_row_overflows_its_capacity_is_refused_before_any_build(device):
     """A width whose coded row overflows its exception capacity is refused before any build, naming the row."""
     weight = _wide_weight(M=128, K=64)
@@ -207,9 +236,17 @@ def test_a_width_where_a_row_overflows_its_capacity_is_refused_before_any_build(
     assert "row" in result.why
 
 
-@unbuilt
+@pytest.mark.xfail(
+    strict=True,
+    reason="fit has no rule for coding part of a shared array yet: it fits the "
+    "coded region beside the plain GEMV",
+)
 def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed(device):
-    """Coding part of a shared array (not every shape sharing it) is refused unless the candidate also proposes the split."""
+    """Coding part of a shared array (not every shape sharing it) is refused unless the candidate also proposes the split.
+
+    The decode on cores of its own: on its consumer's, a core would hold its call's
+    rows, which the analysis refuses first.
+    """
     decode, gemv = coded_consumer(M=2048, K=8192, rows=1, num_aie_columns=device.cols)
     other = GEMV(
         M=2048,
@@ -228,7 +265,9 @@ def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed(d
     )
     configuration = Configuration(
         parts=(
-            _coded_region(M=2048, K=8192, rows=1, num_aie_columns=device.cols),
+            _coded_region(
+                M=2048, K=8192, rows=1, num_aie_columns=device.cols, workers=()
+            ),
             Member(
                 cls=GEMV,
                 dims=dict(M=2048, K=8192),
@@ -243,6 +282,12 @@ def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed(d
     result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
+
+
+def test_a_gemv_a_decode_feeds_streams_its_vector_on_its_own(device):
+    """Fed on its A, a ``GEMV`` takes its vector on a stream of its own (``feed_b``): unstreamed, B rides A's stream from the host."""
+    region = _coded_region(M=128, K=128, rows=1, num_aie_columns=1)
+    assert region.step_tunables()[1]["feed_b"] is True
 
 
 @unbuilt

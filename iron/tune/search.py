@@ -48,6 +48,7 @@ from ..common.declare.composition import (
 )
 from ..common.design import OperatorDesign
 from ..common.graph.carried import CarriedLoop
+from ..common.graph.coded import CodedWeight, encode_all
 from ..common.graph.compiled import _words
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
 from ..common.graph.fusion import composed, in_turn, memory_waits, narrowed
@@ -797,6 +798,10 @@ def fit(
     no edges) on an xclbin per step reads no per-call value at run time: a
     dispatch parameter, which a pack's one sequence does not carry.
 
+    Each call's weights an operator reads coded by declaration (``Decode``),
+    with no flag to read them plain, must each code within its rows'
+    capacity: the counts refuse the first row that does not.
+
     Its values' own choices, before any entry: no more values bound at run
     time than a call's scratchpad holds (``SCRATCHPAD_WORDS``, a word
     each); each set of variants' ranges tiling what a call may take of its
@@ -1031,6 +1036,18 @@ def fit(
     scheduled: set[int] = set()
     for timed in calls:
         recording = timed.recording
+        coded = {
+            weight: recording.declared_coded(h)
+            for weight, h in recording.weights.values()
+            if isinstance(weight, CodedWeight)
+        }
+        for weight, why in encode_all(w for w, ops in coded.items() if ops).items():
+            return Fit(
+                False,
+                "counts",
+                f"{recording.name}: {type(coded[weight][0]).__name__} reads "
+                f"{weight.name} coded by declaration, and {why}",
+            )
         steps = list(recording.steps)
         retuned: dict[int, list] = {}
         for i, step in enumerate(steps):
