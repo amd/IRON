@@ -12,7 +12,7 @@ import itertools
 import logging
 import math
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
@@ -21,7 +21,7 @@ from aie.utils import bfp
 from aie.utils.compile.jit.params import OperatorParam
 
 from ..declare import Operator, Value
-from ..declare.composition import Configuration, Entry, Region
+from ..declare.composition import Configuration, Entry, Member, Region, Scope
 from ..declare.operand import concrete
 from ..declare.operator import graph_recorder
 from ..declare.profile import Profile, Version
@@ -41,6 +41,10 @@ from .handle import (
     _rescale_bounds,
     is_operand,
 )
+
+if TYPE_CHECKING:
+    # compiled imports this module.
+    from .compiled import Graph
 
 logger = logging.getLogger(__name__)
 
@@ -266,6 +270,51 @@ class _Stacking:
         return dataclasses.replace(h, buffer=stacked, shape=stacked.shape)
 
 
+@dataclasses.dataclass(frozen=True)
+class _Placing:
+    """Where one call of a graph recorded at another capacity finds its buffers in the version it runs as (``Recording._over``).
+
+    Attributes:
+        held: The version's input and returned output buffers, by name.
+        moved: Those the call holds at another shape, each a run of it.
+        runs: Each moved buffer's run, in bytes.
+        buffers: The call's own intermediates, by its recording's names.
+        call: Which run of each moved buffer the call takes.
+    """
+
+    held: dict[str, Buffer]
+    moved: frozenset[str]
+    runs: dict[str, int]
+    buffers: dict[str, Buffer]
+    call: int
+
+    def handle(self, h: Handle) -> Handle:
+        """Return ``h`` on the version's buffer, a moved one's run as a contiguous part of it, or on the call's own.
+
+        Raises:
+            NotImplementedError: ``h`` views a moved buffer other than as a
+                contiguous run.
+        """
+        n = h.buffer.name
+        if n not in self.held:
+            return dataclasses.replace(h, buffer=self.buffers.get(n, h.buffer))
+        if n not in self.moved:
+            return dataclasses.replace(h, buffer=self.held[n])
+        if not isinstance(h.layout, Dense):
+            raise NotImplementedError(
+                f"recorded at another capacity, {h!r} views {n} other than as a "
+                f"contiguous run, which is not built yet"
+            )
+        start = (self.call * self.runs[n]) // bfp.itemsize(h.dtype)
+        return dataclasses.replace(
+            h, buffer=self.held[n], layout=Dense(start + (h.layout.offset or 0))
+        )
+
+
+class NotLegalAtCapacity(ValueError):
+    """A variant's entry matches no step of the call recorded at its range's capacity (``Recording.selected``)."""
+
+
 def version_key(inputs: Mapping[str, tuple[tuple[int, ...], Any]]) -> Version:
     """Return the key of a graph's version for ``inputs`` (each input's shape and dtype, by name, in the order its body takes them)."""
     return tuple(
@@ -320,6 +369,9 @@ class Recording:
     calls: int = 1
     derived_from: Version | None = None
     stacked: bool = False
+    # The graph that recorded it, which records it again at other shapes
+    # (``recorded_at``); None for one built of steps. Never part of a key.
+    graph: Graph | None = dataclasses.field(default=None, compare=False, repr=False)
 
     @property
     def version(self) -> Version:
@@ -512,41 +564,452 @@ class Recording:
         )
 
     def scheduled(self, profile: Profile) -> Recording:
-        """Return the version ``profile``'s schedules for this one build: its calls back to back (``repeated``), merged (``merged``), or this one.
+        """Return the version ``profile``'s schedules for this one build: its calls back to back, merged, split, or this one.
 
-        Each in the order ``profile``'s regions take (``ordered``).
+        Back to back (``repeated``) or merged (``merged``) in the order
+        ``profile``'s regions take (``ordered``); each split in two
+        (``split``).
 
         Raises:
             NotImplementedError: A schedule names a derived version other than
-                calls merged into one, both merges calls and runs several a
-                command, or merges calls under an entry naming their steps;
-                or ``repeated`` or ``merged`` does not build it.
+                calls merged into one or split, both merges or splits calls
+                and runs several a command, or merges or splits calls under
+                an entry naming their steps; or ``repeated``, ``merged`` or
+                ``split`` does not build it.
         """
         schedules = [s for s in profile.schedules() if s.version == self.version]
         per = max((s.calls_per_command for s in schedules), default=1)
         merged = max((s.merged_calls for s in schedules), default=1)
-        derived = [s.size for s in schedules if s.size and s.merged_calls == 1]
+        split = max((s.split_calls for s in schedules), default=1)
+        derived = [
+            s.size
+            for s in schedules
+            if s.size and s.merged_calls == 1 and s.split_calls == 1
+        ]
         if derived:
             raise NotImplementedError(
                 f"{self.name}: the derived version {derived[0]!r}, other than calls "
-                f"merged into one, is not built yet"
+                f"merged into one or split, is not built yet"
             )
-        if per > 1 and merged > 1:
+        if (per > 1 or split > 1) and merged > 1 or per > 1 and split > 1:
             raise NotImplementedError(
-                f"{self.name}: several merged calls a command are not built yet"
+                f"{self.name}: several merged or split calls a command, or calls "
+                f"both merged and split, are not built yet"
             )
-        if merged > 1 and any(self.occurrences(e) for e in profile.entries()):
+        if (merged > 1 or split > 1) and any(
+            self.occurrences(e) for e in profile.entries()
+        ):
+            how = ("merged", "merge") if merged > 1 else ("split", "split")
             raise NotImplementedError(
-                f"{self.name}: calls merged into one under an entry naming its "
-                f"steps are not built yet: an entry names a step's shape, which a "
-                f"merge changes"
+                f"{self.name}: calls {how[0]} under an entry naming its steps are "
+                f"not built yet: an entry names a step's shape, which a {how[1]} "
+                f"changes"
             )
+        if split > 1:
+            return self.split(split)
         recording = self.ordered(profile)
         if per > 1:
             return recording.repeated(per)
         if merged > 1:
             return recording.merged(merged)
         return recording
+
+    def reads_only_written(self, root: str) -> bool:
+        """Whether each step reading buffer ``root`` reads only bytes the steps before it wrote, in step order."""
+        written: list[tuple[int, int]] = []
+        for step in self.steps:
+            named = list(zip(step.refs(), step.op.buffers, strict=True))
+            for ref, b in named:
+                if not b.fills or ref.root != root:
+                    continue
+                start, end = ref.start, ref.start + (ref.nbytes or b.nbytes)
+                for lo, hi in sorted(written):
+                    if lo <= start < hi:
+                        start = hi
+                if start < end:
+                    return False
+            written += [
+                (ref.start, ref.start + (ref.nbytes or b.nbytes))
+                for ref, b in named
+                if b.drains and ref.root == root
+            ]
+        return True
+
+    def recorded_at(self, shapes: Mapping[str, tuple[int, ...]]) -> Recording:
+        """Return its graph recorded again, each input at its shape in ``shapes`` and the rest at their own.
+
+        The graph must still record this recording at its own shapes: the
+        same steps (``design_key``), the same weights (one object, or equal
+        contents for one its body makes) and the same states.
+
+        Raises:
+            ValueError: It was built of steps rather than recorded from a
+                graph, is a derived version, or its graph has changed since
+                (its profile, a param, a coded weight).
+            NotLegalAtCapacity: The graph refuses ``shapes`` as it records
+                them (a body or an operator refusing the size).
+            NotImplementedError: It reads a coded weight, or one coding
+                refused, which coding rewrites the recording for.
+        """
+        if self.graph is None or self.derived_from is not None:
+            raise ValueError(
+                f"{self.name}: only a graph's own recording is recorded again at "
+                f"other shapes; this one is "
+                + ("built of steps" if self.graph is None else "a derived version")
+            )
+        if self.read_plain or any(
+            isinstance(w, CodedWeight) for w, _ in self.weights.values()
+        ):
+            raise NotImplementedError(
+                f"{self.name}: recorded again at another capacity, a version "
+                f"with a coded weight is not built yet"
+            )
+        again = self.graph.record(
+            **{h.name: (tuple(h.shape), h.dtype) for h in self.inputs}
+        )
+        weights, kept = (
+            {h.name: w for w, h in r.weights.values()} for r in (again, self)
+        )
+        if (
+            [s.op.design_key() for s in again.steps]
+            != [s.op.design_key() for s in self.steps]
+            or weights.keys() != kept.keys()
+            or again.states.keys() != self.states.keys()
+            or not all(
+                w is k
+                or isinstance(w, np.ndarray)
+                and isinstance(k, np.ndarray)
+                and np.array_equal(w, k)
+                for w, k in ((w, kept[n]) for n, w in weights.items())
+            )
+        ):
+            raise ValueError(
+                f"{self.name}: its graph has changed since it was recorded (its "
+                f"profile, a param or a coded weight), so at other shapes it "
+                f"would record another design"
+            )
+        try:
+            return self.graph.record(
+                **{
+                    h.name: (tuple(shapes.get(h.name, h.shape)), h.dtype)
+                    for h in self.inputs
+                }
+            )
+        except (ValueError, IndexError) as e:
+            raise NotLegalAtCapacity(
+                f"{self.name} at {dict(shapes)} is not legal at that capacity: {e}"
+            ) from e
+
+    def at_capacity(self, bounds: Mapping[str, int]) -> Recording:
+        """Return this version as a call whose per-call values reach at most ``bounds`` runs it, recorded at that capacity.
+
+        Its graph recorded again with fewer leading rows of each input a
+        bounded value bounds (``recorded_at``), over the leading rows of this
+        version's buffers (``_over``).
+
+        Each input a value in ``bounds`` bounds on the leading axis of a whole
+        view of it (``x[:rows]``, or a reshape of ``x`` so bounded) holds the
+        rows its count needs at the bound; an input none bounds keeps its
+        shape. Where no input's shape changes, this recording.
+
+        Raises:
+            ValueError: A bound needs more rows than an input holds.
+            NotImplementedError: A value bounds no input, or bounds one other
+                than by a linear count on the leading axis of a whole view; a
+                step reads an input it shrinks other than through a bound by a
+                value in ``bounds``; or ``_over`` does not build it.
+        """
+        rows: dict[str, int] = {}
+        for value, bound in bounds.items():
+            bounded = [
+                (h, axis, count)
+                for step in self.steps
+                for h in step.slots
+                for axis, count in h.valid.items()
+                if h.role == "input" and count.value.name == value
+            ]
+            if not bounded:
+                raise NotImplementedError(
+                    f"{self.name}: a design at the capacity of {value} <= {bound}, "
+                    f"which bounds no input's rows, is not built yet"
+                )
+            for h, axis, count in bounded:
+                if (
+                    axis
+                    or h.layout != Dense()
+                    or not count.linear
+                    or count.scale < 1
+                    or bfp.dtype_name(h.dtype) != bfp.dtype_name(h.buffer.dtype)
+                ):
+                    raise NotImplementedError(
+                        f"{self.name}: a design at the capacity of {value} <= "
+                        f"{bound}, which bounds {h!r} other than on the leading "
+                        f"rows of a whole view, is not built yet"
+                    )
+                held = h.buffer.shape
+                elements = count.evaluate({value: bound}) * math.prod(h.shape[1:])
+                need = -(-elements // math.prod(held[1:]))
+                if need > held[0]:
+                    raise ValueError(
+                        f"{self.name}: {value} <= {bound} needs {need} rows of "
+                        f"{h.name}, which holds {held[0]}"
+                    )
+                rows[h.name] = max(rows.get(h.name, 0), need)
+        inputs = {h.name: h.shape for h in self.inputs}
+        shapes = {n: (r, *inputs[n][1:]) for n, r in rows.items() if r != inputs[n][0]}
+        if not shapes:
+            return self
+        unbounded = [
+            h
+            for step in self.steps
+            for h in (*step.slots, *([step.gather] if step.gather else []))
+            if h.name in shapes
+            and not (0 in h.valid and h.valid[0].value.name in bounds)
+        ]
+        if unbounded:
+            raise NotImplementedError(
+                f"{self.name}: a design at the capacity of {dict(bounds)} is not "
+                f"built where a step reads {unbounded[0]!r} other than through a "
+                f"bound one of them sets: its rows past the capacity would go "
+                f"unread"
+            )
+        return self._over(
+            self.recorded_at(shapes),
+            1,
+            f"{self.name}_at_" + "_".join(f"{n}{b}" for n, b in bounds.items()),
+        )
+
+    def split(self, calls: int) -> Recording:
+        """Return the derived version running one call of this one as ``calls`` calls back to back, in one command.
+
+        Each a call of its graph recorded at ``1/calls`` of every input's
+        leading rows (``recorded_at``), call ``j`` over the ``j``-th run of
+        each input and returned output (``_over``). That a call's rows are
+        independent of each other is not checked here: ``check`` holds the
+        split bit-identical to its base.
+
+        Raises:
+            ValueError: An input's leading rows do not divide into ``calls``.
+            NotImplementedError: ``_over`` does not build it.
+        """
+        uneven = [h.name for h in self.inputs if not h.shape or h.shape[0] % calls]
+        if uneven:
+            raise ValueError(
+                f"{self.name}: {uneven[0]}'s leading rows do not divide into "
+                f"{calls} calls"
+            )
+        return self._over(
+            self.recorded_at(
+                {h.name: (h.shape[0] // calls, *h.shape[1:]) for h in self.inputs}
+            ),
+            calls,
+            f"{self.name}_split{calls}",
+        )
+
+    def _over(self, part: Recording, calls: int, name: str) -> Recording:
+        """Return ``calls`` calls of ``part``, its graph recorded at other shapes, back to back as one call of this version over its buffers.
+
+        Call ``j`` takes the ``j``-th of ``calls`` equal leading runs of each
+        input and returned output ``part`` holds at another shape, which a
+        step then names in part (``pinned`` sizes it whole); past one call,
+        each call's intermediates are its own (``CALL_SUFFIX``). Its steps,
+        weights, states, per-call values and limits are ``part``'s; its
+        inputs, outputs and version this one's.
+
+        Raises:
+            NotImplementedError: It carries values or buffers, runs a host
+                step or encodes an input from an address; past one call, it
+                holds state, takes per-call values or gathers; or ``part``
+                holds an input or output other than as fewer leading rows, or
+                a step views one other than as a contiguous run.
+        """
+        unbuilt = [
+            what
+            for what, kept in (
+                ("carried values", self.carry or part.carry),
+                ("carried buffers", self.feedback or part.feedback),
+                ("a host step", self.host or part.host),
+                (
+                    "an input encoded from an address",
+                    self.encoders or self.addresses or part.encoders or part.addresses,
+                ),
+                (
+                    "a coded weight",
+                    any(isinstance(w, CodedWeight) for w, _ in part.weights.values()),
+                ),
+                ("state, run as several calls", calls > 1 and part.states),
+                ("per-call values, run as several calls", calls > 1 and part.values),
+                (
+                    "a gather, run as several calls",
+                    calls > 1 and any(s.gather is not None for s in part.steps),
+                ),
+            )
+            if kept
+        ]
+        if unbuilt:
+            raise NotImplementedError(
+                f"{self.name}: recorded at another capacity, a version with "
+                f"{unbuilt[0]} is not built yet"
+            )
+        held = {h.name: h.buffer for h in (*self.inputs, *self.returned)}
+        sizes = {h.name: h.buffer for h in (*part.inputs, *part.returned)}
+        for n, b in sizes.items():
+            whole = held[n]
+            leading = bool(b.shape) and b.shape[1:] == whole.shape[1:]
+            if not (
+                leading and b.shape[0] * calls == whole.shape[0]
+                if calls > 1
+                else b.shape == whole.shape or leading and b.shape[0] <= whole.shape[0]
+            ):
+                raise NotImplementedError(
+                    f"{self.name}: {n} at {b.shape} is not {calls} run(s) of the "
+                    f"leading rows of its {whole.shape}, which is not built yet"
+                )
+        moved = frozenset(
+            n for n, b in sizes.items() if calls > 1 or b.shape != held[n].shape
+        )
+        own = {
+            h.buffer.name: h.buffer
+            for s in part.steps
+            for h in s.slots
+            if h.role == "intermediate"
+        }
+        steps: list[Step] = []
+        pinned = {n: nbytes for n, nbytes in part.pinned.items() if n not in own}
+        for j in range(calls):
+            suffix = CALL_SUFFIX.format(j) if calls > 1 else ""
+            placing = _Placing(
+                held,
+                moved,
+                {n: sizes[n].nbytes for n in moved},
+                {
+                    n: Buffer(n + suffix, b.role, b.shape, b.dtype)
+                    for n, b in own.items()
+                },
+                j,
+            )
+            pinned.update(
+                (n + suffix, nbytes) for n, nbytes in part.pinned.items() if n in own
+            )
+            steps += [
+                dataclasses.replace(
+                    step,
+                    slots=[placing.handle(h) for h in step.slots],
+                    inputs=[placing.handle(h) for h in step.inputs],
+                    outputs=[placing.handle(h) for h in step.outputs],
+                    gather=None if step.gather is None else placing.handle(step.gather),
+                )
+                for step in part.steps
+            ]
+        pinned.update((n, held[n].nbytes) for n in moved)
+        return dataclasses.replace(
+            self,
+            name=name,
+            steps=steps,
+            pinned=pinned,
+            values=part.values,
+            weights=part.weights,
+            states=part.states,
+            bindings=part.bindings,
+            limits=part.limits,
+            read_plain=part.read_plain,
+            derived_from=self.version,
+        )
+
+    def selected(
+        self,
+        profile: Profile,
+        values: Mapping[str, int],
+        points: Sequence[Mapping[str, int]] = (),
+    ) -> tuple[Recording, Profile]:
+        """Return how ``profile`` runs a call of this version at ``values``: each set of its variants' design at its range.
+
+        The design of the range holding ``values``, for each set of variants
+        over values this version takes.
+
+        This version at those ranges' capacity (``at_capacity``, each value at
+        its range's top), and ``profile`` with its variants replaced by those
+        ranges' entries; an entry rooted at a step gives that step's tunables
+        as a tunable entry does (``Profile.add``). With no variants, this
+        recording and a copy of ``profile``. Each of ``points``, the values
+        the call is run at too, must lie in the range ``values`` selects.
+
+        Raises:
+            ValueError: No range holds ``values``.
+            NotLegalAtCapacity: A range's entry matches no step at its
+                capacity: its design is not legal there.
+            NotImplementedError: ``values`` does not give a value the
+                variants are over, or a point lies in another range (a design
+                per point is not built), a range's entry rooted at a step is
+                scoped, runs on the host or is split by fission, or
+                ``at_capacity`` does not build its capacity.
+        """
+        chosen = profile.copy()
+        names = {v.name for v in self.values}
+        bounds: dict[str, int] = {}
+        entries: list[Entry] = []
+        for variants in profile.variants():
+            chosen.remove_variants(variants)
+            if not set(variants.values) <= names:
+                continue
+            missing = [n for n in variants.values if n not in values]
+            if missing:
+                raise NotImplementedError(
+                    f"{self.name}: selecting a variant for a call that does not "
+                    f"give {missing[0]}, so each point may select another, is not "
+                    f"built yet"
+                )
+            holding = [
+                (box, entry)
+                for box, entry in variants.ranges
+                if all(
+                    lo <= values[n] <= hi
+                    for n, (lo, hi) in zip(variants.values, box, strict=True)
+                )
+            ]
+            if not holding:
+                raise ValueError(
+                    f"{self.name}: no range over {', '.join(variants.values)} holds "
+                    f"{[values[n] for n in variants.values]}"
+                )
+            box, entry = holding[0]
+            outside = [
+                p
+                for p in points
+                if not all(
+                    lo <= p[n] <= hi
+                    for n, (lo, hi) in zip(variants.values, box, strict=True)
+                )
+            ]
+            if outside:
+                raise NotImplementedError(
+                    f"{self.name}: a call whose points span more than one range "
+                    f"over {', '.join(variants.values)} ({box} and "
+                    f"{[outside[0][n] for n in variants.values]}) is not built "
+                    f"yet: each point would select its own design"
+                )
+            bounds.update((n, hi) for n, (_, hi) in zip(variants.values, box))
+            entries.append(entry)
+        recording = self.at_capacity(bounds) if bounds else self
+        for entry in entries:
+            if not recording.occurrences(entry):
+                raise NotLegalAtCapacity(
+                    f"{recording.name}: {entry.root} matches no step at its range's "
+                    f"capacity, so its design is not legal there"
+                )
+            root = entry.root
+            if not isinstance(root, Member):
+                chosen.add_entry(entry)
+                continue
+            if entry.scope != Scope() or root.runs_on != "npu" or root.part:
+                raise NotImplementedError(
+                    f"{recording.name}: a variant's entry rooted at a step that is "
+                    f"scoped, runs on the host or is split by fission is not built "
+                    f"yet"
+                )
+            if root.tunables:
+                chosen.add(root.cls, **root.dims, **root.tunables)
+        return recording, chosen
 
     def ordered(self, profile: Profile) -> Recording:
         """Return this recording reordered so each region the composer builds runs its steps together.
@@ -1877,11 +2340,13 @@ class Recorder:
         outputs,
         values,
         carry: Mapping[str, Handle | Affine] | None = None,
+        graph: Graph | None = None,
     ) -> Recording:
         """Return the recorded graph.
 
         ``carry`` is the next value of each carried value, whose handles
-        are outputs too.
+        are outputs too; ``graph`` is the graph recorded, kept to record it
+        again at other shapes.
         """
         next_values = dict(carry or {})
         returned = list(outputs)
@@ -1927,6 +2392,7 @@ class Recorder:
             addresses=self.addresses,
             limits=self.limits,
             host=self.host,
+            graph=graph,
         )
 
     def limit(

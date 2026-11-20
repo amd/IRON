@@ -447,7 +447,8 @@ class Schedule:
         commands_in_flight: Commands submitted before the previous completes.
         interleave_with: Versions mixed into the same command.
         size: A derived version to run instead, by name: ``"merged_<k>x"``,
-            ``k`` calls merged into one, the one built.
+            ``k`` calls merged into one, the one built; ``"half_chunk"``, a
+            call run as two, each over half of every input's leading rows.
         packaging: One full ELF, or an xclbin per step; None for the device's default.
     """
 
@@ -468,6 +469,11 @@ class Schedule:
         if self.size == f"merged_{k}x" and k.isdigit() and int(k) > 1:
             return int(k)
         return 1
+
+    @property
+    def split_calls(self) -> int:
+        """The calls ``size`` runs one call as (``"half_chunk"``: two); 1 where it names no split."""
+        return 2 if self.size == "half_chunk" else 1
 
 
 @dataclass(frozen=True)

@@ -44,6 +44,7 @@ from ..common.declare.composition import (
     RuntimePlan,
     Schedule,
     Switch,
+    Variants,
     Version,
     refinement,
 )
@@ -53,7 +54,7 @@ from ..common.graph.coded import CodedWeight, encode_all
 from ..common.graph.compiled import CompiledGraph, _words
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
 from ..common.graph.fusion import composed, in_turn, memory_waits, narrowed
-from ..common.graph.record import Recording
+from ..common.graph.record import NotLegalAtCapacity, Recording
 from ..common.graph.sdf import Derivation
 from ..common.image.compose import ANNEALED, SEQUENTIAL
 from ..common.image.packaging import SCRATCHPAD_WORDS
@@ -928,7 +929,12 @@ def fit(
     overlapping, holding all of it; a value bound at compile time served
     by one design a value; and no more images held at once than
     ``max_images``, a version holding a design per range of each set of
-    variants over its values.
+    variants over its values. Then each range's design at its capacity:
+    the call re-recorded from its graph where each value takes at most its
+    range's top (``Recording.selected``), which the range's entry must
+    match, fitted under that entry alone; a design not legal there
+    (``NotLegalAtCapacity``) is refused by the counts, or as its own fit
+    refuses it.
 
     A refusal from any stage of any entry wins over what is not fitted yet;
     only where nothing refuses is the first of those raised.
@@ -946,8 +952,9 @@ def fit(
             not name, a region names other than a phase per edge, or a
             binding or a set of variants names a value no call gives.
         NotImplementedError: What is not fitted yet, where nothing refuses:
-            a schedule's choices past its packaging, a variant's entries, a
-            value bound other than at run time, fusion or packing entries, a configuration
+            a schedule's choices past its packaging, a range's design at a
+            capacity ``Recording.selected`` does not record, a value bound
+            other than at run time, fusion or packing entries, a configuration
             the composer does not build, an entry rooted at a step, scoped
             to some runs of its shape, splitting a step by
             fission, a placer setting the build does not take
@@ -957,7 +964,6 @@ def fit(
     waiting = [
         f"fitting {kind} is not built yet"
         for kind, kept in (
-            ("a variant's entries", profile.variants()),
             (
                 "a value bound other than at run time",
                 any(b.how != "runtime" for b in profile.bindings()),
@@ -985,6 +991,7 @@ def fit(
             )
     images = 0
     versions: set[Version] = set()
+    ranged: list[tuple[Timed, Variants]] = []
     for timed in calls:
         recording = timed.recording
         if recording.version in versions:
@@ -1016,6 +1023,7 @@ def fit(
                     f"{recording.name} do not tile what a call may take: {why}",
                 )
             designs += len(variants.ranges) - 1
+            ranged.append((timed, variants))
             for k, name in enumerate(variants.values):
                 spans.setdefault(name, []).extend(box[k] for box in boxes)
         images += designs
@@ -1041,6 +1049,44 @@ def fit(
             f"its calls hold {images} images at once, a design apiece; the host "
             f"holds {max_images}",
         )
+    for timed, variants in ranged:
+        recording = timed.recording
+        top = {
+            v.name: span[1]
+            for v in recording.values
+            if (span := recording.value_range(v.name)) is not None
+        }
+        alone = Profile()
+        alone.add_variants(variants)
+        try:
+            with set_current_device(device):
+                recording.selected(
+                    alone, timed.values, [v for _, v in timed.timed_points()]
+                )
+        except NotImplementedError as e:
+            waiting.append(str(e))
+        except NotLegalAtCapacity as e:
+            return Fit(False, "counts", f"at its own values: {e}")
+        for box, _ in variants.ranges:
+            at = {**top, **{n: hi for n, (_, hi) in zip(variants.values, box)}}
+            try:
+                with set_current_device(device):
+                    variant, chosen = recording.selected(alone, at)
+                fitted = fit(
+                    chosen,
+                    [dataclasses.replace(timed, recording=variant, values=at)],
+                    device,
+                    placements,
+                )
+            except NotImplementedError as e:
+                waiting.append(str(e))
+                continue
+            except NotLegalAtCapacity as e:
+                return Fit(False, "counts", f"its range {box}: {e}")
+            if not fitted.ok:
+                return dataclasses.replace(
+                    fitted, why=f"{recording.name}, its range {box}: {fitted.why}"
+                )
     model = get_target_model(device.resolve())
     rows = range(model.rows())
     mem_row = next(r for r in rows if model.is_mem_tile(0, r))
@@ -1764,11 +1810,19 @@ def fit(
                     )
                 elif refused is not None:
                     return Fit(False, "placer", refused)
+        # A returned output each step reads only where this call already wrote
+        # it is the host's after each call, though pinned as written in parts.
+        handed = {
+            root
+            for root in {h.ref().root for h in recording.returned}
+            if -1 not in writers.get(root, [-1]) + readers.get(root, [])
+            and recording.reads_only_written(root)
+        }
         persist = (
             set(recording.feedback)
             | {h.ref().root for _, h in recording.states.values()}
             | {h.ref().root for h in recording.inputs}
-            | set(recording.pinned)
+            | set(recording.pinned) - handed
             | set(recording.residents)
         )
         carried = [

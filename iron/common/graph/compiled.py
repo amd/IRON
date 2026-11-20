@@ -463,7 +463,11 @@ class Graph:
         items, carry = self._split_carry(result)
         outputs = self._outputs(items, recorder)
         return recorder.finish(
-            inputs, outputs, values, self._recorded_carry(carry, values, recorder)
+            inputs,
+            outputs,
+            values,
+            self._recorded_carry(carry, values, recorder),
+            graph=self,
         )
 
     def _split_carry(self, result) -> tuple[list, Carry | None]:
