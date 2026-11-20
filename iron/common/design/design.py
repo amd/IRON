@@ -229,6 +229,8 @@ class BuiltArray:
         # feed() reads host shapes, which the layout view does not carry.
         operands = {b.name: b for b in op.buffers}
         for name, source in fed.items():
+            # A restage held in L1 holds its rounds at the edge's chosen depth.
+            operands[name].chosen_depth = (depths or {}).get(name)
             operands[name].feed(source, staged=staged, cores=(cores or {}).get(name))
         for mine, built in zip(op.buffers, view.buffers):
             built.fed_from, built.staged = mine.fed_from, mine.staged

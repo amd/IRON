@@ -20,8 +20,9 @@ from aie.dialects.aie import WireBundle, get_target_model
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement, Region
 from iron.common.design import OperatorDesign
+from iron.common.graph.fusion import composed
 from iron.common.graph.sdf import analyze
-from iron.common.image.compose import fits, transported
+from iron.common.image.compose import fits, fused_configuration, transported
 from iron.common.image.step import Edge, EdgeKind, Fusion, FusionKind, HandOff
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
@@ -29,6 +30,8 @@ from iron.tests.support.toys_edges import (
     fan_out_norm_qkv,
     held_in_l1,
     join_in_pairs,
+    join_of_two_streams,
+    join_rows_after_rows,
     join_rows_into_one,
     layout_transpose,
     ratio_three_into_two,
@@ -373,3 +376,51 @@ def test_a_join_held_in_l1_past_a_cores_buffer_descriptors_is_refused_before_any
         device,
         "buffer descriptors",
     )
+
+
+def _composed_in_l1(recording, region):
+    """Compose ``region``'s one fusion as the build does; return its arrays."""
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    _, (fusion,) = composed(recording, profile)
+    designs = [OperatorDesign(recording.steps[s].op.resolved()) for s in fusion.steps]
+    _, arrays = fused_configuration("l1", fusion, designs)
+    return arrays
+
+
+def test_a_restage_held_in_l1_is_as_deep_as_its_chosen_depth(device):
+    """A join held in L1 three deep builds its pool three rounds deep, as fit counts it."""
+    recording, region = held_in_l1(*join_rows_into_one(), depth=3)
+    arrays = _composed_in_l1(recording, region)
+    (sink,) = [b for b in arrays[1].op.buffers if b.name == "x"]
+    assert [f.depth for f in sink.staged] == [3]
+
+
+def test_a_restage_held_in_l1_whose_producer_is_not_first_on_its_cores_waits(
+    device,
+):
+    """A join held in L1 whose producer shares its cores with an earlier step would link on a tile no core runs on: not built yet."""
+    recording, region = held_in_l1(*join_rows_after_rows())
+    with pytest.raises(NotImplementedError, match="not first on its cores"):
+        _composed_in_l1(recording, region)
+
+
+def test_a_restage_held_in_l1_counts_no_channel_for_edges_on_chip(device):
+    """An add fed core to core by two SiLUs, its lanes joined in L1: the add's streamed inputs may be its neighbours' memory, so the counts do not refuse it."""
+    recording, region = join_of_two_streams()
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    try:
+        result = fit(profile, [Timed(recording)], device)
+    except NotImplementedError:
+        return  # not built yet, not refused
+    assert result.ok or "restaged in L1" not in (result.why or "")
+
+
+def test_a_restage_held_in_l1_of_an_output_kept_too_waits(device):
+    """A split held in L1 of an output the host also drains is not built yet: fit waits rather than counting it."""
+    recording, region = held_in_l1(*split_into_rows(keep=True))
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    with pytest.raises(NotImplementedError):
+        fit(profile, [Timed(recording)], device)

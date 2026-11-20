@@ -1289,13 +1289,15 @@ class Staging:
     def on_cores(self) -> list[ObjectFifo]:
         """Wire each group by a link on one of ``cores``, held in L1: a join on its sink lane's core, else on its first source lane's.
 
-        Each round is one object of the link's pool on that core, a call's
-        rounds deep: a core runs its producer's whole call before its
-        consumer's. The source lane leading a round, its objects its slot and
-        read here first, and the sink lane leading it, its objects its slot,
-        keep them in the pool (``ObjectFifo.delegate_tile``): in place where
-        their core is the link's or a neighbour reaching its memory, else by
-        DMA; a core reaches any other slot only as a strided view. A
+        Each round is one object of the link's pool on that core, ``sink``'s
+        ``chosen_depth`` rounds deep, and a call's at least: a core runs its
+        producer's whole call before its consumer's. The source lane leading
+        a round, its objects its slot, rank 1, read here first and moved by
+        nothing that forces a DMA, and the sink lane leading it, its objects
+        its slot, keep them in the pool (``ObjectFifo.delegate_tile``): in
+        place where their core is the link's or a neighbour reaching its
+        memory, else by DMA; a core reaches any other slot only as a strided
+        view. A
         join split again, or a split of rounds of several source objects,
         joins its rounds into a fifo the core sends itself.
 
@@ -1320,18 +1322,30 @@ class Staging:
                     f"another order than it is joined is not built yet"
                 )
             tile = self.cores[outs[0] if len(outs) == 1 else ins[0]]
+            depth = max(sink.chosen_depth or 0, rounds)
             ends = []
             for k, slot in zip(ins, taken):
                 first = k not in source.read_lanes
                 end = source.reader(k)
-                if first and k == ins[0] and slot == produce:
-                    end.object_fifo.delegate_tile = tile
+                fifo = end.object_fifo
+                if (
+                    first
+                    and k == ins[0]
+                    and slot == produce
+                    and len(fifo.shape) == 1
+                    and fifo.to_stream is None
+                    and end.from_stream is None
+                    and fifo.repeat_count is None
+                    and (fifo.transport is None or fifo.transport.mode != "dma")
+                    and fifo.consumer_obj_type == fifo.obj_type
+                ):
+                    fifo.delegate_tile = tile
                 ends.append(end)
             offsets = list(itertools.accumulate(taken[:-1], initial=0))
             if len(outs) == 1:
                 fifo = ObjectFifo(
                     np.ndarray[(sum(taken),), np.dtype[sink.dtype]],
-                    depth=rounds,
+                    depth=depth,
                     consumer_obj_type=None if sum(taken) == consume else sink.obj_type,
                     delegate_tile=tile if sum(taken) == consume else None,
                 )
@@ -1344,7 +1358,7 @@ class Staging:
                 (end,) = ends
             else:
                 joined = ObjectFifo(
-                    np.ndarray[(sum(taken),), np.dtype[sink.dtype]], depth=rounds
+                    np.ndarray[(sum(taken),), np.dtype[sink.dtype]], depth=depth
                 )
                 ObjectFifoLink(
                     ends, joined.prod(), tile, offsets if len(ends) > 1 else [], []
@@ -1353,7 +1367,7 @@ class Staging:
             parts = [
                 ObjectFifo(
                     np.ndarray[(slot,), np.dtype[sink.dtype]],
-                    depth=rounds,
+                    depth=depth,
                     consumer_obj_type=None if slot == consume else sink.obj_type,
                     delegate_tile=tile if n == 0 and slot == consume else None,
                 )

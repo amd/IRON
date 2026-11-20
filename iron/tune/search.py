@@ -1540,7 +1540,7 @@ def fit(
                 if why is not None:
                     return Fit(False, "counts", why)
             # Restages held in L1, on the cores their two steps share.
-            on_cores: list[tuple[Edge, int, int, int]] = []
+            on_cores: list[tuple[Edge, int, int]] = []
             # A region with no edge hands nothing on-chip: nothing to analyse.
             if region.edges:
                 try:
@@ -1561,18 +1561,7 @@ def fit(
                     if edge.kind is EdgeKind.STREAM and any(
                         {p, c} <= set(group) for group in region.workers
                     ):
-                        on_cores.append(
-                            (
-                                edge,
-                                p,
-                                c,
-                                (
-                                    analysis.min_depth[edge]
-                                    if edge.depth is None
-                                    else edge.depth
-                                ),
-                            )
-                        )
+                        on_cores.append((edge, p, c))
                         continue
                     return Fit(
                         False,
@@ -1616,14 +1605,9 @@ def fit(
             try:
                 past = [
                     _restaged_on_cores(
-                        derivation,
-                        edge,
-                        (p, c),
-                        depth,
-                        (p, edge.output) in kept,
-                        model,
+                        derivation, edge, (p, c), (p, edge.output) in kept, model
                     )
-                    for edge, p, c, depth in on_cores
+                    for edge, p, c in on_cores
                 ]
             except NotImplementedError as e:
                 waiting.append(str(e))
@@ -1639,7 +1623,7 @@ def fit(
                     or made is None
                     or taken is None
                     or made == taken
-                    or edge in [e for e, _, _, _ in on_cores]
+                    or edge in [e for e, _, _ in on_cores]
                 ):
                     continue
                 # One fifo delivers each object as a whole number of the
@@ -2045,36 +2029,34 @@ def _restaged_on_cores(
     derivation: Derivation,
     edge: Edge,
     ends: tuple[int, int],
-    depth: int,
-    elsewhere: bool,
+    kept: bool,
     model,
 ) -> str | None:
     """Return why ``edge``'s restage, held in L1 on the cores its two steps share, is past one of them under every placement; else None.
 
     Lane k of either step runs on core k. Each group ``Staging`` plans is
-    held as ``Staging.on_cores`` builds it: a link on a core, its pool
-    ``depth`` rounds deep or a call's rounds where more (a core runs its
-    producer's call through before its consumer's), a join on its
+    held as ``Staging.on_cores`` builds it: a link on a core, a join on its
     consumer lane's core, a split, or a join split again, on its first
-    producer lane's. Only the lanes leading a round meet it in place, at
-    best (on the link's core or a neighbour reaching its memory: a core
+    producer lane's, its pool the edge's chosen depth in rounds, or the
+    objects a producer lane moves a call as the composer chooses it, and a
+    call's rounds at least. Only the lanes leading a round meet it in place,
+    at best (on the link's core or a neighbour reaching its memory: a core
     reaches a later slot only as a strided view); every other lane takes a
     channel and a buffer descriptor a round on the link's core, and the
-    core's own non-leading lane a channel each way. So these are lower
-    bounds: what a plan adds, a join split again sending its rounds out of
-    the core and back, the placer counts. The pool holds a lock pair a
-    slot. A join split again counts no channels here, since another plan
-    could join each sink lane's sources on its own core. Each
-    core also holds its two steps' other fifos, a lock pair each, and a
-    channel and descriptors for each that leaves the core. ``elsewhere``
-    sends a link core's own producer lane to its other readers.
+    core's own non-leading lane a channel each way. The pool holds a lock
+    pair a slot. A join split again counts no channels here, since another
+    plan could join each sink lane's sources on its own core. Each core also
+    holds its two steps' fifos to and from off the array or a memtile, a
+    lock pair each and a channel and descriptors for each; one an on-chip
+    stream or cascade carries may be free in the fused build (in one core,
+    or in a neighbour's memory), so it is not counted. These are lower
+    bounds: what a plan adds the placer counts.
 
     Args:
         derivation: The region's derivation.
         edge: The restaged edge.
         ends: Its producer's and consumer's steps in ``derivation``.
-        depth: The rounds its links hold.
-        elsewhere: Whether the producer's lanes are also read elsewhere.
+        kept: Whether the host drains the producer's output too.
         model: The device's target model.
 
     Returns:
@@ -2082,9 +2064,28 @@ def _restaged_on_cores(
         memory, buffer descriptors or locks, or None.
 
     Raises:
-        NotImplementedError: ``Staging`` does not plan the restage.
+        NotImplementedError: What ``Staging.on_cores`` or the composer does
+            not build: a restage ``Staging`` does not plan, a round read in
+            another order than it is joined, an output also read elsewhere,
+            or a producer not first on its cores.
     """
     p, c = ends
+    region = derivation.region
+    (group,) = [g for g in region.workers if edge.producer in g]
+    # Not built, yet still counted: what is past a core under every plan is
+    # refused all the same.
+    unbuilt = (
+        kept
+        or sum(
+            (e.producer, e.output) == (edge.producer, edge.output) for e in region.edges
+        )
+        != 1
+        or group[0] != edge.producer
+        or any(
+            e.kind is EdgeKind.CASCADE and e.consumer == edge.producer
+            for e in region.edges
+        )
+    )
     (source,) = [
         b for b in derivation.recorded[p][0].op.buffers if b.name == edge.output
     ]
@@ -2097,7 +2098,25 @@ def _restaged_on_cores(
             f"{edge}: a restage held in L1 that Staging does not plan is not "
             f"built yet: {e}"
         ) from e
+    if any(walk is not None for walk in staging.walks):
+        raise NotImplementedError(
+            f"{edge}: a restage held in L1 reading a round in another order "
+            f"than it is joined is not built yet"
+        )
+    chosen = edge.depth
+    if chosen is None:
+        per_object = math.prod(source.obj_shape)
+        chosen = max(-(-n // per_object) for n in source.moved_per_lane().values())
     lanes = (derivation.lanes[p][edge.output], derivation.lanes[c][edge.input])
+    on_chip = {
+        fifo
+        for e, q, r in derivation.wired
+        if e.kind in (EdgeKind.STREAM, EdgeKind.CASCADE)
+        for fifo in (
+            *derivation.lanes[q].get(e.output, []),
+            *derivation.lanes[r].get(e.input, []),
+        )
+    }
     cores = max(len(lanes[0]), len(lanes[1]))
     inputs, outputs, held, bds, locks = ([0] * cores for _ in range(5))
     handles: list[list] = [[] for _ in range(cores)]
@@ -2108,35 +2127,22 @@ def _restaged_on_cores(
                 for core in derivation.recorded[step][1].cores
                 if any(h.object_fifo is fifo for h in core.owner.fifos)
             ]
-            handles[k] += [
-                h for h in worker.fifos if h.object_fifo not in (*lanes[0], *lanes[1])
-            ]
+            handles[k] += [h for h in worker.fifos if h.object_fifo not in on_chip]
     for k, own in enumerate(handles):
-        here = Counter(h.object_fifo for h in own)
         for h in own:
-            local = here[h.object_fifo] > 1
-            # Both ends on this core: one buffer and lock pair, no channel.
-            if local and h.handle_type == "cons":
-                continue
             held[k] += h.depth * math.prod(h.shape) * bfp.itemsize(h.dtype)
             locks[k] += 2
-            if not local:
-                bds[k] += h.depth
-                inputs[k] += h.handle_type == "cons"
-                outputs[k] += h.handle_type == "prod"
+            bds[k] += h.depth
+            inputs[k] += h.handle_type == "cons"
+            outputs[k] += h.handle_type == "prod"
     for (ins, taken, outs, _), rounds in zip(staging.groups, staging.rounds):
         at = outs[0] if len(outs) == 1 else ins[0]
-        deep = max(depth, rounds)
+        deep = max(chosen, rounds)
         held[at] += deep * sum(taken) * staging.item
         locks[at] += 2 * max(len(ins), len(outs))
-        # The leading lanes meet the round in place at best; the rest arrive
-        # and leave by DMA, the core's own through its own channels. A join
-        # split again may be planned lane by lane: the placer counts it.
         ratio = len(ins) > 1 and len(outs) > 1
         arrive = 0 if ratio else len(ins) - 1 + (at in outs[1:])
-        leave = (0 if ratio else len(outs) - 1 + (at in ins[1:])) + (
-            elsewhere and at in ins
-        )
+        leave = 0 if ratio else len(outs) - 1 + (at in ins[1:])
         inputs[at] += arrive
         outputs[at] += leave
         bds[at] += deep * (arrive + leave)
@@ -2162,6 +2168,11 @@ def _restaged_on_cores(
                     f"{edge}, restaged in L1, takes {n} {what} on core {k} of its "
                     f"steps' worker, however it is placed; a core tile has {most}"
                 )
+    if unbuilt:
+        raise NotImplementedError(
+            f"{edge}: a restage held in L1 of an output read elsewhere too, or "
+            f"whose producer is not first on its cores, is not built yet"
+        )
     return None
 
 

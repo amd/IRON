@@ -385,6 +385,17 @@ def fused_configuration(
                         f"{e}: a restage held in L1 of an output read elsewhere "
                         f"too, or bound without its fifos, is not built yet"
                     )
+                # Its links name the producer's cores' tiles, which a joined
+                # core keeps only from the first body it runs.
+                (group,) = [g for g in fusion.workers if e.producer in g]
+                if group[0] != e.producer or any(
+                    c.consumer == e.producer for c in cascades
+                ):
+                    raise NotImplementedError(
+                        f"{e}: a restage held in L1 whose producer is not first "
+                        f"on its cores (a step or a cascade's relay runs before "
+                        f"it there) is not built yet"
+                    )
                 held[e.input] = [
                     next(
                         w
