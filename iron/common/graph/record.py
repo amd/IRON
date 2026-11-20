@@ -21,7 +21,7 @@ from aie.utils import bfp
 from aie.utils.compile.jit.params import OperatorParam
 
 from ..declare import Operator, Value
-from ..declare.composition import Entry, Region
+from ..declare.composition import Configuration, Entry, Region
 from ..declare.operand import concrete
 from ..declare.operator import graph_recorder
 from ..declare.profile import Profile, Version
@@ -553,12 +553,13 @@ class Recording:
 
         The regions are the composer's matches of ``profile``'s region
         entries: each entry's in turn, each but those overlapping one before
-        it, those an order can gather (``gatherable``). Each is contracted to
-        one node of the steps' dependences, the nodes run in topological
-        order, earliest recorded first, and each region's steps in recorded
-        order: so steps move only where a region needs them to. A match no
-        order gathers stays as it is, for ``fit`` to refuse or the composer to
-        wait on.
+        it, those an order can gather (``gatherable``); and the steps of the
+        configurations run at once under each id, the composer's one pack.
+        Each is contracted to one node of the steps' dependences, the nodes
+        run in topological order, earliest recorded first, and each region's
+        steps in recorded order: so steps move only where a region needs
+        them to. A match no order gathers stays as it is, for ``fit`` to
+        refuse or the composer to wait on.
 
         Raises:
             ValueError: Two regions each depend on the other through their
@@ -567,8 +568,13 @@ class Recording:
         """
         regions: list[tuple[int, ...]] = []
         taken: set[int] = set()
+        at_once: dict[int, set[int]] = {}
         for entry in profile.entries():
-            if not isinstance(entry.root, Region):
+            root = entry.root
+            if isinstance(root, Configuration) and root.concurrent is not None:
+                for match in self.occurrences(entry):
+                    at_once.setdefault(root.concurrent, set()).update(match)
+            if not isinstance(root, Region):
                 continue
             for match in self.occurrences(entry):
                 if taken & set(match):
@@ -576,6 +582,11 @@ class Recording:
                 taken.update(match)
                 if len(match) > 1 and self.gatherable(match):
                     regions.append(match)
+        # Configurations run at once are the composer's one pack.
+        for together in at_once.values():
+            steps = tuple(sorted(together))
+            if len(steps) > 1 and not taken & together and self.gatherable(steps):
+                regions.append(steps)
         if all(r == tuple(range(r[0], r[-1] + 1)) for r in regions):
             return self
         node = list(range(len(self.steps)))

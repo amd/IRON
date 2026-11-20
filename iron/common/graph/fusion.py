@@ -390,6 +390,61 @@ def narrowed(
     return dataclasses.replace(configuration, parts=tuple(parts))
 
 
+def in_turn(
+    configuration: Configuration,
+) -> tuple[Region, tuple[tuple[int, int], ...]]:
+    """Return ``configuration``, regions among its parts, as the one region its steps run in, and the waits running its parts in turn.
+
+    Each region part keeps its edges and workers among its own steps; a
+    step part is a step alone. Each part runs a phase after the one before:
+    every step of it waits on the last step before it, as a step waits on
+    one it reads in host memory (``Fusion.waits``), so one device
+    configuration runs the parts one after another.
+
+    Raises:
+        NotImplementedError: Its parts run at once, it takes a partial
+            width, or a part nests regions, takes inflows or chooses phases.
+    """
+    parts = [p.parts if isinstance(p, Region) else (p,) for p in configuration.parts]
+    if (
+        configuration.concurrent is not None
+        or configuration.columns is not None
+        or any(
+            isinstance(p, Region)
+            and (
+                p.inflows
+                or p.phases is not None
+                or not all(isinstance(m, Member) for m in p.parts)
+            )
+            for p in configuration.parts
+        )
+    ):
+        raise NotImplementedError(
+            f"building {configuration} is not built yet: regions among its parts "
+            f"run at once, at a partial width, nested, with inflows or chosen "
+            f"phases"
+        )
+    edges, workers, turns, at = [], [], [], 0
+    for part, members in zip(configuration.parts, parts):
+        if isinstance(part, Region):
+            edges += [
+                dataclasses.replace(
+                    e, producer=e.producer + at, consumer=e.consumer + at
+                )
+                for e in part.edges
+            ]
+            workers += [tuple(s + at for s in group) for group in part.workers]
+        if at:
+            turns += [(at - 1, at + k) for k in range(len(members))]
+        at += len(members)
+    region = Region(
+        tuple(m for members in parts for m in members),
+        tuple(edges),
+        workers=tuple(workers),
+    )
+    return region, tuple(turns)
+
+
 def composed(
     recording: Recording, profile: Profile
 ) -> tuple[dict[int, dict[str, Any]], tuple[Fusion, ...]]:
@@ -478,10 +533,6 @@ def composed(
                         "a switch other than a reload",
                         root.switch not in (None, Switch.RELOAD),
                     ),
-                    (
-                        "regions among its parts",
-                        not all(isinstance(p, Member) for p in root.parts),
-                    ),
                 )
                 if kept
             ]
@@ -496,7 +547,12 @@ def composed(
                         tunables.setdefault(s, {}).setdefault(name, value)
                 if root.concurrent is not None:
                     at_once.setdefault(root.concurrent, set()).update(match)
-            continue
+            if all(isinstance(p, Member) for p in root.parts):
+                continue
+            # Regions among its parts: the one region they run in, in turn.
+            root, turns = in_turn(root)
+        else:
+            turns = ()
         if (
             not isinstance(root, Region)
             or not all(isinstance(part, Member) for part in root.parts)
@@ -593,7 +649,10 @@ def composed(
                         f"reads {sorted(read)}: a carry across calls is a buffer "
                         f"the recording carries, read where it was written"
                     )
-            ordered = memory_waits(recording, match, root.edges)
+            ordered = (
+                *memory_waits(recording, match, root.edges),
+                *((match[a], match[b]) for a, b in turns),
+            )
             kept: list[tuple[int, str]] = []
             for e in on_chip:
                 made = recording.steps[match[e.producer]]
