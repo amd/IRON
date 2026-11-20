@@ -657,14 +657,19 @@ class Derivation:
             if e.kind is EdgeKind.CASCADE
             and ((p, e.output) in self.per_core or (c, e.input) in self.per_core)
         ]
-        # Each per-call word a core may read, by its device symbol, at this call.
+        # Each per-call word a core may read, by its device symbol, at this
+        # call; one the call does not fix is left out, its loops solved from
+        # the objects they move.
         words: dict[str, int] = {}
         for op, (bound, extents) in zip(self.ops, bindings, strict=True):
             for v in op.values:
-                if v.name in bound:
-                    words[v.symbol] = self._evaluate(recording, bound[v.name])
-                elif v.derive is not None:
-                    words[v.symbol] = op.derived_at(v.name, **extents)
+                try:
+                    if v.name in bound:
+                        words[v.symbol] = self._evaluate(recording, bound[v.name])
+                    elif v.derive is not None:
+                        words[v.symbol] = op.derived_at(v.name, **extents)
+                except ValueError:
+                    pass
         # A loop's trips the program reads off this call's words, by id of its scope.
         self.read: dict[int, int] = {}
         part = {i: frozenset([i]) for i in range(len(self.recorded))}
@@ -880,7 +885,8 @@ class Derivation:
         operation = owner.operation
         name = operation.name
         if name == "arith.constant":
-            return ir.IntegerAttr(operation.attributes["value"]).value
+            attribute = operation.attributes["value"]
+            return attribute.value if isinstance(attribute, ir.IntegerAttr) else None
         if name == "aiex.read_scratchpad_parameter":
             return words.get(
                 ir.FlatSymbolRefAttr(operation.attributes["parameter"]).value
@@ -901,6 +907,9 @@ class Derivation:
         args = [self._word(v, written, words) for v in operation.operands]
         if None in args:
             return None
+        # An unsigned op reads a negative word as a large one: not modelled.
+        if name.endswith("ui") and min(args) < 0:
+            return None
         if name in (
             "arith.index_cast",
             "arith.index_castui",
@@ -914,6 +923,18 @@ class Derivation:
             return args[0] - args[1]
         if name == "arith.muli":
             return args[0] * args[1]
+        if (
+            name
+            in (
+                "arith.divsi",
+                "arith.divui",
+                "arith.ceildivsi",
+                "arith.ceildivui",
+                "arith.floordivsi",
+            )
+            and args[1] == 0
+        ):
+            return None
         if name in ("arith.divsi", "arith.divui"):
             quotient = abs(args[0]) // abs(args[1])
             return quotient if (args[0] < 0) == (args[1] < 0) else -quotient
@@ -1178,12 +1199,14 @@ class Derivation:
         """
         taps = {lane: tap for lane, tap, _, _ in operand.transfers()}
         index = np.arange(operand.elements)
-        per = math.prod(operand.obj_shape)
         streams = []
         for lane, handle in enumerate(operand.lane_handles):
             stream = taps[lane].gather(index)
-            objects = None if whole else self.objects.get(handle.object_fifo)
-            streams.append(stream if objects is None else stream[: objects * per])
+            fifo = handle.object_fifo
+            objects = None if whole else self.objects.get(fifo)
+            streams.append(
+                stream if objects is None else stream[: objects * math.prod(fifo.shape)]
+            )
         return streams
 
     def _restaged(
