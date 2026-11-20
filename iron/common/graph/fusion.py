@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import itertools
 from collections.abc import Sequence
 from typing import Any
 
@@ -211,6 +212,38 @@ def _pack_conflicts(recording: Recording) -> set[tuple[int, int]]:
     return conflicts
 
 
+def memory_waits(
+    recording: Recording, match: Sequence[int], edges: Sequence[Edge]
+) -> tuple[tuple[int, int], ...]:
+    """Each pair of a region's steps that depend through host memory with no edge between them.
+
+    Two steps depend where one writes a host buffer root the other reads or
+    writes too. With no edge of the region joining them, the later in
+    recorded order runs a phase after the earlier (``Fusion.waits``), so a
+    reader sees the write landed and a writer does not overwrite what is
+    still to be read.
+
+    Args:
+        recording: The recording ``match`` is a match in.
+        match: The region's steps, as indices into ``recording.steps``.
+        edges: The region's edges, indexing ``match``.
+
+    Returns:
+        Each such pair ``(earlier, later)``, as indices into ``recording.steps``.
+    """
+    joined = {(match[e.producer], match[e.consumer]) for e in edges}
+    uses = {s: recording.steps[s].roots() for s in match}
+    return tuple(
+        (a, b)
+        for a, b in itertools.combinations(sorted(match), 2)
+        if (a, b) not in joined
+        and (
+            set(uses[a][1]) & {*uses[b][0], *uses[b][1]}
+            or set(uses[b][1]) & set(uses[a][0])
+        )
+    )
+
+
 def _pack_runs(recording: Recording) -> list[Fusion]:
     """Every maximal run of consecutive, pairwise independent steps.
 
@@ -326,8 +359,10 @@ def composed(
     region of consecutive steps runs as one stream or staged fusion where
     its on-chip edges are all streams, as one staged fusion where any is
     staged (its stream edges fed as they are), and as a pack where it has no
-    edge. A DDR edge's consumer reads what its producer wrote to host memory
-    a phase or more later (a phased fusion, ``Fusion.waits``). A cascade
+    edge and no two of its steps depend. A DDR edge's consumer reads what its
+    producer wrote to host memory a phase or more later (a phased fusion,
+    ``Fusion.waits``), and so does the later of two steps that depend
+    through host memory with no edge between them (``memory_waits``). A cascade
     edge carries its producer's output to its consumer's core over the
     cascade (``Operand.cascade_to``). Chosen phases run each step in its in-edges'
     phase (``Fusion.phases``).
@@ -350,8 +385,7 @@ def composed(
             (``compose.phases``, at build), or an entry rooted at a step,
             with nested regions, inflows, shared workers, fission, a self-loop over a carried buffer, cascades beside staged or DDR
             edges, a DDR
-            edge's chosen depth, matching steps that are not consecutive,
-            members that depend through memory with no edge between them, or
+            edge's chosen depth, matching steps that are not consecutive, or
             an edge the composer does not build as its kind (``admits``). An edge out of a buffer steps past
             the region, a DDR edge or the host also read keeps its drain to
             host (a tee, ``Fusion.kept``).
@@ -382,7 +416,6 @@ def composed(
     tunables: dict[int, dict[str, Any]] = {}
     fused: list[Fusion] = []
     taken: set[int] = set()
-    conflicts = _pack_conflicts(recording)
     readers, _ = recording.users()
     # The steps of the configurations concurrent under each id, run as one pack.
     at_once: dict[int, set[int]] = {}
@@ -479,17 +512,7 @@ def composed(
                     f"building a region of steps {match}, which are not "
                     f"consecutive, is not built yet"
                 )
-            joined = {(match[e.producer], match[e.consumer]) for e in root.edges}
-            if any(
-                (a, b) in conflicts and (a, b) not in joined
-                for a in match
-                for b in match
-                if a < b
-            ):
-                raise NotImplementedError(
-                    f"building steps {match} at once, which depend through memory "
-                    f"with no edge between them, is not built yet"
-                )
+            ordered = memory_waits(recording, match, root.edges)
             kept: list[tuple[int, str]] = []
             for e in on_chip:
                 made = recording.steps[match[e.producer]]
@@ -535,7 +558,7 @@ def composed(
                                 if EdgeKind.STAGED in kinds
                                 else FusionKind.STREAM
                             )
-                            if kinds
+                            if kinds or ordered
                             else FusionKind.PACK
                         ),
                         match,
@@ -554,11 +577,14 @@ def composed(
                             )
                             for e in on_chip
                         ),
-                        phased=phased,
+                        phased=phased or bool(ordered),
                         kept=tuple(kept),
-                        waits=tuple(
-                            (match[e.producer], match[e.consumer])
-                            for e in through_memory
+                        waits=(
+                            *(
+                                (match[e.producer], match[e.consumer])
+                                for e in through_memory
+                            ),
+                            *ordered,
                         ),
                         workers=tuple(
                             tuple(match[i] for i in group) for group in root.workers
