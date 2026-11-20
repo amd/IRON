@@ -137,6 +137,31 @@ def test_several_regions_in_one_packing_round_trip_and_are_proposed(tmp_path, de
     )
 
 
+@pytest.mark.supported_devices("npu2")
+def test_several_regions_in_one_configuration_are_bit_identical(device):
+    """Two regions, each a GEMV streamed into its SiLU, loaded together in one configuration and run in turn.
+
+    Bit-identical to every step in a configuration of its own.
+    """
+    recording = independent_regions_recording("config_two_regions")
+    ops = [step.op for step in recording.steps]
+    regions = tuple(
+        Region(
+            parts=(member(gemv), member(silu)),
+            edges=(CompositionEdge(0, "C", 1, "x", kind=EdgeKind.STREAM),),
+        )
+        for gemv, silu in (ops[:2], ops[2:])
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=Configuration(parts=regions)))
+    base = Profile()
+    for op in ops:
+        base.add_entry(Entry(root=Configuration(parts=(member(op),))))
+    assert fit(profile, [Timed(recording)], device).ok
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
 @unbuilt
 def test_nesting_a_region_inside_a_region_round_trips_and_is_proposed(tmp_path, device):
     """A region nested inside a region (the Alternating toy's two halves grouped, then wrapped) round-trips and is a candidate."""
@@ -185,7 +210,6 @@ def test_concurrency_one_after_another_is_bit_identical(device):
     assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_concurrency_at_once_with_no_shared_data_is_bit_identical(device):
     """Independent steps sharing a configuration concurrently (``Configuration.concurrent``) are bit-identical to each loaded alone.
@@ -222,7 +246,6 @@ def test_concurrency_at_once_of_consecutive_steps_is_bit_identical(device):
     assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_disjoint_columns_concurrency_is_bit_identical(device):
     """Two designs on disjoint columns at once (``Configuration.concurrent`` with a ``columns`` width each) are bit-identical to each alone."""
@@ -250,7 +273,6 @@ def test_disjoint_columns_concurrency_is_bit_identical(device):
     assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_width_partial_columns_is_bit_identical(device):
     """``Configuration.columns`` (a partial width) is bit-identical to the full-width configuration."""
@@ -409,6 +431,29 @@ def test_members_running_at_once_sharing_written_data_is_refused(device):
     assert not result.ok
     assert result.stage == "analysis"
     assert "independent" in (result.why or "") or "shared" in (result.why or "")
+
+
+def test_a_member_given_more_columns_than_its_configuration_is_refused(device):
+    """A configuration at a partial width narrows its members to fit; one given a wider width itself is refused by counts, before any build."""
+    gemv, silu, mul = gemv_silu_mul(M=256, cols=4, tile=64)
+    profile = Profile()
+    profile.add_entry(
+        Entry(
+            root=Configuration(
+                parts=(
+                    Member(
+                        type(gemv), {"M": gemv.M, "K": gemv.K}, {"num_aie_columns": 4}
+                    ),
+                ),
+                columns=2,
+            )
+        )
+    )
+    recording = gemv_silu_mul_recording("config_member_too_wide", gemv, silu, mul)
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "counts"
+    assert "columns" in (result.why or "")
 
 
 def test_residency_across_a_teardown_is_refused(device):
