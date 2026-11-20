@@ -178,6 +178,9 @@ class GEMM(Operator):
     a_l2: int = tunable(repr=False, init=False)
     b_l2: int = tunable(repr=False, init=False)
     c_l2: int = tunable(repr=False, init=False)
+    # Bounded rows: C drains only the row blocks a call computes
+    # (``row_block_walks``), its padding tiles making none.
+    drains_bounded: bool = tunable(repr=False, init=False)
 
     A = In(M, K, dtype=input_dtype, obj_shape=(a_l2,), per=(n_shim_mem_a,))
     B = In(
@@ -192,7 +195,8 @@ class GEMM(Operator):
         obj_shape=(c_l2,),
         per=(num_aie_columns,),
     )
-    # A bound limits the compute, not the DMAs: A's pattern fills all four BD dims.
+    # A bound limits the compute, not A's or B's DMAs: A's pattern fills all
+    # four BD dims. C's drain it limits where ``drains_bounded`` holds it.
     valid = per_call(bounds=M)
     # The last K tile zeroes A's columns and B's rows past the bound.
     valid_k = per_call(bounds=K)
@@ -207,7 +211,7 @@ class GEMM(Operator):
     k_valid = per_call(derive=lambda op: op.valid_k)
 
     def extent_unit(self, buffer: str) -> int:
-        return 0  # nothing is shortened: the cores bound their compute
+        return 0  # no extent word: a shortened C drain reads row_blocks_valid
 
     @property
     def n_a_tiles_per_shim(self) -> int:
@@ -336,11 +340,15 @@ class GEMM(Operator):
                 f"tile_n={self.tile_n}: a core holds {held} bytes, past its "
                 f"{dev.core_memory_bytes}"
             )
-        return new.replace(
+        new = new.replace(
             n_shim_mem_a=min(cols, new.n_aie_rows),
             a_l2=new.mem_tile_m_a * self.tile_k,
             b_l2=self.tile_k * self.tile_n,
             c_l2=new.mem_tile_m_c * self.tile_n,
+        )
+        return new.replace(
+            drains_bounded="valid" in self.bound_values
+            and new.row_block_walks is not None
         )
 
     def compatible(self) -> None:
@@ -378,6 +386,25 @@ class GEMM(Operator):
         return self.precision == Precision.HIGHEST and (
             np.dtype(self.output_dtype) == np.dtype(bfloat16)
         )
+
+    @property
+    def row_block_walks(self) -> list[TensorAccessPattern] | None:
+        """Return each lane's C walk with its row blocks a dimension below a unit iteration, the dimension a per-call length sizes.
+
+        None where there is no such walk: a column-major C, more than one
+        column tile a lane (the walk then takes every dimension, the blocks
+        its iteration), or a walk one descriptor does not hold.
+        """
+        M, N, rows, n = self.M, self.N, self.mem_tile_m_c, self.tile_n
+        if self.c_col_maj or N != self.mem_tile_n:
+            return None
+        walks = [
+            TensorAccessPattern(
+                (M, N), col * n, [1, M // rows, rows, n], [0, rows * N, N, 1]
+            )
+            for col in range(self.num_aie_columns)
+        ]
+        return walks if all(self.C.fits(w) for w in walks) else None
 
     def matmul(self):
         """Return the m x k x n kernel each core runs."""
@@ -433,6 +460,7 @@ class GEMM(Operator):
         C_l1l2_fifos: list[list[Any]] = [[None] * n_aie_cols for _ in range(n_aie_rows)]
 
         bounded = self.value("valid").in_scratchpad
+        trimmed = bounded and self.drains_bounded
         k_bounded = self.value("valid_k").per_call
         read = [self.k_div_k, self.n_tiles]
         if bounded:
@@ -515,9 +543,12 @@ class GEMM(Operator):
                 spans = [(k_compute, True), (rtp_K_div_k - k_compute, False)]
 
             def tile(compute: bool):
+                # A padding tile makes no C where the drain takes only the
+                # computed row blocks.
+                makes_c = compute or not trimmed
                 if wider:
                     acc = elem_out_internal
-                else:
+                elif makes_c:
                     acc = c = out_c.acquire(1)
                 if compute:
                     zero(acc)
@@ -532,6 +563,8 @@ class GEMM(Operator):
                             matmul(elem_in_a, elem_in_b, acc)
                         in_a.release(1)
                         in_b.release(1)
+                if not makes_c:
+                    return
                 if wider:
                     c = out_c.acquire(1)
                     if compute:
@@ -543,7 +576,7 @@ class GEMM(Operator):
                     for _ in range_(col_tiles):
                         tile(compute=True)
                 for _ in range_(rtp_n_tiles_per_core - row_blocks * col_tiles):
-                    tile(compute=False)  # a padding tile: passed through
+                    tile(compute=False)  # a padding tile
                 return
             for _ in range_(rtp_n_tiles_per_core):
                 tile(compute=True)
@@ -631,6 +664,24 @@ class GEMM(Operator):
                 return C_grid[col::n_aie_cols, pieces]
             return C_grid[c_row_base : c_row_base + c_n_rows, col::n_aie_cols]
 
+        # Under a bound, each lane's C one drain sized by the row blocks the
+        # call computes, awaited once every fill is.
+        trimmed = (
+            self.row_block_walks
+            if self.drains_bounded and self.value("valid").in_scratchpad
+            else None
+        )
+        if trimmed is not None:
+            drains = rt.task_group()
+            for col, walk in enumerate(trimmed):
+                self.C.drain(
+                    walk,
+                    lane=col,
+                    group=drains,
+                    wait=True,
+                    length_parameter=self.row_blocks_valid,
+                    length_unit=mem_tile_m_C * n,
+                )
         tg = rt.task_group()
         for tb in range(ceildiv(n_c_row_tiles_per_core, tb_max_n_rows)):
             for pingpong in [0, 1]:
@@ -642,8 +693,10 @@ class GEMM(Operator):
                     break
                 for col in range(n_aie_cols):
                     # A row stride past the BD's 20-bit step: a drain per row-block.
-                    C_tiles = [c_tile(col, row_base, current_tb_n_rows)]
-                    if not c_col_maj and not self.C.fits(C_tiles[0]):
+                    C_tiles = (
+                        [] if trimmed else [c_tile(col, row_base, current_tb_n_rows)]
+                    )
+                    if C_tiles and not c_col_maj and not self.C.fits(C_tiles[0]):
                         C_tiles = [
                             c_tile(col, row_base + r, 1)
                             for r in range(current_tb_n_rows)
@@ -662,12 +715,15 @@ class GEMM(Operator):
                     rt.finish(tg)
                     tg = rt.task_group()
         rt.finish(tg)
+        if trimmed is not None:
+            rt.finish(drains)
 
     def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
         """Return each lane's whole-buffer walk, the one ``sequence`` emits.
 
-        A, B and C's host order never shortens under a bound: ``sequence`` moves every
-        tile regardless, and a bound only zeroes compute past it.
+        A's and B's host order never shortens under a bound: ``sequence`` moves
+        every tile regardless. C's drain moves the row blocks the call computes
+        where ``drains_bounded`` holds it, else every tile.
         """
         M, K, N = self.M, self.K, self.N
         tm, tk, tn = self.tile_m, self.tile_k, self.tile_n
@@ -711,6 +767,17 @@ class GEMM(Operator):
                 )
             else:
                 grid = TensorAccessPattern.full((M, N)).tile((self.mem_tile_m_c, tn))
+            walks = (
+                self.row_block_walks
+                if self.drains_bounded and self.value("valid").in_scratchpad
+                else None
+            )
+            if walks is not None:
+                unit = self.mem_tile_m_c * tn
+                return [
+                    (col, walk, self.row_blocks_valid, unit)
+                    for col, walk in enumerate(walks)
+                ]
             return [(col, grid[:, col::n_cols], None, None) for col in range(n_cols)]
         return None
 

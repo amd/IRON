@@ -12,7 +12,7 @@ from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Member, Refinement, Region
 from iron.common.graph.record import Recording
 from iron.common.graph.sdf import Derivation, analyze
-from iron.common.image.step import Edge
+from iron.common.image.step import Edge, EdgeKind
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs
@@ -87,7 +87,6 @@ def test_limbs_expansion_is_a_real_six_to_one_multi_rate_edge(device):
     assert analysis.min_depth[edge] == 1
 
 
-@unbuilt
 def test_per_call_bounded_token_count_is_a_valid_kv_length(device):
     """A GEMM over the first ``n`` of 48 rows (a valid KV length short of ``M``), each row then normalized.
 
@@ -130,6 +129,54 @@ def test_a_bounded_gemms_loops_are_read_off_its_words(n, device):
             loops.append(derivation.read[id(scope)])
         nested += reversed([s for s in scope.body if isinstance(s, Scope)])
     assert loops == [n // 16, 1, 1, 3 - n // 16, 1]
+
+
+def _bounded_rows_region(columns: int, kind: EdgeKind) -> tuple[Recording, Region]:
+    """Return ``BoundedRows`` over 48 rows of ``columns`` columns, a 16-row tile, and its region over a ``kind`` edge."""
+    recording = toys.BoundedRows(tile_m=16).record(a=(48, 64), b=(64, columns))
+    region = Region(
+        tuple(
+            Member(cls=type(s.op), dims=Profile.dims(type(s.op), vars(s.op)))
+            for s in recording.steps
+        ),
+        (Edge(0, "C", 1, "x", kind=kind),),
+    )
+    return recording, region
+
+
+def test_a_bounded_gemm_draining_every_tile_into_valid_rows_is_refused(device):
+    """A bounded GEMM draining every tile, its padding too, into a norm over only the valid rows: refused at the analysis.
+
+    Its lanes each hold two column tiles. Each lane's C walk then takes every descriptor dimension, so no per-call
+    length sizes its row blocks: at ``n = 16`` it writes 48 rows, and the
+    norm reads 16.
+    """
+    recording, region = _bounded_rows_region(128, EdgeKind.STREAM)
+    assert not recording.steps[0].op.resolved(device).drains_bounded
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    result = fit(profile, [Timed(recording, {"n": 16})], device)
+    assert not result.ok
+    assert result.stage == "analysis"
+    assert "objects written a call" in result.why
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("n", [16, 32, 48])
+def test_a_valid_kv_length_streamed_into_its_rows_is_bit_identical(n, device):
+    """``BoundedRows``' GEMM over the first ``n`` of 48 rows streamed into its norm a row at a time: bit-identical to the steps run apart.
+
+    One column tile a lane, so its C drains only the row blocks the call
+    computes and its padding tiles make none.
+    """
+    recording, region = _bounded_rows_region(64, EdgeKind.STREAM)
+    assert recording.steps[0].op.resolved(device).drains_bounded
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    calls = [Timed(recording, {"n": n})]
+    assert fit(profile, calls, device).ok
+    result = check(profile, Profile(), calls, device, Refinement.EXACT)
+    assert result.ok, result.why
 
 
 # Where GEMM composes beside another operator: npu1 builds GEMM on an array
