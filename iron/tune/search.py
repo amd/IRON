@@ -31,6 +31,7 @@ from aie import ir
 from aie.dialects.aie import get_target_model
 from aie.iron.device import Device
 from aie.utils import set_current_device
+from aie.utils.compile.jit.params import OperatorParam
 
 from ..common.declare import Profile
 from ..common.declare.composition import (
@@ -800,7 +801,13 @@ def fit(
 
     Each call's weights an operator reads coded by declaration (``Decode``),
     with no flag to read them plain, must each code within its rows'
-    capacity: the counts refuse the first row that does not.
+    capacity: the counts refuse the first row that does not. A step that
+    reads its weight coded (under its coded flag, or fed on chip by a step
+    reading coded by declaration) must share its array (``array_key`` as
+    recorded) with no step reading plain: coding is part of the array, so
+    coding part of a shared array splits it, and a packing that fit runs
+    out of cores. A split proposed with it would be taken, but a split is
+    not representable yet, so the counts refuse every such profile.
 
     Its values' own choices, before any entry: no more values bound at run
     time than a call's scratchpad holds (``SCRATCHPAD_WORDS``, a word
@@ -1076,6 +1083,47 @@ def fit(
         if retuned:
             recording = dataclasses.replace(recording, steps=steps)
             recording.rebind(retuned)
+        # Each step that reads its weight coded: under its own flag, or fed
+        # on chip by a step reading coded by declaration (Decode).
+        coded = {
+            i
+            for i, step in enumerate(steps)
+            if any(
+                b.coded and isinstance(b.declared_coded, OperatorParam)
+                for b in step.op.buffers
+            )
+        }
+        for entry in profile.entries():
+            if isinstance(entry.root, Member):
+                continue
+            edges, _ = entry.root.wiring()
+            for match in timed.recording.occurrences(entry):
+                for k, m in enumerate(entry.root.steps()):
+                    if any(
+                        isinstance(b.declared_coded, OperatorParam)
+                        and (m.tunables or {}).get(b.declared_coded.name) is True
+                        for b in steps[match[k]].op.buffers
+                    ):
+                        coded.add(match[k])
+                for _, p, c in edges:
+                    if any(
+                        b.declared_coded is True for b in steps[match[p]].op.buffers
+                    ):
+                        coded.add(match[c])
+        with set_current_device(device):
+            arrays = [s.op.resolved(device).array_key() for s in timed.recording.steps]
+        for i in sorted(coded):
+            plain = [
+                j for j, key in enumerate(arrays) if key == arrays[i] and j not in coded
+            ]
+            if plain:
+                return Fit(
+                    False,
+                    "counts",
+                    f"{recording.name}: steps {i} and {plain[0]} share an array, and "
+                    f"coding the weight step {i} reads but not step {plain[0]}'s "
+                    f"splits it",
+                )
         # The rest is fitted as built: its version as its schedule runs it,
         # its regions' steps gathered (``Recording.ordered``).
         single = recording
