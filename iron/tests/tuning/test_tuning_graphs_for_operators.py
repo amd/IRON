@@ -268,16 +268,16 @@ def test_decode_graph_holds_deep_cache_accuracy(position, device):
     assert result.ok, result.why
 
 
-# Where prefill's GEMMs compose beside another operator. npu1 builds GEMM on an
-# array narrower than the device, which a configuration beside another
+# Where attention's GEMMs compose beside another operator. npu1 builds GEMM on
+# an array narrower than the device, which a configuration beside another
 # operator's does not take.
-_PREFILL_BUILT = [
+_GEMM_COMPOSED = [
     pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
     for name in sorted(DEVICES)
 ]
 
 
-@pytest.mark.parametrize("device", _PREFILL_BUILT, indirect=True)
+@pytest.mark.parametrize("device", _GEMM_COMPOSED, indirect=True)
 def test_prefill_scores_stage_into_the_mask_add_and_fit(device):
     """Prefill's float32 scores, QK^T's column halves, staged into the mask add's rows, which stream into the softmax: the region fits.
 
@@ -306,7 +306,7 @@ def test_prefill_scores_staged_into_the_mask_add_are_bit_identical(device):
     assert result.ok, result.why
 
 
-@pytest.mark.parametrize("device", _PREFILL_BUILT, indirect=True)
+@pytest.mark.parametrize("device", _GEMM_COMPOSED, indirect=True)
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_prefill_graph_is_no_worse_than_its_own_untuned_build(device):
     qk, add_mask, softmax, pv = toys.prefill_attention_ops(SEQ, KV_LEN, HEAD_DIM)
@@ -317,16 +317,15 @@ def test_prefill_graph_is_no_worse_than_its_own_untuned_build(device):
     assert result.ok, result.why
 
 
+@pytest.mark.parametrize("device", _GEMM_COMPOSED, indirect=True)
 @pytest.mark.supported_devices("npu1", "npu2")
-@unbuilt
 def test_decode_graph_is_no_worse_than_the_fused_mha_it_replaces(device):
-    """Held to the fused ``MHA`` operator it replaces, at the same sizes, the graph's float32 scores are no worse."""
-    qk, softmax, pv = toys.decode_attention_ops(KV_LEN, HEAD_DIM, ROWS)
-    graph_recording = toys.decode_attention_recording("decode_vs_mha", qk, softmax, pv)
+    """Held to the fused ``MHA`` operator it replaces, over its own Q, K and V, the graph's float32 scores are no worse."""
     mha = toys.decode_attention_operator(KV_LEN, HEAD_DIM, ROWS)
+    graph_recording, region = toys.decode_attention_graph(mha)
     operator_recording = toys.decode_attention_operator_recording("decode_mha", mha)
     profile = Profile()
-    profile.add_entry(Entry(root=_decode_region()))
+    profile.add_entry(Entry(root=region))
     result = check(
         profile,
         Profile(),
@@ -338,7 +337,7 @@ def test_decode_graph_is_no_worse_than_the_fused_mha_it_replaces(device):
     assert result.ok, result.why
 
 
-@pytest.mark.parametrize("device", _PREFILL_BUILT, indirect=True)
+@pytest.mark.parametrize("device", _GEMM_COMPOSED, indirect=True)
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_prefill_graph_is_no_worse_than_the_fused_mha_it_replaces(device):
     """Held to the fused ``MHA`` operator it replaces, over its own Q, K and V, scores matched to its own float32 setting, the graph is no worse."""
@@ -381,12 +380,16 @@ def test_a_bf16_mul_then_add_hand_off_is_refused_against_the_fused_axpy(device):
 
 
 @pytest.mark.extensive
-@pytest.mark.supported_devices("npu1", "npu2")
-@unbuilt  # a batched GEMV's B streams on no fifo of its own
+# npu1's waits on host 203.
+@pytest.mark.supported_devices("npu2")
 def test_search_composes_the_decode_graph_where_it_pays(device):
-    region = _decode_region()
-    entry = Entry(root=region)
     qk, softmax, pv = toys.decode_attention_ops(KV_LEN, HEAD_DIM, ROWS)
+    entry = Entry(
+        root=Region(
+            parts=tuple(member(op) for op in (qk, softmax, pv)),
+            edges=_decode_region().edges,
+        )
+    )
     recording = toys.decode_attention_recording("decode_search", qk, softmax, pv)
     calls = [Timed(recording)]
     start = Profile()
@@ -394,8 +397,10 @@ def test_search_composes_the_decode_graph_where_it_pays(device):
     with_entry.add_entry(entry)
     ratio = measure(with_entry, start, calls, device).ratio
     tuned = search(calls, start, device)
+    # Where the graph composed pays, what search keeps is at least as fast (a
+    # later round may hold an edge or batch calls on top).
     if ratio < 0.95:
-        assert entry in tuned.entries()
+        assert measure(tuned, with_entry, calls, device).ratio < 1.05
     if ratio > 1.05:
         assert entry not in tuned.entries()
     result = check(tuned, start, calls, device, Refinement.NO_WORSE)
@@ -403,7 +408,7 @@ def test_search_composes_the_decode_graph_where_it_pays(device):
 
 
 @pytest.mark.extensive
-@pytest.mark.parametrize("device", _PREFILL_BUILT, indirect=True)
+@pytest.mark.parametrize("device", _GEMM_COMPOSED, indirect=True)
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_search_composes_the_prefill_graph_where_it_pays(device):
     qk, add_mask, softmax, pv = toys.prefill_attention_ops(SEQ, KV_LEN, HEAD_DIM)
