@@ -185,6 +185,55 @@ class Region:
         )
         return replace(self, edges=edges)
 
+    def repeated(self, calls: int) -> Region:
+        """Return this region over ``calls`` calls one command runs, as one region.
+
+        Each part once a call, in turn; each edge within a call once a call;
+        each edge across calls (``Edge.across_calls``) from each call's
+        producer into the next call's consumer, a stream putting the two on
+        one worker, so the value stays in that core's memory.
+
+        Raises:
+            NotImplementedError: It chooses phases, nests regions or takes
+                inflows: repeating those is not built yet.
+        """
+        if (
+            self.phases is not None
+            or self.inflows
+            or not all(isinstance(p, Member) for p in self.parts)
+        ):
+            raise NotImplementedError(
+                f"{calls} calls of a region with chosen phases, nested regions or "
+                f"inflows as one region are not built yet"
+            )
+        k = len(self.parts)
+        edges = tuple(
+            replace(
+                e,
+                producer=e.producer + j * k,
+                consumer=e.consumer + (j + e.across_calls) * k,
+            )
+            for j in range(calls)
+            for e in self.edges
+            if not e.across_calls or j + 1 < calls
+        )
+        groups = [
+            {s + j * k for s in group} for j in range(calls) for group in self.workers
+        ]
+        for e in edges:
+            if e.kind is EdgeKind.STREAM and e.producer // k != e.consumer // k:
+                joined = {e.producer, e.consumer}
+                for group in [g for g in groups if g & joined]:
+                    joined |= group
+                    groups.remove(group)
+                groups.append(joined)
+        return Region(
+            self.parts * calls,
+            edges,
+            workers=tuple(sorted(tuple(sorted(g)) for g in groups)),
+            runtime=self.runtime,
+        )
+
     def held(self, index: int, place: Hold) -> Region:
         """Return this region with edge ``index`` held at ``place``.
 

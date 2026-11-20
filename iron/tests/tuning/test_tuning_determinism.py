@@ -8,7 +8,6 @@ import pytest
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement
 from iron.tests.support import toys_dataflow as toys
-from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import check
 
@@ -47,7 +46,6 @@ def test_skip_diamond_is_bit_identical_under_its_one_legal_firing_order(device):
         assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_running_sum_is_bit_identical_at_its_one_legal_initial_token_count(device):
     """The running-sum loop with ``acc`` carried across calls (the one count a self-loop edge's carry supports): every repeated ``check`` passes.

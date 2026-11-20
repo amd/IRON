@@ -1006,7 +1006,20 @@ def fit(
                     "built yet"
                 )
                 continue
-            found = recording.occurrences(entry)
+            # A carry across a command's calls is fitted as the one region
+            # over them the composer builds (``Recording.spanned``).
+            try:
+                spanned = recording.spanned(entry)
+            except NotImplementedError as e:
+                matched.add(index)
+                waiting.append(str(e))
+                continue
+            except ValueError as e:
+                return Fit(False, "analysis", str(e))
+            if spanned is not None:
+                region, found = spanned[0], (spanned[1],)
+            else:
+                found = recording.occurrences(entry)
             if not found:
                 # Matched as recorded, its steps gathered into a region
                 # before it: it gives way, as an overlapping entry does.
@@ -1269,6 +1282,7 @@ def fit(
                     (p, edge.output)
                     for edge, p, _ in derivation.wired
                     if edge.kind is not EdgeKind.DDR
+                    and not edge.across_calls
                     and (
                         set(readers.get(derivation.refs[p][edge.output].root, []))
                         - inside
@@ -1344,21 +1358,26 @@ def fit(
                                 if kinds or ordered
                                 else None
                             ),
+                            # A carry across calls is filled and drained
+                            # around the call, as the composer builds it.
                             edges=[
                                 (e.producer, e.output, e.consumer, e.input)
                                 for e in region.edges
                                 if e.kind in (EdgeKind.STREAM, EdgeKind.STAGED)
+                                and not e.across_calls
                             ],
                             cascades=[
                                 (e.producer, e.output, e.consumer, e.input)
                                 for e in region.edges
-                                if e.kind is EdgeKind.CASCADE
+                                if e.kind is EdgeKind.CASCADE and not e.across_calls
                             ],
                             kept=kept,
                             depths={
                                 (e.producer, e.output): e.depth
                                 for e in region.edges
-                                if e.depth is not None and e.kind is not EdgeKind.DDR
+                                if e.depth is not None
+                                and e.kind is not EdgeKind.DDR
+                                and not e.across_calls
                             },
                             waits=[
                                 *(

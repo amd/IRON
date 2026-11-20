@@ -13,14 +13,12 @@ from iron.common.image.step import Edge
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.tests.support import sequences
 from iron.tests.support import toys_dataflow as toys
-from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import check, fit
 
 pytestmark = pytest.mark.usefixtures("device")
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_running_sum_with_one_initial_token_loses_nothing_over_several_calls(device):
     """A running-sum loop (``acc`` carried across calls) over several calls: ``check`` holds it to the same accumulation run one call at a time."""
@@ -32,7 +30,6 @@ def test_running_sum_with_one_initial_token_loses_nothing_over_several_calls(dev
     assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_running_max_and_sum_carries_both_accumulators(device):
     """Two parallel carried accumulators (running max, running sum) on one edge pair, both carried: neither is lost or doubled."""

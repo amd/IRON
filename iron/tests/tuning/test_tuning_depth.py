@@ -120,7 +120,8 @@ _RESTAGED_MINIMUMS = {
         ("skip", HandOff.RATIO, "same"),
         ("skip", HandOff.RATIO, "different"),
         *(
-            ("through_memory", shape, rate)
+            (role, shape, rate)
+            for role in ("through_memory", "feedback")
             for shape in toys_edges.SHAPES
             for rate in toys_edges.RATES
         ),

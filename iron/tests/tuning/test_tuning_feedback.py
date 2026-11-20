@@ -19,7 +19,14 @@ import dataclasses
 import pytest
 
 from iron.common.declare import Profile
-from iron.common.declare.composition import Entry, Hold, Refinement, Region
+from iron.common.declare.composition import (
+    Configuration,
+    Entry,
+    Hold,
+    Refinement,
+    Region,
+    Schedule,
+)
 from iron.common.graph.record import Recording
 from iron.common.graph.sdf import analyze
 from iron.common.image.step import Edge
@@ -34,7 +41,7 @@ from iron.tests.support.toys_edges import (
 )
 from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import check, fit, search
+from iron.tune.search import BUILT_PLACERS, check, fit, search
 
 _ACCUMULATOR_SIZE = 256
 
@@ -137,7 +144,7 @@ def test_a_cycle_with_its_initial_values_round_trips(cycle, tmp_path, device):
                 ),
             )
             if c == "sample_drawn_token"
-            else pytest.param(c, marks=unbuilt)
+            else c
         )
         # Trail's carry is checked on its own below.
         for c in sorted(CYCLES)
@@ -185,11 +192,6 @@ def test_a_carry_with_no_recorded_range_is_refused_by_name(device):
 
 
 @pytest.mark.extensive
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="candidates does not propose a self-loop over a carried buffer yet",
-)
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_tuner_keeps_the_cycle_where_it_pays(device):
     """The tuner, on the scan-state toy alone, keeps the cycle where it pays (fewer dispatches per token)."""
@@ -238,17 +240,75 @@ def test_a_carry_through_host_memory_with_no_initial_value_is_refused(device):
     assert "no initial value" in (result.why or "")
 
 
+@pytest.mark.parametrize(
+    "hold, calls_per_command",
+    [(Hold.L1, 1), (Hold.MEMTILE, 1), (Hold.MEMTILE, 2), (Hold.MEMTILE, 3)],
+)
+@pytest.mark.supported_devices("npu2")
+def test_a_carry_held_on_chip_is_bit_identical_to_the_calls_run_apart(
+    hold, calls_per_command, device
+):
+    """A carry held on chip, its multiply on chip too, is bit-identical to the calls run apart one after another.
+
+    It is filled on a command's first call and drained after its last; in
+    between, each call's carry stays on chip into the next.
+    """
+    recording, region = _accumulator_into_mul()
+    profile = Profile()
+    profile.add_entry(Entry(region.held(0, hold)))
+    if calls_per_command > 1:
+        profile.add_schedule(
+            Schedule(version=recording.version, calls_per_command=calls_per_command)
+        )
+    assert fit(profile, [Timed(recording)], device).ok
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+def test_a_carry_kept_in_one_core_across_calls_takes_each_call_s_inputs_there(device):
+    """Two calls a command, the carry kept in one core's memory, put both calls' adds on that core: the placer refuses it before any build.
+
+    Each call's add brings its own input streams to the one core.
+    """
+    recording, region = _accumulator_into_mul()
+    profile = Profile()
+    profile.add_entry(Entry(region.held(0, Hold.L1)))
+    profile.add_schedule(Schedule(version=recording.version, calls_per_command=2))
+    verdict = fit(profile, [Timed(recording)], device, placements=tuple(BUILT_PLACERS))
+    assert not verdict.ok and verdict.stage == "placer"
+    assert "DMA channels" in (verdict.why or "")
+
+
+def test_a_carry_on_a_step_sharing_its_core_gets_a_verdict(device):
+    """The accumulator and its multiply on one core, the carry a self-loop: fit gives the placer's verdict, before any build.
+
+    The analysis joins the two steps' actors within the call and leaves the
+    carry across calls to its initial objects; it neither splices the carry
+    into its own step nor joins that step to itself.
+    """
+    recording, region = _accumulator_into_mul()
+    profile = Profile()
+    profile.add_entry(Entry(dataclasses.replace(region, workers=((0, 1),))))
+    verdict = fit(profile, [Timed(recording)], device, placements=tuple(BUILT_PLACERS))
+    assert not verdict.ok and verdict.stage == "placer"
+    assert "DMA channels" in (verdict.why or "")
+
+
 @pytest.mark.parametrize("hold", [Hold.L1, Hold.MEMTILE])
-def test_a_carry_held_on_chip_between_calls_waits_on_residency(hold, device):
-    """A carry across calls held on chip is not built: it stays resident between commands, which nothing loads or keeps yet."""
+def test_a_carry_held_on_chip_between_commands_waits_on_residency(hold, device):
+    """A carry held on chip and kept resident into the next command is not built.
+
+    Within a command it is filled and drained; nothing keeps it on chip
+    between dispatches.
+    """
     recording, region = _running_accumulator(carried=True)
     profile = Profile()
     profile.add_entry(Entry(region.held(0, hold)))
-    with pytest.raises(NotImplementedError, match="resident between calls"):
+    profile.add_entry(Entry(Configuration(parts=(region.parts[0],), resident=("acc",))))
+    with pytest.raises(NotImplementedError, match="resident"):
         fit(profile, [Timed(recording)], device)
 
 
-@unbuilt
 def test_the_recorded_initial_value_fits(device):
     """The same accumulator, its recording carrying the accumulator's initial value, is not refused by the analysis."""
     recording, region = _running_accumulator(carried=True)
