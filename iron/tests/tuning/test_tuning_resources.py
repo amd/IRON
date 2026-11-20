@@ -7,17 +7,25 @@ import pytest
 from aie.dialects.aie import get_target_model
 
 from iron.common.declare import Profile
-from iron.common.declare.composition import Entry, Member, Region
+from iron.common.declare.composition import Entry, Member, Refinement, Region
 from iron.common.image.step import Edge, EdgeKind
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemv import GEMV
 from iron.tests.support import toys_dataflow as toys
 from iron.tests.support.fusable import gemv_add_recording
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import fit
+from iron.tune.search import check, fit
 
 pytestmark = pytest.mark.usefixtures("device")
+
+# Where GEMM composes beside another operator: npu1 builds GEMM on an array
+# narrower than the device, which a configuration beside another's does not take.
+_GEMM_BESIDE = [
+    pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
+    for name in sorted(DEVICES)
+]
 
 
 def test_a_deep_buffer_within_the_memtile_budget_is_counted_and_fits(device):
@@ -38,14 +46,16 @@ def test_a_deep_buffer_within_the_memtile_budget_is_counted_and_fits(device):
     assert result.ok
 
 
-@unbuilt
 def test_a_strided_token_pattern_counts_its_buffer_descriptors(device):
-    """A row-tiled edge counts the buffer descriptors its stride needs.
+    """A row-tiled edge counts the buffer descriptors its stride needs, with the rest of its core's.
 
     A real 16-row tile (``tile_m = 16``) into a per-row consumer, so
     neither end moves whole rows a firing as a contiguous edge would.
     ``M = 48`` keeps the row split each device's array resolves at one, so the
-    real per-firing count is ``tile_m`` alone and depth 16 is its minimum.
+    real per-firing count is ``tile_m`` alone. At depth 16 the norm's core
+    holds a whole tile, a row an object and a buffer descriptor each, read
+    from GEMM's memtile, and drains its own rows past them: past a core
+    tile's descriptors, refused before any build.
     """
     gemm, norm = toys.gemm_rowwise(device, M=48, row_tile=16)
     assert gemm.n_aie_rows == 1
@@ -54,7 +64,46 @@ def test_a_strided_token_pattern_counts_its_buffer_descriptors(device):
     profile.add_entry(Entry(root=region))
     recording = toys.gemm_rowwise_recording("strided", gemm, norm)
     result = fit(profile, [Timed(recording)], device)
-    assert result.ok
+    target = get_target_model(device.resolve())
+    assert target is not None
+    core_row = next(r for r in range(target.rows()) if target.is_core_tile(0, r))
+    assert not result.ok
+    assert result.stage == "counts"
+    assert "step 1 (RMSNorm)'s core 0 moves" in result.why
+    assert f"a core tile has {target.get_num_bds(0, core_row)}" in result.why
+
+
+@pytest.mark.parametrize("device", _GEMM_BESIDE, indirect=True)
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_core_using_every_buffer_descriptor_is_bit_identical(device):
+    """The strided edge at the deepest its norm's core holds fits, and one object deeper is refused at the counts.
+
+    The count is the placer's own: at the deepest depth ``fit`` takes, the
+    norm's core uses every buffer descriptor a core tile has, and the fused
+    build runs bit-identical to the steps apart.
+    """
+    target = get_target_model(device.resolve())
+    assert target is not None
+    core_row = next(r for r in range(target.rows()) if target.is_core_tile(0, r))
+    bds = target.get_num_bds(0, core_row)
+    gemm, norm = toys.gemm_rowwise(device, M=48, row_tile=16)
+    recording = toys.gemm_rowwise_recording("every-descriptor", gemm, norm)
+    profiles = {}
+    for depth in range(bds, 0, -1):
+        profiles[depth] = Profile()
+        profiles[depth].add_entry(
+            Entry(root=toys.gemm_rowwise_region(gemm, norm, depth=depth))
+        )
+        if fit(profiles[depth], [Timed(recording)], device).ok:
+            break
+    refused = fit(profiles[depth + 1], [Timed(recording)], device)
+    assert not refused.ok
+    assert refused.stage == "counts"
+    assert f"moves {bds + 1} objects by DMA" in refused.why
+    result = check(
+        profiles[depth], Profile(), [Timed(recording)], device, Refinement.EXACT
+    )
+    assert result.ok, result.why
 
 
 def test_more_buffer_descriptors_than_a_tile_holds_is_refused_before_any_build(device):
