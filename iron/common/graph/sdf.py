@@ -573,9 +573,12 @@ class Derivation:
             bound = {
                 b.member.name: b.expression for b in recording.bindings if b.op is op
             }
-            if member.tunables:
-                with set_current_device(device):
-                    op = op._with_tunables(**member.tunables).resolved(device)
+            # Resolved, as its array builds it: a per-call word it derives reads
+            # its resolved tunables.
+            with set_current_device(device):
+                op = (
+                    op._with_tunables(**member.tunables) if member.tunables else op
+                ).resolved(device)
             bindings.append(
                 (
                     bound,
