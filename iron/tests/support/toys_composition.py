@@ -37,6 +37,7 @@ from iron.operators import (
 )
 from iron.operators.copy import Copy
 from iron.tests.support import fusable, sequences
+from iron.tests.support.toys_edges import member
 
 
 def has_worker_group(
@@ -397,19 +398,33 @@ def cascade_region(member_dims: list[Member], output: str, input: str) -> Region
     return Region(parts=tuple(member_dims), edges=edges)
 
 
-def fan_in_reducer_region(
-    members: list[Member], reducer: Member, output: str, a: str, b: str
-) -> Region:
-    """Return ``members``' partials fed to one reducing ``Member`` by a fixed-order chain."""
-    parts = list(members)
+def fan_in_reducer_region(recording: Recording, splits: int) -> Region:
+    """Return ``gemv_fan_in_recording``'s partials fed to its fixed-order chain of adds, each step as recorded.
+
+    The first add reads partials 0 and 1; each later one the running sum
+    (the add before's ``y``) and the next partial. A partial is staged: the
+    GEMV's 32-element objects restage into the add's 64; the running sum
+    streams. Edges by producer, then consumer, as ``candidates`` orders them.
+    """
     edges = []
-    running = 0
-    for i in range(1, len(members)):
-        parts.append(reducer)
-        edges.append(CompositionEdge(running, output, len(parts) - 1, a))
-        edges.append(CompositionEdge(i, output, len(parts) - 1, b))
-        running = len(parts) - 1
-    return Region(parts=tuple(parts), edges=tuple(edges))
+    running, out = 0, "C"
+    for i in range(1, splits):
+        add = splits + i - 1
+        edges += [
+            CompositionEdge(
+                running,
+                out,
+                add,
+                "a",
+                kind=EdgeKind.STREAM if i > 1 else EdgeKind.STAGED,
+            ),
+            CompositionEdge(i, "C", add, "b", kind=EdgeKind.STAGED),
+        ]
+        running, out = add, "y"
+    return Region(
+        parts=tuple(member(step.op) for step in recording.steps),
+        edges=tuple(sorted(edges, key=lambda e: (e.producer, e.consumer))),
+    )
 
 
 # ----------------------------------------------------------------- region shape and schedule

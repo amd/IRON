@@ -13,9 +13,9 @@ from iron.common.declare.composition import (
     Refinement,
 )
 from iron.common.declare.profile import Profile
-from iron.operators import GEMM, GEMV, ElementwiseAdd
+from iron.operators import GEMM, GEMV
 from iron.tests.support import toys_composition as toys
-from iron.tests.support.tuning import unbuilt
+from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, measure, search
 
@@ -64,24 +64,19 @@ def test_a_cascade_chain_round_trips_as_an_entry(
     )
 
 
-@unbuilt
 @pytest.mark.parametrize("splits", [2, 4, 8])
 def test_a_fan_in_to_a_reducer_round_trips_as_an_entry(splits, tmp_path, npu2):
-    members = _gemv_members(splits)
-    reducer = Member(ElementwiseAdd, dict(size=M))
-    region = toys.fan_in_reducer_region(members, reducer, "C", "a", "b")
+    """The partials fed to their chain of adds round-trip, and composing ``candidates``' edits reaches the region."""
+    recording = toys.gemv_fan_in_recording(f"fan_in_{splits}", M, GEMV_K, splits)
+    region = toys.fan_in_reducer_region(recording, splits)
     entry = Entry(root=region)
     profile = Profile()
     profile.add_entry(entry)
     profile.save(tmp_path / "profile.json")
     loaded = Profile.load(tmp_path / "profile.json")
     assert loaded.entries() == profile.entries()
-    recording = toys.gemv_fan_in_recording(f"fan_in_{splits}", M, GEMV_K, splits)
-    calls = [Timed(recording)]
-    assert any(
-        entry in edit.apply(Profile()).entries()
-        for edit in candidates(calls, Profile(), npu2)
-    )
+    reached = reached_by_candidates(region, [Timed(recording)], npu2)
+    assert reached.entries() == [entry]
 
 
 @unbuilt
