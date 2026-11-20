@@ -61,6 +61,7 @@ from ..common.image.step import Edge, EdgeKind, FusionKind, HandOff
 from .autotune import Point, Timed, refusal, settings
 from .cli import WATCHDOG_HEADROOM, watchdog_s
 from .costmodel import CostModel
+from .ddr import Ceiling
 from .fusions import (
     Applied,
     Compared,
@@ -406,7 +407,7 @@ def candidates(
     planned: list[tuple[Entry | Version, str, object]] = []
     cores = device.cols * len(device.core_rows)
     queue = get_target_model(device.resolve()).get_dma_task_queue_depth()
-    ceiling = (CostModel.load(device.name) or CostModel()).ceiling()
+    ceiling = Ceiling.stored(device.name)
     for timed in calls:
         recording = timed.recording
         for entry in profile.entries():
@@ -444,7 +445,7 @@ def candidates(
                     recording,
                     device,
                     timed.values,
-                    ceiling,
+                    None if ceiling is None else ceiling.mixed,
                 ).analysis()
             except (NotImplementedError, ValueError):
                 continue  # depths wait on the analysis modelling the region

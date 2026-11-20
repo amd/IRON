@@ -14,10 +14,9 @@ them far. A tune writes its refit to ``<device>.json`` under the NPU cache
 (``NPU_CACHE_HOME/iron/costs``), so one device's tunes bootstrap the next;
 ``costs/<device>.json`` beside this module seeds a device without one.
 
-Beside the terms, the device's DDR ceiling per power mode, as ``ddr.py``
-measures it (``sdf.Ceiling``): the bytes a host stream moves a core cycle,
-against how many run at once and an object's size, and what a phase
-boundary costs beyond its streams (none in one stored before it was).
+Beside the terms, the device's DDR rates per power mode, as ``ddr.py``
+measures them: the bytes a host stream moves a core cycle, against how many
+run at once and an object's size.
 """
 
 from __future__ import annotations
@@ -30,8 +29,7 @@ from pathlib import Path
 import numpy as np
 from aie.utils.compile import NPU_CACHE_HOME
 
-from ..common.graph.sdf import Ceiling
-from .measure import pmode, write
+from .measure import write
 
 FEATURES = ("switches", "switch_cores", "packed_steps", "dispatches")
 # npu2 (Strix Halo, turbo): a 1-core design alternated with designs of 1 to
@@ -61,7 +59,7 @@ class CostModel:
     )
     # What the terms are pulled toward: PRIOR, or a device's measured switch.
     prior: dict[str, float] = dataclasses.field(default_factory=lambda: dict(PRIOR))
-    # Per power mode, ddr.py's ceiling (``Ceiling.as_json``), as measured.
+    # Per power mode, ddr.py's curves (``Ceiling``'s fields), as measured.
     ddr: dict[str, dict] = dataclasses.field(default_factory=dict)
 
     @classmethod
@@ -69,13 +67,6 @@ class CostModel:
         """Return a model without samples whose prior is a measured switch's cost (``measure.switch_cost``)."""
         prior = {**PRIOR, "switches": fixed_us, "switch_cores": per_core_us}
         return cls(terms=dict(prior), prior=prior)
-
-    def ceiling(self) -> Ceiling | None:
-        """Return the DDR ceiling measured in the NPU's present power mode; None where none is."""
-        if not self.ddr:
-            return None
-        kept = self.ddr.get(pmode())
-        return None if kept is None else Ceiling.from_json(kept)
 
     def predict(self, features: Mapping[str, float]) -> float:
         """Return the time, in us, ``features`` add beyond the steps' own."""

@@ -20,7 +20,7 @@ import itertools
 import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Any, get_origin
 
@@ -221,7 +221,6 @@ class Flow:
         depths: Mapping[int, int],
         costs: Sequence[Sequence[Fraction]],
         calls: int = 4,
-        boundary: Fraction = Fraction(0),
     ) -> Fraction | None:
         """Return the time a call takes in steady state, ``calls`` calls run back to back, or None where they deadlock.
 
@@ -233,10 +232,9 @@ class Flow:
         ``floor``.
 
         A phased call runs its phases in turn, once: an actor of a later
-        phase starts ``boundary`` after every actor of an earlier one has
-        finished, as the build awaits each phase's transfers before it
-        issues the next's, and a call's command ends before the next call's
-        starts.
+        phase starts only once every actor of an earlier one has finished,
+        as the build awaits each phase's transfers before it issues the
+        next's, and a call's command ends before the next call's starts.
 
         Raises:
             NotImplementedError: An edge runs in a later phase where the
@@ -267,11 +265,7 @@ class Flow:
                     continue
                 if any(at[b] < lengths[b] * calls for b in earlier[a]):
                     continue
-                start = (
-                    max(clock[b] for b in earlier[a]) + boundary
-                    if earlier[a]
-                    else Fraction(0)
-                )
+                start = max((clock[b] for b in earlier[a]), default=Fraction(0))
                 i = at[a] % lengths[a]
                 event = program[i]
                 e = event.channel
@@ -339,75 +333,6 @@ class Flow:
 
 
 @dataclass(frozen=True)
-class Ceiling:
-    """A device's host streams in one power mode, as ``python -m iron.tune.ddr`` measures them.
-
-    Each rate is the bytes a host stream moves a core cycle, the inverse
-    slope of a call's latency over the bytes, so a call's fixed cost drops
-    out.
-
-    Attributes:
-        core_mhz: The clock the cycles count (the runtime's ``core_mhz``).
-        mixed: Against the streams running at once, half reading and half
-            writing.
-        objects: Against an object's elements, at one count of streams.
-        read: Against the streams running at once, all reading.
-        boundary: The cycles a phase boundary costs beyond its streams: a
-            phased call's latency over a call all on chip, at no bytes. None
-            where it is not measured.
-    """
-
-    core_mhz: float
-    mixed: dict[int, float]
-    objects: dict[int, float]
-    read: dict[int, float]
-    boundary: float | None
-
-    def rate(self, streams: int) -> float:
-        """Return the bytes each of ``streams`` host streams running at once moves a cycle.
-
-        ``mixed`` at ``streams``: linear between two measured counts, the
-        smallest's below them, and past the largest the bandwidth there
-        shared among more.
-        """
-        measured = sorted(self.mixed.items())
-        (low, below), (high, above) = (
-            max([m for m in measured if m[0] <= streams], default=measured[0]),
-            min([m for m in measured if m[0] >= streams], default=measured[-1]),
-        )
-        if streams > high:
-            return below * low / streams
-        return (
-            below
-            if high == low
-            else below + (above - below) * (streams - low) / (high - low)
-        )
-
-    @classmethod
-    def from_json(cls, data: Mapping) -> Ceiling:
-        """Return the ceiling ``as_json`` wrote; one stored before the boundary was measured has none."""
-        boundary = data.get("boundary")
-        return cls(
-            core_mhz=float(data["core_mhz"]),
-            mixed={int(k): float(v) for k, v in data["mixed"].items()},
-            objects={int(k): float(v) for k, v in data["objects"].items()},
-            read={int(k): float(v) for k, v in data["read"].items()},
-            boundary=None if boundary is None else float(boundary),
-        )
-
-    def as_json(self) -> dict:
-        """Return this ceiling as the cost store keeps it, each curve keyed by its count in a string."""
-        return {
-            f.name: (
-                {str(k): v for k, v in value.items()}
-                if isinstance(value := vars(self)[f.name], dict)
-                else value
-            )
-            for f in fields(self)
-        }
-
-
-@dataclass(frozen=True)
 class Analysis:
     """What the dataflow analysis finds for one region.
 
@@ -445,9 +370,10 @@ class Analysis:
             its accesses do not record; none for no kernel.
         transfers: Per actor the host runs, a shim stream filling or
             draining a fifo, the bytes each of its objects moves; where
-            ``ceiling`` is given, every host transfer is one.
-        ceiling: The device's measured host streams; None where they are
-            not measured, and its transfers take no time.
+            ``rates`` is given, every host transfer is one.
+        rates: The bytes a host stream moves a core cycle, against how many
+            run at once (``iron.tune.ddr``'s ``Ceiling.mixed``); None where
+            the device's are not measured, and its transfers take no time.
         device: The device's name, which a missing measurement is named by.
     """
 
@@ -467,7 +393,7 @@ class Analysis:
     work: list[list[int]] = field(repr=False, compare=False)
     fired: list[list[tuple[int, ...]]] = field(repr=False, compare=False)
     transfers: dict[int, int] = field(repr=False, compare=False)
-    ceiling: Ceiling | None = field(repr=False, compare=False)
+    rates: Mapping[int, float] | None = field(repr=False, compare=False)
     device: str = field(repr=False, compare=False)
 
     def deadlock(self, depths: Mapping[Edge, int]) -> str | None:
@@ -488,8 +414,9 @@ class Analysis:
         """Per actor, the cycles it spends before each access: one call of its kernel, traced alone on its own NPU, before each access of its work.
 
         Steps on one core cost each its own kernel's call, in their firing
-        order. A host stream spends an object's bytes at the ceiling's rate
-        for the streams its phase runs at once (``Ceiling.rate``).
+        order. A host stream spends an object's bytes at ``rates``' figure
+        for the streams its phase runs at once, linear between two measured
+        counts and the bandwidth past the largest shared among more.
 
         Raises:
             NotImplementedError: One core's body calls several kernels, in an
@@ -500,12 +427,13 @@ class Analysis:
                 device's DDR rates are not measured.
         """
         phases = self.flow.phases or (0,) * len(self.flow.programs)
-        if any(phases) and self.ceiling is None:
+        if any(phases) and self.rates is None:
             raise NotImplementedError(
                 f"a period over phases waits on {self.device}'s measured DDR rates "
                 f"(python -m iron.tune.ddr, in its power mode)"
             )
         streams = Counter(phases[a] for a in self.transfers)
+        measured = sorted(self.rates.items()) if self.rates else []
         costs = []
         for kernels, scalars, work, fired, program in zip(
             self.kernels,
@@ -540,49 +468,38 @@ class Analysis:
                     row[i] = Fraction(kernel_cycles(kernels[k], scalars[k]))
             costs.append(row)
         for actor, nbytes in self.transfers.items():
-            assert self.ceiling is not None, "host transfers are actors only with one"
-            rate = self.ceiling.rate(streams[phases[actor]])
+            n = streams[phases[actor]]
+            (low, below), (high, above) = (
+                max([m for m in measured if m[0] <= n], default=measured[0]),
+                min([m for m in measured if m[0] >= n], default=measured[-1]),
+            )
+            rate = (
+                below * low / n
+                if n > high
+                else (
+                    below + (above - below) * (n - low) / (high - low)
+                    if high > low
+                    else below
+                )
+            )
             for i in self.work[actor]:
                 costs[actor][i] = Fraction(nbytes / rate)
         return costs
 
     @functools.cached_property
-    def boundary(self) -> Fraction:
-        """The cycles each phase boundary costs beyond its streams (``Ceiling.boundary``); none in one phase.
-
-        Raises:
-            NotImplementedError: The call runs in phases and the device's
-                phase boundary is not measured.
-        """
-        if not any(self.flow.phases or ()):
-            return Fraction(0)
-        if self.ceiling is None or self.ceiling.boundary is None:
-            missing = "DDR rates" if self.ceiling is None else "phase boundary"
-            raise NotImplementedError(
-                f"a period over phases waits on {self.device}'s measured {missing} "
-                f"(python -m iron.tune.ddr, in its power mode)"
-            )
-        return Fraction(self.ceiling.boundary)
-
-    @functools.cached_property
     def period(self) -> Fraction:
         """The cycles a call takes in steady state with every edge as deep as more cannot matter: the bound its slowest actor or cycle sets.
 
-        A call in phases runs them end to end, once, each boundary paying
-        ``boundary`` (``Flow.period``).
+        A call in phases runs them end to end, once (``Flow.period``).
 
         Raises:
             ValueError: The region cannot run at any depth (``why``).
             NotImplementedError: An edge runs in a phase the composer does
-                not group, or ``costs`` or ``boundary`` does not price the
-                call.
+                not group, or ``costs`` does not price the call.
         """
         if self.why is not None:
             raise ValueError(f"the region cannot run at any depth: {self.why}")
-        boundary = self.boundary
-        period = self.flow.period(
-            self.flow.ceiling(self.fixed), self.costs, boundary=boundary
-        )
+        period = self.flow.period(self.flow.ceiling(self.fixed), self.costs)
         assert period is not None, "the ceiling depths run"
         return period
 
@@ -611,9 +528,7 @@ class Analysis:
             while (
                 depth < top
                 and self.flow.period(
-                    {**ceiling, **dict.fromkeys(es, depth)},
-                    self.costs,
-                    boundary=self.boundary,
+                    {**ceiling, **dict.fromkeys(es, depth)}, self.costs
                 )
                 != target
             ):
@@ -634,8 +549,8 @@ class Derivation:
     it), carried through the links to the fifos the cores touch. A region edge joins the producer's output lanes to the
     consumer's input lanes as searched channels; a step's own fifos keep the
     depth its build chose; a lane fed from or drained to outside the region
-    is unbounded, unless the device's host streams are measured: then a
-    host stream fills or drains it, an actor that takes time.
+    is unbounded, unless the device's DDR rates are given: then a host
+    stream fills or drains it, an actor that takes time.
 
     A buffer the recording carries from one call to the next (its feedback,
     or a state the graph holds) arrives whole, so its edge starts the call
@@ -659,8 +574,8 @@ class Derivation:
         recording: The recording its steps are matched in.
         device: The device every operator is built for.
         values: The call's per-call values, by name (``Timed.values``).
-        ceiling: The device's measured host streams (``Analysis.ceiling``);
-            where given, each host transfer is an actor that takes time.
+        rates: The device's measured DDR rates (``Analysis.rates``); where
+            given, each host transfer is an actor that takes time.
 
     Raises:
         NotImplementedError: What the analysis does not model yet: a
@@ -680,7 +595,7 @@ class Derivation:
         recording: Recording,
         device: Device,
         values: Mapping[str, int] | None = None,
-        ceiling: Ceiling | None = None,
+        rates: Mapping[int, float] | None = None,
     ) -> None:
         matches = recording.occurrences(Entry(region))
         if not matches:
@@ -690,7 +605,7 @@ class Derivation:
         self.match = matches[0]
         self.device = device
         self.values = dict(values or {})
-        self.ceiling = ceiling
+        self.rates = None if rates is None else dict(rates)
         self.wired, _ = region.wiring()
         groups = [set(group) for group in region.workers]
         # A carry across calls is no splice within the call: its initial
@@ -1661,7 +1576,7 @@ class Derivation:
                     writes.setdefault(out, []).append(e)
                     reads[(inp, actor)] = e
                     edge_channels.setdefault(edge, []).append(e)
-        if self.ceiling is not None:
+        if self.rates is not None:
             # The region's own host transfers: a fill into a fifo no edge
             # feeds, a drain from one no edge reads.
             for _, recorded in self.recorded:
@@ -1790,9 +1705,9 @@ class Derivation:
             transfers={
                 a: math.prod(f.shape) * np.dtype(f.dtype).itemsize
                 for a, f in hosted.items()
-                if self.ceiling is not None
+                if self.rates is not None
             },
-            ceiling=self.ceiling,
+            rates=self.rates,
             device=self.device.name,
         )
 
@@ -1802,7 +1717,7 @@ def analyze(
     recording: Recording,
     device: Device,
     values: Mapping[str, int] | None = None,
-    ceiling: Ceiling | None = None,
+    rates: Mapping[int, float] | None = None,
 ) -> Analysis:
     """Analyze ``region`` of ``recording`` on ``device``, the device every operator is built for, for one call at ``values``.
 
@@ -1812,7 +1727,7 @@ def analyze(
         device: The device.
         values: The call's per-call values, by name; one it leaves out is
             the largest the recording's limits admit (``Derivation``).
-        ceiling: The device's measured host streams (``Analysis.ceiling``).
+        rates: The device's measured DDR rates (``Analysis.rates``).
 
     Raises:
         NotImplementedError: What the analysis does not model yet
@@ -1820,4 +1735,4 @@ def analyze(
         ValueError: The region matches none of the recording's steps, or a
             per-call value the call leaves out is bounded nowhere.
     """
-    return Derivation(region, recording, device, values, ceiling).analysis()
+    return Derivation(region, recording, device, values, rates).analysis()

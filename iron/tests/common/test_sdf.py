@@ -1,24 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""One call of actors replaying their objectFIFO accesses: balance, deadlock, the smallest depths, and a period over phases at a device's host streams."""
+"""One call of actors replaying their objectFIFO accesses: balance, deadlock and the smallest depths."""
 
-import dataclasses
 from fractions import Fraction
 
 import pytest
 
-from iron.common.graph.sdf import Ceiling, Channel, Event, Flow
-
-# A ceiling shaped as npu2's (Strix Halo) measures: flat to eight streams,
-# shared past them.
-CEILING = Ceiling(
-    core_mhz=1800.0,
-    mixed={2: 4.0, 8: 4.0, 16: 3.0},
-    objects={256: 4.4, 4096: 4.0},
-    read={1: 7.3},
-    boundary=3600.0,
-)
+from iron.common.graph.sdf import Channel, Event, Flow
 
 
 def test_a_two_to_three_edge_needs_p_plus_q_minus_their_gcd():
@@ -236,42 +225,3 @@ def test_edges_of_a_later_phase_without_the_actors_phases_are_not_timed():
     flow = Flow([Channel(0, 1, phase=1)], _timed_pair()[0].programs)
     with pytest.raises(NotImplementedError, match="the composer does not group"):
         flow.period({0: 2}, _timed_pair()[1])
-
-
-def test_each_boundary_a_phased_call_crosses_pays_its_fixed_cost():
-    """Three phases, a producer and its reader each: the call is the phases end to end and two boundaries."""
-    programs, channels, costs = [], [], []
-    for phase, (write_cost, read_cost) in enumerate(((2, 1), (1, 1), (1, 3))):
-        channels.append(Channel(2 * phase, 2 * phase + 1, phase=phase))
-        programs += [
-            [Event(phase, True, True, 1), Event(phase, True, False, 1)] * 4,
-            [Event(phase, False, True, 1), Event(phase, False, False, 1)] * 4,
-        ]
-        costs += [[Fraction(0), Fraction(c)] * 4 for c in (write_cost, read_cost)]
-    flow = Flow(channels, programs, phases=[0, 0, 1, 1, 2, 2])
-    depths = {0: 2, 1: 2, 2: 2}
-    phases_alone = (2 * 4 + 1) + (1 + 1 * 4) + (1 + 3 * 4)
-    assert flow.period(depths, costs) == phases_alone
-    assert flow.period(depths, costs, boundary=Fraction(5)) == phases_alone + 2 * 5
-
-
-def test_streams_between_two_measured_counts_move_at_a_rate_between_theirs():
-    assert CEILING.rate(1) == pytest.approx(4.0)
-    assert CEILING.rate(4) == pytest.approx(4.0)
-    assert CEILING.rate(12) == pytest.approx(3.5)
-
-
-def test_streams_past_the_largest_measured_count_share_its_bandwidth():
-    assert CEILING.rate(32) == pytest.approx(1.5)
-
-
-@pytest.mark.parametrize("boundary", [3600.0, None])
-def test_a_ceiling_round_trips_through_what_the_store_keeps(boundary):
-    ceiling = dataclasses.replace(CEILING, boundary=boundary)
-    assert Ceiling.from_json(ceiling.as_json()) == ceiling
-
-
-def test_a_ceiling_stored_before_the_boundary_was_measured_keeps_its_rates():
-    kept = CEILING.as_json()
-    del kept["boundary"]
-    assert Ceiling.from_json(kept) == dataclasses.replace(CEILING, boundary=None)

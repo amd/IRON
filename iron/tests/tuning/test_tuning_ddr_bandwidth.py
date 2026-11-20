@@ -1,30 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""DDR bandwidth: the device's read ceiling, each weight-bound toy's share of it, and a phased call's period at the device's host streams."""
+"""DDR bandwidth: the device's read ceiling, each weight-bound toy's share of it, and a phased call's period, which waits on the device's measured rates."""
 
 from __future__ import annotations
-
-import dataclasses
-from fractions import Fraction
 
 import pytest
 
 from iron.common.declare.composition import Hold
-from iron.common.graph.sdf import Ceiling, analyze
+from iron.common.graph.sdf import analyze
 from iron.common.testing import run_test, vectors
 from iron.tests.support import toys_dataflow as toys
 from iron.tune.ddr import read_gemv
-
-# A ceiling shaped as npu2's (Strix Halo) measures: flat to eight streams,
-# shared past them.
-CEILING = Ceiling(
-    core_mhz=1800.0,
-    mixed={2: 4.0, 8: 4.0, 16: 3.0},
-    objects={256: 4.4, 4096: 4.0},
-    read={1: 7.3},
-    boundary=3600.0,
-)
 
 # (columns, channels) requested per nominal stream count; ``read_gemv`` takes
 # the widest the device's shim DMAs admit, so the achieved count (read back
@@ -78,34 +65,10 @@ def test_weight_bound_toy_reports_its_share_of_the_ceiling(
     record_property("Toy share of ceiling", toy["Bandwidth"] / ceiling["Bandwidth"])
 
 
-def _through_host(size: int, edges: int):
-    """Return ``add -> SiLU -> mul`` on two columns with its first ``edges`` edges through host memory, a phase boundary each, and its recording."""
-    add, silu, mul = toys.add_silu_mul(size=size, tile=128, cols=2)
-    region = toys.add_silu_mul_region(add, silu, mul)
-    for index in range(edges):
-        region = region.held(index, Hold.DDR)
-    return region, toys.add_silu_mul_recording(f"through_host_{edges}", add, silu, mul)
-
-
-def test_a_phased_period_waits_on_the_measurement_it_lacks(device):
-    """Without the device's measured rates, or with them but no phase boundary, a phased call's period names the measurement it waits on."""
-    region, recording = _through_host(1 << 12, 1)
+def test_a_phased_period_waits_on_the_devices_measured_rates(device):
+    """``add -> SiLU -> mul`` with an edge through host memory runs in two phases: without the device's DDR rates, its period names what it waits on."""
+    add, silu, mul = toys.add_silu_mul(size=1 << 12, tile=128, cols=2)
+    region = toys.add_silu_mul_region(add, silu, mul).held(0, Hold.DDR)
+    recording = toys.add_silu_mul_recording("through_host", add, silu, mul)
     with pytest.raises(NotImplementedError, match="measured DDR rates"):
         analyze(region, recording, device).period
-    unbounded = dataclasses.replace(CEILING, boundary=None)
-    with pytest.raises(NotImplementedError, match="measured phase boundary"):
-        analyze(region, recording, device, ceiling=unbounded).period
-
-
-# npu1's waits on host 203.
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("edges", [1, 2])
-def test_each_boundary_adds_its_measured_cost_to_the_phased_period(edges, device):
-    """A chain with one or two edges through host memory runs two or three phases: each boundary between them adds the ceiling's ``boundary``."""
-    region, recording = _through_host(1 << 17, edges)
-    free = dataclasses.replace(CEILING, boundary=0.0)
-    paid = analyze(region, recording, device, ceiling=CEILING).period
-    assert paid - analyze(region, recording, device, ceiling=free).period == (
-        edges * Fraction(CEILING.boundary)
-    )
-
