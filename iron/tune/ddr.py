@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import subprocess
 from collections.abc import Callable, Mapping, Sequence
 
 import aie.utils as aie_utils
@@ -158,11 +159,18 @@ class Ceiling:
 
     @classmethod
     def stored(cls, device: str) -> Ceiling | None:
-        """Return ``device``'s ceiling in the NPU's present power mode, as the cost store keeps it; None where it is not measured."""
+        """Return ``device``'s ceiling in the NPU's present power mode, as the cost store keeps it.
+
+        None where it is not measured, or no power mode can be read (no XRT).
+        """
         model = CostModel.load(device)
         if model is None or not model.ddr:
             return None
-        kept = model.ddr.get(pmode())
+        try:
+            mode = pmode()
+        except (OSError, subprocess.CalledProcessError, RuntimeError):
+            return None
+        kept = model.ddr.get(mode)
         return None if kept is None else cls.from_json(kept)
 
     @classmethod

@@ -408,7 +408,9 @@ def candidates(
     planned: list[tuple[Entry | Version, str, object]] = []
     cores = device.cols * len(device.core_rows)
     queue = get_target_model(device.resolve()).get_dma_task_queue_depth()
-    ceiling = Ceiling.stored(device.name)
+    # Read once a region is analysed: it asks the NPU for its power mode.
+    ceiling: Ceiling | None = None
+    looked = False
     for timed in calls:
         recording = timed.recording
         for entry in profile.entries():
@@ -440,6 +442,8 @@ def candidates(
                         continue
                     planned.append((entry, name, value))
                     yield PlanRegion(entry, name, value, touches)
+            if not looked:
+                ceiling, looked = Ceiling.stored(device.name), True
             try:
                 analysis = Derivation(
                     root,
