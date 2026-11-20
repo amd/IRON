@@ -16,6 +16,7 @@ from iron.common.image.step import Edge, EdgeKind
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemm import GEMM
+from iron.operators.relu import ReLU
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 from iron.tests.support import sequences
@@ -36,6 +37,22 @@ def add_silu_mul_recording(name: str, add, silu, mul) -> Recording:
         (add, "a", "b", "mid1"), (silu, "mid1", "mid2"), (mul, "mid2", "w", "out")
     )
     return Recording.of_steps(name, steps, ["a", "b", "w"], ["out"])
+
+
+def add_silu_relu(size: int = 512, tile: int = 128):
+    """``add -> SiLU -> ReLU`` on one column: a chain of three reading two host inputs, as many streams as a core takes in."""
+    add = ElementwiseAdd(size=size, tile_size=tile, num_aie_columns=1)
+    silu = SiLU(size=size, tile_size=tile, num_aie_columns=1)
+    relu = ReLU(size=size, tile_size=tile, num_aie_columns=1)
+    return add, silu, relu
+
+
+def add_silu_relu_recording(name: str, add, silu, relu) -> Recording:
+    """Return ``add``, ``silu``, ``relu`` as a recording, over host inputs ``a`` and ``b``."""
+    steps = sequences.steps(
+        (add, "a", "b", "mid1"), (silu, "mid1", "mid2"), (relu, "mid2", "out")
+    )
+    return Recording.of_steps(name, steps, ["a", "b"], ["out"])
 
 
 def add_silu_mul_region(add, silu, mul, **edge_kwargs: object) -> Region:
