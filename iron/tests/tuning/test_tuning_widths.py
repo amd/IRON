@@ -12,7 +12,14 @@ from aie.dialects.aie import get_target_model
 from aie.utils import set_current_device
 
 from iron.common.declare.composition import Edge as CompositionEdge
-from iron.common.declare.composition import Entry, Member, Refinement, Region, Scope
+from iron.common.declare.composition import (
+    Entry,
+    Member,
+    Refinement,
+    Region,
+    Schedule,
+    Scope,
+)
 from iron.common.declare.profile import Profile
 from iron.common.design import OperatorDesign
 from iron.common.image.compose import SHIM_SHORT, fits
@@ -26,6 +33,7 @@ from iron.tests.support.fusable import gemv_silu_mul_recording
 from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
+from iron.tune.fusions import Applied
 from iron.tune.search import PLACEMENTS, candidates, check, fit, search
 
 _SIZE = 2048  # divides evenly into 64-element tiles at 1, 2, 4 or 8 columns
@@ -107,6 +115,28 @@ def test_tuner_keeps_widths_that_pay_and_bounds_builds(device):
         for e in found.entries()
     )
     assert len(PLACEMENTS) > 1
+
+
+def test_four_calls_a_command_fit_a_window_as_one_call_does(device):
+    """A window at the array's full width fits four calls a command as it fits one.
+
+    Each call's intermediates are its own, so no call's window keeps a drain
+    for the next call's reads.
+    """
+    if not device.can_dispatch_full_elf:
+        pytest.skip(
+            "several calls a command wait on an xclbin per step before any placement"
+        )
+    _, recording = _window(columns=2)
+    region, _ = _window(columns=get_target_model(device.resolve()).columns())
+    four = Profile()
+    four.add_entry(Entry(root=region))
+    four.add_schedule(Schedule(version=recording.version, calls_per_command=4))
+    assert fit(four, [Timed(recording)], device).ok
+    with set_current_device(device):
+        applied = Applied.of(Timed(recording), four, device)
+    assert len(applied.fused) == 4
+    assert not any(f.kept for f in applied.fused)
 
 
 @pytest.mark.usefixtures("device")

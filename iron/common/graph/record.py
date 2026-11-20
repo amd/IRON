@@ -328,13 +328,15 @@ class Recording:
     def repeated(self, calls: int) -> Recording:
         """Return the derived version running ``calls`` of this one's calls back to back, one command.
 
-        Call ``j``'s inputs, returned outputs and per-call values are its own,
-        each named with the suffix ``CALL_SUFFIX.format(j)``: each binding's
-        word is written once a call, the IRON-side layout of a slot set per
-        call that mlir-aie's scratchpad management replaces (PLAN step 2).
-        Everything else (weights, states, the buffers carried to the next
-        call, intermediates) is one buffer every call uses in turn, so what
-        one call carries the next reads on the device.
+        Call ``j``'s inputs, returned outputs, intermediates and per-call
+        values are its own, each named with the suffix
+        ``CALL_SUFFIX.format(j)``: each binding's word is written once a call,
+        the IRON-side layout of a slot set per call that mlir-aie's scratchpad
+        management replaces (PLAN step 2), and each call's regions compose as
+        one call's do, where an intermediate the next call writes again would
+        read, to a region, as read past it. Everything else (weights, states,
+        the buffers carried to the next call) is one buffer every call uses in
+        turn, so what one call carries the next reads on the device.
 
         Raises:
             NotImplementedError: It carries values (their next a call's
@@ -366,7 +368,11 @@ class Recording:
         kept = set(self.feedback) | {h.ref().root for _, h in self.states.values()}
         own = {
             h.buffer.name: h.buffer
-            for h in (*self.inputs, *self.returned)
+            for h in (
+                *self.inputs,
+                *self.returned,
+                *(h for s in self.steps for h in s.slots if h.role == "intermediate"),
+            )
             if h.buffer.name not in kept
         }
         steps: list[Step] = []
@@ -443,6 +449,40 @@ class Recording:
             calls=calls,
             derived_from=self.version,
         )
+
+    def scheduled(self, profile: Profile) -> Recording:
+        """Return the version ``profile``'s schedules for this one build: its calls back to back (``repeated``), merged (``merged``), or this one.
+
+        Raises:
+            NotImplementedError: A schedule names a derived version other than
+                calls merged into one, both merges calls and runs several a
+                command, or merges calls under an entry naming their steps;
+                or ``repeated`` or ``merged`` does not build it.
+        """
+        schedules = [s for s in profile.schedules() if s.version == self.version]
+        per = max((s.calls_per_command for s in schedules), default=1)
+        merged = max((s.merged_calls for s in schedules), default=1)
+        derived = [s.size for s in schedules if s.size and s.merged_calls == 1]
+        if derived:
+            raise NotImplementedError(
+                f"{self.name}: the derived version {derived[0]!r}, other than calls "
+                f"merged into one, is not built yet"
+            )
+        if per > 1 and merged > 1:
+            raise NotImplementedError(
+                f"{self.name}: several merged calls a command are not built yet"
+            )
+        if merged > 1 and any(self.occurrences(e) for e in profile.entries()):
+            raise NotImplementedError(
+                f"{self.name}: calls merged into one under an entry naming its "
+                f"steps are not built yet: an entry names a step's shape, which a "
+                f"merge changes"
+            )
+        if per > 1:
+            return self.repeated(per)
+        if merged > 1:
+            return self.merged(merged)
+        return self
 
     def merged(self, calls: int) -> Recording:
         """Return the derived version running ``calls`` of this one's calls as one call, each step over the calls' data at once (``Operator.merged``).

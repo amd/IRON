@@ -7,10 +7,18 @@ from __future__ import annotations
 
 import pytest
 
-from iron.common.declare.composition import Configuration, Entry, Refinement, Schedule
+from iron.common.declare.composition import (
+    Configuration,
+    Edge,
+    Entry,
+    Refinement,
+    Region,
+    Schedule,
+)
 from iron.common.declare.profile import Profile
+from iron.common.image.step import EdgeKind
 from iron.tests.support import toys_schedule
-from iron.tests.support.toys_edges import kv_write_then_read
+from iron.tests.support.toys_edges import kv_write_then_read, member
 from iron.tests.support.tuning import scheduled_by_candidates, unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.cli import watchdog_s
@@ -123,6 +131,24 @@ def test_calls_merged_into_one_are_bit_identical_to_one_a_command(device):
         assert fit(profile, [Timed(recording)], device).ok
         result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
         assert result.ok, result.why
+
+
+def test_a_merge_under_a_region_over_its_steps_waits(device):
+    """Calls merged into one under a region over their steps wait in fit: the region names the steps' shape, which the merge changes."""
+    add, mul = toys_schedule.residual_step()
+    recording = toys_schedule.residual_step_recording("merged_under_region", add, mul)
+    profile = Profile()
+    profile.add_entry(
+        Entry(
+            root=Region(
+                parts=(member(add), member(mul)),
+                edges=(Edge(0, "y", 1, "a", kind=EdgeKind.STREAM),),
+            )
+        )
+    )
+    profile.add_schedule(Schedule(version=recording.version, size="merged_2x"))
+    with pytest.raises(NotImplementedError, match="merge changes"):
+        fit(profile, [Timed(recording)], device)
 
 
 @unbuilt
