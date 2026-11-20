@@ -2044,10 +2044,11 @@ def _restaged_on_cores(
     meet it in place (on the pool's core or a neighbour's); a distributed
     piece a sink lane joins, and any other, takes a channel and a buffer
     descriptor a round at each end. A pool holds a lock pair a slot. Each core
-    also holds its steps' fifos to and from off the array or a memtile, a
-    lock pair each and a channel and descriptors for each; one an on-chip
-    stream or cascade carries may be free in the fused build, so it is not
-    counted. These are lower bounds: what a placement adds the placer counts.
+    also holds its steps' other fifos, once where both ends are on it, a
+    lock pair each, and a channel and descriptors for each with an end off
+    the array or in a memtile; one an on-chip stream or cascade carries, or
+    between two cores of a step, may be free in the fused build (in one
+    core, or a neighbour's memory), so it is not counted. These are lower bounds: what a placement adds the placer counts.
 
     Args:
         derivation: The region's derivation.
@@ -2114,6 +2115,21 @@ def _restaged_on_cores(
         )
     }
     inputs, outputs, held, bds, locks = ([0] * cores for _ in range(5))
+    # A fifo with an end off the array or in a memtile moves by DMA; one
+    # between two cores of a step may be a neighbour's memory.
+    off = {
+        f
+        for step in ends
+        for f in (
+            *(t.fifo for t in derivation.recorded[step][1].transfers),
+            *(
+                h.object_fifo
+                for link in derivation.recorded[step][1].links
+                for h in (*link.srcs, *link.dsts)
+            ),
+        )
+    }
+    on_core: list[list] = [[] for _ in range(cores)]
     for step, fifos, at in ((p, lanes[0], range(len(lanes[0]))), (c, lanes[1], core)):
         for k, fifo in zip(at, fifos):
             (worker,) = [
@@ -2121,11 +2137,21 @@ def _restaged_on_cores(
                 for w in derivation.recorded[step][1].cores
                 if any(h.object_fifo is fifo for h in w.owner.fifos)
             ]
-            for h in worker.fifos:
-                if h.object_fifo in on_chip or h.object_fifo in (*lanes[0], *lanes[1]):
-                    continue
-                held[k] += h.depth * math.prod(h.shape) * bfp.itemsize(h.dtype)
-                locks[k] += 2
+            on_core[k] += [
+                h
+                for h in worker.fifos
+                if h.object_fifo not in on_chip
+                and h.object_fifo not in (*lanes[0], *lanes[1])
+            ]
+    for k, handles in enumerate(on_core):
+        here = Counter(h.object_fifo for h in handles)
+        for h in handles:
+            # Both ends on this core: one buffer and lock pair, no channel.
+            if here[h.object_fifo] > 1 and h.handle_type == "cons":
+                continue
+            held[k] += h.depth * math.prod(h.shape) * bfp.itemsize(h.dtype)
+            locks[k] += 2
+            if here[h.object_fifo] == 1 and h.object_fifo in off:
                 bds[k] += h.depth
                 inputs[k] += h.handle_type == "cons"
                 outputs[k] += h.handle_type == "prod"

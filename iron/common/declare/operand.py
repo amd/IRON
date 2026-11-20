@@ -1385,11 +1385,12 @@ class Staging:
                 end = self.source.reader(lane)
                 self._shares(end, tile)
                 for piece, fifo in zip(pieces, made):
-                    # The leading piece a sink lane reads alone; a joined one
-                    # moves between two links' pools, by DMA.
+                    # The leading piece a sink lane reads alone, of a rank-1
+                    # pool; a joined one moves between two links' pools, by DMA.
                     if (
                         piece[2] == 0
                         and sum(q[1] == piece[1] for q in self.pieces) == 1
+                        and len(end.object_fifo.shape) == 1
                     ):
                         fifo.delegate_tile = tile
                 ObjectFifoLink(

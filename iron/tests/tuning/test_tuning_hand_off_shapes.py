@@ -419,9 +419,10 @@ def test_a_restage_held_in_l1_counts_no_channel_for_edges_on_chip(device):
     profile.add_entry(Entry(region))
     try:
         result = fit(profile, [Timed(recording)], device)
-    except NotImplementedError:
-        return  # not built yet, not refused
-    assert result.ok or "restaged in L1" not in (result.why or "")
+    except NotImplementedError as e:
+        assert "restage held in L1" not in str(e)
+        return
+    assert result.ok, result.why
 
 
 def test_a_restage_held_in_l1_of_an_output_kept_too_waits(device):
@@ -429,7 +430,7 @@ def test_a_restage_held_in_l1_of_an_output_kept_too_waits(device):
     recording, region = held_in_l1(*split_into_rows(keep=True))
     profile = Profile()
     profile.add_entry(Entry(region))
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError, match="read elsewhere too"):
         fit(profile, [Timed(recording)], device)
 
 
