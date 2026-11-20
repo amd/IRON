@@ -16,7 +16,7 @@ from typing import Any
 
 from ..declare import Profile
 from ..design import OperatorDesign
-from ..image.compose import Packing, fits
+from ..image.compose import CoResidenceError, Packing, fits
 from ..image.step import Fusion, FusionKind
 from .fusion_tunables import rebuild
 from .record import Recording
@@ -94,6 +94,10 @@ def merges(
     end sending into the array in flight to its end (mlir-aie's ``ShimTransferSpans``),
     so its designs cannot take turns on a shim channel as a full ELF's separate
     sequences do.
+
+    Raises:
+        CoResidenceError: ``packing.required``, and a design leaves its group's
+            run unplaced.
     """
     if not packing.groups:
         return ()
@@ -141,6 +145,10 @@ def merges(
             if placed[key]:
                 firsts[designs[hi].name] = hi
                 continue
+            if packing.required:
+                raise CoResidenceError(
+                    f"packing {', '.join(key)} does not place as one xclbin's run"
+                )
         if groups[lo] is not None and hi - lo > 1:
             found.append(Fusion(FusionKind.MERGE, tuple(range(lo, hi))))
         lo = hi

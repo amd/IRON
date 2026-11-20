@@ -866,16 +866,20 @@ class Applied:
     packing: Packing
 
     @classmethod
-    def of(cls, call: Timed, profile: Profile, dev) -> Applied:
+    def of(
+        cls, call: Timed, profile: Profile, dev, *, required: bool = False
+    ) -> Applied:
         """Return ``call`` under ``profile`` on ``dev``.
 
         Its weights coded as ``Graph.compile`` codes them (``Recording.code_weights``),
         in ``call``'s recording itself: how a weight is read is its recording's, the
-        same under every profile.
+        same under every profile. ``required``: a packing group that does not place
+        refuses the build rather than running unpacked (``Packing.required``).
         """
         begun = time.perf_counter()
         call.recording.code_weights()
-        out = cls(*apply_profile(call.recording, profile, dev))
+        recording, fused, packing = apply_profile(call.recording, profile, dev)
+        out = cls(recording, fused, dataclasses.replace(packing, required=required))
         Spent.charge(build_s=time.perf_counter() - begun)
         return out
 

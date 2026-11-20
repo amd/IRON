@@ -338,6 +338,14 @@ class Profile:
         """Return the composition entries, in the order they were added."""
         return list(self._compositions)
 
+    def replace_entry(self, old: Entry, new: Entry) -> None:
+        """Replace the composition entry ``old`` with ``new``, in its place.
+
+        Raises:
+            ValueError: ``old`` is not one of its entries.
+        """
+        self._compositions[self._compositions.index(old)] = new
+
     def add_schedule(self, schedule: Schedule) -> None:
         """Add a version's schedule."""
         self._schedules.append(schedule)

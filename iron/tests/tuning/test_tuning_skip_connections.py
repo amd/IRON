@@ -22,7 +22,7 @@ from iron.tests.support.toys_edges import (
     skip_edge,
     window_with_outside_reader,
 )
-from iron.tests.support.tuning import unbuilt
+from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, search
 
@@ -30,10 +30,12 @@ from iron.tune.search import candidates, check, fit, search
 def _residual_region(held: str | None = None):
     """Return the two-transformer-layer-ish residual (add, norm, proj, add2), its skip edge held one way."""
     recording, members, forward = window_with_outside_reader()
-    edges = forward + (skip_edge(depth=4),)
+    skip = skip_edge(depth=4)
+    # By producer, then consumer, as candidates orders a region's edges.
+    edges = tuple(sorted(forward + (skip,), key=lambda e: (e.producer, e.consumer)))
     if held is None:
         return recording, Region(members, edges)
-    edges, workers, phases = realize_helds(edges, {len(edges) - 1: held})
+    edges, workers, phases = realize_helds(edges, {edges.index(skip): held})
     return recording, Region(members, edges, workers=workers, phases=phases)
 
 
@@ -46,12 +48,11 @@ def _short_skip_region(held: str | None = None, depth: int = 4):
     return recording, Region(members, edges, workers=workers, phases=phases)
 
 
-@unbuilt
 @pytest.mark.parametrize("held", HELDS)
 def test_a_residual_skip_round_trips_for_every_way_of_holding_it(
     held, tmp_path, device
 ):
-    """A region with a skip edge, its depth and held place realized, round-trips; ``candidates`` proposes each feasible holding."""
+    """A region with a skip edge, its depth and held place realized, round-trips; composing ``candidates``' edits reaches each holding."""
     recording, region = _residual_region(held=held)
     entry = Entry(region)
     profile = Profile()
@@ -59,11 +60,8 @@ def test_a_residual_skip_round_trips_for_every_way_of_holding_it(
     profile.save(tmp_path / f"skip_{held}.json")
     loaded = Profile.load(tmp_path / f"skip_{held}.json")
     assert loaded.entries() == [entry]
-    start = Profile()
-    assert any(
-        entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, device)
-    )
+    reached = reached_by_candidates(region, [Timed(recording)], device)
+    assert reached.entries() == [entry]
 
 
 def test_a_reconvergent_diamond_round_trips(device):

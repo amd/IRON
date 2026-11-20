@@ -6,6 +6,8 @@
 A version's arrays grouped into shared device configurations (``iron.tune.packings``).
 """
 
+import time
+
 import aie.utils as aie_utils
 import numpy as np
 import pytest
@@ -663,7 +665,9 @@ def test_a_spent_budget_keeps_what_the_first_round_found(tmp_path):
     cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     recording = Alternating().record(x=(SIZE,))
     logged = []
-    budget = Budget(0, logged.append)
+    # Past its reserve before the search starts, its check share still whole.
+    budget = Budget(2, logged.append)
+    time.sleep(1.3)
     profile = price_packings(
         [Timed(recording)],
         dev,
@@ -817,40 +821,3 @@ def test_price_packings_narrows_what_does_not_co_reside(tmp_path):
     np.testing.assert_allclose(
         np.asarray(packed(x)).astype(np.float32), reference, atol=2e-2
     )
-
-
-class Beside(iron.Graph):
-    """Two independent ReLUs, each on every column at two channels: packed, twice a shim's channels."""
-
-    def body(self, x, y):
-        return (
-            ReLU.step(x, num_aie_columns=8, num_channels=2),
-            ReLU.step(y, num_aie_columns=8, num_channels=2),
-        )
-
-
-@pytest.mark.supported_devices("npu2")
-def test_a_spent_budget_searches_no_further_past_a_refusal(tmp_path):
-    """Out of time, a version whose grouping a check refused is not grouped and checked again."""
-    dev = aie_utils.ensure_current_device()
-    report = platform()
-    cache = Cache(report["Name"], report["Power Mode"], root=tmp_path / "c")
-    logged = []
-    budget = Budget(0, logged.append)
-    recording = Beside().record(x=(2**16,), y=(2**16,))
-    profile = price_packings(
-        [Timed(recording)],
-        dev,
-        iron.Profile(),
-        full_elf=True,
-        timing=Timing(rounds=2, calls=5),
-        repeats=5,
-        cache=cache,
-        fit_cache=tmp_path / "fit",
-        log=logged.append,
-        budget=budget,
-    )
-    print("\n".join(logged))
-    assert sum(": refused, " in line for line in logged) == 1, logged
-    assert f"{recording.name}: not searched again after 1 refusal(s)" in logged
-    assert not profile.packings()

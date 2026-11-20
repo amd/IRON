@@ -29,7 +29,14 @@ from aie.iron.device import Device
 from aie.utils import set_current_device
 
 from ..common.declare import Profile
-from ..common.declare.composition import Entry, Member, Refinement, Region, refinement
+from ..common.declare.composition import (
+    Entry,
+    Hold,
+    Member,
+    Refinement,
+    Region,
+    refinement,
+)
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
 from ..common.graph.fusion import composed
 from ..common.graph.sdf import Derivation
@@ -87,6 +94,70 @@ class AddEntry:
         return edited
 
 
+@dataclass(frozen=True)
+class HoldEdge:
+    """An edit holding one edge of a region the profile composes at another place (``Region.held``).
+
+    Attributes:
+        entry: The entry, as the profile holds it.
+        index: The edge, by its index in the entry's root region.
+        place: Where its value waits.
+        touches: The steps the region composes, by index in the recording it
+            was found in.
+        refinement: How the edited build relates to the untuned build.
+    """
+
+    entry: Entry
+    index: int
+    place: Hold
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with ``entry`` replaced by itself, the edge held at ``place``."""
+        edited = profile.copy()
+        root = self.entry.root
+        assert isinstance(root, Region), "candidates yields it for regions alone"
+        held = dataclasses.replace(self.entry, root=root.held(self.index, self.place))
+        edited.replace_entry(self.entry, held)
+        return edited
+
+
+@dataclass(frozen=True)
+class DepthEdge:
+    """An edit holding one edge of a region the profile composes at another depth (``Region.deepened``).
+
+    Attributes:
+        entry: The entry, as the profile holds it.
+        index: The edge, by its index in the entry's root region.
+        depth: The objects it holds.
+        touches: The steps the region composes, by index in the recording it
+            was found in.
+        refinement: How the edited build relates to the untuned build.
+    """
+
+    entry: Entry
+    index: int
+    depth: int
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with ``entry`` replaced by itself, the edge ``depth`` deep."""
+        edited = profile.copy()
+        root = self.entry.root
+        assert isinstance(root, Region), "candidates yields it for regions alone"
+        deepened = dataclasses.replace(
+            self.entry, root=root.deepened(self.index, self.depth)
+        )
+        edited.replace_entry(self.entry, deepened)
+        return edited
+
+
+# A chosen depth is an edge's minimum times a power of two up to this many
+# doublings, beside its knee; past what a core or memtile holds, fit refuses.
+DEPTH_DOUBLINGS = 4
+
 logger = logging.getLogger(__name__)
 
 # A measured ratio under this gains: past the paired timing's noise.
@@ -103,11 +174,8 @@ NO_WORSE_QUANTILE = 0.999
 # What candidates does not propose yet, named where it stops.
 _NOT_GENERATED = (
     "regions of steps that are not consecutive",
-    "chosen depths",
-    "DDR and cascade edges",
+    "cascade edges",
     "inflows",
-    "shared workers past IRON's folds",
-    "chosen phases",
     "runtime plans",
     "nested regions",
     "configurations",
@@ -181,8 +249,10 @@ def candidates(
     A region edit names a window of consecutive recorded steps, no host step
     inside it and no more steps than the array has cores, with an edge for
     each hand-off the recording makes inside it: one step the only writer of
-    a whole, streamed buffer the host does not hold, a later step reading it
-    whole, the two ends one buffer. Its edges are ordered by producer, then
+    a whole, streamed buffer, a later step reading it whole, the two ends one
+    buffer; or, the buffer state the graph holds, any step of the window
+    reading it, the writer itself (a self-loop) or one before it in the
+    window reading what it wrote the call before. Its edges are ordered by producer, then
     consumer, each a stream where the dataflow analysis finds the lanes meet
     as they are (an equal or broadcast hand-off, one object size at both
     ends) and staged otherwise, or
@@ -196,7 +266,11 @@ def candidates(
     its steps on one worker. Then each shape's tunables: a one-member region per setting
     ``autotune.settings`` resolves (the recorded one first), touching every
     step of that shape. Each entry is yielded once, from the first call that
-    admits it.
+    admits it. First, for each region ``profile`` composes that a call's
+    recording runs, each edge held at each other place (``HoldEdge``) and at
+    each chosen depth, its analysis minimum times 2 to 2**DEPTH_DOUBLINGS
+    and its knee (``DepthEdge``): one edge an edit, so the search composes
+    several; the analysis's own kind and minimum are the region edit's.
 
     Args:
         calls: The graph's calls, every version.
@@ -208,9 +282,45 @@ def candidates(
             it does not generate yet.
     """
     proposed: list[Entry] = []
+    holds: list[tuple[Entry, int, Hold]] = []
+    deepened: list[tuple[Entry, int, int]] = []
     cores = device.cols * len(device.core_rows)
     for timed in calls:
         recording = timed.recording
+        for entry in profile.entries():
+            root = entry.root
+            if not isinstance(root, Region):
+                continue
+            found = recording.occurrences(entry)
+            if not found:
+                continue
+            touches = frozenset(s for match in found for s in match)
+            for index in range(len(root.edges)):
+                for place in Hold:
+                    if (entry, index, place) in holds:
+                        continue
+                    if root.held(index, place) == root:
+                        continue
+                    holds.append((entry, index, place))
+                    yield HoldEdge(entry, index, place, touches)
+            try:
+                analysis = Derivation(root, recording, device).analysis()
+            except (NotImplementedError, ValueError):
+                continue  # depths wait on the analysis modelling the region
+            for index, edge in enumerate(root.edges):
+                least = analysis.min_depth.get(edge)
+                if least is None:
+                    continue
+                depths = [least << k for k in range(1, DEPTH_DOUBLINGS + 1)]
+                try:
+                    depths.append(analysis.knee_depth[edge])
+                except (NotImplementedError, KeyError):
+                    pass  # no knee yet: the doublings alone
+                for depth in sorted(set(depths)):
+                    if depth == edge.depth or (entry, index, depth) in deepened:
+                        continue
+                    deepened.append((entry, index, depth))
+                    yield DepthEdge(entry, index, depth, touches)
         steps = recording.steps
         _, writers = recording.users()
         held = recording.held
@@ -234,19 +344,24 @@ def candidates(
                 if recording.crosses_host(lo, hi):
                     break
                 edges: list[Edge] = []
-                for c in range(lo + 1, hi + 1):
+                for c in range(lo, hi + 1):
                     for sink, read in zip(steps[c].op.buffers, steps[c].refs()):
                         made = writers.get(read.root, [])
                         if (
                             not sink.fills
                             or not sink.streamed
                             or read.nbytes is not None
-                            or read.root in held
                             or len(made) != 1
-                            or not lo <= made[0] < c
                         ):
                             continue
                         p = made[0]
+                        # State a step of the window writes is carried: read
+                        # from its writer earlier this call, or (the writer
+                        # itself or later) from the call before.
+                        if not (
+                            lo <= p < c if read.root not in held else lo <= p <= hi
+                        ):
+                            continue
                         for source, wrote in zip(steps[p].op.buffers, steps[p].refs()):
                             if not (
                                 source.drains
@@ -257,10 +372,18 @@ def candidates(
                                 continue
                             pair = (p, source.name, c, sink.name)
                             if pair not in kinds:
-                                edge = Edge(0, source.name, 1, sink.name)
+                                loop = p == c
+                                edge = Edge(0, source.name, int(not loop), sink.name)
                                 try:
                                     pair_of = Derivation(
-                                        Region((members[p], members[c]), (edge,)),
+                                        Region(
+                                            (
+                                                (members[p],)
+                                                if loop
+                                                else (members[p], members[c])
+                                            ),
+                                            (edge,),
+                                        ),
                                         recording,
                                         device,
                                     )
@@ -272,7 +395,9 @@ def candidates(
                                 else:
                                     sizes = (
                                         pair_of.obj_elements[0].get(source.name),
-                                        pair_of.obj_elements[1].get(sink.name),
+                                        pair_of.obj_elements[int(not loop)].get(
+                                            sink.name
+                                        ),
                                     )
                                     kinds[pair] = (
                                         EdgeKind.STREAM

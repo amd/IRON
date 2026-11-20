@@ -12,6 +12,7 @@ from iron.common.declare.composition import (
 )
 from iron.common.declare.composition import (
     Entry,
+    Hold,
     Member,
     Refinement,
     Region,
@@ -28,9 +29,9 @@ from iron.operators import (
 from iron.tests.support import sequences
 from iron.tests.support import toys_composition as toys
 from iron.tests.support.toys_edges import member
-from iron.tests.support.tuning import unbuilt
+from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import candidates, check, fit, measure, search
+from iron.tune.search import AddEntry, HoldEdge, candidates, check, fit, measure, search
 
 pytestmark = pytest.mark.usefixtures("device")
 
@@ -57,15 +58,9 @@ def _named_region_and_recording(name: str) -> tuple[Region, object]:
     return region, recording
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        # IRON folds neither of these pairs (Operator.fold refuses them).
-        (pytest.param(n, marks=unbuilt) if n in ("decode_gemv", "add_softmax") else n)
-        for n in toys.PAIR_TOYS
-    ],
-)
+@pytest.mark.parametrize("name", toys.PAIR_TOYS)
 def test_two_actors_on_one_core_round_trip_as_an_entry(name, tmp_path, device):
+    """Two actors on one core round-trip, and composing ``candidates``' edits reaches them: the region, then its edge held in L1."""
     region, recording = _named_region_and_recording(name)
     entry = Entry(root=region)
     profile = Profile()
@@ -73,14 +68,10 @@ def test_two_actors_on_one_core_round_trip_as_an_entry(name, tmp_path, device):
     profile.save(tmp_path / "profile.json")
     loaded = Profile.load(tmp_path / "profile.json")
     assert loaded.entries() == profile.entries()
-    calls = [Timed(recording)]
-    assert any(
-        entry in edit.apply(Profile()).entries()
-        for edit in candidates(calls, Profile(), device)
-    )
+    reached = reached_by_candidates(region, [Timed(recording)], device)
+    assert reached.entries() == [entry]
 
 
-@unbuilt
 @pytest.mark.parametrize(
     "recording_fn, topology",
     [
@@ -107,13 +98,23 @@ def test_two_actors_on_one_core_round_trip_as_an_entry(name, tmp_path, device):
 def test_every_topology_is_proposed_on_its_producer_s_core(
     recording_fn, topology, device
 ):
-    recording = recording_fn()
-    composed = [
-        edit.apply(Profile())
-        for edit in candidates([Timed(recording)], Profile(), device)
-    ]
+    """Each topology's region, its producer and a consumer then held on one core (an L1 hold), is an edit ``candidates`` yields."""
+    calls = [Timed(recording_fn())]
+    profile = Profile()
+    for edit in candidates(calls, profile, device):
+        if (
+            isinstance(edit, AddEntry)
+            and isinstance(edit.entry.root, Region)
+            and edit.entry.root.edges
+            and not edit.entry.root.workers
+        ):
+            profile = edit.apply(profile)
+            break
     assert any(
-        toys.has_worker_group(e) for profile in composed for e in profile.entries()
+        toys.has_worker_group(e)
+        for edit in candidates(calls, profile, device)
+        if isinstance(edit, HoldEdge) and edit.place is Hold.L1
+        for e in edit.apply(profile).entries()
     )
 
 
@@ -186,7 +187,7 @@ def test_a_pair_over_a_core_s_memory_is_refused(device):
 
     On one worker the SiLU folds into the GEMV, its kernel run on each
     1024-element output tile. The GEMV alone holds 64640 of a core's 65536
-    bytes (npu1's and npu2's alike) (one A tile of 4 rows of 5952, a line, its double-buffered output
+    bytes, npu1's and npu2's alike (one A tile of 4 rows of 5952, a line, its double-buffered output
     and the stack) and builds; the fold's scratch tile adds 2048.
     """
     gemv = GEMV(M=6144, K=5952, tile_size_input=4, tile_size_output=1024)

@@ -169,7 +169,9 @@ def compared(
         cap_s: The most its timing takes (``compare_graphs``).
     """
     memo = {} if memo is None else memo
-    was, now = Applied.of(old, before, dev), Applied.of(new, after, dev)
+    # The profile checked builds what it names; the one it is checked against
+    # may run a stale packing unpacked, as a model does.
+    was, now = Applied.of(old, before, dev), Applied.of(new, after, dev, required=True)
     pair = (was.fingerprint(dev), now.fingerprint(dev))
     if pair[0] == pair[1]:
         return None

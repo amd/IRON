@@ -37,22 +37,8 @@ logger = logging.getLogger(__name__)
 # to a sub-design must start on one.
 SHIM_ADDRESS_ALIGNMENT = 4
 
-# aiecc's resource stages, in its order (tools/aiecc/IRTransforms.h). The whole
-# stateful transform, since allocate alone on unsplit fifos checks nothing.
-_FIT_PIPELINE = (
-    "builtin.module("
-    "aie.device(aie-place-tiles{{placer={placer}}}),"
-    "aie-lower-scratchpad-parameters,"
-    "aie.device("
-    "aie-objectFifo-stateful-transform,"
-    "aie-assign-lock-ids,"
-    "aie-reserve-runtime-bd-ids,"
-    "aie-assign-bd-ids,"
-    "aie-prepare-buffers,"
-    "aie-assign-buffer-addresses,"
-    "aie-create-pathfinder-flows"
-    "))"
-)
+# aiecc's own placement, lowering, buffer address and routing stages.
+_FIT_PIPELINE = "builtin.module(aie-resource-stages{{placer={placer}}})"
 
 
 SEQUENTIAL, ANNEALED = "sequential_placer", "sa_placer"
@@ -77,6 +63,9 @@ class Packing:
     # Designs whose device routes only as the annealing placer places it; out
     # of the repr, so an image without one keeps its cache key.
     annealed: tuple[str, ...] = dataclasses.field(default=(), repr=False)
+    # A group that does not place refuses the image (CoResidenceError) where
+    # it would otherwise run unpacked: a tuner's check builds what it names.
+    required: bool = dataclasses.field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         seen: set[str] = set()
@@ -566,6 +555,10 @@ class Composition:
                 else:
                     _placed[key] = (SEQUENTIAL, refused)
             placer, refused = _placed[key]
+            if refused is not None and packing.required:
+                raise CoResidenceError(
+                    f"packing {', '.join(kept)} does not place: {refused}"
+                )
             if refused is not None:
                 logger.warning(
                     "packing %s does not place, so it is not packed: %s",
@@ -786,15 +779,28 @@ class Composition:
             reconfig_teardown=self.teardown or None,
         ).resolve_program()
         # aiecc places the rest with its default placer; these route only so.
-        annealed = packing.annealed_devices()
-        place = PassManager.parse(
-            f"aie.device(aie-place-tiles{{placer={ANNEALED}}})", module.context
-        )
-        for op in module.body.operations:
-            if "sym_name" in op.attributes and (
-                ir.StringAttr(op.attributes["sym_name"]).value in annealed
-            ):
-                place.run(op.operation)
+        # The placer takes a whole module, so they are placed apart, in one of
+        # their own, and put back where they stood.
+        annealed = [
+            op
+            for op in module.body.operations
+            if "sym_name" in op.attributes
+            and ir.StringAttr(op.attributes["sym_name"]).value
+            in packing.annealed_devices()
+        ]
+        if annealed:
+            with module.context, ir.Location.unknown():
+                apart = ir.Module.create()
+                placed = [
+                    op.operation.clone(ip=ir.InsertionPoint(apart.body))
+                    for op in annealed
+                ]
+                PassManager.parse(
+                    f"builtin.module(aie-place-tiles{{placer={ANNEALED}}})"
+                ).run(apart.operation)
+                for op, done in zip(annealed, placed, strict=True):
+                    done.move_before(op.operation)
+                    op.operation.erase()
         return str(module)
 
     # The device configuration every full ELF's commands run on.
