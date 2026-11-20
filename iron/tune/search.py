@@ -688,6 +688,9 @@ def fit(
     Each call's steps are first tuned as the profile's tunable entries name;
     a setting its operator cannot resolve or validate is refused by the
     counts, as is a region member's, and one that resolves is placed alone.
+    The rest holds the version the call's schedule builds
+    (``Recording.scheduled``): several calls a command, or calls merged into
+    one, composed and placed as built.
     A region whose steps share one worker is IRON's fold of them
     (``composed_folds``), placed as the one operator it folds into. Each other
     region entry, at its first match in each call's recording, then passes
@@ -901,6 +904,15 @@ def fit(
         if retuned:
             recording = dataclasses.replace(recording, steps=steps)
             recording.rebind(retuned)
+        # The rest is fitted as built: its version as its schedule runs it.
+        single = recording
+        try:
+            with set_current_device(device):
+                recording = single.scheduled(profile)
+        except NotImplementedError as e:
+            waiting.append(str(e))
+        except ValueError as e:
+            return Fit(False, "counts", f"{single.name} as its schedule builds it: {e}")
         readers, writers = recording.users()
         spans: list[tuple[int, ...]] = []
         applied: list[Configuration | Region | Member] = []
@@ -1367,35 +1379,9 @@ def fit(
                         f"which outlasts the call, so a call depends on the one "
                         f"before",
                     )
-            if schedule.size is not None and schedule.merged_calls == 1:
-                waiting.append(
-                    f"building a schedule's derived version {schedule.size!r} other "
-                    f"than calls merged into one is not built yet"
-                )
-            elif schedule.size is not None:
-                try:
-                    with set_current_device(device):
-                        recording.merged(schedule.merged_calls)
-                except NotImplementedError as e:
-                    waiting.append(str(e))
-                except ValueError as e:
-                    return Fit(
-                        False,
-                        "counts",
-                        f"its {schedule.merged_calls} calls merged into one: {e}",
-                    )
-                if schedule.calls_per_command > 1:
-                    waiting.append(
-                        f"{recording.name}: several merged calls a command are not "
-                        f"built yet"
-                    )
             if schedule.calls_per_command > 1:
-                try:
-                    repeated = recording.repeated(schedule.calls_per_command)
-                except NotImplementedError as e:
-                    waiting.append(str(e))
-                else:
-                    words, _ = _words(repeated, share=True, extents=False)
+                if recording.calls > 1:
+                    words, _ = _words(recording, share=True, extents=False)
                     if len(words) > SCRATCHPAD_WORDS:
                         return Fit(
                             False,
@@ -1414,7 +1400,7 @@ def fit(
                         cache = Cache.here()
                     except (OSError, subprocess.CalledProcessError, RuntimeError):
                         unknown = "xrt-smi reports no platform to key cached times"
-                for i, step in enumerate(recording.steps if unknown is None else ()):
+                for i, step in enumerate(single.steps if unknown is None else ()):
                     with set_current_device(device):
                         measured = cache.get(cache.key(step.op, dict(timed.values)))
                     if measured is None:
@@ -2220,7 +2206,8 @@ def search(
     then taken best first, each applied to the profile so far (a region and
     a tunable edit of the same steps compose; a region over steps an earlier
     one holds gives way to it, as a tunable an earlier one sets does): one
-    that builds what the profile so far builds is passed over; a take is
+    the profile so far does not fit with (``fit``), or that builds what it
+    builds, is passed over; a take is
     checked against ``start`` by its refinement (``check``) and measured
     against the profile so far, and kept where it still gains. The next
     round's ``candidates`` reach what composes on a take (a hold of an edge
@@ -2301,6 +2288,21 @@ def search(
                 # An earlier take replaced the entry it edits; the next round
                 # proposes it again on what that take left.
                 logger.info("search: %s gives way: %s", edit, e)
+                continue
+            # Priced against the round's base, it joins what the takes before
+            # it left, which may not fit with it.
+            try:
+                fitted = fit(edited, calls, device)
+            except NotImplementedError as e:
+                logger.info("search: %s waits on what it joins: %s", edit, e)
+                continue
+            if not fitted.ok:
+                logger.info(
+                    "search: %s refused on what it joins at %s: %s",
+                    edit,
+                    fitted.stage,
+                    fitted.why,
+                )
                 continue
             with set_current_device(device):
                 same = all(

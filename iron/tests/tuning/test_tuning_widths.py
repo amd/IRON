@@ -12,7 +12,14 @@ from aie.dialects.aie import get_target_model
 from aie.utils import set_current_device
 
 from iron.common.declare.composition import Edge as CompositionEdge
-from iron.common.declare.composition import Entry, Member, Refinement, Region, Scope
+from iron.common.declare.composition import (
+    Entry,
+    Member,
+    Refinement,
+    Region,
+    Schedule,
+    Scope,
+)
 from iron.common.declare.profile import Profile
 from iron.common.design import OperatorDesign
 from iron.common.image.compose import SHIM_SHORT, fits
@@ -107,6 +114,26 @@ def test_tuner_keeps_widths_that_pay_and_bounds_builds(device):
         for e in found.entries()
     )
     assert len(PLACEMENTS) > 1
+
+
+def test_calls_a_command_are_fitted_as_the_version_they_build(device):
+    """A window at the array's full width fits one call, and four calls a command are fitted as the four-call version they build, which the placer refuses."""
+    if not device.can_dispatch_full_elf:
+        pytest.skip(
+            "several calls a command wait on an xclbin per step before any placement"
+        )
+    _, recording = _window(columns=2)
+    region, _ = _window(columns=get_target_model(device.resolve()).columns())
+    one = Profile()
+    one.add_entry(Entry(root=region))
+    assert fit(one, [Timed(recording)], device).ok
+    with pytest.raises(NotImplementedError, match="placer refuses"):
+        fit(one, [Timed(recording.repeated(4))], device)
+    four = Profile()
+    four.add_entry(Entry(root=region))
+    four.add_schedule(Schedule(version=recording.version, calls_per_command=4))
+    with pytest.raises(NotImplementedError, match="placer refuses"):
+        fit(four, [Timed(recording)], device)
 
 
 @pytest.mark.usefixtures("device")

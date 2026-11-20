@@ -964,48 +964,35 @@ class Applied:
     ) -> Applied:
         """Return ``call`` under ``profile`` on ``dev``.
 
-        Where its version's schedule runs several calls a command, the derived
-        version running them, back to back (``Recording.repeated``) or merged
-        into one (``Recording.merged``), and the commands it keeps in flight.
-
-        Raises:
-            NotImplementedError: The schedule names a derived version other
-                than calls merged into one, or both merges calls and runs
-                several a command.
+        The version its schedule builds (``Recording.scheduled``), and the
+        commands it keeps in flight.
 
         Its weights coded as ``Graph.compile`` codes them (``Recording.code_weights``),
         in ``call``'s recording itself: how a weight is read is its recording's, the
         same under every profile. ``required``: a packing group that does not place
         refuses the build rather than running unpacked (``Packing.required``).
+
+        Raises:
+            NotImplementedError: Its schedule's version is not built yet
+                (``Recording.scheduled``).
         """
         begun = time.perf_counter()
         call.recording.code_weights()
-        recording = call.recording
-        schedules = [s for s in profile.schedules() if s.version == recording.version]
-        per = max((s.calls_per_command for s in schedules), default=1)
-        merged = max((s.merged_calls for s in schedules), default=1)
-        derived = [s.size for s in schedules if s.size and s.merged_calls == 1]
-        if derived:
-            raise NotImplementedError(
-                f"{recording.name}: the derived version {derived[0]!r}, other than "
-                f"calls merged into one, is not built yet"
-            )
-        if per > 1 and merged > 1:
-            raise NotImplementedError(
-                f"{recording.name}: several merged calls a command are not built yet"
-            )
-        if per > 1:
-            recording = recording.repeated(per)
-        if merged > 1:
-            recording = recording.merged(merged)
-        recording, fused, packing = apply_profile(recording, profile, dev)
+        recording, fused, packing = apply_profile(
+            call.recording.scheduled(profile), profile, dev
+        )
         out = cls(
             recording,
             fused,
             dataclasses.replace(packing, required=required),
             *packaged(recording, profile),
             commands_in_flight=max(
-                (s.commands_in_flight for s in schedules), default=1
+                (
+                    s.commands_in_flight
+                    for s in profile.schedules()
+                    if s.version == recording.version
+                ),
+                default=1,
             ),
         )
         Spent.charge(build_s=time.perf_counter() - begun)

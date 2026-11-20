@@ -444,6 +444,40 @@ class Recording:
             derived_from=self.version,
         )
 
+    def scheduled(self, profile: Profile) -> Recording:
+        """Return the version ``profile``'s schedules for this one build: its calls back to back (``repeated``), merged (``merged``), or this one.
+
+        Raises:
+            NotImplementedError: A schedule names a derived version other than
+                calls merged into one, both merges calls and runs several a
+                command, or merges calls under an entry naming their steps;
+                or ``repeated`` or ``merged`` does not build it.
+        """
+        schedules = [s for s in profile.schedules() if s.version == self.version]
+        per = max((s.calls_per_command for s in schedules), default=1)
+        merged = max((s.merged_calls for s in schedules), default=1)
+        derived = [s.size for s in schedules if s.size and s.merged_calls == 1]
+        if derived:
+            raise NotImplementedError(
+                f"{self.name}: the derived version {derived[0]!r}, other than calls "
+                f"merged into one, is not built yet"
+            )
+        if per > 1 and merged > 1:
+            raise NotImplementedError(
+                f"{self.name}: several merged calls a command are not built yet"
+            )
+        if merged > 1 and any(self.occurrences(e) for e in profile.entries()):
+            raise NotImplementedError(
+                f"{self.name}: calls merged into one under an entry naming its "
+                f"steps are not built yet: an entry names a step's shape, which a "
+                f"merge changes"
+            )
+        if per > 1:
+            return self.repeated(per)
+        if merged > 1:
+            return self.merged(merged)
+        return self
+
     def merged(self, calls: int) -> Recording:
         """Return the derived version running ``calls`` of this one's calls as one call, each step over the calls' data at once (``Operator.merged``).
 
