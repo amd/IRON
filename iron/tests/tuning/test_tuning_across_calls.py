@@ -246,10 +246,22 @@ def test_several_calls_a_command_are_priced_a_call_at_a_time(device):
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_tuner_keeps_the_call_schedule_that_pays(device):
-    """The tuner, on the decode-step toy alone, keeps the call schedule that pays."""
-    recording = _decode_recording()
+    """The tuner, on a projection toy alone, keeps the call schedule that pays.
+
+    One GEMV, which no region joins and no merge takes, so each call
+    schedule is priced on its own. Its call is short enough that a dispatch
+    is much of it: four calls a command pay well clear of noise (npu2: 0.78
+    a call, against 0.95 to gain).
+    """
+    recording = toys_schedule.projection_step_recording(
+        "across_calls_projection", toys_schedule.projection_step()
+    )
+    calls = [Timed(recording)]
     start = Profile()
-    found = search([Timed(recording)], start, device, budget_s=60.0)
+    four = Profile()
+    four.add_schedule(Schedule(version=recording.version, calls_per_command=4))
+    assert measure(four, start, calls, device).ratio < 0.9
+    found = search(calls, start, device, budget_s=60.0)
     assert any(
         s.calls_per_command > 1 or s.commands_in_flight > 1 for s in found.schedules()
     )

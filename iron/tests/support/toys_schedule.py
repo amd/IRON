@@ -110,6 +110,20 @@ def decode_step_recording(name, gemv, add) -> Recording:
     return Recording.of_steps(name, steps, ["A", "x", "r"], ["out"])
 
 
+def projection_step(size=1024) -> GEMV:
+    """Return one call a call-schedule toy repeats: a projection alone, which no region joins and no merge takes.
+
+    Its call is short enough that a dispatch is much of it.
+    """
+    return GEMV(M=size, K=size, tile_size_input=4, tile_size_output=32)
+
+
+def projection_step_recording(name, gemv) -> Recording:
+    return Recording.of_steps(
+        name, sequences.steps((gemv, "A", "x", "y")), ["A", "x"], ["y"]
+    )
+
+
 def residual_step(cols=2) -> tuple[ElementwiseAdd, ElementwiseMul]:
     """Return a step merged calls stack: elementwise throughout, so ``k`` calls are one call at ``k`` times the size."""
     add = ElementwiseAdd(size=2048, num_aie_columns=cols, tile_size=256)
