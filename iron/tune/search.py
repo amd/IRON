@@ -1613,17 +1613,24 @@ def fit(
                     )
                 }
             )
-            for edge, p, c, depth in on_cores:
-                why = _restaged_on_cores(
-                    derivation,
-                    edge,
-                    (p, c),
-                    depth,
-                    (p, edge.output) in kept,
-                    model,
-                )
-                if why is not None:
-                    return Fit(False, "counts", why)
+            try:
+                past = [
+                    _restaged_on_cores(
+                        derivation,
+                        edge,
+                        (p, c),
+                        depth,
+                        (p, edge.output) in kept,
+                        model,
+                    )
+                    for edge, p, c, depth in on_cores
+                ]
+            except NotImplementedError as e:
+                waiting.append(str(e))
+                continue
+            why = next((w for w in past if w is not None), None)
+            if why is not None:
+                return Fit(False, "counts", why)
             for edge, p, c in derivation.wired:
                 made = derivation.obj_elements[p].get(edge.output)
                 taken = derivation.obj_elements[c].get(edge.input)
@@ -2073,6 +2080,9 @@ def _restaged_on_cores(
     Returns:
         The first core past a core tile's input or output channels,
         memory, buffer descriptors or locks, or None.
+
+    Raises:
+        NotImplementedError: ``Staging`` does not plan the restage.
     """
     p, c = ends
     (source,) = [
@@ -2083,7 +2093,10 @@ def _restaged_on_cores(
         with set_current_device(derivation.device):
             staging = Staging(source, sink)
     except ValueError as e:
-        return f"{edge}, restaged in L1: {e}"
+        raise NotImplementedError(
+            f"{edge}: a restage held in L1 that Staging does not plan is not "
+            f"built yet: {e}"
+        ) from e
     lanes = (derivation.lanes[p][edge.output], derivation.lanes[c][edge.input])
     cores = max(len(lanes[0]), len(lanes[1]))
     inputs, outputs, held, bds, locks = ([0] * cores for _ in range(5))

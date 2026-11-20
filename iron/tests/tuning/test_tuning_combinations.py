@@ -53,6 +53,7 @@ _BUILT_COMBOS = {
             for shape in (HandOff.EQUAL, HandOff.JOIN, HandOff.SLICES, HandOff.SPLIT)
         ),
         (HandOff.SPLIT, "diamond", "l1", "min_minus_one", "different", "smaller"),
+        (HandOff.BROADCAST, "diamond", "l1", "min_minus_one", "same", "recorded"),
         *(
             (shape, role, "l1", "min_minus_one", "same", "recorded")
             for shape, role in (
@@ -75,6 +76,7 @@ _REFUSED_COMBOS = {
     "npu2": {
         (HandOff.RATIO, "skip", "l1", "min", "same", "smaller"),
         (HandOff.SPLIT, "skip", "l1", "min", "same", "recorded"),
+        (HandOff.BROADCAST, "skip", "l1", "knee", "same", "recorded"),
     },
 }
 
