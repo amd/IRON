@@ -78,7 +78,10 @@ class Operand:
     composition ``splices`` a stage into it, those are fifos of the cores'
     own, and the stage's outputs write the join (``join_from``), each
     holding the output ``into`` which it writes; the stage's host operands
-    move ``along`` that output's lanes, in its host order.
+    move ``along`` that output's lanes, in its host order. An output drained
+    only to the host whose ``drain_join`` is above one joins each run of that
+    many lanes in a memtile into one host lane (``joined_drains``), so it
+    takes fewer of the shim's receiving channels.
     """
 
     def __init__(self, member: Any, op: Operator) -> None:
@@ -99,6 +102,7 @@ class Operand:
         self.along: Operand | None = None
         self.into: Operand | None = None
         self.read_lanes: set[int] = set()
+        self.drain_join = 1
         self._decl = member.of(op)
 
     def __getattr__(self, name: str) -> Any:
@@ -290,6 +294,26 @@ class Operand:
         port = Port.dma(0) if self.packeted else None
         if self.packeted:
             objectfifo_kwargs.setdefault("transport", Transport.dma(packet=Packet()))
+        if self.drains and self.drain_join > 1 and join is None and tiles is None:
+            # Each run of lanes a memtile joins, an object of each a round, into
+            # one host lane; the cores write the runs' own fifos.
+            runs = self.joined_drains()
+            elements = math.prod(self.obj_shape)
+            hosts, made = [], []
+            for run in runs:
+                host = ObjectFifo(
+                    np.ndarray[(len(run) * elements,), np.dtype[self.dtype]],
+                    depth=depth,
+                )
+                hosts.append(host)
+                made += host.prod().join(
+                    [k * elements for k in range(len(run))],
+                    depths=[depth] * len(run),
+                    obj_types=[obj_type] * len(run),
+                )
+            self.lane_fifos = made
+            self.lane_handles = [host.cons() for host in hosts]
+            return [f.prod() for f in made]
         made = [
             ObjectFifo(obj_type, depth=depth, **objectfifo_kwargs)
             for _ in range(self.lanes)
@@ -477,6 +501,25 @@ class Operand:
         ends = [(self.reader(lane), sink.handles[lane]) for lane in range(sink.lanes)]
         self.cascade, sink.cascade = sink, self
         return ends
+
+    def joined_drains(self) -> list[list[int]]:
+        """Return each host lane's run of this output's lanes, ``drain_join`` of them a run.
+
+        Raises:
+            ValueError: The output is read on chip, or its lanes do not divide
+                into runs of ``drain_join``.
+        """
+        g = self.drain_join
+        if self.lanes % g:
+            raise ValueError(
+                f"{self.name}'s {self.lanes} lanes do not join in runs of {g}"
+            )
+        if self.feeds or self.cascade is not None or self.keeps_host:
+            raise ValueError(
+                f"{self.name} is read on chip: a drain join takes an output drained "
+                f"only to the host"
+            )
+        return [list(range(k, k + g)) for k in range(0, self.lanes, g)]
 
     def moved_per_lane(self) -> dict[int, int]:
         """Return the elements each lane moves in a call, by lane.
@@ -794,6 +837,84 @@ class Operand:
                 f"{name} has no obj_shape=, so its sequence cannot be derived; add "
                 f"obj_shape= or override sequence(rt)"
             )
+        if self.drains and self.drain_join > 1:
+            return self._joined_transfers(self._lane_transfers())
+        return self._lane_transfers()
+
+    def _joined_transfers(
+        self,
+        lanes: list[tuple[int, TensorAccessPattern, Value | None, int | None]],
+    ) -> list[tuple[int, TensorAccessPattern, Value | None, int | None]]:
+        """Return ``lanes``' transfers as its joined drains take them: a host lane a run, each round an object of each lane.
+
+        The run's pattern puts one axis of its lanes beside the first lane's
+        objects, held element for element to the lanes' own walks.
+
+        Raises:
+            ValueError: A lane moves a per-call count or more than one
+                transfer, the run's walk is no one-descriptor pattern, or it
+                is not the lanes' elements in that order.
+        """
+        taps = dict.fromkeys(range(self.lanes))
+        for lane, tap, word, _ in lanes:
+            if word is not None or taps[lane] is not None:
+                raise ValueError(
+                    f"{self.name}'s lane {lane} moves a per-call count or more than "
+                    f"one transfer, which a drain join does not take"
+                )
+            taps[lane] = tap
+        elements = math.prod(self.obj_shape)
+        index = np.arange(self.elements)
+        out = []
+        for host, run in enumerate(self.joined_drains()):
+            first = taps[run[0]]
+            walks = [taps[k].gather(index).reshape(-1, elements) for k in run]
+            want = np.stack(walks, axis=1).reshape(-1)
+            step = int(walks[1][0, 0] - walks[0][0, 0]) if len(run) > 1 else 0
+            # The first lane's dimensions, split where an object ends inside one.
+            dims = list(zip(first.sizes, first.strides, strict=True))
+            inner, at = 1, len(dims)
+            while at > 0 and inner < elements:
+                size, stride = dims[at - 1]
+                if inner * size <= elements:
+                    inner *= size
+                    at -= 1
+                    continue
+                f, rest = divmod(elements, inner)
+                if rest or size % f:
+                    break
+                dims[at - 1 : at] = [(size // f, stride * f), (f, stride)]
+                inner = elements
+            dims = [
+                (s, d) for s, d in dims[:at] + [(len(run), step)] + dims[at:] if s != 1
+            ]
+            joined = (
+                TensorAccessPattern(
+                    tuple(self.shape),
+                    first.offset,
+                    [s for s, _ in dims],
+                    [d for _, d in dims],
+                )
+                if inner == elements and len(dims) <= 4
+                else None
+            )
+            if (
+                joined is None
+                or not np.array_equal(joined.gather(index), want)
+                or not self.fits(joined)
+            ):
+                raise ValueError(
+                    f"{self.name}'s lanes {run}, joined an object of each a round, "
+                    f"have no one-descriptor host pattern"
+                )
+            out.append((host, joined, None, None))
+        return out
+
+    def _lane_transfers(
+        self,
+    ) -> list[tuple[int, TensorAccessPattern, Value | None, int | None]]:
+        """Return each lane's transfers as its cores move them (``transfers``, before any drain join)."""
+        name = f"{type(self.op).__name__}.{self.name}"
         described = self.op.lane_transfers(self)
         if described is not None:
             return described

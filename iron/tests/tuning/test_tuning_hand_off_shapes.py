@@ -15,11 +15,14 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
+from aie.dialects.aie import WireBundle, get_target_model
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement, Region
+from iron.common.design import OperatorDesign
 from iron.common.graph.sdf import analyze
-from iron.common.image.step import EdgeKind, HandOff
+from iron.common.image.compose import fits, transported
+from iron.common.image.step import Edge, EdgeKind, Fusion, FusionKind, HandOff
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     broadcast_weight_to_columns,
@@ -207,16 +210,41 @@ def test_a_restage_over_a_memtiles_memory_is_refused_before_any_build(device):
     assert "memtile" in (result.why or "")
 
 
-@unbuilt
+def _memtile_receives(device) -> int:
+    """Return the lanes one of ``device``'s memtiles receives: its stream switch's DMA destinations."""
+    model = get_target_model(device.resolve())
+    row = next(r for r in range(model.rows()) if model.is_mem_tile(0, r))
+    return model.get_num_dest_switchbox_connections(0, row, WireBundle.DMA)
+
+
+# The devices where a GEMV at the array's full width drains more lanes than a
+# memtile receives.
+PAST_A_MEMTILE = [
+    pytest.param(name, id=f"device_{name}")
+    for name in sorted(DEVICES)
+    if DEVICES[name]().cols > _memtile_receives(DEVICES[name]())
+]
+
+
+@pytest.mark.parametrize("device", PAST_A_MEMTILE, indirect=True)
 def test_a_restage_over_a_memtiles_channels_is_refused_before_any_build(device):
-    """A restage past a memtile's channel budget is refused before any build."""
-    recording, region = fan_out_norm_qkv(columns=(device.cols,) * 3)
-    profile = Profile()
-    profile.add_entry(Entry(region))
-    result = fit(profile, [Timed(recording)], device)
-    assert not result.ok
-    assert result.stage == "counts"
-    assert "channel" in (result.why or "")
+    """A drain join restages a projection's lanes through a memtile, which joins only as many as it receives.
+
+    All of a full-width projection's lanes joined into one are refused
+    before any build; the build joins its drains in runs within them.
+    """
+    recording, _ = fan_out_norm_qkv(columns=(device.cols,) * 3)
+    designs = [OperatorDesign(step.op.resolved()) for step in recording.steps]
+    fusion = Fusion(
+        FusionKind.STREAM,
+        (0, 1, 2, 3),
+        tuple(Edge(0, "y", c, "B") for c in (1, 2, 3)),
+        packets=True,
+    )
+    members = {str(j): d for j, d in enumerate(designs)}
+    refused = fits(members, fusion=dataclasses.replace(fusion, drains=device.cols))
+    assert refused is not None and "MemTile" in refused
+    assert 1 < transported(fusion, designs).drains <= _memtile_receives(device)
 
 
 @pytest.mark.parametrize("shape", sorted(REPRESENTABLE_GAPS))

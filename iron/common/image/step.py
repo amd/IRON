@@ -130,7 +130,11 @@ class Fusion:
     ``packets`` True sends its members' host fills as packet flows, sharing
     the shim's sending channels; False keeps them circuits; None leaves it to
     the placer: packets only where circuits run the channels short and packets
-    place (``compose.transported``).
+    place (``compose.transported``). ``drains`` above one joins each run of
+    that many lanes of a member's output drained only to the host in a
+    memtile into one host lane, taking fewer of the shim's receiving
+    channels; 1 drains each lane on its own; None leaves it to the placer,
+    as ``packets``.
     ``phases`` names each member's phase, in ``steps``' order, where they are
     chosen rather than derived (``compose.phases``).
     """
@@ -144,6 +148,7 @@ class Fusion:
     workers: tuple[tuple[int, ...], ...] = ()
     packets: bool | None = None
     phases: tuple[int, ...] | None = None
+    drains: int | None = None
 
     def __post_init__(self) -> None:
         if len(self.steps) < 2:
@@ -185,6 +190,11 @@ class Fusion:
                     f"step {edge.consumer}'s input {edge.input!r} is fed twice"
                 )
             fed.add((edge.consumer, edge.input))
+        if self.drains is not None and self.drains < 1:
+            raise ValueError(
+                f"fusion {self.steps} joins drains in runs of {self.drains}; a run "
+                f"is a lane or more"
+            )
         if self.waits and not self.phased:
             raise ValueError(
                 f"fusion {self.steps} waits on host memory, which only a phased "

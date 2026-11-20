@@ -168,6 +168,8 @@ class BuiltArray:
             (``Operand.packeted``).
         splices: Output names a composition splices a stage into, where
             their build joins their cores' fifos (``Operand.splices``).
+        joined_drains: Output name -> the lanes each host lane joins in a
+            memtile (``Operand.drain_join``).
 
     Raises:
         ValueError: A full ELF is asked to carry a ``DispatchTime`` value, an
@@ -188,6 +190,7 @@ class BuiltArray:
         depths: Mapping[str, int] | None = None,
         packeted: Collection[str] = (),
         splices: Collection[str] = (),
+        joined_drains: Mapping[str, int] | None = None,
     ):
         words = words or {}
         dispatch = dispatch or {}
@@ -224,6 +227,7 @@ class BuiltArray:
             built.chosen_depth = (depths or {}).get(mine.name)
             built.packeted = mine.name in packeted
             built.splices = mine.name in splices
+            mine.drain_join = built.drain_join = (joined_drains or {}).get(mine.name, 1)
         self.built = view.build()
         for mine, built in zip(op.buffers, view.buffers):
             chosen = built.chosen_depth

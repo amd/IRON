@@ -15,7 +15,7 @@ import hashlib
 import itertools
 import logging
 import math
-from collections.abc import Hashable, Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 from aie import ir
@@ -192,27 +192,55 @@ def places(
     return "\n".join(diagnostics) if diagnostics else None
 
 
+def transports(
+    designs: Sequence[OperatorDesign],
+    packets: bool | None = None,
+    drains: int | None = None,
+) -> Iterator[tuple[bool, int]]:
+    """Yield each ``(packets, drains)`` a fusion of ``designs`` may take, in the order a build tries them.
+
+    What is given is kept; what is None is varied: the drains each lane on
+    its own, then joined in runs of 2, 4, ... lanes up to the widest
+    output's (``Fusion.drains``), and at each the host fills as circuits,
+    then as packet flows (``Fusion.packets``): the fewest memtile hops
+    first, and circuits before channels shared by packets.
+    """
+    widest = max(
+        (b.lanes for d in designs for b in d.op.buffers if b.drains), default=1
+    )
+    runs = (
+        [drains] if drains is not None else [1 << k for k in range(widest.bit_length())]
+    )
+    for run in runs:
+        for packeted in [packets] if packets is not None else [False, True]:
+            yield packeted, run
+
+
 def transported(
     fusion: Fusion,
     designs: Sequence[OperatorDesign],
     words: Mapping[str, str] | None = None,
     beside: Mapping[str, OperatorDesign] | None = None,
 ) -> Fusion:
-    """Return ``fusion`` with its host fills as packet flows where circuits run the shim's DMA channels short and packets place.
+    """Return ``fusion`` under the first of its ``transports`` the sequential placer places, where circuits run the shim's DMA channels short.
 
-    Where ``fusion.packets`` is None, the sequential placer decides (``fits``),
-    with ``beside``'s designs packed in the same configuration; otherwise
-    ``fusion`` is returned as given, for the build to report.
+    Decided by the sequential placer (``fits``), with ``beside``'s designs
+    packed in the same configuration. Where none places, or the first
+    refusal is not the shim's channels, ``fusion`` is returned as given,
+    for the build to report.
     """
-    if fusion.packets is not None:
-        return fusion
     members = dict(zip((str(j) for j in fusion.steps), designs, strict=True))
     members.update(beside or {})
-    refused = fits(members, words, fusion=fusion)
-    if refused is None or SHIM_SHORT not in refused:
-        return fusion
-    packeted = dataclasses.replace(fusion, packets=True)
-    return packeted if fits(members, words, fusion=packeted) is None else fusion
+    for k, (packets, drains) in enumerate(
+        transports(designs, fusion.packets, fusion.drains)
+    ):
+        tried = dataclasses.replace(fusion, packets=packets, drains=drains)
+        refused = fits(members, words, fusion=tried)
+        if refused is None:
+            return fusion if k == 0 else tried
+        if SHIM_SHORT not in refused:
+            return fusion
+    return fusion
 
 
 def fused_configuration(
@@ -329,6 +357,18 @@ def fused_configuration(
                 else ()
             ),
             splices=[e.output for e in [*joined_in, *cascades] if e.producer == j],
+            joined_drains=(
+                {
+                    b.name: fusion.drains
+                    for b in design.op.buffers
+                    if b.drains
+                    and (j, b.name) not in first_reader
+                    and b.lanes > 1
+                    and b.lanes % fusion.drains == 0
+                }
+                if fusion.drains is not None and fusion.drains > 1
+                else None
+            ),
         )
         for producer, output in fusion.kept:
             if producer == j:
@@ -1125,7 +1165,12 @@ class Composition:
                 refused = fits(designs, fusion=fusion)
                 if refused is None:
                     _placed[key] = (SEQUENTIAL, None)
-                elif fits(designs, fusion=fusion, placer=ANNEALED) is None:
+                # Short of channels, the transport is the build's to choose
+                # (``transported``); annealing adds none.
+                elif (
+                    SHIM_SHORT not in refused
+                    and fits(designs, fusion=fusion, placer=ANNEALED) is None
+                ):
                     _placed[key] = (ANNEALED, None)
                 else:
                     _placed[key] = (SEQUENTIAL, refused)
