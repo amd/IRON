@@ -60,6 +60,7 @@ from ..common.image.packaging import SCRATCHPAD_WORDS
 from ..common.image.step import Edge, EdgeKind, FusionKind, HandOff
 from .autotune import Point, Timed, refusal, settings
 from .cli import WATCHDOG_HEADROOM, watchdog_s
+from .costmodel import CostModel
 from .fusions import (
     Applied,
     Compared,
@@ -67,6 +68,7 @@ from .fusions import (
     _bound_points,
     _random_tensor,
     compare_graphs,
+    design_cores,
     drawn_inputs,
     group_fit_verdict,
 )
@@ -264,8 +266,7 @@ _NOT_GENERATED = (
     "inflows",
     "a runtime plan's DDR burst lengths and transfer sizes",
     "nested regions",
-    "a configuration of one design, and its concurrency, width, residency, "
-    "switch and teardown",
+    "a configuration's concurrency, partial width, residency, switch and teardown",
     "widths differing between a region's members",
     "fission",
     "substitution",
@@ -377,11 +378,18 @@ def candidates(
     interleaved, and its packaging; ``fit`` refuses one that breaks a
     dependence.
 
-    Before the schedules, after each call's tunables, its configurations:
-    each window of consecutive steps a region's window may be, of two or
-    more designs, as one ``Configuration`` loaded together, each region the
-    profile composes inside it (at its first match) one part, every other
-    step a member.
+    Before the schedules, after each call's tunables, its configurations,
+    each the designs it loads together (``Configuration``): designs that
+    share an array (IRON's ``array_key``) are one device, so each array's
+    shapes alone, then the designs of each window of consecutive steps a
+    region's window may be, two or more, a shape once and each region the
+    profile composes whole in it (at each match it runs in a row) one part.
+    Each is narrowed to co-reside (``narrowed``): as recorded where its
+    designs' cores fit the array, else at the widest width at which they
+    do, the narrowest where none does, for ``fit`` to refuse. They are
+    yielded most saving first, by what their switches save as the device's
+    cost model prices them (``CostModel``), every step of their designs
+    run in them.
 
     Args:
         calls: The graph's calls, every version.
@@ -676,35 +684,138 @@ def candidates(
                             else Refinement.EXACT
                         ),
                     )
-        # Each region the profile composes, by its first match's first step.
-        pieces: dict[int, tuple[Region, tuple[int, ...]]] = {}
-        for entry in profile.entries():
+        piece_of: dict[int, tuple[Region, tuple[int, ...]]] = {}
+        design_of: dict[int, tuple] = {}
+        for k, entry in enumerate(profile.entries()):
             root = entry.root
             if not isinstance(root, Region):
                 continue
-            for match in recording.occurrences(entry)[:1]:
-                if match == tuple(range(match[0], match[0] + len(match))):
-                    pieces.setdefault(match[0], (root, match))
+            for match in recording.occurrences(entry):
+                if match == tuple(
+                    range(match[0], match[0] + len(match))
+                ) and not piece_of.keys() & set(match):
+                    piece_of.update({s: (root, match) for s in match})
+                    design_of.update({s: ("region", k) for s in match})
+        with set_current_device(device):
+            resolved = [step.op.resolved(device) for step in steps]
+            for s, op in enumerate(resolved):
+                design_of.setdefault(s, ("array", op.array_key()))
+            placed: dict[tuple, int] = {}
+            for op in resolved:
+                if op.array_key() not in placed:
+                    placed[op.array_key()] = design_cores(op)
+            cores_of: dict[tuple, int] = {}
+            for s, design in design_of.items():
+                if design[0] == "region" or design not in cores_of:
+                    cores_of[design] = (
+                        cores_of.get(design, 0) + placed[resolved[s].array_key()]
+                    )
+        # By the designs it loads together: its parts, and the step each of
+        # their steps is.
+        memberships: dict[frozenset, tuple[tuple[Region | Member, ...], list[int]]] = {}
+        for s, design in design_of.items():
+            if design[0] == "array" and frozenset([design]) not in memberships:
+                at = []
+                for t in range(len(steps)):
+                    if design_of[t] == design and all(
+                        members[t] != members[u] for u in at
+                    ):
+                        at.append(t)
+                memberships[frozenset([design])] = (
+                    tuple(members[t] for t in at),
+                    at,
+                )
         for lo in range(len(steps)):
             for hi in range(lo + 1, min(lo + cores, len(steps))):
                 if recording.crosses_host(lo, hi):
                     break
-                if all(m == members[lo] for m in members[lo : hi + 1]):
-                    continue  # one design: its own configuration already
+                if lo in piece_of and piece_of[lo][1][0] < lo:
+                    break  # it cuts a region the profile composes
+                if hi in piece_of and piece_of[hi][1][-1] > hi:
+                    continue
                 parts: list[Region | Member] = []
+                at = []
                 s = lo
                 while s <= hi:
-                    piece = pieces.get(s)
-                    if piece is not None and piece[1][-1] <= hi:
-                        parts.append(piece[0])
-                        s += len(piece[1])
-                    else:
+                    if s in piece_of:
+                        root, match = piece_of[s]
+                        parts.append(root)
+                        at += match
+                        s = match[-1] + 1
+                        continue
+                    if members[s] not in parts:
                         parts.append(members[s])
-                        s += 1
-                entry = Entry(Configuration(tuple(parts)))
-                if len(parts) > 1 and entry not in proposed:
-                    proposed.append(entry)
-                    yield AddEntry(entry, frozenset(range(lo, hi + 1)))
+                        at.append(s)
+                    s += 1
+                designs = frozenset(design_of[t] for t in at)
+                if len(designs) > 1:
+                    memberships.setdefault(designs, (tuple(parts), at))
+        model = CostModel.load(device.name)
+        if model is None:
+            model = CostModel()
+        offers: list[tuple[float, Configuration, frozenset[int]]] = []
+        for designs, (parts, at) in memberships.items():
+            configuration = Configuration(parts)
+            width = (
+                max(vars(resolved[s]).get("num_aie_columns") or 0 for s in at)
+                if len(designs) > 1
+                else 0
+            )
+            while True:
+                together: dict[tuple, int] = {}
+                with set_current_device(device):
+                    for s, m in zip(at, configuration.steps()):
+                        op = (
+                            steps[s].op._with_tunables(**m.tunables).resolved(device)
+                            if m.tunables
+                            else resolved[s]
+                        )
+                        if op.array_key() not in placed:
+                            placed[op.array_key()] = design_cores(op)
+                        together[design_of[s]] = placed[op.array_key()] + (
+                            together.get(design_of[s], 0)
+                            if design_of[s][0] == "region"
+                            else 0
+                        )
+                if sum(together.values()) <= cores or width <= 1:
+                    break
+                width -= 1
+                try:
+                    with set_current_device(device):
+                        narrow = narrowed(
+                            Configuration(parts, columns=width), tuple(at), recording
+                        )
+                except NotImplementedError:
+                    break  # a step declares no column count
+                configuration = dataclasses.replace(narrow, columns=None)
+            predicted = []
+            for merged in (frozenset(), designs):
+                group = {d: merged if d in merged else d for d in cores_of}
+                order = [group[design_of[s]] for s in range(len(steps))]
+                into = [b for a, b in zip([None, *order], order) if a != b]
+                predicted.append(
+                    model.predict(
+                        {
+                            "switches": len(into),
+                            "switch_cores": sum(
+                                sum(together.values()) if g == merged else cores_of[g]
+                                for g in into
+                            ),
+                            "packed_steps": sum(
+                                group[design_of[s]] == merged
+                                for s in range(len(steps))
+                                if len(merged) > 1
+                            ),
+                        }
+                    )
+                )
+            touches = frozenset(s for s in range(len(steps)) if design_of[s] in designs)
+            offers.append((predicted[0] - predicted[1], configuration, touches))
+        for _, configuration, touches in sorted(offers, key=lambda o: -o[0]):
+            entry = Entry(configuration)
+            if entry not in proposed:
+                proposed.append(entry)
+                yield AddEntry(entry, touches)
     versions = [t.recording.version for t in calls]
     for timed in calls:
         version = timed.recording.version
@@ -1309,8 +1420,8 @@ def fit(
                 # Not a fold: the composer joins its cores, counted below.
                 fold = folds[0] if folds else None
                 if fold is not None:
-                    folded = apply_folds(recording, [fold]).steps[fold.steps[0]].op
                     with set_current_device(device):
+                        folded = apply_folds(recording, [fold]).steps[fold.steps[0]].op
                         refused = refusal(folded)
                     if refused is not None and set(placements) != {"sequential"}:
                         waiting.append(
@@ -2684,8 +2795,9 @@ def search(
 
     In rounds, each from the profile the last one kept (``start`` first):
     each edit ``candidates`` yields from it is applied to it, fitted
-    (``fit``; one that waits or is refused is passed over) and measured in
-    place against it (``measure``); one under ``GAINS`` gains, and one
+    (``fit``; one that waits or is refused is passed over, as is one that
+    builds what the profile builds) and measured in place against it
+    (``measure``); one under ``GAINS`` gains, and one
     that does not build, or builds wrong, is refused and logged. The gainers are
     then taken best first, each applied to the profile so far (a region and
     a tunable edit of the same steps compose; a region over steps an earlier
@@ -2745,6 +2857,14 @@ def search(
                 )
                 continue
             try:
+                with set_current_device(device):
+                    same = all(
+                        Applied.of(c, edited, device).fingerprint(device)
+                        == Applied.of(c, base, device).fingerprint(device)
+                        for c in calls
+                    )
+                if same:
+                    continue  # it builds what its base builds
                 ratio = measure(
                     edited,
                     base,
