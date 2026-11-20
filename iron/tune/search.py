@@ -423,7 +423,7 @@ def candidates(
                     planned.append((entry, name, value))
                     yield PlanRegion(entry, name, value, touches)
             try:
-                analysis = Derivation(root, recording, device).analysis()
+                analysis = Derivation(root, recording, device, timed.values).analysis()
             except (NotImplementedError, ValueError):
                 continue  # depths wait on the analysis modelling the region
             for index, edge in enumerate(root.edges):
@@ -505,6 +505,7 @@ def candidates(
                                         ),
                                         recording,
                                         device,
+                                        timed.values,
                                     )
                                     shape = pair_of.analysis().hand_off[edge]
                                 except NotImplementedError:
@@ -1001,6 +1002,7 @@ def fit(
                     region,
                     found[0],
                     recording,
+                    timed.values,
                     after,
                     device,
                     cores_on_array // model.columns(),
@@ -1091,7 +1093,7 @@ def fit(
                         f"{cascade_rows} rows",
                     )
             try:
-                derivation = Derivation(region, recording, device)
+                derivation = Derivation(region, recording, device, timed.values)
             except NotImplementedError as e:
                 waiting.append(str(e))
                 continue
@@ -1559,6 +1561,7 @@ def _configuration_fit(
     configuration: Configuration,
     match: tuple[int, ...],
     recording: Recording,
+    values: Mapping[str, int],
     after: Sequence[set[int]],
     device: Device,
     core_rows: int,
@@ -1579,6 +1582,7 @@ def _configuration_fit(
         configuration: The configuration fitted.
         match: The recording's step each of its steps is, depth-first.
         recording: The recording it is matched in.
+        values: The call's per-call values (``Timed.values``).
         after: Each step's readers later in the recording.
         device: The device.
         core_rows: The core tiles a column holds.
@@ -1597,7 +1601,7 @@ def _configuration_fit(
         if refused is not None:
             return refused
     try:
-        derivation = Derivation(Region(configuration.parts), recording, device)
+        derivation = Derivation(Region(configuration.parts), recording, device, values)
     except NotImplementedError as e:
         return [str(e)]
     cores = [len(recorded.cores) for _, recorded in derivation.recorded]

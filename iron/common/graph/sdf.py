@@ -36,6 +36,7 @@ from aie.utils import set_current_device
 from ..declare import Operator
 from ..declare.composition import Entry, Region
 from ..design import BuiltArray, OperatorDesign, configuration
+from ..elementwise import Elementwise
 from ..image.compose import Spliced, cascade_cores, splice
 from ..image.step import BufferRef, Edge, EdgeKind, HandOff
 from .clock import kernel_cycles
@@ -70,12 +71,18 @@ class Channel:
         initial: Objects on it before the call starts (a carried value).
         phase: The runtime phase its transfer runs in: it is read only once
             every edge of an earlier phase has had all it moves written.
+        floor: Objects it holds whatever its depth: its producer's own end
+            buffers, for a core-to-core fifo. Where the two ends share
+            memory the lowering makes one pool as deep as the deeper end;
+            apart, each end its own pool, more again. A period counts it; a
+            deadlock does not, so a depth that runs runs on either.
     """
 
     producer: int
     consumer: int
     initial: int = 0
     phase: int = 0
+    floor: int = 0
 
 
 class Flow:
@@ -210,13 +217,15 @@ class Flow:
         before what it releases), and an access waits, besides on its actor,
         until what it takes is there: an acquire, until the edge last
         changed. A call's end is its last actor's; the period is the time
-        between the last two calls' ends.
+        between the last two calls' ends. An edge holds at least its
+        ``floor``.
 
         Raises:
             NotImplementedError: An edge runs in a later phase.
         """
         if any(c.phase for c in self.channels):
             raise NotImplementedError("a period over phases is not modelled yet")
+        depths = {e: max(depths[e], c.floor) for e, c in enumerate(self.channels)}
         filled = [c.initial for c in self.channels]
         changed = [Fraction(0)] * len(self.channels)
         clock = [Fraction(0)] * len(self.programs)
@@ -319,6 +328,8 @@ class Analysis:
         fixed: The channels an operator's own build holds at a depth.
         kernels: Per actor, the kernels its core calls; none for a memtile
             link, which takes no time of a core's.
+        scalars: Per actor, each of its kernels' scalar arguments its
+            contract leaves unbound, as its operator passes them.
         work: Per actor, the accesses its work comes before: each output
             it releases (once, not again for each reader a broadcast writes
             to), or, where it writes none, each input it frees.
@@ -336,6 +347,7 @@ class Analysis:
     channels: dict[Edge, list[int]] = field(repr=False, compare=False)
     fixed: dict[int, int] = field(repr=False, compare=False)
     kernels: list[tuple[ExternalFunction, ...]] = field(repr=False, compare=False)
+    scalars: list[tuple[tuple, ...]] = field(repr=False, compare=False)
     work: list[list[int]] = field(repr=False, compare=False)
 
     def deadlock(self, depths: Mapping[Edge, int]) -> str | None:
@@ -360,15 +372,15 @@ class Analysis:
                 firing the recording does not hold.
         """
         costs = []
-        for kernels, work, program in zip(
-            self.kernels, self.work, self.flow.programs, strict=True
+        for kernels, scalars, work, program in zip(
+            self.kernels, self.scalars, self.work, self.flow.programs, strict=True
         ):
             if len(kernels) > 1:
                 raise NotImplementedError(
                     f"pricing a core that calls {len(kernels)} kernels "
                     f"({', '.join(fn.name for fn in kernels)}) is not modelled yet"
                 )
-            each = Fraction(kernel_cycles(kernels[0]) if kernels else 0)
+            each = Fraction(kernel_cycles(kernels[0], scalars[0]) if kernels else 0)
             marked = set(work)
             costs.append(
                 [each if i in marked else Fraction(0) for i in range(len(program))]
@@ -390,22 +402,38 @@ class Analysis:
         assert period is not None, "the ceiling depths run"
         return period
 
-    @property
+    @functools.cached_property
     def knee_depth(self) -> dict[Edge, int]:
-        """Per edge, the shallowest depth from its minimum at which a call takes ``period``.
+        """Per edge, the shallowest depth from its minimum at which a call takes ``period``, every other edge as deep as more cannot matter.
+
+        A core-to-core edge holds what its producer's own end buffers too
+        (``Channel.floor``), which the device runs ahead into, so a depth
+        below that end's buffers gains nothing over them (``add -> SiLU ->
+        mul`` at 2**18 elements: depth 2 against 1 measures 0.99 to 1.01,
+        where the reading end alone says 0.81). The floor is the pool the
+        two ends share, the least either placement gives, so the knee holds
+        whichever the placer picks.
 
         Raises:
-            NotImplementedError: Always, for now: a core-to-core edge also
-                holds what its producer's own end buffers, which the device
-                runs ahead into and the analysis does not count, so a knee
-                over the reading end alone overstates what depth buys
-                (``add -> SiLU -> mul`` at 2**18 elements: depth 2 against 1
-                measures 0.99 to 1.01, where the reading end alone says 0.81).
+            ValueError: The region cannot run at any depth (``why``).
+            NotImplementedError: As ``period``.
         """
-        raise NotImplementedError(
-            "a knee depth needs the producer end's buffers, which the analysis "
-            "does not count yet"
-        )
+        target = self.period
+        ceiling = self.flow.ceiling(self.fixed)
+        knees = {}
+        for edge, es in self.channels.items():
+            depth = self.min_depth[edge]
+            top = max(ceiling[e] for e in es)
+            while (
+                depth < top
+                and self.flow.period(
+                    {**ceiling, **dict.fromkeys(es, depth)}, self.costs
+                )
+                != target
+            ):
+                depth += 1
+            knees[edge] = depth
+        return knees
 
 
 class Derivation:
@@ -433,27 +461,43 @@ class Derivation:
     edge; a cascade into or out of such cores is a channel a core pair, its
     relays the transport, not actors.
 
+    One call is analysed, at its per-call values: a lane whose length a
+    per-call word sizes moves that word's tiles at the call's extents
+    (``Operand.transfers``), the one array serving every extent. A value the
+    call does not give is the largest the recording's limits admit, a whole
+    call.
+
     Args:
         region: The composed region.
         recording: The recording its steps are matched in.
         device: The device every operator is built for.
+        values: The call's per-call values, by name (``Timed.values``).
 
     Raises:
         NotImplementedError: What the analysis does not model yet: a
-            run-time branch or a ``forever_`` in a core, a per-call count, a
-            slice, a restaging IRON's ``Staging`` cannot plan, or a loop no
-            fifo's objects settle.
+            run-time branch or a ``forever_`` in a core, a transfer sized
+            per call other than by a lane's length word, a slice, a
+            restaging IRON's ``Staging`` cannot plan, or a loop no fifo's
+            objects settle.
         ValueError: The region matches none of the recording's steps, a
-            member's tunables do not resolve (``Unresolvable``), or an edge's
-            two ends are not one buffer.
+            member's tunables do not resolve (``Unresolvable``), an edge's
+            two ends are not one buffer, or a per-call value the call does
+            not give is bounded by no limit of the recording.
     """
 
-    def __init__(self, region: Region, recording: Recording, device: Device) -> None:
+    def __init__(
+        self,
+        region: Region,
+        recording: Recording,
+        device: Device,
+        values: Mapping[str, int] | None = None,
+    ) -> None:
         matches = recording.occurrences(Entry(region))
         if not matches:
             raise ValueError("the region matches none of the recording's steps")
         self.region = region
         self.device = device
+        self.values = dict(values or {})
         self.wired, _ = region.wiring()
         groups = [set(group) for group in region.workers]
         one_core = [
@@ -473,18 +517,27 @@ class Derivation:
         self.spliced: dict[Edge, list[tuple[Worker, Worker, ObjectFifo]]] = {}
         self.per_core: dict[tuple[int, str], list[ObjectFifo]] = {}
         spliced_into: dict[int, tuple[int, Spliced]] = {}
+        # Per step, the graph expression each of its per-call values is bound
+        # to, and its extents at this call.
+        bindings: list[tuple[dict[str, Any], dict[str, int]]] = []
         for i, (s, member) in enumerate(zip(matches[0], region.steps())):
             step = recording.steps[s]
             op = step.op
+            bound = {
+                b.member.name: b.expression for b in recording.bindings if b.op is op
+            }
             if member.tunables:
                 with set_current_device(device):
                     op = op._with_tunables(**member.tunables).resolved(device)
-            if op.bound_extents:
-                raise NotImplementedError(
-                    f"{type(op).__name__} is bounded per call "
-                    f"({', '.join(op.bound_extents)}); analysing a call at "
-                    f"its own values is not modelled yet"
+            bindings.append(
+                (
+                    bound,
+                    {
+                        name: self._evaluate(recording, bound[name])
+                        for name in op.bound_extents
+                    },
                 )
+            )
             self.ops.append(op)
             self.refs.append({b.name: ref for ref, b in zip(step.refs(), op.buffers)})
             into = [
@@ -618,27 +671,45 @@ class Derivation:
         self.objects: dict[ObjectFifo, int] = {}
         self.lanes: list[dict[str, list[ObjectFifo]]] = []
         self.obj_elements: list[dict[str, int]] = []
-        for array, recorded in self.recorded:
+        for op, (array, recorded), (bound, extents) in zip(
+            self.ops, self.recorded, bindings, strict=True
+        ):
             lanes: dict[str, list[ObjectFifo]] = {}
             obj_elements: dict[str, int] = {}
+            # Per fifo, the elements each transfer its lane's per-call length
+            # sizes moves this call, in order.
+            sized: dict[ObjectFifo, list[int]] = {}
+            per_call = any(t.elements is None for t in recorded.transfers)
             for b in array.op.buffers:
                 if not b.streamed or not b.lane_handles:
                     continue
                 lanes[b.name] = [h.object_fifo for h in b.lane_handles]
                 obj_elements[b.name] = math.prod(b.obj_shape)
+                for lane, _, length, unit in b.transfers() if per_call else ():
+                    if length is None:
+                        continue
+                    tiles = (
+                        self._evaluate(recording, bound[length.name])
+                        if length.name in bound
+                        else op.derived_at(length.name, **extents)
+                    )
+                    sized.setdefault(lanes[b.name][lane], []).append(tiles * unit)
             moved: dict[ObjectFifo, int] = {}
             for transfer in recorded.transfers:
-                if transfer.elements is None:
+                fifo = transfer.fifo
+                elements = transfer.elements
+                if elements is None and sized.get(fifo):
+                    elements = sized[fifo].pop(0)
+                if elements is None:
                     site = transfer.site
                     raise NotImplementedError(
                         f"{type(array.op).__name__}'s {transfer.kind} of "
-                        f"{transfer.fifo.name} is sized per call"
+                        f"{fifo.name} is sized per call"
                         + (f" ({site.filename}:{site.line})" if site else "")
-                        + "; analysing a call at its own values is not modelled yet"
+                        + " other than by a lane's length; analysing it is not "
+                        "modelled yet"
                     )
-                moved[transfer.fifo] = moved.get(transfer.fifo, 0) + -(
-                    -transfer.elements // math.prod(transfer.fifo.shape)
-                )
+                moved[fifo] = moved.get(fifo, 0) + -(-elements // math.prod(fifo.shape))
             self.objects.update(moved)
             self.lanes.append(lanes)
             self.obj_elements.append(obj_elements)
@@ -656,6 +727,41 @@ class Derivation:
                             )
         self.links = [link for _, recorded in self.recorded for link in recorded.links]
         self._through_links(self.links)
+
+    def _evaluate(self, recording: Recording, expression: Any) -> int:
+        """Return graph ``expression`` at this call: its value as the call gives it, else the largest every limit of the recording on it admits.
+
+        Raises:
+            ValueError: The call does not give the value and no limit of the
+                recording bounds it, or the limits do not settle one.
+        """
+        name = expression.value.name
+        if name not in self.values:
+            on = [
+                limit
+                for limit in recording.limits
+                if limit.plus is None
+                and limit.expression.value.name == name
+                and limit.expression.linear
+                and limit.expression.scale > 0
+            ]
+            if not on:
+                raise ValueError(
+                    f"{recording.name}: the call does not give {name}, and no limit "
+                    f"of the recording bounds it"
+                )
+            most = min(
+                (limit.hi - 1 - limit.expression.bias) // limit.expression.scale
+                for limit in on
+            )
+            if not all(
+                limit.lo <= limit.evaluate({name: most}) < limit.hi for limit in on
+            ):
+                raise ValueError(
+                    f"{recording.name}: the limits on {name} settle no largest value"
+                )
+            self.values[name] = most
+        return expression.evaluate(self.values)
 
     def _through_links(self, links: Sequence[ObjectFifoLink]) -> None:
         """Carry the objects a call moves across ``links``, from the fifos that know them to those that do not."""
@@ -1029,12 +1135,14 @@ class Derivation:
         """
         programs: list[list[tuple[ObjectFifo, bool, bool, int]]] = []
         actor_kernels: list[tuple[ExternalFunction, ...]] = []
+        actor_scalars: list[tuple[tuple, ...]] = []
         repetition: dict[int, int] = {}
         # Per actor, the step whose core it is; None for a link.
         actor_step: list[int | None] = []
         solved = self._all_trips()
         actor_of: dict[int, int] = {}
-        for i, (_, recorded) in enumerate(self.recorded):
+        for i, (array, recorded) in enumerate(self.recorded):
+            given = array.op.scalars() if isinstance(array.op, Elementwise) else ()
             for k, core in enumerate(recorded.cores):
                 trips = solved[id(core)]
                 actor_of[id(core.owner)] = len(programs)
@@ -1044,6 +1152,7 @@ class Derivation:
                         f for f in core.owner.fn_args if isinstance(f, ExternalFunction)
                     )
                 )
+                actor_scalars.append((given,) * len(actor_kernels[-1]))
                 programs.append(
                     [
                         (
@@ -1060,6 +1169,7 @@ class Derivation:
                     repetition[i] = trips[id(outermost[0])] if outermost else 1
             for link in recorded.links:
                 actor_kernels.append(())
+                actor_scalars.append(())
                 actor_step.append(None)
                 programs.append(self._link_events(link))
         writer: dict[ObjectFifo, int] = {}
@@ -1109,10 +1219,12 @@ class Derivation:
             ordered = sorted(members, key=lambda a: firing[actor_step[a]])
             programs[first] = [event for a in ordered for event in programs[a]]
             actor_kernels[first] = tuple(f for a in ordered for f in actor_kernels[a])
+            actor_scalars[first] = tuple(s for a in ordered for s in actor_scalars[a])
             for a in members:
                 if a != first:
                     programs[a] = []
                     actor_kernels[a] = ()
+                    actor_scalars[a] = ()
         if lead:
             writer, readers = {}, {}
             for actor, program in enumerate(programs):
@@ -1237,10 +1349,12 @@ class Derivation:
                     f"rides another's or is held whole); an edge with it is not "
                     f"modelled yet"
                 )
+            # More objects than its own buffer holds; a call bounded short of
+            # it moves fewer.
             if (
                 sizes[1] is not None
                 and all(f in self.objects for f in ins)
-                and sum(self.objects[f] for f in ins) != sink.elements // sizes[1]
+                and sum(self.objects[f] for f in ins) > sink.elements // sizes[1]
             ):
                 raise NotImplementedError(
                     f"{edge}: {sink.name}'s fifos carry another buffer's objects "
@@ -1280,6 +1394,7 @@ class Derivation:
                             actor,
                             initial=self.objects[inp] if carried else 0,
                             phase=phase,
+                            floor=out.prod().depth,
                         )
                     )
                     e = len(channels) - 1
@@ -1297,6 +1412,7 @@ class Derivation:
                 if fifo.depth is not None:
                     fixed[e] = fifo.depth
         actor_kernels += [()] * (len(programs) - len(actor_kernels))
+        actor_scalars += [()] * (len(programs) - len(actor_scalars))
         events: list[list[Event]] = []
         work: list[list[int]] = []
         for actor, program in enumerate(programs):
@@ -1361,16 +1477,30 @@ class Derivation:
             channels=edge_channels,
             fixed=fixed,
             kernels=actor_kernels,
+            scalars=actor_scalars,
             work=work,
         )
 
 
-def analyze(region: Region, recording: Recording, device: Device) -> Analysis:
-    """Analyze ``region`` of ``recording`` on ``device``, the device every operator is built for.
+def analyze(
+    region: Region,
+    recording: Recording,
+    device: Device,
+    values: Mapping[str, int] | None = None,
+) -> Analysis:
+    """Analyze ``region`` of ``recording`` on ``device``, the device every operator is built for, for one call at ``values``.
+
+    Args:
+        region: The composed region.
+        recording: The recording its steps are matched in.
+        device: The device.
+        values: The call's per-call values, by name; one it leaves out is
+            the largest the recording's limits admit (``Derivation``).
 
     Raises:
         NotImplementedError: What the analysis does not model yet
             (``Derivation``).
-        ValueError: The region matches none of the recording's steps.
+        ValueError: The region matches none of the recording's steps, or a
+            per-call value the call leaves out is bounded nowhere.
     """
-    return Derivation(region, recording, device).analysis()
+    return Derivation(region, recording, device, values).analysis()

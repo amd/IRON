@@ -27,6 +27,21 @@ def test_balanced_chain_is_consistent_firing_once_a_tile(device):
     assert all(d == 1 for d in analysis.min_depth.values())
 
 
+@pytest.mark.parametrize(("n", "tiles"), [(None, 8), (1024, 8), (512, 4), (130, 2)])
+def test_a_bounded_call_fires_the_tiles_its_own_values_cover(n, tiles, device):
+    """``add -> mul`` over the first ``n`` of 1024 elements, a 128-element tile an object: a call fires each core once a tile its ``n`` covers.
+
+    A call that gives no ``n`` is a whole one, the largest the recording's
+    limits admit.
+    """
+    recording = toys.BoundedChain().record(a=(1024,), b=(1024,), c=(1024,))
+    region = toys.bounded_chain_region(recording)
+    analysis = analyze(region, recording, device, None if n is None else {"n": n})
+    assert analysis.consistent
+    assert analysis.repetition == {0: tiles, 1: tiles}
+    assert analysis.tokens[region.edges[0]] == ((1,), (1,))
+
+
 def test_cycle_without_a_carried_value_deadlocks_at_any_depth(device):
     """A one-actor accumulate loop with nothing carried: its first read waits on its own write, so no depth runs."""
     region, add = toys.running_sum()

@@ -19,7 +19,7 @@ from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.fusions import Applied
-from iron.tune.search import check, fit, measure, search
+from iron.tune.search import GAINS, check, fit, measure, search
 
 pytestmark = pytest.mark.usefixtures("device")
 
@@ -306,10 +306,10 @@ def test_tuner_keeps_a_depth_at_or_past_the_minimum(device):
     assert tuned_edge.depth >= analysis.min_depth[tuned_edge]
 
 
-@unbuilt
-@pytest.mark.supported_devices("npu1", "npu2")
+# npu1's waits on host 203.
+@pytest.mark.supported_devices("npu2")
 def test_each_depth_up_to_the_knee_is_measured_against_the_next(device):
-    """The chain toy at every depth from the analysis's minimum to its knee, each measured against the next by ``measure``'s paired runs.
+    """The chain toy at every depth from the analysis's minimum to its knee, each measured against the next by ``measure``'s paired runs, and one past it.
 
     The measured knee (the depth past which a further measured pair gains
     nothing more) is the one ``analyze`` itself reports as ``knee_depth``.
@@ -338,3 +338,8 @@ def test_each_depth_up_to_the_knee_is_measured_against_the_next(device):
     assert list(analyze(at_knee, recording, device).knee_depth.values()) == list(
         analysis.knee_depth.values()
     )
+    knee_profile = Profile()
+    knee_profile.add_entry(Entry(root=at_knee))
+    past = Profile()
+    past.add_entry(Entry(root=toys.add_silu_mul_region(add, silu, mul, depth=knee + 1)))
+    assert measure(past, knee_profile, calls, device).ratio > GAINS
