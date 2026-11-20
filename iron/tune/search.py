@@ -694,7 +694,7 @@ def fit(
     the array. The
     dataflow analysis then finds whether the region's steps are convex (no
     step outside it on a path between two of them), whether it balances, whether each
-    stream edge's lanes meet as they are (a cascade's one to one), and
+    stream or cascade edge's lanes meet as they are, and
     whether it runs at its chosen
     depths, the rest at their minimum. The placer last places the composed
     module, where the composer builds the region as IRON's fusions do.
@@ -1150,18 +1150,15 @@ def fit(
                 for edge, p, c in derivation.wired:
                     if edge.kind not in (EdgeKind.STREAM, EdgeKind.CASCADE):
                         continue
+                    # A broadcast's lanes meet as they are, each read by
+                    # several: a cascade's relay is one of them.
                     shape = analysis.hand_off[edge]
-                    if shape not in (
-                        (HandOff.EQUAL, HandOff.BROADCAST)
-                        if edge.kind is EdgeKind.STREAM
-                        else (HandOff.EQUAL,)
-                    ):
+                    if shape not in (HandOff.EQUAL, HandOff.BROADCAST):
                         return Fit(
                             False,
                             "analysis",
-                            f"{edge} is a {edge.kind.value}, whose lanes meet one to "
-                            f"one as they are; its {shape.value} hand-off needs a "
-                            f"restage",
+                            f"{edge} is a {edge.kind.value}, whose lanes meet as "
+                            f"they are; its {shape.value} hand-off needs a restage",
                         )
                 why = analysis.deadlock(
                     {e: e.depth for e, _, _ in derivation.wired if e.depth is not None}

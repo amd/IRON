@@ -239,15 +239,6 @@ def fused_configuration(
     for e in fusion.edges:
         incoming.setdefault(e.consumer, []).append(e)
     cascades = [e for e in fusion.edges if e.kind is EdgeKind.CASCADE]
-    for e in cascades:
-        if any(
-            (d.producer, d.output) == (e.producer, e.output) and d != e
-            for d in fusion.edges
-        ):
-            raise NotImplementedError(
-                f"{e}: an output on the cascade that also feeds another step "
-                f"on-chip is not built yet"
-            )
     # The lanes' bound ends go to their first on-chip reader (by consumer in
     # step order), unless the host's drain keeps them (a tee).
     first_reader: dict[tuple[int, str], Edge] = {}

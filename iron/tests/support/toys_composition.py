@@ -26,6 +26,7 @@ from iron.common.declare.composition import (
 )
 from iron.common.declare.composition import Edge as CompositionEdge
 from iron.common.graph.record import Recording
+from iron.common.image.step import EdgeKind
 from iron.operators import (
     AXPY,
     GEMM,
@@ -437,6 +438,39 @@ def cascade_reducer_region(recording: Recording) -> Region:
     for index, edge in enumerate(region.edges):
         region = region.held(index, Hold.CASCADE if edge.input == "a" else Hold.L1)
     return region
+
+
+def partial_read_twice(name: str, M: int, K: int) -> tuple[Recording, Region]:
+    """Return two ``GEMV`` partials summed by an add, the first also read by a ``SiLU``, and its region.
+
+    The region carries the first partial to the add on the cascade and to
+    the ``SiLU`` by a stream; the add runs on the second partial's core
+    (held in L1).
+    """
+    first, second = gemv_k_split_partials(M, K, 2)
+    add = ElementwiseAdd(size=M, tile_size=M)
+    silu = SiLU(size=M, tile_size=M)
+    recording = Recording.of_steps(
+        name,
+        sequences.steps(
+            (first, "A0", "B0", "p0"),
+            (second, "A1", "B1", "p1"),
+            (add, "p0", "p1", "s"),
+            (silu, "p0", "t"),
+        ),
+        ["A0", "B0", "A1", "B1"],
+        ["s", "t"],
+    )
+    region = Region(
+        tuple(member(step.op) for step in recording.steps),
+        (
+            CompositionEdge(0, "C", 2, "a", kind=EdgeKind.CASCADE),
+            CompositionEdge(0, "C", 3, "x"),
+            CompositionEdge(1, "C", 2, "b"),
+        ),
+        workers=((1, 2),),
+    )
+    return recording, region
 
 
 # ----------------------------------------------------------------- region shape and schedule

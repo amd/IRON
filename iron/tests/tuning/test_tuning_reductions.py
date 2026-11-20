@@ -84,6 +84,16 @@ def test_a_split_gemv_is_bit_identical_across_repeats_and_arrival_order(splits, 
         assert result.ok, result.why
 
 
+@pytest.mark.supported_devices("npu2")
+def test_a_partial_on_the_cascade_and_streamed_elsewhere_is_bit_identical(npu2):
+    """A partial the cascade carries to the add and a stream to a SiLU: the relay is one more reader of its lane."""
+    recording, region = toys.partial_read_twice("read_twice", M, GEMV_K)
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    result = check(profile, Profile(), [Timed(recording)], npu2, Refinement.EXACT)
+    assert result.ok, result.why
+
+
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("splits", [2, 4, 8])
