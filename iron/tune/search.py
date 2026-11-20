@@ -2049,13 +2049,15 @@ def _restaged_on_cores(
     ``depth`` rounds deep or a call's rounds where more (a core runs its
     producer's call through before its consumer's), a join on its
     consumer lane's core, a split, or a join split again, on its first
-    producer lane's. The core's own lanes meet the round in its memory, as
-    do the lanes of the neighbours whose cores reach that memory, at best
-    every other lane up to their number; each lane past them takes a
-    channel and a buffer descriptor a round on the link's core. So these
-    are lower bounds: what a plan adds, a join split again sending its
-    rounds out of the core and back, the placer counts. The pool holds a
-    lock pair a slot. Each
+    producer lane's. Only the lanes leading a round meet it in place, at
+    best (on the link's core or a neighbour reaching its memory: a core
+    reaches a later slot only as a strided view); every other lane takes a
+    channel and a buffer descriptor a round on the link's core, and the
+    core's own non-leading lane a channel each way. So these are lower
+    bounds: what a plan adds, a join split again sending its rounds out of
+    the core and back, the placer counts. The pool holds a lock pair a
+    slot. A join split again counts no channels here, since another plan
+    could join each sink lane's sources on its own core. Each
     core also holds its two steps' other fifos, a lock pair each, and a
     channel and descriptors for each that leaves the core. ``elsewhere``
     sends a link core's own producer lane to its other readers.
@@ -2109,32 +2111,23 @@ def _restaged_on_cores(
                 bds[k] += h.depth
                 inputs[k] += h.handle_type == "cons"
                 outputs[k] += h.handle_type == "prod"
-    tiles = [
-        (col, row)
-        for col in range(model.columns())
-        for row in range(model.rows())
-        if model.is_core_tile(col, row)
-    ]
-    neighbours = max(
-        sum(
-            model.is_legal_mem_affinity(*other, *tile)
-            for other in tiles
-            if other != tile
-        )
-        for tile in tiles
-    )
     for (ins, taken, outs, _), rounds in zip(staging.groups, staging.rounds):
         at = outs[0] if len(outs) == 1 else ins[0]
         deep = max(depth, rounds)
         held[at] += deep * sum(taken) * staging.item
         locks[at] += 2 * max(len(ins), len(outs))
-        far_in = max(0, sum(k != at for k in ins) - neighbours)
-        far_out = max(0, sum(j != at for j in outs) - neighbours)
-        sent = elsewhere and at in ins
-        inputs[at] += far_in
-        outputs[at] += far_out + sent
-        bds[at] += deep * (far_in + far_out + sent)
-    col, row = tiles[0]
+        # The leading lanes meet the round in place at best; the rest arrive
+        # and leave by DMA, the core's own through its own channels. A join
+        # split again may be planned lane by lane: the placer counts it.
+        ratio = len(ins) > 1 and len(outs) > 1
+        arrive = 0 if ratio else len(ins) - 1 + (at in outs[1:])
+        leave = (0 if ratio else len(outs) - 1 + (at in ins[1:])) + (
+            elsewhere and at in ins
+        )
+        inputs[at] += arrive
+        outputs[at] += leave
+        bds[at] += deep * (arrive + leave)
+    col, row = 0, next(r for r in range(model.rows()) if model.is_core_tile(0, r))
     for k in range(cores):
         for what, n, most in (
             (

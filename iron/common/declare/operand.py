@@ -1291,10 +1291,11 @@ class Staging:
 
         Each round is one object of the link's pool on that core, a call's
         rounds deep: a core runs its producer's whole call before its
-        consumer's. A source lane whose objects are its slot of a round, read
-        here first, and a sink lane whose objects are its slot keep them in
-        the pool (``ObjectFifo.delegate_tile``): in place where their core
-        is the link's or a neighbour reaching its memory, else by DMA. A
+        consumer's. The source lane leading a round, its objects its slot and
+        read here first, and the sink lane leading it, its objects its slot,
+        keep them in the pool (``ObjectFifo.delegate_tile``): in place where
+        their core is the link's or a neighbour reaching its memory, else by
+        DMA; a core reaches any other slot only as a strided view. A
         join split again, or a split of rounds of several source objects,
         joins its rounds into a fifo the core sends itself.
 
@@ -1323,7 +1324,7 @@ class Staging:
             for k, slot in zip(ins, taken):
                 first = k not in source.read_lanes
                 end = source.reader(k)
-                if first and slot == produce:
+                if first and k == ins[0] and slot == produce:
                     end.object_fifo.delegate_tile = tile
                 ends.append(end)
             offsets = list(itertools.accumulate(taken[:-1], initial=0))
@@ -1354,9 +1355,9 @@ class Staging:
                     np.ndarray[(slot,), np.dtype[sink.dtype]],
                     depth=rounds,
                     consumer_obj_type=None if slot == consume else sink.obj_type,
-                    delegate_tile=tile if slot == consume else None,
+                    delegate_tile=tile if n == 0 and slot == consume else None,
                 )
-                for slot in given
+                for n, slot in enumerate(given)
             ]
             ObjectFifoLink(
                 end,

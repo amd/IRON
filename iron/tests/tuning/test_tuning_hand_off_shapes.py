@@ -347,7 +347,7 @@ def test_a_restage_held_in_l1_past_a_cores_memory_is_refused_before_any_build(
     )
 
 
-# Past what a core's neighbours reach: more lanes than reach one core's memory.
+# A split as wide as npu2's array.
 WIDE = [pytest.param("npu2", id="device_npu2")]
 
 
@@ -355,19 +355,18 @@ WIDE = [pytest.param("npu2", id="device_npu2")]
 def test_a_split_held_in_l1_past_a_cores_output_channels_is_refused_before_any_build(
     device,
 ):
-    """One lane split into eight held in L1 sends the lanes past its core's neighbours on channels of its own, more than a core has."""
+    """One lane split into eight held in L1 sends every lane but the leading one on a channel of its own, more than a core has."""
     _refused_in_l1(
         *held_in_l1(*split_into_rows(size=64, rows=8)), device, "output channels"
     )
 
 
-@pytest.mark.parametrize("device", WIDE, indirect=True)
 def test_a_join_held_in_l1_past_a_cores_buffer_descriptors_is_refused_before_any_build(
     device,
 ):
-    """Five lanes joined into one held in L1, deep: the lane past the core's neighbours takes a buffer descriptor a round, past the core's."""
+    """Two lanes joined into one held in L1, deep: the lane arriving by DMA takes a buffer descriptor a round, past the core's."""
     _refused_in_l1(
-        *held_in_l1(*join_rows_into_one(size=64, rows=5), depth=13),
+        *held_in_l1(*join_rows_into_one(size=64), depth=13),
         device,
         "buffer descriptors",
     )
