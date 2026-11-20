@@ -73,7 +73,7 @@ from .fusions import (
     drawn_inputs,
     group_fit_verdict,
 )
-from .measure import Cache, Spent, Timing
+from .measure import Cache, Spent, Timing, switch_cost
 
 
 class Edit(Protocol):
@@ -241,6 +241,28 @@ class ScheduleVersion:
         return edited
 
 
+@dataclass(frozen=True)
+class AddVariants:
+    """An edit adding a set of variants: a design per range of per-call values (``Variants``).
+
+    Attributes:
+        variants: The set added.
+        touches: The steps whose design a range changes, by index in the
+            recording it was found in.
+        refinement: How the edited build relates to the untuned build.
+    """
+
+    variants: Variants
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with ``variants`` added."""
+        edited = profile.copy()
+        edited.add_variants(self.variants)
+        return edited
+
+
 # A chosen depth is an edge's minimum times a power of two up to this many
 # doublings, beside its knee; past what a core or memtile holds, fit refuses.
 DEPTH_DOUBLINGS = 4
@@ -273,7 +295,8 @@ _NOT_GENERATED = (
     "substitution",
     "scopes",
     "a schedule's order and recomputed steps",
-    "variants and bindings",
+    "variants over several values at once, or by any but a power of two",
+    "bindings",
     "state layouts",
 )
 
@@ -379,6 +402,15 @@ def candidates(
     interleaved, and its packaging; ``fit`` refuses one that breaks a
     dependence.
 
+    Before everything else, each per-call value a call takes and ``profile``
+    does not vary yet, split in two ranges at each power of two inside its
+    recorded range (``AddVariants``): each range's entry the first step
+    whose design its capacity changes (``Recording.at_capacity``), named by
+    its ``Profile.dims``; a capacity the graph does not record, or that
+    changes no step, is passed over. First, as which design runs a call is
+    what every other edit is priced on, and a search on a budget prices
+    what comes first.
+
     Before the schedules, after each call's tunables, its configurations,
     each the designs it loads together (``Configuration``): designs that
     share an array (IRON's ``array_key``) are one device, so each array's
@@ -407,6 +439,46 @@ def candidates(
     planned: list[tuple[Entry | Version, str, object]] = []
     cores = device.cols * len(device.core_rows)
     queue = get_target_model(device.resolve()).get_dma_task_queue_depth()
+    varied = {n for v in profile.variants() for n in v.values}
+    split: set[tuple[Version, str, int]] = set()
+    for timed in calls:
+        recording = timed.recording
+        for value in recording.values:
+            span = recording.value_range(value.name)
+            if value.name in varied or span is None:
+                continue
+            lo, top = span
+            for b in (1 << k for k in range(top.bit_length())):
+                if not lo <= b < top or (recording.version, value.name, b) in split:
+                    continue
+                split.add((recording.version, value.name, b))
+                try:
+                    with set_current_device(device):
+                        small = recording.at_capacity({value.name: b})
+                except (NotImplementedError, NotLegalAtCapacity):
+                    continue
+                changed = [
+                    i
+                    for i, (a, c) in enumerate(
+                        zip(recording.steps, small.steps, strict=True)
+                    )
+                    if a.op.design_key() != c.op.design_key()
+                ]
+                if not changed:
+                    continue
+                ops = [r.steps[changed[0]].op for r in (small, recording)]
+                ranges = tuple(
+                    (
+                        ((low, high),),
+                        Entry(Member(type(op), Profile.dims(type(op), vars(op)))),
+                    )
+                    for (low, high), op in zip(
+                        ((lo, b), (b + 1, top)), ops, strict=True
+                    )
+                )
+                yield AddVariants(
+                    Variants(values=(value.name,), ranges=ranges), frozenset(changed)
+                )
     for timed in calls:
         recording = timed.recording
         for entry in profile.entries():
@@ -932,7 +1004,8 @@ def fit(
     variants over its values. Then each range's design at its capacity:
     the call re-recorded from its graph where each value takes at most its
     range's top (``Recording.selected``), which the range's entry must
-    match, fitted under that entry alone; a design not legal there
+    match, fitted under that entry and the rest of the profile (its
+    compositions named at that capacity); a design not legal there
     (``NotLegalAtCapacity``) is refused by the counts, or as its own fit
     refuses it.
 
@@ -1001,6 +1074,20 @@ def fit(
         admitted = {n: recording.value_range(n) for n in names}
         designs = 1
         spans: dict[str, list[tuple[int, int]]] = {}
+        twice = [
+            n
+            for n, k in Counter(
+                n for variants in profile.variants() for n in variants.values
+            ).items()
+            if k > 1 and n in names
+        ]
+        if twice:
+            return Fit(
+                False,
+                "counts",
+                f"{recording.name}: {twice[0]} is varied by two sets of variants; "
+                f"one set holds every range of a value",
+            )
         for variants in profile.variants():
             if not set(variants.values) <= names:
                 continue
@@ -1056,17 +1143,17 @@ def fit(
             for v in recording.values
             if (span := recording.value_range(v.name)) is not None
         }
-        alone = Profile()
-        alone.add_variants(variants)
+        # The profile but its other sets of variants: each range's design is
+        # fitted with what the profile composes, at the range's capacity.
+        alone = profile.copy()
+        for other in profile.variants():
+            if other != variants:
+                alone.remove_variants(other)
         try:
-            with set_current_device(device):
-                recording.selected(
-                    alone, timed.values, [v for _, v in timed.timed_points()]
-                )
+            for _, values in timed.timed_points():
+                recording.ranges_at(alone, values)
         except NotImplementedError as e:
             waiting.append(str(e))
-        except NotLegalAtCapacity as e:
-            return Fit(False, "counts", f"at its own values: {e}")
         for box, _ in variants.ranges:
             at = {**top, **{n: hi for n, (_, hi) in zip(variants.values, box)}}
             try:
@@ -2206,7 +2293,9 @@ def check(
     reference at each pair of points (``_no_worse``), each side's calls one
     at a time; a version the profile batches then holds its batches
     bit-identical to its calls one at a time (``_batched``), as ``EXACT``
-    does.
+    does. Where a profile has variants, each pair of points runs on the
+    design its values select (``Recording.ranges_at``): a call whose points
+    select several is checked as one call per design, each at its own pairs.
 
     Args:
         profile: The profile checked.
@@ -2230,8 +2319,9 @@ def check(
             time).
         NotImplementedError: What is not checked yet: a no-worse call that
             carries state (``_no_worse``), a call checked apart that carries
-            a value to the next with no range recorded to start it in, and
-            what ``fit`` or the composer (``composed``) does not take yet.
+            a value to the next with no range recorded to start it in, a call
+            holding state at points of several designs, and what ``fit`` or
+            the composer (``composed``) does not take yet.
     """
     fitted = fit(profile, calls, device)
     if not fitted.ok:
@@ -2373,6 +2463,39 @@ def check(
                     f"returned output alike"
                 )
         checked.append((call, old, at, batching))
+    # A call whose points select several designs (Variants) is checked as one
+    # call per design, each at its own pairs of points.
+    split = []
+    for call, old, at, batching in checked:
+        designs: dict[tuple, list] = {}
+        for values in at:
+            key = tuple(
+                tuple(box for box, _ in side.recording.ranges_at(chosen, v))
+                for side, chosen, v in (
+                    (old, base, values[0]),
+                    (call, profile, values[1]),
+                )
+            )
+            designs.setdefault(key, []).append(values)
+        if len(designs) == 1:
+            split.append((call, old, at, batching))
+            continue
+        if call.recording.states or old.recording.states:
+            raise NotImplementedError(
+                f"{call.recording.name}: checking a call that holds state at points "
+                f"of several designs is not built yet: split by design, its calls "
+                f"would carry the state out of order"
+            )
+        split += [
+            (
+                dataclasses.replace(call, values=pairs[0][1], points=()),
+                dataclasses.replace(old, values=pairs[0][0], points=()),
+                pairs,
+                batching,
+            )
+            for pairs in designs.values()
+        ]
+    checked = split
     if refinement is Refinement.NO_WORSE:
         for call, old, at, batching in checked:
             one, _ = _one_at_a_time(profile, call.recording.version)
@@ -2886,7 +3009,12 @@ def measure(
     flight), batched, a call's time its batch's over its calls
     (``_time_batched``). A call's time is its points' medians,
     weighted; ``ratio`` weighs each point's median paired ratio by the
-    base's time there.
+    base's time there. Where ``profile`` has variants, each point runs on
+    the design its values select (``Recording.ranges_at``), a call timed as
+    one call per design; one whose points select several designs adds what
+    switching into each costs (``measure.switch_cost``, at the cores of its
+    first array, ``design_cores``), weighed by the chance a call's design
+    differs from the one before (each share times the rest).
 
     Args:
         profile: The profile timed.
@@ -2908,33 +3036,90 @@ def measure(
     seconds = base_seconds = weighted = 0.0
     for call in calls:
         known = Compared()
-        with set_current_device(device):
-            applied = (
-                Applied.of(call, base, device),
-                Applied.of(call, profile, device),
-            )
-        if any(a.recording.calls > 1 or a.commands_in_flight > 1 for a in applied):
-            _time_batched(
-                call, applied, device, timing, known, refinement is Refinement.EXACT
-            )
-        else:
+        parts = _by_design(call, (base, profile))
+        # The time a call adds switching into the design it runs on from
+        # another, each design's share of the points weighing both ends.
+        shares: dict[tuple, float] = {}
+        for weight, values in call.timed_points():
+            selects = tuple(box for box, _ in call.recording.ranges_at(profile, values))
+            shares[selects] = shares.get(selects, 0.0) + weight
+        total = sum(shares.values())
+        switch_us = 0.0
+        for part in parts:
             with set_current_device(device):
-                compare_graphs(
-                    call,
-                    applied[0].built(device),
-                    applied[1].built(device),
-                    timing=timing,
-                    known=known,
-                    log=logger.info,
-                    exact=refinement is Refinement.EXACT,
+                applied = (
+                    Applied.of(part, base, device),
+                    Applied.of(part, profile, device),
                 )
+            if any(a.recording.calls > 1 or a.commands_in_flight > 1 for a in applied):
+                _time_batched(
+                    part, applied, device, timing, known, refinement is Refinement.EXACT
+                )
+            else:
+                with set_current_device(device):
+                    compare_graphs(
+                        part,
+                        applied[0].built(device),
+                        applied[1].built(device),
+                        timing=timing,
+                        known=known,
+                        log=logger.info,
+                        exact=refinement is Refinement.EXACT,
+                    )
+            if len(shares) > 1:
+                share = (
+                    shares[
+                        tuple(
+                            box
+                            for box, _ in part.recording.ranges_at(profile, part.values)
+                        )
+                    ]
+                    / total
+                )
+                with set_current_device(device):
+                    fixed_us, per_core_us = switch_cost(
+                        device, cache=Cache.here(), log=logger.info
+                    )
+                    cores = design_cores(
+                        applied[1].recording.steps[0].op.resolved(device)
+                    )
+                switch_us += share * (1 - share) * (fixed_us + per_core_us * cores)
         for weight, values in call.timed_points():
             point = tuple(sorted(values.items()))
             was, now = known.medians[point]
             base_seconds += weight * was / 1e6
             seconds += weight * now / 1e6
             weighted += weight * was * known.ratios[point] / 1e6
+        seconds += switch_us / 1e6
+        weighted += switch_us / 1e6
     return Measured(weighted / base_seconds, seconds, base_seconds)
+
+
+def _by_design(call: Timed, profiles: Sequence[Profile]) -> list[Timed]:
+    """Return ``call`` as one call per design its timed points select under ``profiles`` together, or ``call`` where they select one.
+
+    A design is what ``Recording.ranges_at`` selects under each profile.
+
+    Each at its own points, its values its first's, so ``Applied.of`` builds
+    each as one design.
+    """
+    designs: dict[tuple, list[tuple[float, dict[str, int]]]] = {}
+    for weight, values in call.timed_points():
+        key = tuple(
+            tuple(box for box, _ in call.recording.ranges_at(profile, values))
+            for profile in profiles
+        )
+        designs.setdefault(key, []).append((weight, values))
+    if len(designs) == 1:
+        return [call]
+    return [
+        dataclasses.replace(
+            call,
+            values=points[0][1],
+            points=tuple(Point(w, v) for w, v in points),
+        )
+        for points in designs.values()
+    ]
 
 
 def _time_batched(
@@ -3110,7 +3295,8 @@ def search(
                     same = all(
                         Applied.of(c, edited, device).fingerprint(device)
                         == Applied.of(c, base, device).fingerprint(device)
-                        for c in calls
+                        for call in calls
+                        for c in _by_design(call, (base, edited))
                     )
                 if same:
                     continue  # it builds what its base builds
@@ -3161,7 +3347,8 @@ def search(
                 same = all(
                     Applied.of(c, edited, device).fingerprint(device)
                     == Applied.of(c, incumbent, device).fingerprint(device)
-                    for c in calls
+                    for call in calls
+                    for c in _by_design(call, (incumbent, edited))
                 )
             if same:
                 continue  # an earlier take decides what it names

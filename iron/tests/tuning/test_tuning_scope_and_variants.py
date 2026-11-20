@@ -24,6 +24,7 @@ from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
+from iron.tests.support.toys_edges import member
 from iron.tests.support.toys_settings import (
     RangedPair,
     coded_consumer_recording_with_weight,
@@ -32,9 +33,18 @@ from iron.tests.support.toys_settings import (
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Point, Timed
 from iron.tune.fusions import Applied
-from iron.tune.search import candidates, check, fit, measure, search
+from iron.tune.search import AddVariants, candidates, check, fit, measure, search
 
 pytestmark = pytest.mark.usefixtures("device")
+
+
+def _split_at_256() -> Variants:
+    """Return RangedPair's ``rows`` split at 256: GEMM at 256 rows below, at the full 2048 above."""
+    small = Entry(root=Member(cls=GEMM, dims={"M": 256, "K": 256, "N": 256}))
+    large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
+    return Variants(
+        values=("rows",), ranges=((((0, 256),), small), (((257, 2048),), large))
+    )
 
 
 def _gemv_decode(device):
@@ -169,7 +179,6 @@ def test_a_derived_chunk_size_is_checked_against_its_base(device, request):
 
 
 @pytest.mark.extensive
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_a_boundary_is_kept_only_where_its_saving_beats_a_switch_and_one_more_design(
     device,
@@ -178,22 +187,24 @@ def test_a_boundary_is_kept_only_where_its_saving_beats_a_switch_and_one_more_de
 
     The split is sized so that its small side is clearly faster than the single design
     bounded at the full 2048 (``measure``'s ratio under 0.95), so ``search`` must keep it.
+    The call runs most of its points at 256 rows and some at 1024, so it switches
+    designs between calls now and then; ``search`` keeps a boundary that puts the two
+    apart, wherever on its grid that is.
     """
     g = RangedPair(K=256, N=256)
     recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
-    calls = [Timed(recording)]
+    points = (Point(0.9, {"rows": 256}), Point(0.1, {"rows": 1024}))
+    calls = [Timed(recording, values={"rows": 256, "valid": 256}, points=points)]
     start = Profile()
-    small = Entry(root=Member(cls=GEMM, dims={"M": 256, "K": 256, "N": 256}))
-    large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
-    variants = Variants(
-        values=("rows",), ranges=((((0, 256),), small), (((257, 2048),), large))
-    )
     with_entry = Profile()
-    with_entry.add_variants(variants)
+    with_entry.add_variants(_split_at_256())
     ratio = measure(with_entry, start, calls, device).ratio
     assert ratio < 0.95
     tuned = search(calls, start, device, budget_s=5.0)
-    assert variants in tuned.variants()
+    (kept,) = tuned.variants()
+    assert kept.values == ("rows",)
+    (((_, boundary),), _), _ = kept.ranges
+    assert 256 <= boundary < 1024
 
 
 @pytest.mark.parametrize(
@@ -289,24 +300,118 @@ def test_a_range_whose_capacity_the_graph_cannot_record_is_refused(device):
     assert "not legal" in (result.why or "")
 
 
-def test_a_call_whose_points_span_more_than_one_range_waits_in_fit(device):
-    """``fit`` holds a call's points to one range as building it does, so a call spanning two waits there rather than fitting."""
+def test_a_call_whose_points_span_more_than_one_range_fits(device):
+    """A call timed at 64 and at 1024 runs each point on its own range's design, each fitted at its capacity, so ``fit`` admits it."""
     g = RangedPair(K=256, N=256)
     recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
-    small = Entry(root=Member(cls=GEMM, dims={"M": 256, "K": 256, "N": 256}))
-    large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
     tuned = Profile()
-    tuned.add_variants(
-        Variants(
-            values=("rows",), ranges=((((0, 256),), small), (((257, 2048),), large))
-        )
-    )
+    tuned.add_variants(_split_at_256())
     points = (Point(0.5, {"rows": 64}), Point(0.5, {"rows": 1024}))
     call = Timed(recording, values={"rows": 256, "valid": 256}, points=points)
-    with pytest.raises(NotImplementedError, match="span more than one range"):
-        fit(tuned, [call], device)
-    within = Timed(recording, values={"rows": 256, "valid": 256}, points=points[:1])
-    assert fit(tuned, [within], device).ok
+    assert fit(tuned, [call], device).ok
+    bare = Timed(recording)
+    with pytest.raises(NotImplementedError, match="does not give rows"):
+        fit(tuned, [bare], device)
+
+
+def _packed(recording) -> Entry:
+    """Return RangedPair's GEMM and copy as one pack (a region of no edges), named at the recording's shapes."""
+    return Entry(Region(parts=tuple(member(s.op) for s in recording.steps)))
+
+
+def test_a_design_per_range_keeps_what_the_profile_composes_at_its_capacity(device):
+    """A pack naming the 2048-row GEMM is named again at 256 rows in the design below the boundary, so the range keeps it."""
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    profile = Profile()
+    profile.add_entry(_packed(recording))
+    profile.add_variants(_split_at_256())
+    variant, chosen = recording.selected(profile, {"rows": 128, "valid": 256})
+    (entry,) = chosen.entries()
+    assert [m.dims["M"] for m in entry.root.steps() if m.cls is GEMM] == [256]
+    assert variant.occurrences(entry) == ((0, 1),)
+    full, kept = recording.selected(profile, {"rows": 1024, "valid": 256})
+    assert full is recording and kept.entries() == profile.entries()
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_pack_and_a_split_are_bit_identical_on_each_design(device):
+    """The pack beside the split at 256, a call at 128 and at 1024: each point on its design, the pack named at that design's capacity."""
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    baseline = Profile()
+    baseline.add(GEMM, M=2048, K=256, N=256, tile_m=64)
+    tuned = Profile()
+    tuned.add_entry(_packed(recording))
+    tuned.add_variants(_split_at_256())
+    points = (Point(0.5, {"rows": 128}), Point(0.5, {"rows": 1024}))
+    call = Timed(recording, values={"rows": 128, "valid": 256}, points=points)
+    result = check(tuned, baseline, [call], device, refinement=Refinement.EXACT)
+    assert result.ok, result.why
+
+
+def test_one_value_varied_by_two_sets_of_variants_is_refused(device):
+    """Two sets of variants over ``rows`` would each select a design for one call: refused before any build."""
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    profile = Profile()
+    profile.add_variants(_split_at_256())
+    profile.add_variants(_split_at_256())
+    result = fit(
+        profile, [Timed(recording, values={"rows": 256, "valid": 256})], device
+    )
+    assert not result.ok
+    assert result.stage == "counts"
+    assert "two sets of variants" in (result.why or "")
+
+
+def test_candidates_split_a_bounding_value_at_powers_of_two_its_capacity_records(
+    device,
+):
+    """``candidates`` splits ``rows`` at powers of two GEMM records, each range's entry the GEMM at its capacity.
+
+    ``valid`` bounds no input's rows, so it is not split; nor is a value the profile
+    already varies.
+    """
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    found = []
+    with pytest.raises(NotImplementedError, match="candidates does not generate"):
+        for edit in candidates([Timed(recording)], Profile(), device):
+            if isinstance(edit, AddVariants):
+                found.append(edit.variants)
+    assert {v.values for v in found} == {("rows",)}
+    boundaries = [v.ranges[0][0][0][1] for v in found]
+    assert 256 in boundaries
+    assert all(b & (b - 1) == 0 and 0 < b < 2048 for b in boundaries)
+    at_256 = found[boundaries.index(256)]
+    assert [(r.root.cls, r.root.dims["M"]) for _, r in at_256.ranges] == [
+        (GEMM, 256),
+        (GEMM, 2048),
+    ]
+    assert at_256.ranges[1][0] == ((257, 2048),)
+    varied = Profile()
+    varied.add_variants(at_256)
+    with pytest.raises(NotImplementedError, match="candidates does not generate"):
+        assert not any(
+            isinstance(e, AddVariants)
+            for e in candidates([Timed(recording)], varied, device)
+        )
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_call_whose_points_span_two_ranges_is_bit_identical_on_each_design(device):
+    """A call at 128 and at 1024 runs 128 on the 256-row design and 1024 on the 2048-row one, each bit-identical to the single bounded baseline."""
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    baseline = Profile()
+    baseline.add(GEMM, M=2048, K=256, N=256, tile_m=64)
+    tuned = Profile()
+    tuned.add_variants(_split_at_256())
+    points = (Point(0.5, {"rows": 128}), Point(0.5, {"rows": 1024}))
+    call = Timed(recording, values={"rows": 128, "valid": 256}, points=points)
+    result = check(tuned, baseline, [call], device, refinement=Refinement.EXACT)
+    assert result.ok, result.why
 
 
 def test_a_half_chunk_of_a_graph_reading_a_coded_weight_waits(device):
