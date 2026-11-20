@@ -356,14 +356,16 @@ class SplicedArray(BuiltArray):
 
     It builds nothing of its own: its stage runs on the producer's cores,
     and each of its host operands moves along the producer's output's lanes
-    (``Operand.along``), the input the producer feeds on-chip.
+    (``Operand.along``), the input the producer feeds on-chip, and any other
+    on the cascade, core to core.
 
     Args:
         design: The step's design.
         source: The producer's output, spliced (``Operand.splices``).
         input: The step's input ``source`` feeds.
-        hosts: Each other operand's lane ends, by name: the fifos the stage's
-            other inputs read, or ``source``'s own, which carry its output.
+        hosts: Each host operand's lane ends, by name: the fifos the stage's
+            other inputs read, or ``source``'s own, which carry its output;
+            an operand it does not name is on the cascade.
         stages: Each core's stage, whose runtime parameters its sequence
             writes.
     """
@@ -381,9 +383,11 @@ class SplicedArray(BuiltArray):
         for b in op.buffers:
             if b.name == input:
                 b.fed_from = source
-                continue
-            b.along = source
-            b.lane_handles = list(hosts[b.name])
+            elif b.name in hosts:
+                b.along = source
+                b.lane_handles = list(hosts[b.name])
+            else:
+                b.cascade = source
         self.built = Built([])
         self.design = design
         self.op = op

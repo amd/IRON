@@ -38,6 +38,7 @@ from aie.passmanager import PassManager
 from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
+from ..declare.operand import Operand
 from ..design import (
     BuiltArray,
     OperatorDesign,
@@ -282,7 +283,8 @@ def fused_configuration(
         if e.kind is EdgeKind.STREAM
         and any({e.producer, e.consumer} <= set(group) for group in fusion.workers)
     }
-    spliced: dict[int, Edge] = {}
+    spliced: dict[int, Spliced] = {}
+    spliced_from: dict[int, int] = {}
     for design, j, own in zip(designs, fusion.steps, scalars, strict=True):
         into = [
             e
@@ -295,10 +297,16 @@ def fused_configuration(
         ]
         if into:
             (e,) = into
-            arrays[j] = splice(
-                e, design, arrays[e.producer], incoming.get(j, ()), words
+            spliced[j] = splice(
+                e,
+                design,
+                arrays[e.producer],
+                incoming.get(j, ()),
+                any(c.producer == j for c in cascades),
+                words,
             )
-            spliced[j] = e
+            arrays[j] = spliced[j].array
+            spliced_from[j] = e.producer
             continue
         fed = {}
         for e in incoming.get(j, ()):
@@ -329,7 +337,7 @@ def fused_configuration(
                 if fusion.packets
                 else ()
             ),
-            splices=[e.output for e in joined_in if e.producer == j],
+            splices=[e.output for e in [*joined_in, *cascades] if e.producer == j],
         )
         for producer, output in fusion.kept:
             if producer == j:
@@ -341,6 +349,12 @@ def fused_configuration(
     for e in cascades:
         (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
         (sink,) = [b for b in arrays[e.consumer].op.buffers if b.name == e.input]
+        sending, receiving = spliced.get(e.producer), spliced.get(e.consumer)
+        if sending is not None or receiving is not None or source.join is not None:
+            relays += cascade_cores(
+                e, arrays[e.producer], sending, receiving, sink, before, after
+            )
+            continue
         per_object = math.prod(source.obj_shape)
         moved = source.moved_per_lane()
         for lane, (reading, writing) in enumerate(source.cascade_to(sink)):
@@ -377,9 +391,28 @@ def fused_configuration(
         and any(id(w) in before or id(w) in after for w in arrays[j].workers)
     ]
     joined: dict[int, Worker] = {}
+    for j, made in spliced.items():
+        producer = arrays[spliced_from[j]]
+        for writer, stage in made.cores:
+            (worker,) = stage.workers
+            bodies = [
+                writer,
+                *before.get(id(worker), ()),
+                worker,
+                *after.get(id(worker), ()),
+            ]
+            try:
+                core = Worker.join(bodies)
+            except ValueError as e:  # joining what mlir-aie does not join
+                raise NotImplementedError(
+                    f"splicing step {j} into step {spliced_from[j]}'s cores is not "
+                    f"built yet: {e}"
+                ) from e
+            producer.workers = [core if w is writer else w for w in producer.workers]
+            joined |= {id(w): core for w in bodies}
     for group in [*fusion.workers, *alone]:
         if any(j in spliced for j in group):
-            if len(group) != 2 or spliced.get(group[1]) is None:
+            if len(group) != 2 or group[1] not in spliced:
                 raise NotImplementedError(
                     f"one core for steps {tuple(group)} is not built yet: a step "
                     f"spliced into its producer's cores shares them with no other"
@@ -415,40 +448,62 @@ def fused_configuration(
     return configured, [arrays[j] for j in fusion.steps]
 
 
+@dataclasses.dataclass
+class Spliced:
+    """A step spliced into its producer's cores (``splice``).
+
+    Attributes:
+        array: The step's array, its host operands moving along the
+            producer's lanes.
+        cores: Each core's own worker and its stage, lane by lane: what
+            ``Worker.join`` makes one core, relays between.
+        arriving: Each input the cascade fills, the fifo a core's stage
+            reads it from, in ``cores``' order.
+    """
+
+    array: SplicedArray
+    cores: list[tuple[Worker, BuiltArray]]
+    arriving: dict[str, list[ObjectFifo]]
+
+
 def splice(
     edge: Edge,
     design: OperatorDesign,
     producer: BuiltArray,
     incoming: Sequence[Edge],
+    cascaded: bool,
     words: Mapping[str, str] | None = None,
-) -> SplicedArray:
+) -> Spliced:
     """Splice step ``design``'s kernel into ``producer``'s cores, which ``edge`` streams it from: a stage on each core.
 
     ``producer``'s output joins its cores' fifos in a memtile, and was built
     to splice (``Operand.splices``). Each core runs the step on its own
-    tile, as a finish step would (``FinishStep.consumer_at``), joined after
-    its own body; the stage's output takes the core's place in the join, so
-    the output's lanes carry the step's. Each other input arrives in the
-    same tiles: its host buffer moves along the output's lanes, split in a
-    memtile at the join's offsets and in its order (the output's
-    ``to_stream`` as the split's ``from_stream``).
+    tile, as a finish step would (``FinishStep.consumer_at``), after its own
+    body; the stages' outputs take the cores' places in the join, so the
+    output's lanes carry the step's, unless its output leaves on the
+    cascade (``cascaded``), each core's from that core. Each other input
+    arrives in the same tiles: on the cascade, to each core (``arriving``),
+    or its host buffer moving along the output's lanes, split in a memtile
+    at the join's offsets and in its order (the output's ``to_stream`` as
+    the split's ``from_stream``). The cores are joined later, relays
+    between (``fused_configuration``).
 
     Args:
         edge: The stream from the producer's output into the step.
         design: The step's design.
-        producer: The producer's array; its workers become the joined cores.
+        producer: The producer's array.
         incoming: Every edge into the step.
+        cascaded: The step's output leaves on the cascade.
         words: On a full ELF, the shared scratchpad words.
-
-    Returns:
-        The step's array, its host operands moving along the output's lanes.
 
     Raises:
         NotImplementedError: The step is not an elementwise operator over
             tiles, has another output or a per-call value, another of its
-            inputs is fed on-chip, or the output is read by another step or
-            the host too: splicing those is not built yet.
-        ValueError: The stage's output tile is not the core's (``Operand.join_from``).
+            inputs is fed on-chip other than by the cascade, or the output
+            is read by another step or the host too: splicing those is not
+            built yet.
+        ValueError: The stage's output tile is not the core's
+            (``Operand.join_from``).
     """
     op = design.op
     (source,) = [b for b in producer.op.buffers if b.name == edge.output]
@@ -466,25 +521,45 @@ def splice(
             f"an elementwise operator over tiles, with one output and no per-call "
             f"value"
         )
-    if [e for e in incoming if e != edge] or source.keeps_host or source.feeds:
+    others = [e for e in incoming if e != edge]
+    if (
+        any(e.kind is not EdgeKind.CASCADE for e in others)
+        or source.keeps_host
+        or source.feeds
+    ):
         raise NotImplementedError(
             f"splicing {type(op).__name__} into {type(producer.op).__name__}'s "
             f"cores is not built yet where another of its inputs is fed on-chip "
-            f"or {source.name} is read elsewhere too"
+            f"but by the cascade, or {source.name} is read elsewhere too"
         )
+    on_cascade = {e.input for e in others}
     names = [b.name for b in op.inputs]
     step = FinishStep.of(op, names.index(edge.input))
     (out,) = op.outputs
     moved = source.moved_per_lane()
     per_object = math.prod(source.obj_shape)
-    hosts: dict[str, list] = {b.name: [] for b in op.buffers if b.name != edge.input}
-    hosts[out.name] = list(source.handles)
-    stages: list[BuiltArray] = []
+    hosts: dict[str, list] = {
+        b.name: []
+        for b in op.buffers
+        if b.name != edge.input and b.name not in on_cascade
+    }
+    if cascaded:
+        del hosts[out.name]
+    else:
+        hosts[out.name] = list(source.handles)
+    cores_of: list[tuple[Worker, BuiltArray]] = []
+    arriving: dict[str, list[ObjectFifo]] = {n: [] for n in on_cascade}
     for lane, cores in enumerate(source.core_fifos):
         objects = -(-moved.get(lane, 0) // per_object)
         tiles: dict[str, list[ObjectFifo]] = {}
         for b in op.inputs:
+            types = [np.ndarray[tuple(c.shape), np.dtype[b.dtype]] for c in cores]
             if b.name == edge.input:
+                continue
+            if b.name in on_cascade:
+                # The receiving relay runs through before the stage reads.
+                tiles[b.name] = [ObjectFifo(t, depth=objects) for t in types]
+                arriving[b.name] += tiles[b.name]
                 continue
             mirror = ObjectFifo(
                 np.ndarray[tuple(source.obj_shape), np.dtype[b.dtype]],
@@ -494,14 +569,9 @@ def splice(
             tiles[b.name] = mirror.cons(
                 from_stream=source.lane_fifos[lane].to_stream
             ).split(
-                join.offsets,
-                tile=join.tiles[lane],
-                obj_types=[
-                    np.ndarray[tuple(c.shape), np.dtype[b.dtype]] for c in cores
-                ],
-                depths=join.depths,
+                join.offsets, tile=join.tiles[lane], obj_types=types, depths=join.depths
             )
-        ends = []
+        made = []
         for k, core in enumerate(cores):
             line = math.prod(core.shape)
             stage = BuiltArray(
@@ -509,9 +579,7 @@ def splice(
                 words,
                 fed={edge.input: core} | {n: fifos[k] for n, fifos in tiles.items()},
             )
-            stages.append(stage)
-            (made,) = stage.op.outputs
-            ends.append(made)
+            made.append(stage.op.outputs[0])
             (writer,) = [
                 w
                 for w in producer.workers
@@ -520,16 +588,105 @@ def splice(
                     for h in w.fifos
                 )
             ]
-            try:
-                joined = Worker.join([writer, *stage.workers])
-            except ValueError as e:  # joining what mlir-aie does not join
-                raise NotImplementedError(
-                    f"splicing {type(op).__name__} into "
-                    f"{type(producer.op).__name__}'s cores is not built yet: {e}"
-                ) from e
-            producer.workers = [joined if w is writer else w for w in producer.workers]
-        source.join_from(lane, ends)
-    return SplicedArray(design, source, edge.input, hosts, stages)
+            cores_of.append((writer, stage))
+        if not cascaded:
+            source.join_from(lane, made)
+    return Spliced(
+        SplicedArray(
+            design,
+            source,
+            edge.input,
+            hosts,
+            [stage for _, stage in cores_of],
+        ),
+        cores_of,
+        arriving,
+    )
+
+
+def cascade_cores(
+    edge: Edge,
+    producer: BuiltArray,
+    sending: Spliced | None,
+    receiving: Spliced | None,
+    sink: Operand,
+    before: dict[int, list[Worker]],
+    after: dict[int, list[Worker]],
+) -> list[tuple[Worker, Worker]]:
+    """Carry ``edge`` over the cascade core by core, where an end is spliced or joined in a memtile: a relay pair a core.
+
+    The sending end's cores are the spliced step's (``sending``), each core's
+    stage output, or the cores of an output joined in a memtile (its
+    ``core_fifos``); the receiving end's are the spliced step's
+    (``receiving``), each core's fifo of the input (``Spliced.arriving``).
+    Each sending relay runs after its core's body (``after``), each
+    receiving one before (``before``).
+
+    Returns:
+        Each core pair's relays, sending then receiving.
+
+    Raises:
+        NotImplementedError: An end is neither spliced nor joined, or the two
+            ends' cores do not pair one to one with one object type.
+    """
+    (source,) = [b for b in producer.op.buffers if b.name == edge.output]
+    if sending is not None:
+        sends = [
+            (stage.workers[0], stage.op.outputs[0].reader(0))
+            for _, stage in sending.cores
+        ]
+        for _, stage in sending.cores:
+            stage.op.outputs[0].cascade = sink
+    elif source.join is not None and source.splices:
+        sends = [
+            (
+                next(
+                    w
+                    for w in producer.workers
+                    if any(
+                        isinstance(h, ObjectFifoHandle) and h.object_fifo is fifo
+                        for h in w.fifos
+                    )
+                ),
+                fifo.cons(fifo.depth),
+            )
+            for fifos in source.core_fifos
+            for fifo in fifos
+        ]
+    else:
+        sends = None
+    receives = (
+        None
+        if receiving is None
+        else [
+            (stage, fifo.prod())
+            for (_, stage), fifo in zip(
+                receiving.cores, receiving.arriving[edge.input], strict=True
+            )
+        ]
+    )
+    if sends is None or receives is None or len(sends) != len(receives):
+        raise NotImplementedError(
+            f"{edge}: a cascade between a step's lanes and another's cores, or "
+            f"between cores that do not pair one to one, is not built yet"
+        )
+    pairs = []
+    for (sender, reading), (stage, writing) in zip(sends, receives):
+        if reading.obj_type != writing.obj_type:
+            raise NotImplementedError(
+                f"{edge}: a cascade from a core's {reading.obj_type} into a core's "
+                f"{writing.obj_type} is not built yet"
+            )
+        (fed,) = [b for b in stage.op.inputs if b.name == edge.input]
+        objects = -(-fed.moved_per_lane()[0] // math.prod(fed.obj_shape))
+        pair = (
+            cascade_relay(reading, objects, True),
+            cascade_relay(writing, objects, False),
+        )
+        after.setdefault(id(sender), []).append(pair[0])
+        before.setdefault(id(stage.workers[0]), []).append(pair[1])
+        pairs.append(pair)
+    return pairs
 
 
 def share(

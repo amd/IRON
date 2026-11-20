@@ -457,7 +457,7 @@ class GEMM(Operator):
 
         c_cores = self.C.fifos(
             FIFO_DEPTH,
-            tiles=[Tile(c, 0) for c in range(n_aie_cols)],
+            tiles=[Tile(c, 0) if pinned else None for c in range(n_aie_cols)],
             to_stream=streams.C,
             join=Join(
                 offsets=[m * n * i for i in range(n_aie_rows)],
@@ -569,9 +569,17 @@ class GEMM(Operator):
                 )
 
         self.A.bind(
-            [f.prod(tile=Tile(a_cols[c], 0)) for c, f in enumerate(A_l3l2_fifos)]
+            [
+                f.prod(tile=Tile(a_cols[c], 0) if pinned else None)
+                for c, f in enumerate(A_l3l2_fifos)
+            ]
         )
-        self.B.bind([f.prod(tile=Tile(c, 0)) for c, f in enumerate(B_l3l2_fifos)])
+        self.B.bind(
+            [
+                f.prod(tile=Tile(c, 0) if pinned else None)
+                for c, f in enumerate(B_l3l2_fifos)
+            ]
+        )
         return Built(workers, rtps)
 
     def sequence(self, rt):
