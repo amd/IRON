@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from aie.dialects.aie import DMAChannelDir, WireBundle, get_target_model
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import DmaEndpoint, ObjectFifo, TaskGroup
+from aie.iron import DmaEndpoint, ObjectFifo, Packet, Port, TaskGroup, Transport
 from aie.iron.dataflow.objectfifo import ObjectFifoLink
 from aie.iron.device import AnyMemTile
 from aie.utils import bfp, coded
@@ -61,6 +61,8 @@ class Operand:
         self.staged: list[ObjectFifo] | None = None
         self.feeds: list[Operand] = []
         self.keeps_host = False
+        # Its host transfers ride packet flows, sharing the shim's channels.
+        self.packeted = False
         self.chosen_depth: int | None = None
         self.read_lanes: set[int] = set()
         self._decl = member.of(op)
@@ -234,6 +236,10 @@ class Operand:
             raise ValueError(
                 f"{self.name} has {self.lanes} lanes; tiles has {len(lane_tiles)}"
             )
+        # Packet flows share a shim's sending channel only where they pin it.
+        port = Port.dma(0) if self.packeted else None
+        if self.packeted:
+            objectfifo_kwargs.setdefault("transport", Transport.dma(packet=Packet()))
         made = [
             ObjectFifo(obj_type, depth=depth, **objectfifo_kwargs)
             for _ in range(self.lanes)
@@ -246,7 +252,7 @@ class Operand:
             if tiles is not None:
                 return made
             return [f.prod() for f in made]
-        self.bind([f.prod(tile=t) for f, t in zip(made, lane_tiles)])
+        self.bind([f.prod(tile=t, port=port) for f, t in zip(made, lane_tiles)])
         if tiles is not None:
             return made
         if readers is None:

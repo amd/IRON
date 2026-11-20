@@ -10,7 +10,6 @@ from iron.common.declare.profile import Profile
 from iron.common.image.step import Edge, EdgeKind
 from iron.tests.support import toys_schedule
 from iron.tests.support.tools import DEVICES
-from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import check, fit
 
@@ -40,7 +39,6 @@ def _packet_window():
     return region, recording
 
 
-@unbuilt
 def test_the_4x2_window_builds_with_packet_transport_and_is_bit_identical():
     """The 4x2 window, built requesting packet transport on the placer's channel verdict, is bit-identical to its steps apart.
 
@@ -49,17 +47,12 @@ def test_the_4x2_window_builds_with_packet_transport_and_is_bit_identical():
     each.
     """
     region, recording = _packet_window()
-    base = Profile()
-    base.add_entry(
-        Entry(root=Region(parts=region.parts))
-    )  # the steps apart: no shared-channel edges
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
+    result = check(profile, Profile(), [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
 
-@unbuilt
 def test_the_4x2_window_is_bit_identical_across_repeated_runs():
     """Repeated runs of the packet-transport window agree bit for bit with each other, not only with the reference."""
     region, recording = _packet_window()
@@ -70,7 +63,6 @@ def test_the_4x2_window_is_bit_identical_across_repeated_runs():
     assert first.ok and second.ok, (first.why, second.why)
 
 
-@unbuilt
 def test_the_4x2_window_does_not_hang():
     """The window fits the shim's channel budget by sharing, so static fit accepts it (no refusal, and no build to hang)."""
     region, recording = _packet_window()

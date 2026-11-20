@@ -544,9 +544,7 @@ def fit(
             images held at once, a profile's schedules, variants, bindings,
             fusion or packing entries, an entry rooted at a configuration or
             a step, scoped to some runs of its shape, splitting a step by
-            fission or chaining a cascade, more fifos to or
-            from the host than the shim has channels (IRON's composer gives
-            each its own; mlir-aie can share them), a placer setting past the
+            fission or chaining a cascade, a placer setting past the
             sequential placer, a region the composer does not build, and
             what the analysis does not model (``Derivation``).
     """
@@ -716,36 +714,7 @@ def fit(
                     f"its steps take {needed} cores; {device.resolve()} has "
                     f"{cores_on_array}",
                 )
-            on_chip = {
-                (p, e.output)
-                for e, p, _ in derivation.wired
-                if e.kind is not EdgeKind.DDR
-            } | {
-                (c, e.input)
-                for e, _, c in derivation.wired
-                if e.kind is not EdgeKind.DDR
-            }
-            moved = set()
-            for s, ((_, recorded), lanes) in enumerate(
-                zip(derivation.recorded, derivation.lanes)
-            ):
-                owner = {f: name for name, fifos in lanes.items() for f in fifos}
-                moved |= {
-                    (t.kind, t.fifo)
-                    for t in recorded.transfers
-                    if (s, owner.get(t.fifo)) not in on_chip
-                }
-            unplaceable = [
-                f"its steps {kind} {taken} fifos from the host, and "
-                f"{device.resolve()} has {budget} shim channels: IRON's composer "
-                f"gives each its own, and sharing them is not built yet"
-                for kind, budget in (
-                    ("fill", device.shim_dma_channels_in),
-                    ("drain", device.shim_dma_channels_out),
-                )
-                for taken in [sum(k == kind for k, _ in moved)]
-                if taken > budget
-            ]
+            unplaceable = []
             for edge, p, _ in derivation.wired:
                 elements = derivation.obj_elements[p].get(edge.output)
                 if edge.depth is None or edge.kind not in held_in or elements is None:

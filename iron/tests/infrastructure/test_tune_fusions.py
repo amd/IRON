@@ -24,6 +24,7 @@ from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
 from iron.common.graph.fusion import candidates
 from iron.common.graph.record import Recording
+from iron.common.image.compose import SHIM_SHORT
 from iron.common.image.packaging import plan
 from iron.common.image.step import Edge, Fusion, FusionKind
 from iron.lm.generation import Sampler
@@ -385,12 +386,22 @@ def test_dominates_requires_every_member_at_least_as_wide():
 
 
 def test_group_fit_verdict_finds_the_merge_that_only_fits_narrowed(tmp_path):
+    """As circuits the merge fits only with its add narrowed; with packet fills, at its own widths."""
     dev = aie_utils.ensure_current_device()
     rms, gemv, add = _merge_members(dev)
     kind = FusionKind.MERGE
-    assert group_fit_verdict([rms, gemv, add], tmp_path, kind=kind) is not None
+    circuits = group_fit_verdict(
+        [rms, gemv, add], tmp_path, kind=kind, packet_fills=False
+    )
+    assert circuits is not None and SHIM_SHORT in circuits
+    assert group_fit_verdict([rms, gemv, add], tmp_path, kind=kind) is None
     _, _, narrow_add = _merge_members(dev, add_cols=2)
-    assert group_fit_verdict([rms, gemv, narrow_add], tmp_path, kind=kind) is None
+    assert (
+        group_fit_verdict(
+            [rms, gemv, narrow_add], tmp_path, kind=kind, packet_fills=False
+        )
+        is None
+    )
 
 
 def test_group_fit_verdict_misses_a_record_keyed_on_recipes_alone(tmp_path):
@@ -471,7 +482,10 @@ def test_narrowings_narrows_only_the_member_that_needs_it(tmp_path):
         ops = [
             op._with_tunables(**s).resolved(dev) for op, s in zip(group.steps, combo)
         ]
-        return group_fit_verdict(ops, tmp_path, kind=group.kind) is None
+        return (
+            group_fit_verdict(ops, tmp_path, kind=group.kind, packet_fills=False)
+            is None
+        )
 
     combos = narrowings(group, dev, fits)
     assert combos, "expected at least one combination that co-resides"

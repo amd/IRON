@@ -127,6 +127,10 @@ class Fusion:
     more after the producer. ``workers`` names each group of members whose
     cores are one, in firing order: each lane's core runs the group's
     members' bodies in turn, the edges among them fifos within its tile.
+    ``packets`` True sends its members' host fills as packet flows, sharing
+    the shim's sending channels; False keeps them circuits; None leaves it to
+    the placer: packets only where circuits run the channels short and packets
+    place (``compose.transported``).
     """
 
     kind: FusionKind
@@ -136,6 +140,7 @@ class Fusion:
     kept: tuple[tuple[int, str], ...] = ()
     waits: tuple[tuple[int, int], ...] = ()
     workers: tuple[tuple[int, ...], ...] = ()
+    packets: bool | None = None
 
     def __post_init__(self) -> None:
         if len(self.steps) < 2:

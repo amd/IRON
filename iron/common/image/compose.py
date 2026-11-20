@@ -43,6 +43,9 @@ _FIT_PIPELINE = "builtin.module(aie-resource-stages{{placer={placer}}})"
 
 SEQUENTIAL, ANNEALED = "sequential_placer", "sa_placer"
 
+# The sequential placer's diagnostic where no shim tile has a channel left.
+SHIM_SHORT = "DMA channel(s) free"
+
 # Each packed group's placer and the diagnostic where none routes it, by its
 # designs' identities.
 _placed: dict[tuple[str, ...], tuple[str, str | None]] = {}
@@ -168,6 +171,29 @@ def places(
     return "\n".join(diagnostics) if diagnostics else None
 
 
+def transported(
+    fusion: Fusion,
+    designs: Sequence[OperatorDesign],
+    words: Mapping[str, str] | None = None,
+    beside: Mapping[str, OperatorDesign] | None = None,
+) -> Fusion:
+    """Return ``fusion`` with its host fills as packet flows where circuits run the shim's DMA channels short and packets place.
+
+    Where ``fusion.packets`` is None, the sequential placer decides (``fits``),
+    with ``beside``'s designs packed in the same configuration; otherwise
+    ``fusion`` is returned as given, for the build to report.
+    """
+    if fusion.packets is not None:
+        return fusion
+    members = dict(zip((str(j) for j in fusion.steps), designs, strict=True))
+    members.update(beside or {})
+    refused = fits(members, words, fusion=fusion)
+    if refused is None or SHIM_SHORT not in refused:
+        return fusion
+    packeted = dataclasses.replace(fusion, packets=True)
+    return packeted if fits(members, words, fusion=packeted) is None else fusion
+
+
 def fused_configuration(
     name: str,
     fusion: Fusion,
@@ -210,6 +236,11 @@ def fused_configuration(
         chosen[e] = max(-(-n // per_object) for n in source.moved_per_lane().values())
     arrays: dict[int, BuiltArray] = {}
     scalars = [None] * len(designs) if dispatch is None else dispatch
+    # A member's buffers on-chip edges carry stay circuits: fed inputs, and
+    # outputs read on-chip whose drain the host does not keep.
+    on_chip = {(e.consumer, e.input) for e in fusion.edges} | {
+        (p, output) for (p, output) in first_reader if (p, output) not in kept
+    }
     for design, j, own in zip(designs, fusion.steps, scalars, strict=True):
         fed = {}
         for e in incoming.get(j, ()):
@@ -229,6 +260,15 @@ def fused_configuration(
                 },
                 **{e.input: chosen[e] for e in incoming.get(j, ()) if e in chosen},
             },
+            packeted=(
+                [
+                    b.name
+                    for b in design.op.buffers
+                    if not b.drains and (j, b.name) not in on_chip
+                ]
+                if fusion.packets
+                else ()
+            ),
         )
         for producer, output in fusion.kept:
             if producer == j:
@@ -661,7 +701,12 @@ class Composition:
                 plain = [m for m in members if m != window]
                 configured, fused_members = fused_configuration(
                     symbol,
-                    fusion,
+                    transported(
+                        fusion,
+                        member_designs,
+                        words,
+                        beside={m: self.designs[m] for m in plain},
+                    ),
                     member_designs,
                     words,
                     independent={m: arrays[m] for m in plain},
@@ -705,7 +750,9 @@ class Composition:
         for symbol, (designs, fusion) in self.fusions.items():
             if symbol in packed:
                 continue
-            configured, members = fused_configuration(symbol, fusion, designs, words)
+            configured, members = fused_configuration(
+                symbol, transported(fusion, designs, words), designs, words
+            )
             configurations[symbol] = configured
             runtimes[symbol] = configured.runtimes[0]
             taken = [
