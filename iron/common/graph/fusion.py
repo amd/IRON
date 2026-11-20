@@ -509,6 +509,7 @@ def composed(
         carried = set(recording.feedback) | {
             h.ref().root for _, h in recording.states.values()
         }
+        given = root.step_tunables()
         for match in matches:
             if taken & set(match):
                 continue
@@ -556,8 +557,9 @@ def composed(
                     )
                 ) and (match[e.producer], e.output) not in kept:
                     kept.append((match[e.producer], e.output))
+                # Each as the region builds it, its tunables there.
                 p, c = (
-                    recording.steps[match[i]].op.resolved()
+                    recording.steps[match[i]].op._with_tunables(**given[i]).resolved()
                     for i in (e.producer, e.consumer)
                 )
                 # Steps on one core meet lane by lane, or the consumer runs
@@ -586,8 +588,8 @@ def composed(
                         + ("neither way" if built is None else f"only {built.value}")
                     )
             # The first entry naming a step's tunable wins, as for its region.
-            for s, m in zip(match, root.parts):
-                for name, value in (m.tunables or {}).items():
+            for s, named in zip(match, given):
+                for name, value in named.items():
                     tunables.setdefault(s, {}).setdefault(name, value)
             if len(match) > 1:
                 fused.append(

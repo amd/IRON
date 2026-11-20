@@ -1246,18 +1246,14 @@ def fit(
                     elif refused is not None:
                         return Fit(False, "placer", refused)
                     continue
-            for s, m in zip(found[0], region.steps()):
-                if not m.tunables:
+            for s, m, given in zip(found[0], region.steps(), region.step_tunables()):
+                if not given:
                     continue
                 try:
                     with set_current_device(device):
-                        recording.steps[s].op._with_tunables(**m.tunables).resolved(
-                            device
-                        )
+                        recording.steps[s].op._with_tunables(**given).resolved(device)
                 except ValueError as e:  # unresolvable or incompatible here
-                    return Fit(
-                        False, "counts", f"{m.cls.__name__} at {m.tunables}: {e}"
-                    )
+                    return Fit(False, "counts", f"{m.cls.__name__} at {given}: {e}")
             core = {s: min(worker) for worker in region.workers for s in worker}
             links = [
                 (core.get(e.producer, e.producer), core.get(e.consumer, e.consumer))

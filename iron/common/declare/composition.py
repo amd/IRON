@@ -21,6 +21,8 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Literal
 
+from aie.utils.compile.jit.params import Select
+
 from ..image.step import Edge, EdgeKind
 
 Version = tuple[tuple[str, tuple[int, ...], str], ...]
@@ -176,6 +178,40 @@ class Region:
             )
             for i in range(len(self.steps()))
         )
+
+    def step_tunables(self) -> tuple[dict[str, Any], ...]:
+        """Return each step's tunables: its member's own, and the form an edge feeding it on chip needs.
+
+        An input whose stream its operator declares under a flag (``obj_shape=
+        Select(flag, ...)``, one branch no stream: GEMV's ``feed_b``) is fed
+        on chip only in the form that streams it, so a stream or staged edge
+        into it sets that tunable so. A tunable the member names stays as it
+        names it.
+        """
+        steps = self.steps()
+        tunables = [dict(m.tunables or {}) for m in steps]
+        for e in self.edges:
+            if e.kind not in (EdgeKind.STREAM, EdgeKind.STAGED) or e.across_calls:
+                continue
+            declaration = steps[e.consumer].cls.declaration
+            for operand in declaration.operands:
+                dims = operand.obj_dims
+                if (
+                    operand.name != e.input
+                    or dims is None
+                    or len(dims) != 1
+                    or not isinstance(dims[0], Select)
+                ):
+                    continue
+                shape = dims[0]
+                flag = shape.flag.name
+                streams = shape.when_true is not None
+                if (
+                    flag in declaration.tunables
+                    and (shape.when_false is None) == streams
+                ):
+                    tunables[e.consumer].setdefault(flag, streams)
+        return tuple(tunables)
 
     def deepened(self, index: int, depth: int | None) -> Region:
         """Return this region with edge ``index`` held ``depth`` objects deep; None, the analysis's minimum."""
