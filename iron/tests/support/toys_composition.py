@@ -361,13 +361,9 @@ def gemv_silu_recording(name: str, gemv: GEMV, silu: SiLU) -> Recording:
 
 
 def decode_gemv_pair(M: int = 256, K: int = 192) -> tuple[Decode, GEMV]:
-    """Return a coded-weight decode step feeding the projection it codes for (the decode hook).
-
-    The GEMV reads the decode's rows as its tiles, and its vector on a stream of
-    its own (``feed_b``): fed on chip, its A carries no vector from the host.
-    """
+    """Return a coded-weight decode step feeding the projection it codes for (the decode hook), the GEMV reading the decode's rows as its tiles."""
     decode = Decode(M=M, K=K, rows=2)
-    gemv = GEMV(M=M, K=K, tile_size_input=2, tile_size_output=32, feed_b=True)
+    gemv = GEMV(M=M, K=K, tile_size_input=2, tile_size_output=32)
     return decode, gemv
 
 

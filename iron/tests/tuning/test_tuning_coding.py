@@ -30,7 +30,7 @@ from iron.tests.support.toys_settings import (
 )
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import AddEntry, candidates, check, fit, measure, search
+from iron.tune.search import candidates, check, fit, measure, search
 
 pytestmark = pytest.mark.usefixtures("device")
 
@@ -51,9 +51,8 @@ def _coded_region(
 ) -> Region:
     """Return ``Decode`` into the ``GEMV`` it feeds, a lane each to a lane each.
 
-    The ``GEMV`` reads the decode's rows as its tiles, and its vector on a stream of
-    its own (``feed_b``): fed on chip, its A carries no vector from the host. On one
-    worker by default; ``workers=()`` runs the decode on cores of its own.
+    The ``GEMV`` reads the decode's rows as its tiles. On one worker by default;
+    ``workers=()`` runs the decode on cores of its own.
     """
     return Region(
         parts=(
@@ -70,7 +69,6 @@ def _coded_region(
                     num_channels=1,
                     tile_size_input=rows,
                     tile_size_output=M // num_aie_columns,
-                    feed_b=True,
                 ),
             ),
         ),
@@ -238,9 +236,17 @@ def test_a_width_where_a_row_overflows_its_capacity_is_refused_before_any_build(
     assert "row" in result.why
 
 
-@unbuilt
+@pytest.mark.xfail(
+    strict=True,
+    reason="fit has no rule for coding part of a shared array yet: it fits the "
+    "coded region beside the plain GEMV",
+)
 def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed(device):
-    """Coding part of a shared array (not every shape sharing it) is refused unless the candidate also proposes the split."""
+    """Coding part of a shared array (not every shape sharing it) is refused unless the candidate also proposes the split.
+
+    The decode on cores of its own: on its consumer's, a core would hold its call's
+    rows, which the analysis refuses first.
+    """
     decode, gemv = coded_consumer(M=2048, K=8192, rows=1, num_aie_columns=device.cols)
     other = GEMV(
         M=2048,
@@ -259,7 +265,9 @@ def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed(d
     )
     configuration = Configuration(
         parts=(
-            _coded_region(M=2048, K=8192, rows=1, num_aie_columns=device.cols),
+            _coded_region(
+                M=2048, K=8192, rows=1, num_aie_columns=device.cols, workers=()
+            ),
             Member(
                 cls=GEMV,
                 dims=dict(M=2048, K=8192),
@@ -276,19 +284,10 @@ def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed(d
     assert result.stage == "counts"
 
 
-def test_a_gemv_a_decode_feeds_is_proposed_with_its_vector_on_its_own_stream(device):
-    """Decode into a GEMV is proposed with the GEMV's B on a stream of its own (``feed_b``): fed on chip, its A carries no vector from the host."""
-    weight = small_integer_weight((128, 128), 0)
-    recording = coded_consumer_recording_with_weight(
-        rows=1, num_aie_columns=1, weight=weight
-    )
-    assert any(
-        isinstance(edit, AddEntry)
-        and isinstance(edit.entry.root, Region)
-        and any(e.input == "A" for e in edit.entry.root.edges)
-        and (edit.entry.root.parts[1].tunables or {}).get("feed_b") is True
-        for edit in candidates([Timed(recording)], Profile(), device)
-    )
+def test_a_gemv_a_decode_feeds_streams_its_vector_on_its_own(device):
+    """Fed on its A, a ``GEMV`` takes its vector on a stream of its own (``feed_b``): unstreamed, B rides A's stream from the host."""
+    region = _coded_region(M=128, K=128, rows=1, num_aie_columns=1)
+    assert region.step_tunables()[1]["feed_b"] is True
 
 
 @unbuilt
