@@ -192,7 +192,6 @@ def test_coding_is_kept_only_where_ddr_bytes_saved_beat_the_decode_cost(device):
     )
 
 
-@unbuilt
 def test_a_width_where_a_row_overflows_its_capacity_is_refused_before_any_build(device):
     """A width whose coded row overflows its exception capacity is refused before any build, naming the row."""
     weight = _wide_weight(M=128, K=64)
