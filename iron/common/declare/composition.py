@@ -163,6 +163,18 @@ class Region:
         """Return its steps depth-first through nested regions, the order its indices name them in."""
         return tuple(m for part in self.parts for m in part.steps())
 
+    def step_phases(self) -> tuple[int, ...] | None:
+        """Return each step's phase, its in-edges', else the first; None where its phases are not chosen."""
+        if self.phases is None:
+            return None
+        return tuple(
+            max(
+                (p for e, p in zip(self.edges, self.phases) if e.consumer == i),
+                default=0,
+            )
+            for i in range(len(self.steps()))
+        )
+
     def deepened(self, index: int, depth: int | None) -> Region:
         """Return this region with edge ``index`` held ``depth`` objects deep; None, the analysis's minimum."""
         edges = tuple(
@@ -177,9 +189,9 @@ class Region:
         ``L1`` makes the edge a stream and puts its two steps on one worker,
         with any each already shares one with. ``MEMTILE`` and
         ``LATER_PHASE`` make it staged, ``DDR`` a DDR edge. ``LATER_PHASE``
-        runs its consumer, and every step downstream of it, in phase 1: a
-        step's phase is the largest of its producers' and 1 where a later
-        edge feeds it. ``MEMORY`` drops the edge (and its phase), so the
+        runs its consumer a phase after its producer, and every step
+        downstream of it later with it: a step's phase is the largest of its
+        producers', one more across each edge held a phase later. ``MEMORY`` drops the edge (and its phase), so the
         edges after it move down one index.
         """
         if place is Hold.MEMORY:
@@ -215,14 +227,23 @@ class Region:
             workers = tuple(sorted([*apart, tuple(sorted(joined))]))
         phases = self.phases
         if place is Hold.LATER_PHASE:
-            step = {e.consumer: p for e, p in zip(self.edges, self.phases or ())}
-            # A self-loop's later read is its step's next firing, not a phase.
+            old = {e.consumer: p for e, p in zip(self.edges, self.phases or ())}
+            # Each edge whose consumer runs a phase after its producer stays a
+            # boundary as phases move; a self-loop's later read is its step's
+            # next firing, not a phase.
+            boundaries = {
+                i
+                for i, (e, p) in enumerate(zip(self.edges, self.phases or ()))
+                if e.producer != e.consumer and p > old.get(e.producer, 0)
+            }
             if edge.producer != edge.consumer:
-                step[edge.consumer] = max(step.get(edge.consumer, 0), 1)
-            for e in sorted(self.edges, key=lambda e: e.consumer):
+                boundaries.add(index)
+            step: dict[int, int] = {}
+            for i, e in sorted(enumerate(edges), key=lambda ie: ie[1].consumer):
                 if e.producer != e.consumer:
                     step[e.consumer] = max(
-                        step.get(e.consumer, 0), step.get(e.producer, 0)
+                        step.get(e.consumer, 0),
+                        step.get(e.producer, 0) + (i in boundaries),
                     )
             phases = tuple(step.get(e.consumer, 0) for e in edges)
         return replace(self, edges=edges, workers=workers, phases=phases)

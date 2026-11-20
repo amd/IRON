@@ -325,12 +325,13 @@ def _composed_module(
     depths: Mapping[tuple[int, str], int] | None = None,
     waits: Sequence[tuple[int, int]] = (),
     workers: Sequence[tuple[int, ...]] = (),
+    phases: Sequence[int] | None = None,
 ) -> ir.Module:
     """Return the one module ``fits`` places ``designs`` as, built the same way it does.
 
     Plain (``configuration``), or, given ``kind``, as ``kind``'s own fusion wires
     ``edges``, each output ``kept`` drained to the host too, each of ``waits`` a
-    phase apart (``fused_configuration``,
+    phase apart, each member at its chosen ``phases`` (``fused_configuration``,
     which also tells a pack's or a stream's own array per member, fuse=True, from a
     merge's shared one). Composing is cheap next to
     running the placement pipeline on the result, so a group-fit verdict's cache key is
@@ -349,10 +350,11 @@ def _composed_module(
                 Edge(p, out, c, inp, depth=(depths or {}).get((p, out)))
                 for p, out, c, inp in edges
             ),
-            phased=bool(waits),
+            phased=bool(waits) or phases is not None,
             kept=tuple(kept),
             waits=tuple(waits),
             workers=tuple(workers),
+            phases=None if phases is None else tuple(phases),
         )
         configured, _ = fused_configuration("fused", fusion, list(designs.values()))
     return Program.compose([configured], entry=configured.runtimes[0]).resolve_program()
@@ -373,13 +375,15 @@ def group_fit_verdict(
     depths: Mapping[tuple[int, str], int] | None = None,
     waits: Sequence[tuple[int, int]] = (),
     workers: Sequence[tuple[int, ...]] = (),
+    phases: Sequence[int] | None = None,
 ) -> str | None:
     """Why the placer refuses ``ops``' resolved designs sharing one device configuration (plain, or as ``kind``'s fusion wires ``edges``).
 
     Each output ``kept`` drains to the host too (``Fusion.kept``), each
     output ``depths`` names is built at that depth, and each of ``waits``
     runs its consumer a phase after its producer (``Fusion.waits``); each of
-    ``workers`` shares its members' cores (``Fusion.workers``).
+    ``workers`` shares its members' cores (``Fusion.workers``); ``phases``
+    are its members' chosen phases (``Fusion.phases``).
 
     Or None if they co-reside; kept under ``fit_cache``, keyed on the composed module's
     own text (``_composed_module``) and each design's build (``artifact_hash``, as
@@ -387,8 +391,13 @@ def group_fit_verdict(
     takes invalidates it by construction, not only one to ``compose.py``'s own source.
     The placer runs in a process of its own (``failures.place``): a compiler crash
     refuses the group, recorded in ``ledger`` where one is given.
+
+    Raises:
+        NotImplementedError: Composing them is not built yet.
     """
-    found = _fit_record(ops, fit_cache, kind, edges, kept, depths, waits, workers)
+    found = _fit_record(
+        ops, fit_cache, kind, edges, kept, depths, waits, workers, phases
+    )
     if isinstance(found, str):
         return found  # composing itself refused; no placement pass to cache
     text, record = found
@@ -439,11 +448,20 @@ def _fit_record(
     depths: Mapping[tuple[int, str], int] | None = None,
     waits: Sequence[tuple[int, int]] = (),
     workers: Sequence[tuple[int, ...]] = (),
+    phases: Sequence[int] | None = None,
 ) -> tuple[str, Path] | str:
-    """``ops`` composed into one module, its text and its verdict's file under ``fit_cache``; or why composing them refused."""
+    """``ops`` composed into one module, its text and its verdict's file under ``fit_cache``; or why composing them refused.
+
+    Raises:
+        NotImplementedError: Composing them is not built yet.
+    """
     designs = {str(i): OperatorDesign(op.resolved()) for i, op in enumerate(ops)}
     try:
-        module = _composed_module(designs, kind, edges, kept, depths, waits, workers)
+        module = _composed_module(
+            designs, kind, edges, kept, depths, waits, workers, phases
+        )
+    except NotImplementedError:
+        raise
     except (ValueError, RuntimeError, ir.MLIRError) as e:
         return str(e)
     text = str(module)

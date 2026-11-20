@@ -127,6 +127,8 @@ class Fusion:
     more after the producer. ``workers`` names each group of members whose
     cores are one, in firing order: each lane's core runs the group's
     members' bodies in turn, the edges among them fifos within its tile.
+    ``phases`` names each member's phase, in ``steps``' order, where they are
+    chosen rather than derived (``compose.phases``).
     """
 
     kind: FusionKind
@@ -136,10 +138,18 @@ class Fusion:
     kept: tuple[tuple[int, str], ...] = ()
     waits: tuple[tuple[int, int], ...] = ()
     workers: tuple[tuple[int, ...], ...] = ()
+    phases: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         if len(self.steps) < 2:
             raise ValueError("a fusion needs at least two steps")
+        if self.phases is not None and (
+            not self.phased or len(self.phases) != len(self.steps)
+        ):
+            raise ValueError(
+                f"fusion {self.steps}: chosen phases {self.phases} name a phase "
+                f"for each member of a phased fusion"
+            )
         if self.phased and self.kind not in (FusionKind.STREAM, FusionKind.STAGED):
             raise ValueError(f"a {self.kind.value} fusion has no phases to run apart")
         if list(self.steps) != sorted(set(self.steps)):
@@ -259,6 +269,8 @@ class Fusion:
             "@" + "+".join(str(self.steps.index(s)) for s in group)
             for group in self.workers
         )
+        if self.phases is not None:
+            wiring += "%" + ",".join(map(str, self.phases))
         kind = f"{self.kind.value}/phased" if self.phased else self.kind.value
         digest = hashlib.sha256(
             f"{kind}[{'|'.join(designs)}]({wiring})".encode()
