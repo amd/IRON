@@ -965,8 +965,12 @@ class Applied:
         """Return ``call`` under ``profile`` on ``dev``.
 
         Where its version's schedule runs several calls a command, the derived
-        version running them (``Recording.repeated``), and the commands it
-        keeps in flight.
+        version running them, back to back (``Recording.repeated``) or merged
+        into one (``Recording.merged``), and the commands it keeps in flight.
+
+        Raises:
+            NotImplementedError: The schedule both merges calls and runs
+                several a command.
 
         Its weights coded as ``Graph.compile`` codes them (``Recording.code_weights``),
         in ``call``'s recording itself: how a weight is read is its recording's, the
@@ -978,8 +982,15 @@ class Applied:
         recording = call.recording
         schedules = [s for s in profile.schedules() if s.version == recording.version]
         per = max((s.calls_per_command for s in schedules), default=1)
+        merged = max((s.merged_calls for s in schedules), default=1)
+        if per > 1 and merged > 1:
+            raise NotImplementedError(
+                f"{recording.name}: several merged calls a command are not built yet"
+            )
         if per > 1:
             recording = recording.repeated(per)
+        if merged > 1:
+            recording = recording.merged(merged)
         recording, fused, packing = apply_profile(recording, profile, dev)
         out = cls(
             recording,

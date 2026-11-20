@@ -372,6 +372,23 @@ class Schedule:
     size: str | None = None
     packaging: Literal["full_elf", "xclbin"] | None = None
 
+    @property
+    def merged_calls(self) -> int:
+        """The calls ``size`` merges into one call; 1 where it names none.
+
+        Raises:
+            ValueError: ``size`` is not ``"merged_<k>x"``, ``k`` past one.
+        """
+        if self.size is None:
+            return 1
+        k = self.size.removeprefix("merged_").removesuffix("x")
+        if f"merged_{k}x" != self.size or not k.isdigit() or int(k) < 2:
+            raise ValueError(
+                f"{self.size!r} names no derived version: a merge is 'merged_<k>x', "
+                f"k calls past one"
+            )
+        return int(k)
+
 
 @dataclass(frozen=True)
 class Variants:

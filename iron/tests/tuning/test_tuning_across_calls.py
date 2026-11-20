@@ -110,6 +110,21 @@ def test_several_calls_per_command_are_bit_identical_to_one_per_command(device):
         assert result.ok, result.why
 
 
+@pytest.mark.supported_devices("npu2")
+def test_calls_merged_into_one_are_bit_identical_to_one_a_command(device):
+    """Two and four calls of an elementwise step merged into one call at that many times the size are bit-identical to them one a command."""
+    add, mul = toys_schedule.residual_step()
+    recording = toys_schedule.residual_step_recording("across_calls_merged", add, mul)
+    for calls in (2, 4):
+        profile = Profile()
+        profile.add_schedule(
+            Schedule(version=recording.version, size=f"merged_{calls}x")
+        )
+        assert fit(profile, [Timed(recording)], device).ok
+        result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+        assert result.ok, result.why
+
+
 @unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_a_merge_into_a_larger_shape_is_no_worse_where_it_reorders_a_reduction(device):

@@ -213,6 +213,17 @@ class Operator(jit.Operator, library=True):
         """
         return None
 
+    def merged(self, calls: int) -> Self:
+        """Return this operator over ``calls`` calls' data at once, each operand the calls' stacked along its leading axis.
+
+        Raises:
+            NotImplementedError: It does not merge calls into one.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__}: {calls} calls merged into one call are not "
+            f"built yet"
+        )
+
     def tolerance(self) -> Tolerance | None:
         """Return what each output of the resolved operator is judged by.
 

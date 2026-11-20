@@ -1367,6 +1367,23 @@ def fit(
                         f"which outlasts the call, so a call depends on the one "
                         f"before",
                     )
+            if schedule.size is not None:
+                try:
+                    with set_current_device(device):
+                        recording.merged(schedule.merged_calls)
+                except NotImplementedError as e:
+                    waiting.append(str(e))
+                except ValueError as e:
+                    return Fit(
+                        False,
+                        "counts",
+                        f"its {schedule.merged_calls} calls merged into one: {e}",
+                    )
+                if schedule.calls_per_command > 1:
+                    waiting.append(
+                        f"{recording.name}: several merged calls a command are not "
+                        f"built yet"
+                    )
             if schedule.calls_per_command > 1:
                 try:
                     repeated = recording.repeated(schedule.calls_per_command)
@@ -1427,11 +1444,12 @@ def fit(
                     ("recomputed steps", schedule.recompute),
                     ("calls overlapped", schedule.calls_overlapped),
                     (
-                        "several calls a command or commands in flight on an "
-                        "xclbin per step",
+                        "several calls a command, merged calls or commands in "
+                        "flight on an xclbin per step",
                         (
                             schedule.commands_in_flight != 1
                             or schedule.calls_per_command != 1
+                            or schedule.size is not None
                         )
                         and (
                             schedule.packaging == "xclbin"
@@ -1439,7 +1457,6 @@ def fit(
                         ),
                     ),
                     ("versions interleaved", schedule.interleave_with),
-                    ("derived size", schedule.size is not None),
                 )
                 if kept
             ]
@@ -1668,7 +1685,11 @@ def check(
             s
             for s in profile.schedules()
             if s.version == call.recording.version
-            and (s.commands_in_flight > 1 or s.calls_per_command > 1)
+            and (
+                s.commands_in_flight > 1
+                or s.calls_per_command > 1
+                or s.size is not None
+            )
         ]
         if not batching:
             apart.append(call)
@@ -1699,24 +1720,22 @@ def _batched(
 ) -> str | None:
     """Return how ``call``'s draws, run as ``schedule`` batches them under ``profile``, first differ from them called one at a time under ``base``, or None.
 
-    ``calls_per_command * (2 * commands_in_flight + 1)`` calls, each on its
-    seeded draw, in turn at the call's values and at each of its bounds
+    ``calls * (2 * commands_in_flight + 1)`` calls, ``calls`` the version's
+    a command (``Recording.calls``: back to back, or merged into one), each on
+    its seeded draw, in turn at the call's values and at each of its bounds
     halved (``_bound_points``), so calls of one command differ, from one set
     of seeded states:
     batched through ``CarriedLoop.calls`` (where the version carries values,
-    the first call's, the Emit giving the rest), ``calls_per_command`` a
-    command and ``commands_in_flight`` commands in flight; apart each an
-    ordinary call. Every returned output of each call, and every state after
-    the last, must be bit-identical.
+    the first call's, the Emit giving the rest), ``calls`` a command and
+    ``commands_in_flight`` commands in flight; apart each an ordinary call.
+    Every returned output of each call, and every state after the last, must
+    be bit-identical.
 
     Raises:
         NotImplementedError: ``base`` batches the version's calls too.
     """
     recording = call.recording
     points = [dict(call.values), *_bound_points(recording, dict(call.values))]
-    per, depth = schedule.calls_per_command, schedule.commands_in_flight
-    draws = [drawn_inputs(recording, seed) for seed in range(per * (2 * depth + 1))]
-    at = [points[k % len(points)] for k in range(len(draws))]
     with set_current_device(device):
         graphs = (
             Applied.of(old, base, device).built(device),
@@ -1727,6 +1746,9 @@ def _batched(
             "checking a batched schedule against a base that batches too is not "
             "built yet"
         )
+    per, depth = graphs[1].recording.calls, schedule.commands_in_flight
+    draws = [drawn_inputs(recording, seed) for seed in range(per * (2 * depth + 1))]
+    at = [points[k % len(points)] for k in range(len(draws))]
     rng = np.random.default_rng(len(draws))
     states = {h.name: _random_tensor(h, rng) for _, h in recording.states.values()}
     owns = [{h.name: s for s, h in g.recording.states.values()} for g in graphs]

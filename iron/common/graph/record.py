@@ -243,6 +243,26 @@ class _CallNames:
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class _Stacking:
+    """What a merged version stacks along the leading axis, ``calls`` calls' at once (``Recording.merged``).
+
+    Attributes:
+        buffers: Each stacked buffer, by name, at its stacked shape.
+        calls: The calls stacked.
+    """
+
+    buffers: dict[str, Buffer]
+    calls: int
+
+    def handle(self, h: Handle) -> Handle:
+        """Return ``h`` on its stacked buffer, whole, where it has one."""
+        stacked = self.buffers.get(h.buffer.name)
+        if stacked is None:
+            return h
+        return dataclasses.replace(h, buffer=stacked, shape=stacked.shape)
+
+
 def version_key(inputs: Mapping[str, tuple[tuple[int, ...], Any]]) -> Version:
     """Return the key of a graph's version for ``inputs`` (each input's shape and dtype, by name, in the order its body takes them)."""
     return tuple(
@@ -291,10 +311,12 @@ class Recording:
     host: list[HostStep] = dataclasses.field(default_factory=list)
     # Each weight a coded read was given but which is read plain, and why.
     read_plain: dict[str, str] = dataclasses.field(default_factory=dict)
-    # A derived version running this many calls of another back to back in one
-    # command (``repeated``), and that version's key.
+    # A derived version running this many calls of another in one command, back
+    # to back (``repeated``) or stacked into one call (``merged``, ``stacked``),
+    # and that version's key.
     calls: int = 1
     derived_from: Version | None = None
+    stacked: bool = False
 
     @property
     def version(self) -> Version:
@@ -420,6 +442,84 @@ class Recording:
             limits=limits,
             calls=calls,
             derived_from=self.version,
+        )
+
+    def merged(self, calls: int) -> Recording:
+        """Return the derived version running ``calls`` of this one's calls as one call, each step over the calls' data at once (``Operator.merged``).
+
+        Every buffer a step reads or writes but a weight is the calls' stacked
+        along its leading axis, inputs and returned outputs included, which
+        ``CarriedLoop.calls`` stacks and splits; a weight stays one, which
+        every call reads.
+
+        Raises:
+            NotImplementedError: It carries values, buffers or state, takes
+                per-call values, runs a host step or encodes an input from an
+                address; a step reads or writes part of a buffer that is not
+                a weight (a slice, a stride, a gather); or a step's operator
+                does not merge calls.
+        """
+        unbuilt = [
+            what
+            for what, kept in (
+                ("carried values", self.carry),
+                ("carried buffers or state", self.feedback or self.states),
+                ("per-call values", self.values or self.bindings),
+                ("a host step", self.host),
+                ("an input encoded from an address", self.encoders or self.addresses),
+            )
+            if kept
+        ]
+        if unbuilt:
+            raise NotImplementedError(
+                f"{self.name}: {calls} calls merged into one of a version with "
+                f"{unbuilt[0]} are not built yet"
+            )
+        weights = {h.buffer.name for _, h in self.weights.values()}
+        buffers: dict[str, Buffer] = {}
+        for i, step in enumerate(self.steps):
+            for h in step.slots:
+                if h.buffer.name in weights:
+                    continue
+                if h.layout != Dense() or h.shape != h.buffer.shape or not h.shape:
+                    raise NotImplementedError(
+                        f"{self.name}: {calls} calls merged into one, where step "
+                        f"{i} ({type(step.op).__name__}) reads or writes part of "
+                        f"{h.buffer.name}, are not built yet"
+                    )
+                b = h.buffer
+                buffers[b.name] = dataclasses.replace(
+                    b, shape=(calls * b.shape[0], *b.shape[1:])
+                )
+        stacking = _Stacking(buffers, calls)
+        ops: dict[int, Operator] = {}
+        steps = []
+        for step in self.steps:
+            if id(step.op) not in ops:
+                ops[id(step.op)] = step.op.merged(calls)
+            steps.append(
+                dataclasses.replace(
+                    step,
+                    op=ops[id(step.op)],
+                    slots=[stacking.handle(h) for h in step.slots],
+                    inputs=[stacking.handle(h) for h in step.inputs],
+                    outputs=[stacking.handle(h) for h in step.outputs],
+                )
+            )
+        return dataclasses.replace(
+            self,
+            name=f"{self.name}_merged{calls}",
+            pinned={
+                n: nbytes * calls if n in buffers else nbytes
+                for n, nbytes in self.pinned.items()
+            },
+            steps=steps,
+            inputs=[stacking.handle(h) for h in self.inputs],
+            outputs=[stacking.handle(h) for h in self.outputs],
+            returned=[stacking.handle(h) for h in self.returned],
+            calls=calls,
+            derived_from=self.version,
+            stacked=True,
         )
 
     def occurrences(self, entry: Entry) -> tuple[tuple[int, ...], ...]:

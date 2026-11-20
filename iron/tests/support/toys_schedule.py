@@ -9,6 +9,7 @@ import iron
 from iron.common.graph.record import Recording
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
 from iron.tests.support import sequences
@@ -107,6 +108,18 @@ def decode_step(add_cols=2) -> tuple[GEMV, ElementwiseAdd]:
 def decode_step_recording(name, gemv, add) -> Recording:
     steps = sequences.steps((gemv, "A", "x", "mid"), (add, "r", "mid", "out"))
     return Recording.of_steps(name, steps, ["A", "x", "r"], ["out"])
+
+
+def residual_step(cols=2) -> tuple[ElementwiseAdd, ElementwiseMul]:
+    """Return a step merged calls stack: elementwise throughout, so ``k`` calls are one call at ``k`` times the size."""
+    add = ElementwiseAdd(size=2048, num_aie_columns=cols, tile_size=256)
+    mul = ElementwiseMul(size=2048, num_aie_columns=cols, tile_size=256)
+    return add, mul
+
+
+def residual_step_recording(name, add, mul) -> Recording:
+    steps = sequences.steps((add, "x", "r", "h"), (mul, "h", "g", "out"))
+    return Recording.of_steps(name, steps, ["x", "r", "g"], ["out"])
 
 
 def kv_write_read(width=64) -> tuple[Copy, Copy]:

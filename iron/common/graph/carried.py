@@ -197,8 +197,10 @@ class CarriedLoop:
     later call's the Emit of the call before, as ``steps``' are. A buffer
     or state carried from one call to the next stays on the device between
     them, as commands on one context run in turn. A version running several
-    calls a command (``Recording.repeated``) takes the batch that many at a
-    time, each call's tensors and values its own.
+    calls a command takes the batch that many at a time: back to back
+    (``Recording.repeated``), each call's tensors and values its own; merged
+    into one (``Recording.merged``), each input the calls' stacked and each
+    output split back.
     """
 
     def __init__(self, first: CompiledGraph, body: CompiledGraph, depth: int = 2):
@@ -286,18 +288,27 @@ class CarriedLoop:
                 f"{self.body.recording.name} runs {per} calls a command; got "
                 f"{len(batch)}"
             )
-        # A command of a repeated version takes each of its calls' tensors in
-        # turn, and each call's values under its own names.
+        stacked = self.body.recording.stacked
+        # A command of a merged version takes each input its calls' stacked; of
+        # a repeated version, each of its calls' tensors in turn, and each
+        # call's values under its own names.
         batch = [
             (
-                [t for tensors, _ in batch[k : k + per] for t in tensors],
+                (
+                    [
+                        np.concatenate(parts)
+                        for parts in zip(*(t for t, _ in batch[k : k + per]))
+                    ]
+                    if stacked
+                    else [t for tensors, _ in batch[k : k + per] for t in tensors]
+                ),
                 (
                     {
                         name + CALL_SUFFIX.format(j): value
                         for j, (_, values) in enumerate(batch[k : k + per])
                         for name, value in values.items()
                     }
-                    if per > 1
+                    if per > 1 and not stacked
                     else batch[k][1]
                 ),
             )
@@ -337,6 +348,12 @@ class CarriedLoop:
                 run.wired = False
         if per == 1:
             return results
+        if stacked:
+            return [
+                dict(zip(returned, parts, strict=True))
+                for returned in results
+                for parts in zip(*(np.split(v, per) for v in returned.values()))
+            ]
         return [
             {
                 name.removesuffix(CALL_SUFFIX.format(j)): value
