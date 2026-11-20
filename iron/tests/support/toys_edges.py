@@ -368,10 +368,8 @@ def scan_state_cycle(heads=2, head_dim=16, state_size=16):
 def sample_token_cycle(size=256, vocab=256):
     """Return a projection into ``Sample``, the drawn token fed back as the next call's record: the token across decode steps.
 
-    ``Sample``'s own ``tokens``, read and written, is the cross-call carry;
-    the edge's ``producer`` and ``consumer`` are again the same part. GEMV's
-    tiles of ``C`` are not Sample's chunks of ``logits``, so the analysis
-    stages that edge.
+    ``Sample``'s own ``tokens``/``token`` is the cross-call carry; the edge's
+    ``producer`` and ``consumer`` are again the same part.
     """
     proj = GEMV(M=vocab, K=size, feed_b=True, num_aie_columns=1)
     sample = Sample(vocab=vocab, k_max=4, cores=1)
@@ -382,8 +380,8 @@ def sample_token_cycle(size=256, vocab=256):
         "toy_sample_cycle", steps, ["A", "x", "draws"], ["tokens", "token"]
     )
     members = (member(proj), member(sample))
-    cycle = Edge(1, "tokens", 1, "tokens")
-    forward = (Edge(0, "C", 1, "logits", kind=EdgeKind.STAGED),)
+    cycle = Edge(1, "token", 1, "tokens")
+    forward = (Edge(0, "C", 1, "logits"),)
     return recording, members, forward, cycle
 
 

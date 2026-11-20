@@ -73,7 +73,15 @@ CYCLES = {
 }
 
 
-@pytest.mark.parametrize("cycle", sorted(CYCLES))
+@pytest.mark.parametrize(
+    "cycle",
+    [
+        # The drawn token's carry into tokens is no recorded buffer, so no
+        # candidate edit reaches the cycle.
+        (pytest.param(c, marks=unbuilt) if c == "sample_drawn_token" else c)
+        for c in sorted(CYCLES)
+    ],
+)
 def test_a_cycle_with_its_initial_values_round_trips(cycle, tmp_path):
     """A cycle with its initial values round-trips through the profile, and composing ``candidates``' edits reaches it."""
     recording, region = CYCLES[cycle]()

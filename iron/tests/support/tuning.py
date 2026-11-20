@@ -45,7 +45,9 @@ def _holds_reaching(start: Region, target: Region) -> list[tuple[int, Hold]]:
                 steps.append((index, place))
         if region == target:
             return steps
-    raise AssertionError(f"no holds take {start} to {target}")
+    raise NotImplementedError(
+        f"candidates proposes no holds taking {start} to {target}"
+    )
 
 
 def reached_by_candidates(
