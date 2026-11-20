@@ -780,34 +780,18 @@ class Derivation:
 
         Raises:
             ValueError: The call does not give the value and no limit of the
-                recording bounds it, or the limits do not settle one.
+                recording bounds it, or the limits admit none
+                (``Recording.value_range``).
         """
         name = expression.value.name
         if name not in self.values:
-            on = [
-                limit
-                for limit in recording.limits
-                if limit.plus is None
-                and limit.expression.value.name == name
-                and limit.expression.linear
-                and limit.expression.scale > 0
-            ]
-            if not on:
+            admitted = recording.value_range(name)
+            if admitted is None:
                 raise ValueError(
                     f"{recording.name}: the call does not give {name}, and no limit "
                     f"of the recording bounds it"
                 )
-            most = min(
-                (limit.hi - 1 - limit.expression.bias) // limit.expression.scale
-                for limit in on
-            )
-            if not all(
-                limit.lo <= limit.evaluate({name: most}) < limit.hi for limit in on
-            ):
-                raise ValueError(
-                    f"{recording.name}: the limits on {name} settle no largest value"
-                )
-            self.values[name] = most
+            self.values[name] = admitted[1]
         return expression.evaluate(self.values)
 
     def _through_links(self, links: Sequence[ObjectFifoLink]) -> None:
