@@ -28,6 +28,7 @@ from iron.operators.sigmoid import Sigmoid
 from iron.operators.tanh import Tanh
 from iron.tests.support import sequences, toys_schedule
 from iron.tests.support.fusable import gemv_silu_mul, gemv_silu_mul_recording
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_composition import independent_regions_recording
 from iron.tests.support.toys_edges import combination_toy, member
 from iron.tests.support.tuning import reached_by_candidates, unbuilt
@@ -379,18 +380,48 @@ def test_packaging_full_elf_and_xclbin_per_step_are_bit_identical(device):
     assert result.ok, result.why
 
 
+# npu1 builds GEMM on an array narrower than the device, which a
+# configuration beside another operator's does not take.
+_CONFIGURATION_PAYS = [
+    pytest.param(
+        name,
+        id=f"device_{name}",
+        marks=(
+            ()
+            if name == "npu2"
+            else pytest.mark.xfail(
+                strict=True,
+                raises=AssertionError,
+                reason="candidates does not propose configurations yet",
+            )
+        ),
+    )
+    for name in sorted(DEVICES)
+]
+
+# The seconds the search takes on npu2 to price the configuration that pays
+# (326 s: a configuration before it hangs the placer to its 300 s limit),
+# with margin.
+_CONFIGURATION_BUDGET_S = 600.0
+
+
 @pytest.mark.extensive
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="candidates does not propose configurations yet",
-)
+@pytest.mark.parametrize("device", _CONFIGURATION_PAYS, indirect=True)
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_tuner_keeps_the_configuration_that_pays(device):
-    """The tuner, on the Wide toy alone, keeps the configuration (narrowed to co-reside) that pays."""
-    _, recording = _wide_configuration(device)
-    start = Profile()
-    found = search([Timed(recording)], start, device, budget_s=60.0)
+    """The tuner, on the pre-norm MLP toy alone, keeps the configuration (narrowed to co-reside) that pays.
+
+    Its two projections share one GEMM array, so its four arrays loaded
+    together serve all five steps, where a region holds the GEMM's cores
+    once a projection. On the Wide toy a one-column stream region beats
+    every configuration, so the search rightly keeps none there.
+    """
+    recording = toys_schedule.PreNormMLP(512, 1024, device.cols).record(
+        x=(256, 512), up=(512, 1024), down=(1024, 512)
+    )
+    found = search(
+        [Timed(recording)], Profile(), device, budget_s=_CONFIGURATION_BUDGET_S
+    )
     assert any(isinstance(e.root, Configuration) for e in found.entries())
 
 
