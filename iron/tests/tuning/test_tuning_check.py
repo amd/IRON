@@ -17,6 +17,7 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.rms_norm import RMSNorm
 from iron.tests.support import sequences, toys_schedule
+from iron.tests.support.toys_check import MulUpToM, MulUpToN
 from iron.tests.support.toys_edges import chain, fan_out_norm_qkv, member
 from iron.tests.support.toys_settings import shared_kv_state, small_integer_weight
 from iron.tune.autotune import Timed
@@ -218,20 +219,6 @@ def test_a_state_written_wrong_is_caught_after_the_call_that_writes_it(device):
     assert "call 0" in (result.why or "") and "kv" in (result.why or "")
 
 
-class _MulUpToN(iron.Graph):
-    """``x * y`` over the first ``n`` elements, ``n`` per call."""
-
-    def body(self, x, y, *, n: Scratchpad[np.int32]):
-        return ElementwiseMul.step(x, y[:n], size=256, tile_size=64)
-
-
-class _MulUpToM(iron.Graph):
-    """``_MulUpToN`` with its per-call bound named ``m``, as the operator a graph replaces names its own."""
-
-    def body(self, x, y, *, m: Scratchpad[np.int32]):
-        return ElementwiseMul.step(x, y[:m], size=256, tile_size=64)
-
-
 class _Mul(iron.Graph):
     """``x * y`` whole, with no per-call value."""
 
@@ -246,10 +233,10 @@ def test_a_call_and_its_base_call_each_run_at_their_own_values(device, refinemen
     result = check(
         Profile(),
         Profile(),
-        [Timed(_MulUpToN().record(**shapes), values={"n": 256})],
+        [Timed(MulUpToN().record(**shapes), values={"n": 256})],
         device,
         refinement,
-        base_calls=[Timed(_MulUpToM().record(**shapes), values={"m": 256})],
+        base_calls=[Timed(MulUpToM().record(**shapes), values={"m": 256})],
     )
     assert result.ok, result.why
 
@@ -264,10 +251,10 @@ def test_a_base_call_cutting_its_output_otherwise_than_its_call_is_refused(
         check(
             Profile(),
             Profile(),
-            [Timed(_MulUpToN().record(**shapes), values={"n": 256})],
+            [Timed(MulUpToN().record(**shapes), values={"n": 256})],
             device,
             refinement,
-            base_calls=[Timed(_MulUpToM().record(**shapes), values={"m": 128})],
+            base_calls=[Timed(MulUpToM().record(**shapes), values={"m": 128})],
         )
 
 
@@ -354,7 +341,7 @@ def test_a_no_worse_call_is_held_to_its_base_s_reference_at_the_base_s_values(de
     result = check(
         Profile(),
         Profile(),
-        [Timed(_MulUpToN().record(**shapes), values={"n": 256})],
+        [Timed(MulUpToN().record(**shapes), values={"n": 256})],
         device,
         Refinement.NO_WORSE,
         base_calls=[Timed(_AddUpToM().record(**shapes), values={"m": 256})],
@@ -373,6 +360,18 @@ def test_an_exact_base_batching_what_its_call_runs_one_at_a_time_is_refused(devi
         check(Profile(), base, [Timed(recording)], device, Refinement.EXACT)
 
 
+def test_an_exact_base_keeping_commands_in_flight_is_held_to_calls_one_at_a_time(
+    device,
+):
+    """A base keeping two decode commands in flight, one call each, against a profile running them one at a time: its calls run apart, bit-identical."""
+    gemv, add = toys_schedule.decode_step()
+    recording = toys_schedule.decode_step_recording("check_in_flight_base", gemv, add)
+    base = Profile()
+    base.add_schedule(Schedule(version=recording.version, commands_in_flight=2))
+    result = check(Profile(), base, [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
 def test_a_base_call_checked_at_another_count_of_points_is_refused(device):
     """A call bound per call (its values and its bound halved, two points) held to a base call with no bound (one point): refused before any build."""
     shapes = dict(x=(256,), y=(256,))
@@ -380,7 +379,7 @@ def test_a_base_call_checked_at_another_count_of_points_is_refused(device):
         check(
             Profile(),
             Profile(),
-            [Timed(_MulUpToN().record(**shapes), values={"n": 256})],
+            [Timed(MulUpToN().record(**shapes), values={"n": 256})],
             device,
             Refinement.EXACT,
             base_calls=[Timed(_Mul().record(**shapes))],

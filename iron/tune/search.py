@@ -2241,8 +2241,13 @@ def check(
     checked = []
     for call, old in pairs:
         _, batching = _one_at_a_time(profile, call.recording.version)
-        _, holding = _one_at_a_time(base, old.recording.version)
-        if refinement is Refinement.EXACT and holding and not batching:
+        merging = [
+            s
+            for s in base.schedules()
+            if s.version == old.recording.version
+            and (s.calls_per_command > 1 or s.size is not None)
+        ]
+        if refinement is Refinement.EXACT and merging and not batching:
             raise ValueError(
                 f"{old.recording.name}: the base batches its calls and "
                 f"{call.recording.name}'s profile runs them one at a time; an "
@@ -2291,10 +2296,16 @@ def check(
         for values in [(old.values, call.values), *at]:
             wrong = []
             for h in old.recording.returned:
+                # An axis whose bound is not given (a call's points give it)
+                # is whole, as _bound_points leaves it.
                 cut = [
                     tuple(
-                        len(range(*c.indices(n)))
-                        for c, n in zip(side.valid_index(v), side.shape, strict=True)
+                        (
+                            len(range(*slice(side.valid[axis].evaluate(v)).indices(n)))
+                            if axis in side.valid and side.valid[axis].value.name in v
+                            else n
+                        )
+                        for axis, n in enumerate(side.shape)
                     )
                     for side, v in ((h, values[0]), (returned[h.name], values[1]))
                 ]
