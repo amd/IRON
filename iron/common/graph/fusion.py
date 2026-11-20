@@ -51,8 +51,8 @@ def admits(
     key = (producer_design.identity, output, consumer_design.identity, input_)
     if key in _built:
         return _built[key]
-    (made,) = (b for b in producer_design.op.buffers if b.name == output)
-    (taken,) = (b for b in consumer_design.op.buffers if b.name == input_)
+    made = {b.name: b for b in producer_design.op.buffers}[output]
+    taken = {b.name: b for b in consumer_design.op.buffers}[input_]
     sizes = (
         (math.prod(made.obj_shape), math.prod(taken.obj_shape))
         if made.streamed and taken.streamed
