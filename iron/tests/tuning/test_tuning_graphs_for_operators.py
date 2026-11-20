@@ -321,7 +321,6 @@ def test_prefill_graph_is_no_worse_than_the_fused_mha_it_replaces(device):
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-@unbuilt
 def test_a_bf16_mul_then_add_hand_off_is_refused_against_the_fused_axpy(device):
     """``AXPY`` keeps ``scalar_factor * x`` at float32 before the add; the graph's bf16 ``mid`` is refused against it."""
     mul, add = toys.axpy_ops()
@@ -340,6 +339,7 @@ def test_a_bf16_mul_then_add_hand_off_is_refused_against_the_fused_axpy(device):
         base_calls=[Timed(operator_recording)],
     )
     assert not result.ok
+    assert "out is worse" in (result.why or "")
 
 
 @pytest.mark.extensive
