@@ -614,22 +614,26 @@ class Recording:
             return recording.merged(merged)
         return recording
 
-    def writes_whole(self, root: str) -> bool:
-        """Whether its steps' writes of buffer ``root`` together cover every byte of it."""
-        size = self.pinned.get(root)
-        runs = []
+    def reads_only_written(self, root: str) -> bool:
+        """Whether each step reading buffer ``root`` reads only bytes the steps before it wrote, in step order."""
+        written: list[tuple[int, int]] = []
         for step in self.steps:
-            for ref, b in zip(step.refs(), step.op.buffers, strict=True):
-                if b.drains and ref.root == root:
-                    if ref.nbytes is None and (size is None or b.nbytes >= size):
-                        return True
-                    runs.append((ref.start, ref.nbytes or b.nbytes))
-        reached = 0
-        for start, nbytes in sorted(runs):
-            if start > reached:
-                return False
-            reached = max(reached, start + nbytes)
-        return size is not None and reached >= size
+            named = list(zip(step.refs(), step.op.buffers, strict=True))
+            for ref, b in named:
+                if not b.fills or ref.root != root:
+                    continue
+                start, end = ref.start, ref.start + (ref.nbytes or b.nbytes)
+                for lo, hi in sorted(written):
+                    if lo <= start < hi:
+                        start = hi
+                if start < end:
+                    return False
+            written += [
+                (ref.start, ref.start + (ref.nbytes or b.nbytes))
+                for ref, b in named
+                if b.drains and ref.root == root
+            ]
+        return True
 
     def recorded_at(self, shapes: Mapping[str, tuple[int, ...]]) -> Recording:
         """Return its graph recorded again, each input at its shape in ``shapes`` and the rest at their own.
@@ -642,12 +646,23 @@ class Recording:
             ValueError: It was built of steps rather than recorded from a
                 graph, is a derived version, or its graph has changed since
                 (its profile, a param, a coded weight).
+            NotLegalAtCapacity: The graph refuses ``shapes`` as it records
+                them (a body or an operator refusing the size).
+            NotImplementedError: It reads a coded weight, or one coding
+                refused, which coding rewrites the recording for.
         """
         if self.graph is None or self.derived_from is not None:
             raise ValueError(
                 f"{self.name}: only a graph's own recording is recorded again at "
                 f"other shapes; this one is "
                 + ("built of steps" if self.graph is None else "a derived version")
+            )
+        if self.read_plain or any(
+            isinstance(w, CodedWeight) for w, _ in self.weights.values()
+        ):
+            raise NotImplementedError(
+                f"{self.name}: recorded again at another capacity, a version "
+                f"with a coded weight is not built yet"
             )
         again = self.graph.record(
             **{h.name: (tuple(h.shape), h.dtype) for h in self.inputs}
@@ -673,12 +688,17 @@ class Recording:
                 f"profile, a param or a coded weight), so at other shapes it "
                 f"would record another design"
             )
-        return self.graph.record(
-            **{
-                h.name: (tuple(shapes.get(h.name, h.shape)), h.dtype)
-                for h in self.inputs
-            }
-        )
+        try:
+            return self.graph.record(
+                **{
+                    h.name: (tuple(shapes.get(h.name, h.shape)), h.dtype)
+                    for h in self.inputs
+                }
+            )
+        except (ValueError, IndexError) as e:
+            raise NotLegalAtCapacity(
+                f"{self.name} at {dict(shapes)} is not legal at that capacity: {e}"
+            ) from e
 
     def at_capacity(self, bounds: Mapping[str, int]) -> Recording:
         """Return this version as a call whose per-call values reach at most ``bounds`` runs it, recorded at that capacity.

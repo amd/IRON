@@ -24,7 +24,11 @@ from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
-from iron.tests.support.toys_settings import RangedPair, small_integer_weight
+from iron.tests.support.toys_settings import (
+    RangedPair,
+    coded_consumer_recording_with_weight,
+    small_integer_weight,
+)
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Point, Timed
 from iron.tune.fusions import Applied
@@ -193,15 +197,23 @@ def test_a_boundary_is_kept_only_where_its_saving_beats_a_switch_and_one_more_de
 
 
 @pytest.mark.parametrize(
-    "order", ["read_before_last_write", "read_unwritten_part", "read_after_writes"]
+    "order",
+    [
+        "read_before_last_write",
+        "read_unwritten_part",
+        "read_after_writes",
+        "read_written_part_first",
+        "unwritten_part_unread",
+    ],
 )
 def test_an_output_read_where_a_call_has_not_written_it_breaks_a_merge(device, order):
     """A returned output written in parts outlasts the call where a step reads part of it this call has not yet written.
 
     Read before the write of its second half, or a half no step writes, each call reads
     what the call before left there, so merging calls is refused before any build.
-    Read only after both halves are written, it is the host's after each call, and the
-    merge waits on what is not built rather than being refused.
+    Read only where this call already wrote it, or with a half no step writes and none
+    reads, it is the host's after each call, and the merge waits on what is not built
+    rather than being refused.
     """
     add = ElementwiseAdd(size=256, tile_size=128, num_aie_columns=1)
     first, second = BufferRef("out", 0, 512), BufferRef("out", 512, 512)
@@ -210,17 +222,24 @@ def test_an_output_read_where_a_call_has_not_written_it_breaks_a_merge(device, o
         SequenceStep(add, (BufferRef("x"), BufferRef("x"), second)),
     ]
     reads = SequenceStep(add, (BufferRef("x"), second, BufferRef("t")))
+    reads_first = SequenceStep(add, (BufferRef("x"), first, BufferRef("t")))
     steps = {
         "read_before_last_write": [writes[0], reads, writes[1]],
         "read_unwritten_part": [writes[0], reads],
         "read_after_writes": [*writes, reads],
+        "read_written_part_first": [writes[0], reads_first, writes[1]],
+        "unwritten_part_unread": [writes[0], reads_first],
     }[order]
     recording = Recording.of_steps(
         "halves", steps, ["x"], ["out", "t"], pinned={"out": 1024}
     )
     profile = Profile()
     profile.add_schedule(Schedule(version=recording.version, size="merged_2x"))
-    if order == "read_after_writes":
+    if order in (
+        "read_after_writes",
+        "read_written_part_first",
+        "unwritten_part_unread",
+    ):
         with pytest.raises(NotImplementedError, match="part of out"):
             fit(profile, [Timed(recording)], device)
         return
@@ -250,6 +269,59 @@ def test_a_call_whose_points_span_more_than_one_range_is_refused_before_any_buil
         Applied.of(call, tuned, device)
     within = Timed(recording, values={"rows": 256, "valid": 256}, points=points[:1])
     assert Applied.of(within, tuned, device).recording.steps[0].op.M == 256
+
+
+def test_a_range_whose_capacity_the_graph_cannot_record_is_refused(device):
+    """A range up to 100 rows records a GEMM of 100 rows, which GEMM refuses: a design not legal at that capacity, refused before any build."""
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    small = Entry(root=Member(cls=GEMM, dims={"M": 100, "K": 256, "N": 256}))
+    large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
+    profile = Profile()
+    profile.add_variants(
+        Variants(
+            values=("rows",), ranges=((((0, 100),), small), (((101, 2048),), large))
+        )
+    )
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "counts"
+    assert "not legal" in (result.why or "")
+
+
+def test_a_call_whose_points_span_more_than_one_range_waits_in_fit(device):
+    """``fit`` holds a call's points to one range as building it does, so a call spanning two waits there rather than fitting."""
+    g = RangedPair(K=256, N=256)
+    recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    small = Entry(root=Member(cls=GEMM, dims={"M": 256, "K": 256, "N": 256}))
+    large = Entry(root=Member(cls=GEMM, dims={"M": 2048, "K": 256, "N": 256}))
+    tuned = Profile()
+    tuned.add_variants(
+        Variants(
+            values=("rows",), ranges=((((0, 256),), small), (((257, 2048),), large))
+        )
+    )
+    points = (Point(0.5, {"rows": 64}), Point(0.5, {"rows": 1024}))
+    call = Timed(recording, values={"rows": 256, "valid": 256}, points=points)
+    with pytest.raises(NotImplementedError, match="span more than one range"):
+        fit(tuned, [call], device)
+    within = Timed(recording, values={"rows": 256, "valid": 256}, points=points[:1])
+    assert fit(tuned, [within], device).ok
+
+
+def test_a_half_chunk_of_a_graph_reading_a_coded_weight_waits(device):
+    """A graph reading a coded weight, coded as a build codes it, splits into a half chunk not yet: it waits, and is not refused."""
+    recording = coded_consumer_recording_with_weight(
+        rows=1,
+        num_aie_columns=1,
+        weight=small_integer_weight((128, 128), 0),
+        num_batches=2,
+    )
+    recording.code_weights()
+    profile = Profile()
+    profile.add_schedule(Schedule(version=recording.version, size="half_chunk"))
+    with pytest.raises(NotImplementedError, match="a coded weight"):
+        fit(profile, [Timed(recording)], device)
 
 
 def test_a_malformed_range_entry_is_raised_not_refused_as_illegal(device):

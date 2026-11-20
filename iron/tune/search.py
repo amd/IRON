@@ -1058,6 +1058,15 @@ def fit(
         }
         alone = Profile()
         alone.add_variants(variants)
+        try:
+            with set_current_device(device):
+                recording.selected(
+                    alone, timed.values, [v for _, v in timed.timed_points()]
+                )
+        except NotImplementedError as e:
+            waiting.append(str(e))
+        except NotLegalAtCapacity as e:
+            return Fit(False, "counts", f"at its own values: {e}")
         for box, _ in variants.ranges:
             at = {**top, **{n: hi for n, (_, hi) in zip(variants.values, box)}}
             try:
@@ -1801,14 +1810,13 @@ def fit(
                     )
                 elif refused is not None:
                     return Fit(False, "placer", refused)
-        # A returned output its steps write whole, read only after its last
-        # write, is the host's after each call, though pinned as written in parts.
+        # A returned output each step reads only where this call already wrote
+        # it is the host's after each call, though pinned as written in parts.
         handed = {
             root
             for root in {h.ref().root for h in recording.returned}
             if -1 not in writers.get(root, [-1]) + readers.get(root, [])
-            and all(r > max(writers[root]) for r in readers.get(root, []))
-            and recording.writes_whole(root)
+            and recording.reads_only_written(root)
         }
         persist = (
             set(recording.feedback)
