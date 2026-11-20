@@ -482,10 +482,12 @@ class GEMV(Finishing):
         rtps = [Rtp([self.tiles, self.batches]) for _ in range(lanes)]
 
         if not self.feed_b:
-            if self.B.fed_from is not None:
+            fed = [b.name for b in (self.A, self.B) if b.fed_from is not None]
+            if fed:
                 raise ValueError(
-                    "GEMV: B is fed, which needs feed_b=True: unfed, its vector "
-                    "rides each lane's A stream, which a fed input cannot take"
+                    f"GEMV: {fed[0]} is fed, which needs feed_b=True: unfed, B's "
+                    f"vector rides each lane's A stream from the host, which a fed "
+                    f"input cannot carry"
                 )
             vector = np.ndarray[(K,), np.dtype[bfloat16]]
             if not self.coded_a:
