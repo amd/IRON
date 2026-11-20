@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 import subprocess
 import time
 from collections import Counter
@@ -1366,6 +1367,28 @@ def fit(
                         f"which outlasts the call, so a call depends on the one "
                         f"before",
                     )
+            if schedule.size is not None and schedule.merged_calls == 1:
+                waiting.append(
+                    f"building a schedule's derived version {schedule.size!r} other "
+                    f"than calls merged into one is not built yet"
+                )
+            elif schedule.size is not None:
+                try:
+                    with set_current_device(device):
+                        recording.merged(schedule.merged_calls)
+                except NotImplementedError as e:
+                    waiting.append(str(e))
+                except ValueError as e:
+                    return Fit(
+                        False,
+                        "counts",
+                        f"its {schedule.merged_calls} calls merged into one: {e}",
+                    )
+                if schedule.calls_per_command > 1:
+                    waiting.append(
+                        f"{recording.name}: several merged calls a command are not "
+                        f"built yet"
+                    )
             if schedule.calls_per_command > 1:
                 try:
                     repeated = recording.repeated(schedule.calls_per_command)
@@ -1426,11 +1449,12 @@ def fit(
                     ("recomputed steps", schedule.recompute),
                     ("calls overlapped", schedule.calls_overlapped),
                     (
-                        "several calls a command or commands in flight on an "
-                        "xclbin per step",
+                        "several calls a command, merged calls or commands in "
+                        "flight on an xclbin per step",
                         (
                             schedule.commands_in_flight != 1
                             or schedule.calls_per_command != 1
+                            or schedule.size is not None
                         )
                         and (
                             schedule.packaging == "xclbin"
@@ -1438,7 +1462,6 @@ def fit(
                         ),
                     ),
                     ("versions interleaved", schedule.interleave_with),
-                    ("derived size", schedule.size is not None),
                 )
                 if kept
             ]
@@ -1708,7 +1731,11 @@ def check(
             s
             for s in profile.schedules()
             if s.version == call.recording.version
-            and (s.commands_in_flight > 1 or s.calls_per_command > 1)
+            and (
+                s.commands_in_flight > 1
+                or s.calls_per_command > 1
+                or s.size is not None
+            )
         ]
         if not batching:
             apart.append((call, old))
@@ -1736,24 +1763,22 @@ def _batched(
 ) -> str | None:
     """Return how ``call``'s draws, run as ``schedule`` batches them under ``profile``, first differ from them called one at a time under ``base``, or None.
 
-    ``calls_per_command * (2 * commands_in_flight + 1)`` calls, each on its
-    seeded draw, in turn at the call's values and at each of its bounds
+    ``calls * (2 * commands_in_flight + 1)`` calls, ``calls`` the version's
+    a command (``Recording.calls``: back to back, or merged into one), each on
+    its seeded draw, in turn at the call's values and at each of its bounds
     halved (``_bound_points``), so calls of one command differ, from one set
     of seeded states:
     batched through ``CarriedLoop.calls`` (where the version carries values,
-    the first call's, the Emit giving the rest), ``calls_per_command`` a
-    command and ``commands_in_flight`` commands in flight; apart each an
-    ordinary call. Every returned output of each call, and every state after
-    the last, must be bit-identical.
+    the first call's, the Emit giving the rest), ``calls`` a command and
+    ``commands_in_flight`` commands in flight; apart each an ordinary call.
+    Every returned output of each call, and every state after the last, must
+    be bit-identical.
 
     Raises:
         NotImplementedError: ``base`` batches the version's calls too.
     """
     recording = call.recording
     points = [dict(call.values), *_bound_points(recording, dict(call.values))]
-    per, depth = schedule.calls_per_command, schedule.commands_in_flight
-    draws = [drawn_inputs(recording, seed) for seed in range(per * (2 * depth + 1))]
-    at = [points[k % len(points)] for k in range(len(draws))]
     with set_current_device(device):
         graphs = (
             Applied.of(old, base, device).built(device),
@@ -1764,6 +1789,9 @@ def _batched(
             "checking a batched schedule against a base that batches too is not "
             "built yet"
         )
+    per, depth = graphs[1].recording.calls, schedule.commands_in_flight
+    draws = [drawn_inputs(recording, seed) for seed in range(per * (2 * depth + 1))]
+    at = [points[k % len(points)] for k in range(len(draws))]
     rng = np.random.default_rng(len(draws))
     states = {h.name: _random_tensor(h, rng) for _, h in recording.states.values()}
     owns = [{h.name: s for s, h in g.recording.states.values()} for g in graphs]
@@ -2070,7 +2098,10 @@ def measure(
 
     ``profile`` must fit (``fit``). Each call is built both ways and timed
     interleaved on the NPU at each of its points, checked bit-identical as
-    it goes where ``refinement`` is exact (``compare_graphs``). A call's time is its points' medians,
+    it goes where ``refinement`` is exact (``compare_graphs``); where either
+    way batches the call's version (several calls a command, or commands in
+    flight), batched, a call's time its batch's over its calls
+    (``_time_batched``). A call's time is its points' medians,
     weighted; ``ratio`` weighs each point's median paired ratio by the
     base's time there.
 
@@ -2095,17 +2126,25 @@ def measure(
     for call in calls:
         known = Compared()
         with set_current_device(device):
-            before = Applied.of(call, base, device).built(device)
-            after = Applied.of(call, profile, device).built(device)
-            compare_graphs(
-                call,
-                before,
-                after,
-                timing=timing,
-                known=known,
-                log=logger.info,
-                exact=refinement is Refinement.EXACT,
+            applied = (
+                Applied.of(call, base, device),
+                Applied.of(call, profile, device),
             )
+        if any(a.recording.calls > 1 or a.commands_in_flight > 1 for a in applied):
+            _time_batched(
+                call, applied, device, timing, known, refinement is Refinement.EXACT
+            )
+        else:
+            with set_current_device(device):
+                compare_graphs(
+                    call,
+                    applied[0].built(device),
+                    applied[1].built(device),
+                    timing=timing,
+                    known=known,
+                    log=logger.info,
+                    exact=refinement is Refinement.EXACT,
+                )
         for weight, values in call.timed_points():
             point = tuple(sorted(values.items()))
             was, now = known.medians[point]
@@ -2113,6 +2152,102 @@ def measure(
             seconds += weight * now / 1e6
             weighted += weight * was * known.ratios[point] / 1e6
     return Measured(weighted / base_seconds, seconds, base_seconds)
+
+
+def _time_batched(
+    call: Timed,
+    applied: tuple[Applied, Applied],
+    device: Device,
+    timing: Timing,
+    known: Compared,
+    exact: bool,
+) -> None:
+    """Time ``call`` as each of ``applied`` (before, after) dispatches it, a call's time its batch's over its calls, into ``known``.
+
+    At each of the call's points (``Timed.timed_points``), one batch of at
+    least ``timing.calls`` calls, whole commands of both
+    (``Recording.repeated``), each on its own seeded draw, runs through
+    ``CarriedLoop.calls`` with each one's commands in flight, ``timing.rounds``
+    rounds interleaved, half each way round, each from the same seeded states.
+    A round before them is not timed: it makes each loop's runs, and where
+    ``exact`` every call's returned outputs, within their bounds, must be
+    bit-identical between the two. ``known`` takes each point's two medians,
+    their difference and the median of the paired ratios.
+
+    Raises:
+        NotBitIdentical: ``exact``, and a call's returned output differs.
+        NotImplementedError: One carries values, so its later calls take the
+            Emit's values rather than the batch's.
+    """
+    recording = call.recording
+    with set_current_device(device):
+        graphs = [a.built(device) for a in applied]
+    try:
+        if any(g.emit is not None for g in graphs):
+            raise NotImplementedError(
+                f"{recording.name}: pricing batched calls of a version that carries "
+                f"values is not built yet"
+            )
+        per = math.lcm(*(g.recording.calls for g in graphs))
+        count = per * max(1, math.ceil(timing.calls / per))
+        draws = [drawn_inputs(recording, seed) for seed in range(count)]
+        rng = np.random.default_rng(count)
+        states = {h.name: _random_tensor(h, rng) for _, h in recording.states.values()}
+        owns = [{h.name: s for s, h in g.recording.states.values()} for g in graphs]
+        with set_current_device(device):
+            loops = [
+                CarriedLoop(g, g, a.commands_in_flight)
+                for g, a in zip(graphs, applied, strict=True)
+            ]
+            for _, values in call.timed_points():
+                batch = [(tensors, values) for tensors in draws]
+                seconds: tuple[list[float], list[float]] = ([], [])
+                for r in range(timing.rounds + 1):
+                    got = {}
+                    for side in (1, 0) if r % 2 else (0, 1):
+                        for name, content in states.items():
+                            graphs[side].write(owns[side][name], content)
+                        begun = time.perf_counter()
+                        got[side] = loops[side].calls(batch)
+                        seconds[side].append((time.perf_counter() - begun) / count)
+                    if r or not exact:
+                        continue
+                    for k, (want, have) in enumerate(zip(got[0], got[1], strict=True)):
+                        differ = [
+                            h.name
+                            for h in recording.returned
+                            if not np.array_equal(
+                                want[h.name][h.valid_index(values)],
+                                have[h.name][h.valid_index(values)],
+                            )
+                        ]
+                        if differ:
+                            raise NotBitIdentical(
+                                f"{recording.name}: call {k} of {count} batched at "
+                                f"{values}: {', '.join(differ)} not bit-identical"
+                            )
+                was, now = (np.array(s[1:]) * 1e6 for s in seconds)
+                point = tuple(sorted(values.items()))
+                known.medians[point] = (float(np.median(was)), float(np.median(now)))
+                known.ratios[point] = float(np.median(now / was))
+                known.points[point] = (
+                    known.medians[point][1] - known.medians[point][0],
+                    None,
+                )
+                logger.info(
+                    "measure: %s batched at %s: %.1f us a call before, %.1f after "
+                    "(%d calls a command and %d in flight against %d and %d)",
+                    recording.name,
+                    values,
+                    *known.medians[point],
+                    graphs[1].recording.calls,
+                    applied[1].commands_in_flight,
+                    graphs[0].recording.calls,
+                    applied[0].commands_in_flight,
+                )
+    finally:
+        for graph in graphs:
+            graph.release()
 
 
 def search(

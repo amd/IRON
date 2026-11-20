@@ -197,8 +197,10 @@ class CarriedLoop:
     later call's the Emit of the call before, as ``steps``' are. A buffer
     or state carried from one call to the next stays on the device between
     them, as commands on one context run in turn. A version running several
-    calls a command (``Recording.repeated``) takes the batch that many at a
-    time, each call's tensors and values its own.
+    calls a command takes the batch that many at a time: back to back
+    (``Recording.repeated``), each call's tensors and values its own; merged
+    into one (``Recording.merged``), each input the calls' stacked and each
+    output split back.
     """
 
     def __init__(self, first: CompiledGraph, body: CompiledGraph, depth: int = 2):
@@ -233,6 +235,9 @@ class CarriedLoop:
         # body itself, is dead after, so the heap holds first's ctrlcode and
         # body's first copy, then body's depth copies, never 1 + depth.
         self._runs: list[FullELFRun] | None = None
+        # calls()'s runs, each with its own input and output buffers, built on
+        # its first batch and kept for the next.
+        self._batch_runs: list[FullELFRun] = []
 
     def calls(
         self, batch: Sequence[tuple[Sequence[np.ndarray], Mapping[str, int]]]
@@ -283,18 +288,27 @@ class CarriedLoop:
                 f"{self.body.recording.name} runs {per} calls a command; got "
                 f"{len(batch)}"
             )
-        # A command of a repeated version takes each of its calls' tensors in
-        # turn, and each call's values under its own names.
+        stacked = self.body.recording.stacked
+        # A command of a merged version takes each input its calls' stacked; of
+        # a repeated version, each of its calls' tensors in turn, and each
+        # call's values under its own names.
         batch = [
             (
-                [t for tensors, _ in batch[k : k + per] for t in tensors],
+                (
+                    [
+                        np.concatenate(parts)
+                        for parts in zip(*(t for t, _ in batch[k : k + per]))
+                    ]
+                    if stacked
+                    else [t for tensors, _ in batch[k : k + per] for t in tensors]
+                ),
                 (
                     {
                         name + CALL_SUFFIX.format(j): value
                         for j, (_, values) in enumerate(batch[k : k + per])
                         for name, value in values.items()
                     }
-                    if per > 1
+                    if per > 1 and not stacked
                     else batch[k][1]
                 ),
             )
@@ -302,7 +316,11 @@ class CarriedLoop:
         ]
         call = self.body.callable
         assert isinstance(call, FullELFCallable), "a loop's runs are a full ELF's"
-        runs = [call.new_run(owned=("input", "output")) for _ in range(self.depth)]
+        if not self._batch_runs:
+            self._batch_runs = [
+                call.new_run(owned=("input", "output")) for _ in range(self.depth)
+            ]
+        runs = self._batch_runs
         if self.body.emit is not None:
             for k, run in enumerate(runs):
                 run.bind_feedback(runs[(k + 1) % self.depth].scratchpad_alias())
@@ -330,6 +348,12 @@ class CarriedLoop:
                 run.wired = False
         if per == 1:
             return results
+        if stacked:
+            return [
+                dict(zip(returned, parts, strict=True))
+                for returned in results
+                for parts in zip(*(np.split(v, per) for v in returned.values()))
+            ]
         return [
             {
                 name.removesuffix(CALL_SUFFIX.format(j)): value

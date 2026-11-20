@@ -14,7 +14,8 @@ from iron.tests.support.toys_edges import kv_write_then_read
 from iron.tests.support.tuning import scheduled_by_candidates, unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.cli import watchdog_s
-from iron.tune.search import check, fit, search
+from iron.tune.measure import Timing
+from iron.tune.search import check, fit, measure, search
 
 _DECODE_STEPS = 16
 
@@ -109,6 +110,21 @@ def test_several_calls_per_command_are_bit_identical_to_one_per_command(device):
         assert result.ok, result.why
 
 
+@pytest.mark.supported_devices("npu2")
+def test_calls_merged_into_one_are_bit_identical_to_one_a_command(device):
+    """Two and four calls of an elementwise step merged into one call at that many times the size are bit-identical to them one a command."""
+    add, mul = toys_schedule.residual_step()
+    recording = toys_schedule.residual_step_recording("across_calls_merged", add, mul)
+    for calls in (2, 4):
+        profile = Profile()
+        profile.add_schedule(
+            Schedule(version=recording.version, size=f"merged_{calls}x")
+        )
+        assert fit(profile, [Timed(recording)], device).ok
+        result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+        assert result.ok, result.why
+
+
 @unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_a_merge_into_a_larger_shape_is_no_worse_where_it_reorders_a_reduction(device):
@@ -186,12 +202,22 @@ def test_commands_in_flight_are_bit_identical_to_one_at_a_time(device):
         assert result.ok, result.why
 
 
+@pytest.mark.supported_devices("npu2")
+def test_several_calls_a_command_are_priced_a_call_at_a_time(device):
+    """Four calls a command are timed per call against one a command, not as one command against one call.
+
+    Priced per command, four calls would take about four times one.
+    """
+    recording = _decode_recording()
+    profile = Profile()
+    profile.add_schedule(Schedule(version=recording.version, calls_per_command=4))
+    measured = measure(
+        profile, Profile(), [Timed(recording)], device, timing=Timing(rounds=2, calls=8)
+    )
+    assert measured.ratio < 2, measured
+
+
 @pytest.mark.extensive
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="candidates does not propose schedules yet",
-)
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_tuner_keeps_the_call_schedule_that_pays(device):
     """The tuner, on the decode-step toy alone, keeps the call schedule that pays."""

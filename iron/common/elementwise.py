@@ -845,6 +845,9 @@ class UnaryElementwise(Elementwise):
         }
         return self.replace(size=elements, tile_size=line, bound_values={}, **one)
 
+    def merged(self, calls: int) -> Self:
+        return self.replace(size=self.size * calls)
+
 
 class BinaryElementwise(Elementwise):
     """Two flat buffers in, one of the same size out."""
@@ -889,6 +892,7 @@ class BinaryElementwise(Elementwise):
         return self.valid
 
     over = UnaryElementwise.over
+    merged = UnaryElementwise.merged
 
     def validate(self) -> None:
         super().validate()
