@@ -17,6 +17,7 @@ from aie.iron.device import Device
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Hold, Region, RuntimePlan, Schedule
+from iron.common.image.step import EdgeKind
 from iron.tune.autotune import Timed
 from iron.tune.search import (
     AddEntry,
@@ -44,9 +45,40 @@ waits_on_a_kernel = pytest.mark.xfail(
 def _holds_reaching(start: Region, target: Region) -> list[tuple[int, Hold]]:
     """Return a hold for each edge, last first, that takes ``start`` to ``target`` (``Region.held``), skipping an edge whose hold changes nothing.
 
-    Last first: a ``MEMORY`` hold drops its edge, moving those after it down.
+    Each edge's place is read off its namesake in ``target``: none there a
+    ``MEMORY`` hold, a stream whose steps share a worker there ``L1``, a
+    staged edge ``MEMTILE`` (or ``LATER_PHASE``, where ``target`` chooses
+    phases), a DDR edge ``DDR``, a cascade edge ``CASCADE``. Last first: a ``MEMORY`` hold drops
+    its edge, moving those after it down.
     """
-    for choice in itertools.product((None, *Hold), repeat=len(start.edges)):
+    at = {
+        (e.producer, e.output, e.consumer, e.input): i
+        for i, e in enumerate(target.edges)
+    }
+    options: list[tuple[Hold | None, ...]] = []
+    for edge in start.edges:
+        i = at.get((edge.producer, edge.output, edge.consumer, edge.input))
+        if i is None:
+            options.append((Hold.MEMORY,))
+            continue
+        kind = target.edges[i].kind
+        if kind is EdgeKind.STREAM:
+            options.append(
+                (Hold.L1,)
+                if any({edge.producer, edge.consumer} <= set(g) for g in target.workers)
+                else (None,)
+            )
+        elif kind is EdgeKind.STAGED:
+            options.append(
+                (Hold.MEMTILE, Hold.LATER_PHASE)
+                if target.phases is not None
+                else (Hold.MEMTILE,)
+            )
+        else:
+            options.append(
+                {EdgeKind.DDR: (Hold.DDR,), EdgeKind.CASCADE: (Hold.CASCADE,)}[kind]
+            )
+    for choice in itertools.product(*options):
         region, steps = start, []
         for index, place in reversed(list(enumerate(choice))):
             if place is not None and region.held(index, place) != region:

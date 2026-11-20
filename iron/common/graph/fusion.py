@@ -327,7 +327,9 @@ def composed(
     its on-chip edges are all streams, as one staged fusion where any is
     staged (its stream edges fed as they are), and as a pack where it has no
     edge. A DDR edge's consumer reads what its producer wrote to host memory
-    a phase or more later (a phased fusion, ``Fusion.waits``).
+    a phase or more later (a phased fusion, ``Fusion.waits``). A cascade
+    edge carries its producer's output to its consumer's core over the
+    cascade (``Operand.cascade_to``).
 
     A configuration of steps gives each its member's tunables; which
     designs it loads together is the packing's (``packing.configured``).
@@ -340,7 +342,8 @@ def composed(
             reload or holding regions, a runtime plan other than one task
             group, or an entry rooted at a step, with nested regions,
             inflows, shared workers, chosen phases, a runtime plan,
-            fission, a self-loop over a carried buffer, cascade edges, a DDR
+            fission, a self-loop over a carried buffer, cascades beside
+            staged or DDR edges, a DDR
             edge's chosen depth, matching steps that are not consecutive,
             members that depend through memory with no edge between them, or
             an edge the composer does not build as its kind (``admits``). An edge out of a buffer steps past
@@ -405,12 +408,10 @@ def composed(
             or root.phases is not None
             or any(m.part is not None for m in root.steps())
             or any(e.producer == e.consumer for e in root.edges)
-            or not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED, EdgeKind.DDR}
         ):
             raise NotImplementedError(
                 f"building {entry} is not built yet: the composer builds a "
-                f"region of steps whose edges are stream, staged or DDR, "
-                f"with no chosen phase, inflow or self-loop"
+                f"region of steps with no chosen phase, inflow or self-loop"
             )
         plan = root.runtime or RuntimePlan()
         # One task group: every task issued at once, then each awaited. In one
@@ -437,10 +438,15 @@ def composed(
                 f"building {entry} is not built yet: a runtime plan with "
                 f"{unbuilt[0]}"
             )
-        if root.workers and kinds - {EdgeKind.STREAM}:
+        if root.workers and kinds - {EdgeKind.STREAM, EdgeKind.CASCADE}:
             raise NotImplementedError(
                 f"building {entry} is not built yet: steps on one core joined "
-                f"by edges other than streams"
+                f"by edges other than streams and cascades"
+            )
+        if EdgeKind.CASCADE in kinds and kinds - {EdgeKind.STREAM, EdgeKind.CASCADE}:
+            raise NotImplementedError(
+                f"building {entry} is not built yet: cascades beside staged or "
+                f"DDR edges"
             )
         if any(e.kind is EdgeKind.DDR and e.depth is not None for e in root.edges):
             raise NotImplementedError(
@@ -490,7 +496,8 @@ def composed(
                 )
                 built = admits(p, e.output, c, e.input)
                 if built is None or (
-                    e.kind is EdgeKind.STREAM and built is not FusionKind.STREAM
+                    e.kind in (EdgeKind.STREAM, EdgeKind.CASCADE)
+                    and built is not FusionKind.STREAM
                 ):
                     raise NotImplementedError(
                         f"building {type(p).__name__}.{e.output} -> "
@@ -521,6 +528,11 @@ def composed(
                                 e.output,
                                 match[e.consumer],
                                 e.input,
+                                kind=(
+                                    EdgeKind.CASCADE
+                                    if e.kind is EdgeKind.CASCADE
+                                    else EdgeKind.STREAM
+                                ),
                                 depth=e.depth,
                             )
                             for e in on_chip

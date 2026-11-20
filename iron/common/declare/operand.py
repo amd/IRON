@@ -50,7 +50,9 @@ class Operand:
     Where a composition chose an edge's depth, which names the edge's reading
     end, ``chosen_depth`` holds it: on a fed input, the depth of the end it
     reads through; on an output, that of the end its lanes bind for their
-    first on-chip reader.
+    first on-chip reader; on an input the cascade fills, its fifos' own.
+    An output and the input it carries to over the cascade each hold the
+    other as ``cascade`` (``cascade_to``).
     """
 
     def __init__(self, member: Any, op: Operator) -> None:
@@ -64,6 +66,7 @@ class Operand:
         # Its host transfers ride packet flows, sharing the shim's channels.
         self.packeted = False
         self.chosen_depth: int | None = None
+        self.cascade: Operand | None = None
         self.read_lanes: set[int] = set()
         self._decl = member.of(op)
 
@@ -229,6 +232,8 @@ class Operand:
                 f"{self.name} is an output: readers= reads a streamed input's "
                 f"lane, not an output's own"
             )
+        if self.chosen_depth is not None and self.fills:
+            depth = self.chosen_depth
         depth = self.l1_depth if depth is None else depth
         obj_type = self.obj_type if obj_type is None else obj_type
         lane_tiles = [None] * self.lanes if tiles is None else tiles
@@ -291,30 +296,7 @@ class Operand:
                 f"{source.name} is pinned to shim channels, not a fifo: it "
                 f"cannot feed {self.name} on-chip"
             )
-        mismatch = None
-        if len(source.handles) != self.lanes or source.obj_type != self.obj_type:
-            mismatch = (
-                f"{source.name} streams {len(source.handles)} lanes of "
-                f"{source.obj_type}, but {self.name} reads {self.lanes} lanes of "
-                f"{self.obj_type}"
-            )
-        else:
-            mine = {lane: tap for lane, tap, _, _ in self.transfers()}
-            theirs = {lane: tap for lane, tap, _, _ in source.transfers()}
-            lane = next(
-                (
-                    k
-                    for k in sorted(mine)
-                    if not theirs[k].compare_access_orders(mine[k])
-                ),
-                None,
-            )
-            if lane is not None:
-                mismatch = (
-                    f"{self.name} and {source.name} disagree on lane {lane}'s "
-                    f"host access order: {source.name} visits {theirs[lane]}, "
-                    f"{self.name} visits {mine[lane]}"
-                )
+        mismatch = self._mismatch(source)
         if mismatch is not None and not staged:
             raise ValueError(mismatch)
         if source.keeps_host:
@@ -324,6 +306,67 @@ class Operand:
             self.staged = Staging(source, self).build()
         self.fed_from = source
         source.feeds.append(self)
+
+    def _mismatch(self, source: Operand) -> str | None:
+        """Return how ``source``'s lanes fail to meet this input's as they are, or None where each lane carries the same objects in the same order."""
+        if len(source.handles) != self.lanes or source.obj_type != self.obj_type:
+            return (
+                f"{source.name} streams {len(source.handles)} lanes of "
+                f"{source.obj_type}, but {self.name} reads {self.lanes} lanes of "
+                f"{self.obj_type}"
+            )
+        mine = {lane: tap for lane, tap, _, _ in self.transfers()}
+        theirs = {lane: tap for lane, tap, _, _ in source.transfers()}
+        lane = next(
+            (k for k in sorted(mine) if not theirs[k].compare_access_orders(mine[k])),
+            None,
+        )
+        if lane is None:
+            return None
+        return (
+            f"{self.name} and {source.name} disagree on lane {lane}'s host access "
+            f"order: {source.name} visits {theirs[lane]}, {self.name} visits "
+            f"{mine[lane]}"
+        )
+
+    def cascade_to(self, sink: Operand) -> list[tuple[Any, Any]]:
+        """Carry this output's stream to ``sink``, another operator's input, over the cascade.
+
+        Neither is a host transfer, unless this output ``keeps_host``. Both
+        are built, each lane on fifos of its own: a relay on the producer's
+        core reads this output's lane and puts it on the cascade, and one on
+        the consumer's core gets it and writes ``sink``'s.
+
+        Returns:
+            Each lane's two ends the relays take: a reading end of this
+            output and ``sink``'s writing end.
+
+        Raises:
+            ValueError: This is not a bound output or ``sink`` a bound,
+                streamed input of its own, either is pinned to shim
+                channels, or their lanes do not carry the same objects in the
+                same order.
+        """
+        if (
+            not self.drains
+            or not (sink.streamed and sink.fills)
+            or sink.fed_from is not None
+            or any(isinstance(h, DmaEndpoint) for h in self.handles + sink.handles)
+        ):
+            raise ValueError(
+                f"{self.name} can carry over the cascade only from an output to "
+                f"a streamed input of its own, each on fifos rather than pinned "
+                f"to shim channels"
+            )
+        mismatch = sink._mismatch(self)
+        if mismatch is not None:
+            raise ValueError(mismatch)
+        if self.keeps_host:
+            # The host's drain keeps each lane's bound end.
+            self.read_lanes.update(range(self.lanes))
+        ends = [(self.reader(lane), sink.handles[lane]) for lane in range(sink.lanes)]
+        self.cascade, sink.cascade = sink, self
+        return ends
 
     def moved_per_lane(self) -> dict[int, int]:
         """Return the elements each lane moves in a call, by lane.
@@ -376,8 +419,12 @@ class Operand:
 
     @property
     def on_chip(self) -> bool:
-        """Whether this operand's stream stays on-chip, fed to or from another operator, with no host transfer."""
-        return self.fed_from is not None or (bool(self.feeds) and not self.keeps_host)
+        """Whether this operand's stream stays on-chip, fed to or from another operator or on the cascade, with no host transfer."""
+        if self.fills and self.cascade is not None:
+            return True
+        return self.fed_from is not None or (
+            (bool(self.feeds) or self.cascade is not None) and not self.keeps_host
+        )
 
     def pin(self, endpoints: list[DmaEndpoint]) -> None:
         """Pin each lane, in order, to a shim ``DmaEndpoint`` built elsewhere.
