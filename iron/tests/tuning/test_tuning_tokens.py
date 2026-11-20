@@ -10,7 +10,7 @@ from aie.dialects.aie import get_target_model
 
 from iron import Precision
 from iron.common.declare import Profile
-from iron.common.declare.composition import Entry, Member, Region
+from iron.common.declare.composition import Entry, Member, Refinement, Region
 from iron.common.graph.record import Recording
 from iron.common.graph.sdf import analyze
 from iron.common.image.step import Edge, EdgeKind, HandOff
@@ -21,7 +21,7 @@ from iron.tests.support import toys_edges
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import fit
+from iron.tune.search import check, fit
 
 pytestmark = pytest.mark.usefixtures("device")
 
@@ -115,7 +115,7 @@ def test_column_tiles_with_no_restage_are_refused(device):
     assert "layout" in (result.why or "")
 
 
-@unbuilt
+@pytest.mark.parametrize("device", _LAYOUT_FITS, indirect=True)
 def test_32_row_tiles_into_64_row_tiles_balance_at_their_lcm(device):
     """A 32-row GEMM tile feeding a 64-row GEMM tile.
 
@@ -140,3 +140,20 @@ def test_32_row_tiles_into_64_row_tiles_balance_at_their_lcm(device):
     assert result.ok
     analysis = analyze(region, recording, device)
     assert analysis.repetition == {0: 2, 1: 1}
+
+
+@pytest.mark.supported_devices("npu2")
+def test_32_row_tiles_into_64_row_tiles_are_bit_identical(device):
+    """The 32-row GEMM tile streamed into the 64-row one: bit-identical to the steps run apart.
+
+    The reader takes each of its objects as two of its producer's (an
+    asymmetric fifo).
+    """
+    producer, consumer = toys.gemm_into_gemm(
+        device, M=256, width=64, producer_tile=32, consumer_tile=64
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=toys.gemm_into_gemm_region(producer, consumer)))
+    recording = toys.gemm_into_gemm_recording("32-64-run", producer, consumer)
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
