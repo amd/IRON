@@ -31,8 +31,9 @@ def _held_where_it_can_be(device, role, shape, depth, rate):
     A stream edge's lanes meet as they are, so only an equal or broadcast
     hand-off can be held in L1; the analysis, not the toy's name, says which,
     read off the memtile-held toy (the hand-off is the operators' lanes', not
-    where the value waits). An L1 hold the analysis does not model yet stays
-    in the memtile.
+    where the value waits). An L1 hold the analysis does not model, or the
+    composer does not build (a stream whose reader takes larger objects than
+    its producer sends), yet stays in the memtile.
     """
     staged = toys_edges.combination_toy(
         device, shape, role, "memtile", depth, rate, "recorded"
@@ -44,11 +45,21 @@ def _held_where_it_can_be(device, role, shape, depth, rate):
             device, shape, role, "l1", depth, rate, "recorded"
         )
         try:
-            analysis = analyze(joined, held, device)
+            held_analysis = analyze(joined, held, device)
+            profile = Profile()
+            profile.add_entry(
+                Entry(
+                    root=toys_edges.with_resolved_depth(
+                        joined, at, held_analysis.min_depth[joined.edges[at]]
+                    )
+                )
+            )
+            fit(profile, [Timed(held)], device)
         except NotImplementedError:
             pass  # held in the memtile instead
         else:
             recording, region, index = held, joined, at
+            analysis = held_analysis
     return recording, region, index, analysis.min_depth[region.edges[index]]
 
 
@@ -119,6 +130,12 @@ _RESTAGED_MINIMUMS = {
         ("skip", HandOff.SPLIT, "different"),
         ("skip", HandOff.RATIO, "same"),
         ("skip", HandOff.RATIO, "different"),
+        # Held in the memtile where the composer does not build the L1 hold.
+        *(
+            (role, HandOff.EQUAL, rate)
+            for role in ("chain", "fan_in", "skip", "diamond")
+            for rate in toys_edges.RATES
+        ),
         *(
             (role, shape, rate)
             for role in ("through_memory", "feedback")
