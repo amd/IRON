@@ -1169,11 +1169,22 @@ class Derivation:
             edge_channels.setdefault(edge, []).append(len(channels) - 1)
         return len(channels) - 1
 
-    def _streams(self, operand: Any) -> list[np.ndarray]:
-        """Return each of ``operand``'s lanes' elements, in the order the lane moves them."""
+    def _streams(self, operand: Any, whole: bool = False) -> list[np.ndarray]:
+        """Return each of ``operand``'s lanes' elements this call, in the order the lane moves them.
+
+        A lane a per-call length shortens moves the first of its walk's
+        elements, its objects this call's worth; ``whole`` takes every
+        lane's walk whole.
+        """
         taps = {lane: tap for lane, tap, _, _ in operand.transfers()}
         index = np.arange(operand.elements)
-        return [taps[lane].gather(index) for lane in range(operand.lanes)]
+        per = math.prod(operand.obj_shape)
+        streams = []
+        for lane, handle in enumerate(operand.lane_handles):
+            stream = taps[lane].gather(index)
+            objects = None if whole else self.objects.get(handle.object_fifo)
+            streams.append(stream if objects is None else stream[: objects * per])
+        return streams
 
     def _restaged(
         self,
@@ -1562,6 +1573,11 @@ class Derivation:
                     f"{sink.name}'s lanes; an edge into it is not modelled yet"
                 )
             produced, consumed = self._streams(source), self._streams(sink)
+            # Ends moving other counts this call: their walks whole, the
+            # mismatch the balance's to show.
+            if sum(map(len, produced)) != sum(map(len, consumed)):
+                produced = self._streams(source, whole=True)
+                consumed = self._streams(sink, whole=True)
             if (
                 len(outs) != len(ins)
                 or sizes[0] != sizes[1]
