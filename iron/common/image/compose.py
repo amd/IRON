@@ -832,11 +832,7 @@ def share(
         (taken,) = [b for b in arrays[e.consumer].op.buffers if b.name == e.input]
         # Restaged on the cores (``Staging``), lane k of each is on core k.
         restaged |= taken.staged is not None
-        reads = (
-            [h.object_fifo for h in taken.lane_handles]
-            if taken.staged is not None
-            else made.lane_fifos
-        )
+        reads = made.lane_fifos if taken.staged is None else taken.staged
         for lane, (fifo, read) in enumerate(zip(made.lane_fifos, reads)):
             ends = [
                 [

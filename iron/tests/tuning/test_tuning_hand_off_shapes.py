@@ -290,7 +290,10 @@ HELD_IN_L1 = {
 }
 
 # Each device's L1-held shapes the composer builds bit-identical there.
-_BUILT_IN_L1: dict[str, set[str]] = {"npu1": set(), "npu2": set()}
+_BUILT_IN_L1: dict[str, set[str]] = {
+    "npu1": set(),
+    "npu2": {"join_rows_into_one", "split_into_rows"},
+}
 
 
 @pytest.mark.parametrize(
