@@ -190,9 +190,9 @@ def axpy_operator(
 
 
 def axpy_operator_recording(name: str, axpy: AXPY) -> Recording:
-    """Return the recording of ``axpy`` alone: ``out = scalar_factor * a + b``."""
-    steps = sequences.steps((axpy, "a", "b", "out"))
-    return Recording.of_steps(name, steps, ["a", "b"], ["out"])
+    """Return the recording of ``axpy`` alone on the graph's ``x`` and ``y``: ``out = scalar_factor * x + y``."""
+    steps = sequences.steps((axpy, "x", "y", "out"))
+    return Recording.of_steps(name, steps, ["x", "y"], ["out"])
 
 
 # ----------------------------------------------------------------- two actors, one core

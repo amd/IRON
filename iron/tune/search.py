@@ -1633,11 +1633,16 @@ def check(
         device: The device.
         refinement: The rule it is held to.
         base_calls: The calls ``base`` runs, where they are not ``calls``
-            (an operator a graph replaces), by version.
+            (the operator a graph replaces): one for each of ``calls``, in
+            their order. Each returns its call's outputs; held ``EXACT`` it
+            takes its call's inputs as they are, held ``NO_WORSE`` it reads
+            some of them, by name.
 
     Raises:
         ValueError: ``profile`` does not fit, an entry matches none of the
-            calls (``fit``), or a call leaves the host nothing to compare.
+            calls (``fit``), a call leaves the host nothing to compare, or
+            ``base_calls`` does not pair with ``calls`` as above (or pairs
+            calls of one version with base calls of several).
         NotImplementedError: What is not checked yet: a no-worse call that
             carries state (``_no_worse``), and what ``fit`` or the composer
             (``composed``) does not take yet.
@@ -1652,17 +1657,53 @@ def check(
                 f"{recording.name} leaves the host no output, carried buffer or "
                 f"state to compare"
             )
-    olds = {
-        c.recording.version: c for c in (calls if base_calls is None else base_calls)
-    }
+    olds = list(calls if base_calls is None else base_calls)
+    if len(olds) != len(calls):
+        raise ValueError(
+            f"{len(calls)} calls and {len(olds)} base calls: base_calls holds one "
+            f"for each call, in their order"
+        )
+    pairs = list(zip(calls, olds, strict=True))
+    versions: dict[Version, Version] = {}
+    for call, old in pairs:
+        new, was = call.recording, old.recording
+        if versions.setdefault(new.version, was.version) != was.version:
+            raise ValueError(
+                f"{new.name}: calls of its version pair with base calls of several "
+                f"versions, so neither side builds the version once"
+            )
+        takes, gives = (
+            [(h.name, tuple(h.shape), np.dtype(h.dtype)) for h in r.inputs]
+            for r in (was, new)
+        )
+        if refinement is Refinement.NO_WORSE:
+            unread = [t[0] for t in takes if t not in gives]
+        else:
+            unread = [] if takes == gives else [t[0] for t in takes]
+        if unread:
+            raise ValueError(
+                f"{was.name} is held against {new.name}, which does not give it "
+                f"{', '.join(unread)} by name, shape and dtype"
+                + ("" if refinement is Refinement.NO_WORSE else ", in order")
+            )
+        returns, returned = (
+            {(h.name, tuple(h.shape), np.dtype(h.dtype)) for h in r.returned}
+            for r in (was, new)
+        )
+        if returns != returned:
+            raise ValueError(
+                f"{was.name} returns {sorted(n for n, *_ in returns)} and "
+                f"{new.name} {sorted(n for n, *_ in returned)}: not one result to "
+                f"hold them to"
+            )
     if refinement is Refinement.NO_WORSE:
-        for call in calls:
-            why = _no_worse(profile, base, call, olds[call.recording.version], device)
+        for call, old in pairs:
+            why = _no_worse(profile, base, call, old, device)
             if why is not None:
                 return Check(False, refinement, why)
         return Check(True, refinement)
     apart = []
-    for call in calls:
+    for call, old in pairs:
         batching = [
             s
             for s in profile.schedules()
@@ -1670,19 +1711,16 @@ def check(
             and (s.commands_in_flight > 1 or s.calls_per_command > 1)
         ]
         if not batching:
-            apart.append(call)
+            apart.append((call, old))
             continue
-        why = _batched(
-            profile, base, call, olds[call.recording.version], device, batching[0]
-        )
+        why = _batched(profile, base, call, old, device, batching[0])
         if why is not None:
             return Check(False, refinement, why)
-    calls = apart
-    if len(calls) > 1 and any(c.recording.states for c in calls):
-        why = _in_order(profile, base, calls, olds, device)
+    if len(apart) > 1 and any(call.recording.states for call, _ in apart):
+        why = _in_order(profile, base, apart, device)
         return Check(why is None, refinement, why)
-    for call in calls:
-        why = _bit_identical(profile, base, call, olds[call.recording.version], device)
+    for call, old in apart:
+        why = _bit_identical(profile, base, call, old, device)
         if why is not None:
             return Check(False, refinement, why)
     return Check(True, refinement)
@@ -1807,7 +1845,9 @@ def _no_worse(
     ``Recording.reference`` must be no larger than ``old``'s in mean square
     and in its ``NO_WORSE_QUANTILE`` quantile of |e|, and finite; a
     bit-identical output ties. The reference is ``old``'s recording's, the
-    untuned build's.
+    untuned build's. An input whose contents ``call`` gives
+    (``Timed.contents``) holds them on every draw, unscaled, and ``old``
+    reads the inputs it takes by name.
 
     Raises:
         NotImplementedError: The call carries a buffer or a state to the
@@ -1859,6 +1899,11 @@ def _no_worse(
         if b.fills
     }
     values = dict(call.values)
+    given = {
+        h.name: call.contents[h.ref().root]
+        for h in recording.inputs
+        if h.ref().root in call.contents
+    }
     with set_current_device(device):
         graphs = before.built(device), after.built(device)
     try:
@@ -1870,8 +1915,11 @@ def _no_worse(
                     recording.inputs, drawn_inputs(recording, draw), strict=True
                 )
             }
+            tensors.update(given)
             if draw % 2:
                 for h in recording.inputs:
+                    if h.name in given:
+                        continue
                     if np.dtype(h.dtype).kind == "f" or np.dtype(h.dtype).name == (
                         "bfloat16"
                     ):
@@ -1939,13 +1987,12 @@ def _no_worse(
 def _in_order(
     profile: Profile,
     base: Profile,
-    calls: Sequence[Timed],
-    olds: dict,
+    pairs: Sequence[tuple[Timed, Timed]],
     device: Device,
 ) -> str | None:
-    """Run ``calls`` in order built under ``profile`` and under ``base``, each side's states carried into its next call; return the first difference, or None.
+    """Run each pair's call under ``profile`` and its base call under ``base``, in order, states carried; return the first difference, or None.
 
-    Each version is built once each way, so a repeated call keeps what it
+    Each side carries its states into its next call. Each version is built once each way, so a repeated call keeps what it
     carries. The calls start from one set of seeded states, shared by name
     across versions, and each takes seeded inputs at its own values; after
     each, every output within its bound, carried buffer and state must be
@@ -1953,19 +2000,19 @@ def _in_order(
     """
     rng = np.random.default_rng(0)
     seeded: dict[str, np.ndarray] = {}
-    for call in calls:
+    for call, _ in pairs:
         for _, h in call.recording.states.values():
             seeded.setdefault(h.name, _random_tensor(h, rng))
     sides = [dict(seeded), dict(seeded)]
     built: dict = {}
     try:
-        for k, call in enumerate(calls):
+        for k, (call, old) in enumerate(pairs):
             recording = call.recording
             version = recording.version
             if version not in built:
                 with set_current_device(device):
                     built[version] = (
-                        Applied.of(olds[version], base, device).built(device),
+                        Applied.of(old, base, device).built(device),
                         Applied.of(call, profile, device).built(device),
                     )
             graphs = built[version]
@@ -2001,7 +2048,7 @@ def _in_order(
             ]
             if differ:
                 return (
-                    f"{recording.name}, call {k} of {len(calls)}: "
+                    f"{recording.name}, call {k} of {len(pairs)}: "
                     f"{', '.join(dict.fromkeys(differ))} not bit-identical"
                 )
     finally:
