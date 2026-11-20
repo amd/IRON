@@ -453,6 +453,18 @@ def candidates(
             Member(type(step.op), Profile.dims(type(step.op), vars(step.op)))
             for step in steps
         ]
+        # A member an edge feeds holds feed_b where it has one, as a fused
+        # group's does (``fusions._fed_widths``): fed, a GEMV's B streams
+        # only so, and its A carries no vector from the host.
+        fed = [
+            (
+                dataclasses.replace(m, tunables={"feed_b": True})
+                if "feed_b" in type(step.op).declaration.tunables
+                and not vars(step.op)["feed_b"]
+                else m
+            )
+            for m, step in zip(members, steps)
+        ]
         kinds: dict[tuple[int, str, int, str], EdgeKind | None] = {}
         columns = []
         recorded = []
@@ -505,7 +517,7 @@ def candidates(
                                             (
                                                 (members[p],)
                                                 if loop
-                                                else (members[p], members[c])
+                                                else (members[p], fed[c])
                                             ),
                                             (edge,),
                                         ),
@@ -541,9 +553,13 @@ def candidates(
                                         kind=kinds[pair],
                                     )
                                 )
+                consumers = {lo + e.consumer for e in edges}
                 entry = Entry(
                     Region(
-                        tuple(members[lo : hi + 1]),
+                        tuple(
+                            fed[s] if s in consumers else members[s]
+                            for s in range(lo, hi + 1)
+                        ),
                         tuple(
                             sorted(
                                 edges,
@@ -574,7 +590,7 @@ def candidates(
                         at = {lo + i: k for k, i in enumerate(sorted(joined))}
                         part = Entry(
                             Region(
-                                tuple(members[s] for s in gathered),
+                                tuple(entry.root.parts[s - lo] for s in gathered),
                                 tuple(
                                     dataclasses.replace(
                                         e,
@@ -601,9 +617,13 @@ def candidates(
                         Region(
                             tuple(
                                 dataclasses.replace(
-                                    m, tunables={"num_aie_columns": width}
+                                    m,
+                                    tunables={
+                                        **(m.tunables or {}),
+                                        "num_aie_columns": width,
+                                    },
                                 )
-                                for m in members[lo : hi + 1]
+                                for m in entry.root.parts
                             ),
                             entry.root.edges,
                         )

@@ -21,6 +21,7 @@ from iron.common.image.step import Edge
 from iron.operators.decode import Decode
 from iron.operators.gemv import GEMV
 from iron.tests.support import sequences
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_settings import (
     coded_consumer,
     coded_consumer_recording,
@@ -29,7 +30,7 @@ from iron.tests.support.toys_settings import (
 )
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import candidates, check, fit, measure, search
+from iron.tune.search import AddEntry, candidates, check, fit, measure, search
 
 pytestmark = pytest.mark.usefixtures("device")
 
@@ -41,7 +42,19 @@ def _wide_weight(M: int, K: int) -> np.ndarray:
     return np.tile(row, (M, 1))
 
 
-def _coded_region(M: int, K: int, rows: int, num_aie_columns: int) -> Region:
+def _coded_region(
+    M: int,
+    K: int,
+    rows: int,
+    num_aie_columns: int,
+    workers: tuple[tuple[int, ...], ...] = ((0, 1),),
+) -> Region:
+    """Return ``Decode`` into the ``GEMV`` it feeds, a lane each to a lane each.
+
+    The ``GEMV`` reads the decode's rows as its tiles, and its vector on a stream of
+    its own (``feed_b``): fed on chip, its A carries no vector from the host. On one
+    worker by default; ``workers=()`` runs the decode on cores of its own.
+    """
     return Region(
         parts=(
             Member(
@@ -54,13 +67,15 @@ def _coded_region(M: int, K: int, rows: int, num_aie_columns: int) -> Region:
                 dims=dict(M=M, K=K),
                 tunables=dict(
                     num_aie_columns=num_aie_columns,
-                    tile_size_input=1,
+                    num_channels=1,
+                    tile_size_input=rows,
                     tile_size_output=M // num_aie_columns,
+                    feed_b=True,
                 ),
             ),
         ),
         edges=(Edge(0, "out", 1, "A"),),
-        workers=((0, 1),),
+        workers=workers,
     )
 
 
@@ -121,10 +136,22 @@ def test_coding_is_proposed_wherever_capacity_holds_at_that_width(tmp_path, devi
     )
 
 
-@unbuilt
+@pytest.mark.parametrize(
+    "device",
+    [
+        pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
+        for name in sorted(DEVICES)
+    ],
+    indirect=True,
+)
+# On one worker a core holds its call's rows, 32 at four columns; on cores of
+# its own, at one column the decode's lanes meet the GEMV's as they are.
+@pytest.mark.parametrize(
+    ("workers", "columns"), [(((0, 1),), 4), ((), 1)], ids=["one_worker", "own_cores"]
+)
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_coded_weights_are_bit_identical_to_plain(device):
-    """A coded weight, decoded on chip by a ``Decode`` sharing a worker with its consumer, is bit-identical to the plain weight the untuned build reads.
+def test_coded_weights_are_bit_identical_to_plain(workers, columns, device):
+    """A coded weight decoded on chip, on its consumer's cores or its own, is bit-identical to the plain weight the untuned build reads.
 
     The recording carries a real weight (``coded_consumer_recording_with_weight``): both
     lossless coding and its legality depend on the weight's own values, not only the
@@ -132,12 +159,16 @@ def test_coded_weights_are_bit_identical_to_plain(device):
     """
     weight = small_integer_weight((128, 128), 0)
     recording = coded_consumer_recording_with_weight(
-        rows=1, num_aie_columns=1, weight=weight
+        rows=1, num_aie_columns=columns, weight=weight
     )
     base = Profile()
     coded_profile = Profile()
     coded_profile.add_entry(
-        Entry(root=_coded_region(M=128, K=128, rows=1, num_aie_columns=1))
+        Entry(
+            root=_coded_region(
+                M=128, K=128, rows=1, num_aie_columns=columns, workers=workers
+            )
+        )
     )
     result = check(
         coded_profile,
@@ -158,7 +189,8 @@ def test_coding_is_kept_only_where_ddr_bytes_saved_beat_the_decode_cost(device):
     Both calls run the same ``Decode`` into ``GEMV`` toy and the same real weight
     (``coded_consumer_recording_with_weight``), so the same ``_coded_region`` Region is
     held to each: only ``num_batches`` differs, amortizing the one decoded weight over
-    more of the ``GEMV``'s compute (a prompt chunk) rather than a single row.
+    more of the ``GEMV``'s compute (a prompt chunk) rather than a single row. The decode
+    runs on cores of its own: on its consumer's, a core would hold its call's 512 rows.
     """
     weight = small_integer_weight((2048, 8192), 0)
     weight_bound = coded_consumer_recording_with_weight(
@@ -170,7 +202,7 @@ def test_coding_is_kept_only_where_ddr_bytes_saved_beat_the_decode_cost(device):
     start = Profile()
     with_entry = Profile()
     with_entry.add_entry(
-        Entry(root=_coded_region(M=2048, K=8192, rows=1, num_aie_columns=4))
+        Entry(root=_coded_region(M=2048, K=8192, rows=1, num_aie_columns=4, workers=()))
     )
 
     weight_bound_calls = [Timed(weight_bound)]
@@ -242,6 +274,21 @@ def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed(d
     result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
+
+
+def test_a_gemv_a_decode_feeds_is_proposed_with_its_vector_on_its_own_stream(device):
+    """Decode into a GEMV is proposed with the GEMV's B on a stream of its own (``feed_b``): fed on chip, its A carries no vector from the host."""
+    weight = small_integer_weight((128, 128), 0)
+    recording = coded_consumer_recording_with_weight(
+        rows=1, num_aie_columns=1, weight=weight
+    )
+    assert any(
+        isinstance(edit, AddEntry)
+        and isinstance(edit.entry.root, Region)
+        and any(e.input == "A" for e in edit.entry.root.edges)
+        and (edit.entry.root.parts[1].tunables or {}).get("feed_b") is True
+        for edit in candidates([Timed(recording)], Profile(), device)
+    )
 
 
 @unbuilt

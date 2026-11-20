@@ -32,6 +32,7 @@ from iron.operators import (
 )
 from iron.tests.support import sequences
 from iron.tests.support import toys_composition as toys
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
@@ -133,12 +134,19 @@ def test_every_topology_is_proposed_on_its_producer_s_core(
 
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
-    "name",
+    ("name", "device"),
     [
-        # Decode's A rides another buffer's fifos: an edge into it waits.
-        (pytest.param(n, marks=unbuilt) if n == "decode_gemv" else n)
+        # Decode -> GEMV on one core built on npu2; npu1's waits on host 203.
+        pytest.param(
+            n,
+            d,
+            id=f"device_{d}-name_{n}",
+            marks=unbuilt if n == "decode_gemv" and d != "npu2" else (),
+        )
         for n in toys.PAIR_TOYS
+        for d in sorted(DEVICES)
     ],
+    indirect=["device"],
 )
 def test_two_actors_on_one_core_is_bit_identical_to_the_steps_run_apart(name, device):
     region, recording = _named_region_and_recording(name)
@@ -168,12 +176,19 @@ def test_a_per_call_size_below_the_recorded_one_still_runs_on_one_core(device):
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
-    "name",
+    ("name", "device"),
     [
-        # Decode's A rides another buffer's fifos: an edge into it waits.
-        (pytest.param(n, marks=unbuilt) if n == "decode_gemv" else n)
+        # Decode -> GEMV on one core built on npu2; npu1's waits on host 203.
+        pytest.param(
+            n,
+            d,
+            id=f"device_{d}-name_{n}",
+            marks=unbuilt if n == "decode_gemv" and d != "npu2" else (),
+        )
         for n in toys.PAIR_TOYS
+        for d in sorted(DEVICES)
     ],
+    indirect=["device"],
 )
 def test_search_keeps_the_pair_joined_where_it_pays(name, device):
     region, recording = _named_region_and_recording(name)
