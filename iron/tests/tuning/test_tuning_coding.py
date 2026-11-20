@@ -236,16 +236,12 @@ def test_a_width_where_a_row_overflows_its_capacity_is_refused_before_any_build(
     assert "row" in result.why
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="fit has no rule for coding part of a shared array yet: it fits the "
-    "coded region beside the plain GEMV",
-)
 def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed(device):
-    """Coding part of a shared array (not every shape sharing it) is refused unless the candidate also proposes the split.
+    """Coding part of a shared array (not every shape sharing it) is refused before any build.
 
-    The decode on cores of its own: on its consumer's, a core would hold its call's
-    rows, which the analysis refuses first.
+    Unless the candidate also proposes the split, which is not representable yet: the
+    two projections share one array as recorded, and only one is fed its decoded
+    weight.
     """
     decode, gemv = coded_consumer(M=2048, K=8192, rows=1, num_aie_columns=device.cols)
     other = GEMV(
@@ -253,7 +249,7 @@ def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed(d
         K=8192,
         num_aie_columns=device.cols,
         tile_size_input=1,
-        tile_size_output=256,
+        tile_size_output=2048 // device.cols,
     ).resolved(device)
     steps = sequences.steps(
         (decode.resolved(device), "coded", "w"),
@@ -265,14 +261,14 @@ def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed(d
     )
     configuration = Configuration(
         parts=(
-            _coded_region(
-                M=2048, K=8192, rows=1, num_aie_columns=device.cols, workers=()
-            ),
+            _coded_region(M=2048, K=8192, rows=1, num_aie_columns=device.cols),
             Member(
                 cls=GEMV,
                 dims=dict(M=2048, K=8192),
                 tunables=dict(
-                    num_aie_columns=device.cols, tile_size_input=1, tile_size_output=256
+                    num_aie_columns=device.cols,
+                    tile_size_input=1,
+                    tile_size_output=2048 // device.cols,
                 ),
             ),
         )
@@ -282,6 +278,7 @@ def test_coding_part_of_a_shared_array_is_refused_unless_the_split_is_proposed(d
     result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
+    assert "share an array" in result.why
 
 
 def test_a_gemv_a_decode_feeds_streams_its_vector_on_its_own(device):
