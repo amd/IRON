@@ -1768,7 +1768,8 @@ def fit(
             set(recording.feedback)
             | {h.ref().root for _, h in recording.states.values()}
             | {h.ref().root for h in recording.inputs}
-            | set(recording.pinned)
+            # A returned output pinned as written in parts is the host's after each call.
+            | set(recording.pinned) - {h.ref().root for h in recording.returned}
             | set(recording.residents)
         )
         carried = [
