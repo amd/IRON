@@ -51,7 +51,7 @@ from ..common.graph.carried import CarriedLoop
 from ..common.graph.coded import CodedWeight, encode_all
 from ..common.graph.compiled import _words
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
-from ..common.graph.fusion import composed, memory_waits
+from ..common.graph.fusion import composed, in_turn, memory_waits, narrowed
 from ..common.graph.record import Recording
 from ..common.graph.sdf import Derivation
 from ..common.image.compose import ANNEALED, SEQUENTIAL
@@ -1126,6 +1126,7 @@ def fit(
         ]
         for index, entry in enumerate(profile.entries()):
             region = entry.root
+            turns: tuple[tuple[int, int], ...] = ()
             if any(m.part is not None for m in region.steps()):
                 matched.add(index)
                 waiting.append(
@@ -1254,7 +1255,15 @@ def fit(
                 if isinstance(verdict, Fit):
                     return verdict
                 waiting += verdict
-                continue
+                if region.concurrent is not None or all(
+                    isinstance(p, Member) for p in region.parts
+                ):
+                    continue
+                try:
+                    region, turns = in_turn(region)
+                except NotImplementedError as e:
+                    waiting.append(str(e))
+                    continue
             if entry.scope.occurrences is not None:
                 waiting.append(
                     "an entry scoped to some runs of its shape is not built yet: "
@@ -1283,18 +1292,14 @@ def fit(
                     elif refused is not None:
                         return Fit(False, "placer", refused)
                     continue
-            for s, m in zip(found[0], region.steps()):
-                if not m.tunables:
+            for s, m, given in zip(found[0], region.steps(), region.step_tunables()):
+                if not given:
                     continue
                 try:
                     with set_current_device(device):
-                        recording.steps[s].op._with_tunables(**m.tunables).resolved(
-                            device
-                        )
+                        recording.steps[s].op._with_tunables(**given).resolved(device)
                 except ValueError as e:  # unresolvable or incompatible here
-                    return Fit(
-                        False, "counts", f"{m.cls.__name__} at {m.tunables}: {e}"
-                    )
+                    return Fit(False, "counts", f"{m.cls.__name__} at {given}: {e}")
             core = {s: min(worker) for worker in region.workers for s in worker}
             links = [
                 (core.get(e.producer, e.producer), core.get(e.consumer, e.consumer))
@@ -1493,7 +1498,7 @@ def fit(
             ordered = [
                 (position[a], position[b])
                 for a, b in memory_waits(recording, found[0], region.edges)
-            ]
+            ] + list(turns)
             tried = [s for s in placements if s in BUILT_PLACERS]
             refusals: list[str] = []
             with set_current_device(device):
@@ -1874,6 +1879,8 @@ def _configuration_fit(
         if refused is not None:
             return refused
     try:
+        with set_current_device(device):
+            configuration = narrowed(configuration, match, recording)
         derivation = Derivation(Region(configuration.parts), recording, device, values)
     except NotImplementedError as e:
         return [str(e)]
@@ -1894,6 +1901,18 @@ def _configuration_fit(
         own += sum(max(cores[steps[k]] for k in worker) for worker in workers)
     needed = own + sum(arrays.values())
     width = device.cols if configuration.columns is None else configuration.columns
+    wider = [
+        op
+        for op in derivation.ops
+        if "num_aie_columns" in op.declaration.tunables and op.num_aie_columns > width
+    ]
+    if wider:
+        return Fit(
+            False,
+            "counts",
+            f"{type(wider[0]).__name__} takes {wider[0].num_aie_columns} columns; "
+            f"its configuration has {width}",
+        )
     if needed > width * core_rows:
         return Fit(
             False,
@@ -1908,21 +1927,22 @@ def _configuration_fit(
     unbuilt = [
         f"building a configuration with {what} is not built yet"
         for what, kept in (
-            ("a partial width", configuration.columns is not None),
             ("buffers resident into the next", configuration.resident),
             (
                 "a switch other than a reload",
                 configuration.switch not in (None, Switch.RELOAD),
             ),
-            (
-                "regions among its parts",
-                not all(isinstance(p, Member) for p in configuration.parts),
-            ),
         )
         if kept
     ]
-    if unbuilt or configuration.concurrent is not None:
-        return unbuilt  # parts run at once are placed as their pack, in fit
+    if (
+        unbuilt
+        or configuration.concurrent is not None
+        or not all(isinstance(p, Member) for p in configuration.parts)
+    ):
+        # Parts run at once are placed as their pack, and regions among its
+        # parts as the one region they run in (``in_turn``), in fit.
+        return unbuilt
     with set_current_device(device):
         designs = {OperatorDesign(op).name: op for op in derivation.ops}
         refused = group_fit_verdict(list(designs.values()))

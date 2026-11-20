@@ -896,6 +896,9 @@ class Copy(Operator):
         def at(tap, bound, valid):
             if valid is None:
                 return tap
+            # A call bounded at 0 moves nothing, which no access pattern spells.
+            if int(valid) == 0:
+                return None
             return tap[(*[slice(None)] * bound, slice(int(valid)))]
 
         src, dst = self.walks()
@@ -911,11 +914,20 @@ class Copy(Operator):
                 src_repeats7,
             )
             src = [w if r is None else w[: int(r) + 1] for w, r in zip(src, repeats)]
-        src = tuple(at(tap, self.src_bound, src_valid) for tap in src)
-        dst = tuple(at(tap, self.dst_bound, dst_valid) for tap in dst)
+        src = tuple(
+            p
+            for p in (at(tap, self.src_bound, src_valid) for tap in src)
+            if p is not None
+        )
+        dst = tuple(
+            p
+            for p in (at(tap, self.dst_bound, dst_valid) for tap in dst)
+            if p is not None
+        )
         gather, scatter = (
             np.concatenate(
                 [p.gather(np.arange(prod(concrete(p.tensor_dims, p)))) for p in tap]
+                + [np.empty(0, dtype=np.int64)]
             )
             + int(offset)
             for tap, offset in ((src, in_offset), (dst, out_offset))

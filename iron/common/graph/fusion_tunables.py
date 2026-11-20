@@ -16,7 +16,7 @@ from typing import Any
 
 from aie.utils.compile.jit.params import OperatorParam
 
-from ..declare import Operator, Profile
+from ..declare import Profile
 from ..image.step import Fusion
 from .record import Recording
 
@@ -43,35 +43,29 @@ def apply(
     return rebuild(recording, given, dev)
 
 
-def retuned(op: Operator, tunables: Mapping[str, Any], dev) -> Operator:
-    """Return the recorded ``op`` rebuilt at ``tunables`` and resolved for ``dev``, the bound device where None.
-
-    From the recorded operator, so a tunable resolved at its old widths resolves again
-    at the new ones. A flag that reads an operand coded (``In(coded=)``) keeps its
-    recorded value: the step's slot already holds the weight coded or plain
-    (``Recording.code_weights``).
-    """
-    coding = {
-        b.declared_coded.name
-        for b in op.buffers
-        if isinstance(b.declared_coded, OperatorParam)
-    }
-    return op._with_tunables(
-        **{n: v for n, v in tunables.items() if n not in coding}
-    ).resolved(dev)
-
-
 def rebuild(
     recording: Recording, tunables: Mapping[int, Mapping[str, Any]], dev
 ) -> Recording:
-    """Return ``recording`` with each step ``tunables`` names, by index, rebuilt at its tunables there (``retuned``).
+    """Return ``recording`` with each step ``tunables`` names, by index, rebuilt at its tunables there.
 
-    The per-call values bound to its operator bound to the rebuilt one.
+    The per-call values bound to its operator bound to the rebuilt one. A flag that
+    reads an operand coded (``In(coded=)``) keeps its recorded value: the step's slot
+    already holds the weight coded or plain (``Recording.code_weights``).
     """
     steps = list(recording.steps)
     rebuilt: dict[int, list] = {}
     for i, t in tunables.items():
-        narrowed = retuned(recording.steps[i].op, t, dev)
+        op = recording.steps[i].op
+        coding = {
+            b.declared_coded.name
+            for b in op.buffers
+            if isinstance(b.declared_coded, OperatorParam)
+        }
+        # From the recorded operator: a tunable resolved at its old widths
+        # resolves again at the new ones.
+        narrowed = op._with_tunables(
+            **{n: v for n, v in t.items() if n not in coding}
+        ).resolved(dev)
         rebuilt.setdefault(id(recording.steps[i].op), []).append(narrowed)
         steps[i] = dataclasses.replace(steps[i], op=narrowed)
     if not rebuilt:

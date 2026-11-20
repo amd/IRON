@@ -22,7 +22,6 @@ from ..declare.composition import (
 from ..declare.profile import Profile
 from ..design import BuiltArray, OperatorDesign
 from ..image.step import Edge, EdgeKind, Fusion, FusionKind
-from .fusion_tunables import retuned
 from .record import Recording
 
 # How a producer's output can feed a consumer's input, by the pair's
@@ -336,6 +335,116 @@ def fusions(recording: Recording, profile: Profile) -> tuple[Fusion, ...]:
     )
 
 
+def narrowed(
+    configuration: Configuration, match: Sequence[int], recording: Recording
+) -> Configuration:
+    """Return ``configuration`` with each step at ``match`` wider than its ``columns`` narrowed to fit, as a packing member's tunables narrow it to co-reside.
+
+    A step's width is its ``num_aie_columns``, resolved on the bound device
+    with its member's tunables, which win: a member given a wider width is
+    left for the counts to refuse, as is one taking no narrower width. A
+    narrowed step takes the widest it resolves at, no wider than
+    ``columns``. Which columns is the placer's.
+
+    Raises:
+        NotImplementedError: ``columns`` is given and a step's operator
+            declares no ``num_aie_columns`` to narrow.
+    """
+    if configuration.columns is None:
+        return configuration
+    steps = iter(match)
+    parts: list[Region | Member] = []
+    for part in configuration.parts:
+        members = []
+        for m in part.steps():
+            op = recording.steps[next(steps)].op
+            if "num_aie_columns" not in op.declaration.tunables:
+                raise NotImplementedError(
+                    f"narrowing {type(op).__name__}, which declares no column count, "
+                    f"to a configuration's {configuration.columns} columns is not "
+                    f"built yet"
+                )
+            given = m.tunables or {}
+            own = (op._with_tunables(**given) if given else op).resolved()
+            if (
+                own.num_aie_columns <= configuration.columns
+                or "num_aie_columns" in given
+            ):
+                members.append(m)
+                continue
+            # The widest that fits and the operator takes; none leaves it wide
+            # for the counts to refuse.
+            for width in range(configuration.columns, 0, -1):
+                try:
+                    op._with_tunables(**given, num_aie_columns=width).resolved()
+                except ValueError:
+                    continue
+                m = dataclasses.replace(m, tunables={**given, "num_aie_columns": width})
+                break
+            members.append(m)
+        parts.append(
+            members[0]
+            if isinstance(part, Member)
+            else dataclasses.replace(part, parts=tuple(members))
+        )
+    return dataclasses.replace(configuration, parts=tuple(parts))
+
+
+def in_turn(
+    configuration: Configuration,
+) -> tuple[Region, tuple[tuple[int, int], ...]]:
+    """Return ``configuration``, regions among its parts, as the one region its steps run in, and the waits running its parts in turn.
+
+    Each region part keeps its edges and workers among its own steps; a
+    step part is a step alone. Each part runs a phase after the one before:
+    every step of it waits on the last step before it, as a step waits on
+    one it reads in host memory (``Fusion.waits``), so one device
+    configuration runs the parts one after another.
+
+    Raises:
+        NotImplementedError: Its parts run at once, it takes a partial
+            width, or a part nests regions, takes inflows or chooses phases.
+    """
+    parts = [p.parts if isinstance(p, Region) else (p,) for p in configuration.parts]
+    if (
+        configuration.concurrent is not None
+        or configuration.columns is not None
+        or any(
+            isinstance(p, Region)
+            and (
+                p.inflows
+                or p.phases is not None
+                or not all(isinstance(m, Member) for m in p.parts)
+            )
+            for p in configuration.parts
+        )
+    ):
+        raise NotImplementedError(
+            f"building {configuration} is not built yet: regions among its parts "
+            f"run at once, at a partial width, nested, with inflows or chosen "
+            f"phases"
+        )
+    edges, workers, turns, at = [], [], [], 0
+    for part, members in zip(configuration.parts, parts):
+        if isinstance(part, Region):
+            edges += [
+                dataclasses.replace(
+                    e, producer=e.producer + at, consumer=e.consumer + at
+                )
+                for e in part.edges
+            ]
+            workers += [tuple(s + at for s in group) for group in part.workers]
+        if at:
+            turns += [(at - 1, at + k) for k in range(len(members))]
+        at += len(members)
+    region = Region(
+        tuple(m for members in parts for m in members),
+        tuple(edges),
+        workers=tuple(workers),
+    )
+    return region, tuple(turns)
+
+
 def composed(
     recording: Recording, profile: Profile
 ) -> tuple[dict[int, dict[str, Any]], tuple[Fusion, ...]]:
@@ -369,8 +478,9 @@ def composed(
             commands in flight (the host's, ``CarriedLoop``), variants,
             bindings or
             state layouts, steps run at once that are not consecutive, a
-            configuration at a partial width, keeping buffers resident, switched other than by a
-            reload or holding regions, a runtime plan other than one task
+            configuration keeping buffers resident, switched other than by a
+            reload, holding regions or at a partial width over a step that
+            declares no column count (``narrowed``), a runtime plan other than one task
             group, chosen phases a fusion's demands do not meet
             (``compose.phases``, at build), or an entry rooted at a step,
             with nested regions, inflows, shared workers, fission, an edge
@@ -418,15 +528,10 @@ def composed(
             unbuilt = [
                 what
                 for what, kept in (
-                    ("a partial width", root.columns is not None),
                     ("buffers resident into the next", root.resident),
                     (
                         "a switch other than a reload",
                         root.switch not in (None, Switch.RELOAD),
-                    ),
-                    (
-                        "regions among its parts",
-                        not all(isinstance(p, Member) for p in root.parts),
                     ),
                 )
                 if kept
@@ -437,12 +542,17 @@ def composed(
                     f"{unbuilt[0]}"
                 )
             for match in recording.occurrences(entry):
-                for s, m in zip(match, root.steps()):
+                for s, m in zip(match, narrowed(root, match, recording).steps()):
                     for name, value in (m.tunables or {}).items():
                         tunables.setdefault(s, {}).setdefault(name, value)
                 if root.concurrent is not None:
                     at_once.setdefault(root.concurrent, set()).update(match)
-            continue
+            if all(isinstance(p, Member) for p in root.parts):
+                continue
+            # Regions among its parts: the one region they run in, in turn.
+            root, turns = in_turn(root)
+        else:
+            turns = ()
         if (
             not isinstance(root, Region)
             or not all(isinstance(part, Member) for part in root.parts)
@@ -510,6 +620,7 @@ def composed(
         carried = set(recording.feedback) | {
             h.ref().root for _, h in recording.states.values()
         }
+        given = root.step_tunables()
         for match in matches:
             if taken & set(match):
                 continue
@@ -539,7 +650,10 @@ def composed(
                         f"reads {sorted(read)}: a carry across calls is a buffer "
                         f"the recording carries, read where it was written"
                     )
-            ordered = memory_waits(recording, match, root.edges)
+            ordered = (
+                *memory_waits(recording, match, root.edges),
+                *((match[a], match[b]) for a, b in turns),
+            )
             kept: list[tuple[int, str]] = []
             for e in on_chip:
                 made = recording.steps[match[e.producer]]
@@ -557,17 +671,9 @@ def composed(
                     )
                 ) and (match[e.producer], e.output) not in kept:
                     kept.append((match[e.producer], e.output))
-                # As the region builds them: at its members' tunables, an
-                # earlier entry's winning, as below.
+                # Each as the region builds it, its tunables there.
                 p, c = (
-                    retuned(
-                        recording.steps[match[i]].op,
-                        {
-                            **(root.parts[i].tunables or {}),
-                            **tunables.get(match[i], {}),
-                        },
-                        None,
-                    )
+                    recording.steps[match[i]].op._with_tunables(**given[i]).resolved()
                     for i in (e.producer, e.consumer)
                 )
                 # Steps on one core meet lane by lane, or the consumer runs
@@ -596,8 +702,8 @@ def composed(
                         + ("neither way" if built is None else f"only {built.value}")
                     )
             # The first entry naming a step's tunable wins, as for its region.
-            for s, m in zip(match, root.parts):
-                for name, value in (m.tunables or {}).items():
+            for s, named in zip(match, given):
+                for name, value in named.items():
                     tunables.setdefault(s, {}).setdefault(name, value)
             if len(match) > 1:
                 fused.append(

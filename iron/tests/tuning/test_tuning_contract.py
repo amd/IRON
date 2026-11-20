@@ -292,3 +292,28 @@ def test_every_coverage_pattern_round_trips_through_a_saved_profile(
     assert loaded.schedules() == profile.schedules()
     assert loaded.variants() == profile.variants()
     assert loaded.bindings() == profile.bindings()
+
+
+@pytest.mark.parametrize(
+    ("kind", "named", "taken"),
+    [
+        (EdgeKind.STREAM, None, True),
+        (EdgeKind.STAGED, None, True),
+        (EdgeKind.DDR, None, None),
+        (EdgeKind.STREAM, False, False),
+    ],
+)
+def test_an_edge_feeding_an_input_streamed_under_a_flag_takes_the_form_that_streams_it(
+    kind: EdgeKind, named: bool | None, taken: bool | None
+) -> None:
+    """GEMV's ``B`` streams only under ``feed_b``: fed on chip, the member takes it; read through host memory, or named, it is left as it is."""
+    tunables = None if named is None else {"feed_b": named}
+    region = Region(
+        parts=(
+            Member(Softmax, dict(rows=32, cols=128)),
+            Member(GEMV, dict(M=64, K=128), tunables),
+        ),
+        edges=(Edge(0, "y", 1, "B", kind=kind),),
+    )
+    assert region.step_tunables()[1].get("feed_b") is taken
+    assert region.step_tunables()[0] == {}

@@ -199,6 +199,59 @@ def decode_attention_operator_recording(name: str, mha: MHA) -> Recording:
     return Recording.of_steps(name, steps, ["Q", "K", "V"], ["out"])
 
 
+class DecodeAttention(iron.Graph):
+    """Decode MHA's graph over the fused ``MHA``'s own ``Q``, ``K`` and ``V``: ``K . (q * scale) -> Softmax -> P V``.
+
+    Its query heads share the one KV head, so ``K . q`` is one ``GEMV`` over
+    a batch a head, ``K`` as the MHA takes it its one matrix, and ``P V``
+    one ``GEMM`` over every head's row, ``V`` as given its ``B`` (no
+    transpose: the DMAs move bf16 only in 32-bit words). ``mha``'s scale is
+    a power of two, so scaling ``Q`` on chip first is exact. Its scores are
+    float32 up to the softmax, as the MHA keeps them; ``P V`` sums in f32
+    at ``HIGHEST``, as the MHA does.
+    """
+
+    def __init__(self, mha: MHA) -> None:
+        heads, keys, d = mha.num_heads, mha.kv_len, mha.d
+        self.sizes = (heads, keys, d)
+        self.scale = iron.param(np.full(heads * d, mha.scale, dtype=bfloat16))
+
+    def body(self, Q, K, V):
+        heads, keys, d = self.sizes
+        q = ElementwiseMul.step(Q.reshape(heads * d), self.scale)
+        scores = GEMV.step(
+            K,
+            q.reshape(heads, d),
+            num_batches=heads,
+            repeat=heads,
+            tile_size_input=4,
+            tile_size_output=32,
+            output_dtype=np.float32,
+        )
+        p = Softmax.step(scores, input_dtype=np.float32)
+        out = GEMM.step(p, V.reshape(keys, d), precision=Precision.HIGHEST)
+        return out.reshape(1, heads, d)
+
+
+def decode_attention_graph(mha: MHA) -> tuple[Recording, Region]:
+    """Return ``DecodeAttention``'s recording at ``mha``'s inputs, and its three attention steps as one region.
+
+    The scores staged into the softmax, its rows staged into ``P V``'s
+    tiles; the scaling of Q runs on its own.
+    """
+    recording = DecodeAttention(mha).record(
+        **{b.name: tuple(b.shape) for b in mha.resolved().inputs}
+    )
+    region = Region(
+        parts=tuple(member(step.op) for step in recording.steps[1:]),
+        edges=(
+            CompositionEdge(0, "C", 1, "x", kind=EdgeKind.STAGED),
+            CompositionEdge(1, "y", 2, "A", kind=EdgeKind.STAGED),
+        ),
+    )
+    return recording, region
+
+
 class PrefillAttention(iron.Graph):
     """Prefill MHA's graph over the fused ``MHA``'s own ``Q``, ``K`` and ``V``: ``(Q * scale) K^T + causal mask -> Softmax -> P V``.
 
