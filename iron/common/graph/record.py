@@ -11,7 +11,7 @@ import heapq
 import itertools
 import logging
 import math
-from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -309,6 +309,25 @@ class _Placing:
         return dataclasses.replace(
             h, buffer=self.held[n], layout=Dense(start + (h.layout.offset or 0))
         )
+
+
+def _rematched(
+    part: Configuration | Region | Member, ops: Iterator[Operator]
+) -> Configuration | Region | Member:
+    """Return ``part`` with each step it names, depth-first, naming the next of ``ops`` by the same dims.
+
+    Each member keeps the dims it names, each taken from its operator
+    (``Profile.dims``); its tunables, where and how it runs are its own.
+    """
+    if isinstance(part, Member):
+        op = next(ops)
+        dims = Profile.dims(type(op), vars(op))
+        return dataclasses.replace(
+            part, dims={k: dims.get(k, v) for k, v in part.dims.items()}
+        )
+    return dataclasses.replace(
+        part, parts=tuple(_rematched(sub, ops) for sub in part.parts)
+    )
 
 
 class NotLegalAtCapacity(ValueError):
@@ -916,48 +935,29 @@ class Recording:
             derived_from=self.version,
         )
 
-    def selected(
-        self,
-        profile: Profile,
-        values: Mapping[str, int],
-        points: Sequence[Mapping[str, int]] = (),
-    ) -> tuple[Recording, Profile]:
-        """Return how ``profile`` runs a call of this version at ``values``: each set of its variants' design at its range.
+    def ranges_at(
+        self, profile: Profile, values: Mapping[str, int]
+    ) -> tuple[tuple[tuple[tuple[int, int], ...], Entry], ...]:
+        """Return the range holding ``values``, and its entry, of each set of ``profile``'s variants over values this version takes.
 
-        The design of the range holding ``values``, for each set of variants
-        over values this version takes.
-
-        This version at those ranges' capacity (``at_capacity``, each value at
-        its range's top), and ``profile`` with its variants replaced by those
-        ranges' entries; an entry rooted at a step gives that step's tunables
-        as a tunable entry does (``Profile.add``). With no variants, this
-        recording and a copy of ``profile``. Each of ``points``, the values
-        the call is run at too, must lie in the range ``values`` selects.
+        In ``profile``'s order: what selects a call's design, so two points
+        with equal ranges run on one design.
 
         Raises:
-            ValueError: No range holds ``values``.
-            NotLegalAtCapacity: A range's entry matches no step at its
-                capacity: its design is not legal there.
-            NotImplementedError: ``values`` does not give a value the
-                variants are over, or a point lies in another range (a design
-                per point is not built), a range's entry rooted at a step is
-                scoped, runs on the host or is split by fission, or
-                ``at_capacity`` does not build its capacity.
+            ValueError: No range of a set holds ``values``.
+            NotImplementedError: ``values`` does not give a value a set of
+                variants is over.
         """
-        chosen = profile.copy()
         names = {v.name for v in self.values}
-        bounds: dict[str, int] = {}
-        entries: list[Entry] = []
+        held = []
         for variants in profile.variants():
-            chosen.remove_variants(variants)
             if not set(variants.values) <= names:
                 continue
             missing = [n for n in variants.values if n not in values]
             if missing:
                 raise NotImplementedError(
                     f"{self.name}: selecting a variant for a call that does not "
-                    f"give {missing[0]}, so each point may select another, is not "
-                    f"built yet"
+                    f"give {missing[0]} is not built yet"
                 )
             holding = [
                 (box, entry)
@@ -972,26 +972,80 @@ class Recording:
                     f"{self.name}: no range over {', '.join(variants.values)} holds "
                     f"{[values[n] for n in variants.values]}"
                 )
-            box, entry = holding[0]
-            outside = [
-                p
-                for p in points
-                if not all(
-                    lo <= p[n] <= hi
-                    for n, (lo, hi) in zip(variants.values, box, strict=True)
-                )
-            ]
-            if outside:
-                raise NotImplementedError(
-                    f"{self.name}: a call whose points span more than one range "
-                    f"over {', '.join(variants.values)} ({box} and "
-                    f"{[outside[0][n] for n in variants.values]}) is not built "
-                    f"yet: each point would select its own design"
-                )
-            bounds.update((n, hi) for n, (_, hi) in zip(variants.values, box))
-            entries.append(entry)
+            held.append(holding[0])
+        return tuple(held)
+
+    def selected(
+        self,
+        profile: Profile,
+        values: Mapping[str, int],
+        points: Sequence[Mapping[str, int]] = (),
+    ) -> tuple[Recording, Profile]:
+        """Return how ``profile`` runs a call of this version at ``values``: each set of its variants' design at its range.
+
+        The design of the range holding ``values`` (``ranges_at``), for each
+        set of variants over values this version takes: this version at
+        those ranges' capacity (``at_capacity``, each value at its range's
+        top), and ``profile`` with its variants replaced by those ranges'
+        entries; an entry rooted at a step gives that step's tunables as a
+        tunable entry does (``Profile.add``). A composition entry of
+        ``profile`` that matches this recording's steps and not those at the
+        capacity names the same steps there (each member's dims taken from
+        its step at the capacity), so a design per range keeps what the
+        profile composes. With no variants, this recording and a copy of
+        ``profile``. Each of ``points``, the values
+        the one build is run at too, must select the same ranges.
+
+        Raises:
+            ValueError: No range holds ``values``.
+            NotLegalAtCapacity: A range's entry matches no step at its
+                capacity: its design is not legal there.
+            NotImplementedError: ``values`` does not give a value the
+                variants are over, or a point selects other ranges (one build
+                runs one design; a caller splits a call by its points'
+                ranges), a range's entry rooted at a step is scoped, runs on
+                the host or is split by fission, or ``at_capacity`` does not
+                build its capacity.
+        """
+        chosen = profile.copy()
+        for variants in profile.variants():
+            chosen.remove_variants(variants)
+        held = self.ranges_at(profile, values)
+        outside = [p for p in points if self.ranges_at(profile, p) != held]
+        if outside:
+            raise NotImplementedError(
+                f"{self.name}: one build whose points span more than one range "
+                f"({[box for box, _ in held]} and "
+                f"{[box for box, _ in self.ranges_at(profile, outside[0])]}) is not "
+                f"built: each point selects its own design"
+            )
+        names = {v.name for v in self.values}
+        sets = [v for v in profile.variants() if set(v.values) <= names]
+        bounds = {
+            n: hi
+            for variants, (box, _) in zip(sets, held, strict=True)
+            for n, (_, hi) in zip(variants.values, box, strict=True)
+        }
         recording = self.at_capacity(bounds) if bounds else self
-        for entry in entries:
+        if recording is not self:
+            for entry in profile.entries():
+                found = self.occurrences(entry)
+                if not found or recording.occurrences(entry):
+                    continue
+                moved: list[Entry] = []
+                for match in found:
+                    named = dataclasses.replace(
+                        entry,
+                        root=_rematched(
+                            entry.root, iter(recording.steps[i].op for i in match)
+                        ),
+                    )
+                    if named not in moved:
+                        moved.append(named)
+                chosen.replace_entry(entry, moved[0])
+                for other in moved[1:]:
+                    chosen.add_entry(other)
+        for _, entry in held:
             if not recording.occurrences(entry):
                 raise NotLegalAtCapacity(
                     f"{recording.name}: {entry.root} matches no step at its range's "
