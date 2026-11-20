@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import math
 from collections.abc import Sequence
 from typing import Any
+
+import numpy as np
 
 from ..declare import Operator, Unresolvable
 from ..declare.composition import (
@@ -48,10 +51,29 @@ def admits(
     key = (producer_design.identity, output, consumer_design.identity, input_)
     if key in _built:
         return _built[key]
+    (made,) = (b for b in producer_design.op.buffers if b.name == output)
+    (taken,) = (b for b in consumer_design.op.buffers if b.name == input_)
+    sizes = (
+        (math.prod(made.obj_shape), math.prod(taken.obj_shape))
+        if made.streamed and taken.streamed
+        else (0, 0)
+    )
+    # Streamed, a whole number of the reader's objects in each of the
+    # producer's: one fifo delivers them (``Operand.delivers``).
+    delivers = (
+        {output: taken.obj_type}
+        if sizes[0] != sizes[1]
+        and sizes[0] % sizes[1] == 0
+        and np.dtype(made.dtype) == np.dtype(taken.dtype)
+        else {}
+    )
     found = None
     for kind in (FusionKind.STREAM, FusionKind.STAGED):
         try:
-            producer_array = BuiltArray(producer_design)
+            producer_array = BuiltArray(
+                producer_design,
+                delivers=delivers if kind is FusionKind.STREAM else None,
+            )
             (source,) = (b for b in producer_array.op.buffers if b.name == output)
             BuiltArray(
                 consumer_design,

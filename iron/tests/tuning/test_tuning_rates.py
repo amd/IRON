@@ -3,6 +3,8 @@
 
 """The multi-rate family: single rate, multi-rate ``p : 1``, and rates that cannot balance."""
 
+import math
+
 import pytest
 
 from iron.common.declare import Profile
@@ -14,6 +16,7 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.limbs import Limbs
 from iron.tests.support import sequences
 from iron.tests.support import toys_dataflow as toys
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import candidates, check, fit, search
@@ -103,25 +106,64 @@ def test_per_call_bounded_token_count_is_a_valid_kv_length(device):
     assert analysis.repetition == {0: 1, 1: 16}
 
 
-@unbuilt
+# Where GEMM composes beside another operator: npu1 builds GEMM on an array
+# narrower than the device, which a configuration beside another's does not take.
+_GEMM_BESIDE = [
+    pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
+    for name in sorted(DEVICES)
+]
+
+
+@pytest.mark.parametrize("device", _GEMM_BESIDE, indirect=True)
+@pytest.mark.parametrize("row_tile", [16, 64])
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_gemm_tiles_delivered_a_row_at_a_time_are_bit_identical(row_tile, device):
+    """A GEMM's ``row_tile``-row tile delivered to a per-row norm a row at a time over one stream (an asymmetric fifo): bit-identical to the steps run apart."""
+    gemm, norm = toys.gemm_rowwise(device, M=row_tile, row_tile=row_tile)
+    assert gemm.n_aie_rows == 1
+    profile = Profile()
+    profile.add_entry(Entry(root=toys.gemm_rowwise_region(gemm, norm)))
+    recording = toys.gemm_rowwise_recording("delivered-rows", gemm, norm)
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+@pytest.mark.parametrize("device", _GEMM_BESIDE, indirect=True)
 def test_buffer_below_the_computed_minimum_is_refused(device):
-    """A multi-rate edge (rate ``16 : 1``, minimum buffer 16) at depth 15 is refused by ``fit`` at stage ``"analysis"``, before any build."""
+    """A multi-rate stream (``16 : 1`` rows) one object short of its minimum buffer is refused by ``fit`` at stage ``"analysis"``, before any build.
+
+    The GEMM's 16-row tile is delivered to the norm a row at a time (one
+    asymmetric fifo). Its minimum buffer is ``p + c - gcd(p, c)`` elements,
+    ``1024 + 64 - 64``: one of the producer's objects, the unit an edge's
+    depth counts. At it, the region fits.
+    """
     gemm, norm = toys.gemm_rowwise(device, M=16, K=64, N=64, row_tile=16)
     assert gemm.n_aie_rows == 1
-    region = toys.gemm_rowwise_region(gemm, norm, depth=15)
-    profile = Profile()
-    profile.add_entry(Entry(root=region))
+    region = toys.gemm_rowwise_region(gemm, norm)
     recording = toys.gemm_rowwise_recording("below-minimum", gemm, norm)
-    result = fit(profile, [Timed(recording)], device)
-    assert not result.ok
-    assert result.stage == "analysis"
+    analysis = analyze(region, recording, device)
+    (edge,) = region.edges
+    produced, consumed = 16 * 64, 64
+    least = produced + consumed - math.gcd(produced, consumed)
+    assert analysis.min_depth[edge] * produced == least
+    for depth, fits in ((analysis.min_depth[edge], True), (0, False)):
+        profile = Profile()
+        profile.add_entry(Entry(root=toys.gemm_rowwise_region(gemm, norm, depth=depth)))
+        result = fit(profile, [Timed(recording)], device)
+        assert result.ok is fits, result.why
+        if not fits:
+            assert result.stage == "analysis"
+            assert "deadlock" in result.why
 
 
 @pytest.mark.extensive
-@unbuilt
+@pytest.mark.parametrize("device", _GEMM_BESIDE, indirect=True)
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_tuner_picks_token_sizes_that_pay(device):
-    """``search``, run on the multi-rate toy alone, keeps a depth at or past the analysis's minimum and passes ``check`` against the start, exact."""
+    """``search``, run on the multi-rate toy alone, keeps a depth at or past the analysis's minimum and passes ``check`` against the start, exact.
+
+    An edge with no chosen depth builds at the analysis's minimum.
+    """
     gemm, norm = toys.gemm_rowwise(device, M=48, row_tile=16)
     assert gemm.n_aie_rows == 1
     region = toys.gemm_rowwise_region(gemm, norm)
@@ -135,5 +177,5 @@ def test_tuner_picks_token_sizes_that_pay(device):
     tuned_entry = tuned.entries()[0]
     tuned_edge = tuned_entry.root.edges[0]
     analysis = analyze(tuned_entry.root, recording, device)
-    assert tuned_edge.depth is not None
-    assert tuned_edge.depth >= analysis.min_depth[tuned_edge]
+    least = analysis.min_depth[tuned_edge]
+    assert (least if tuned_edge.depth is None else tuned_edge.depth) >= least

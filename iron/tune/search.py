@@ -1595,15 +1595,41 @@ def fit(
                 made = derivation.obj_elements[p].get(edge.output)
                 taken = derivation.obj_elements[c].get(edge.input)
                 if (
-                    edge.kind in (EdgeKind.STREAM, EdgeKind.CASCADE)
-                    and made is not None
-                    and taken is not None
-                    and made != taken
+                    edge.kind not in (EdgeKind.STREAM, EdgeKind.CASCADE)
+                    or made is None
+                    or taken is None
+                    or made == taken
                 ):
+                    continue
+                # One fifo delivers each object as a whole number of the
+                # reader's (the dialect's asymmetric fifo): a stream from one
+                # core to another, read nowhere else, in a region the
+                # composer streams (``compose.fused_configuration``).
+                if edge.kind is EdgeKind.CASCADE:
+                    why = "the cascade carries one object size"
+                elif made % taken:
+                    why = (
+                        "an asymmetric fifo delivers each object as a whole number "
+                        "of smaller ones"
+                    )
+                elif EdgeKind.STAGED in {e.kind for e in region.edges}:
+                    why = "beside staged edges the composer stages it too"
+                elif any({p, c} <= set(group) for group in region.workers):
+                    why = "on one worker its two ends are one buffer"
+                elif (p, edge.output) in kept or (
+                    sum(
+                        (q, e.output) == (p, edge.output)
+                        for e, q, _ in derivation.wired
+                    )
+                    > 1
+                ):
+                    why = "read elsewhere too, its fifo has one object size"
+                else:
+                    why = None
+                if why is not None:
                     unplaceable.append(
                         f"{edge}: a {edge.kind.value} whose ends' objects differ "
-                        f"({made} elements and {taken}) is not built yet; the "
-                        f"composer gives a fifo one object size"
+                        f"({made} elements and {taken}) is not built yet: {why}"
                     )
             kinds = {e.kind for e in region.edges if not e.across_calls}
             unplaceable += [
