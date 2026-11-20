@@ -686,8 +686,10 @@ class Recording:
         """Build a graph of ``steps`` over buffers known by name.
 
         A buffer some step names whole takes that step's declared shape and
-        type (a block float's, its bytes); one named only in part is bytes, as many as ``pinned``
-        gives it. The host writes ``inputs`` and reads ``outputs``, and
+        type (a block float's, its bytes), and each other step naming it whole
+        sees it in its own shape (``Handle.reshape``); one named only in part
+        is bytes, as many as ``pinned`` gives it. The host writes ``inputs``
+        and reads ``outputs``, and
         ``pinned`` sizes a buffer a step names only in part or holds at a
         size of its own; what it reads is what a call returns.
         """
@@ -709,7 +711,7 @@ class Recording:
         recording = []
         for step in steps:
             slots = []
-            for ref in step.buffers:
+            for ref, b in zip(step.buffers, step.op.buffers, strict=True):
                 root = roots.setdefault(
                     ref.root,
                     Handle.whole(
@@ -719,7 +721,9 @@ class Recording:
                     ),
                 )
                 if ref.nbytes is None:
-                    slots.append(root)
+                    shape = (b.nbytes,) if bfp.is_bfp(b.dtype) else tuple(b.shape)
+                    seen = shape != root.shape and math.prod(shape) == root.elements
+                    slots.append(root.reshape(shape) if seen else root)
                     continue
                 slots.append(
                     Handle(root.buffer, (ref.nbytes,), np.uint8, {}, Dense(ref.start))
