@@ -67,13 +67,10 @@ def _wide_configuration(device) -> tuple[Configuration, object]:
     return configuration, recording
 
 
-@unbuilt
 def test_membership_as_one_design_round_trips_and_is_proposed(tmp_path, device):
     """A single design's membership round-trips through a profile and is a candidate."""
     gemv, silu, mul = gemv_silu_mul(M=256, cols=4, tile=64)
-    entry = Entry(
-        root=Configuration(parts=(Member(type(gemv), {"M": gemv.M, "K": gemv.K}),))
-    )
+    entry = Entry(root=Configuration(parts=(member(gemv),)))
     profile = Profile()
     profile.add_entry(entry)
     profile.save(tmp_path / "membership_single.json")
@@ -110,30 +107,39 @@ def test_region_as_one_packing_piece_round_trips_and_is_proposed(tmp_path, devic
     )
 
 
-@unbuilt
 def test_several_regions_in_one_packing_round_trip_and_are_proposed(tmp_path, device):
-    """Several regions sharing one configuration (two independent windows) round-trip and are a candidate."""
+    """Several regions sharing one configuration (two independent windows) round-trip and are a candidate.
+
+    Regions the search holds: the first window's, reached by candidates, and
+    the last step's own at its recorded tunables.
+    """
     gemv1, silu1, mul1 = gemv_silu_mul(M=256, cols=4, tile=64)
     region1 = Region(
-        parts=(
-            Member(type(gemv1), {"M": gemv1.M, "K": gemv1.K}),
-            Member(type(silu1), {"size": silu1.size}),
-        ),
+        parts=(member(gemv1), member(silu1)),
         edges=(CompositionEdge(0, "C", 1, "x", kind=EdgeKind.STREAM),),
     )
-    region2 = Region(parts=(Member(type(mul1), {"size": mul1.size}),))
-    configuration = Configuration(parts=(region1, region2))
+    recording = gemv_silu_mul_recording("config_several_regions", gemv1, silu1, mul1)
+    calls = [Timed(recording)]
+    start = reached_by_candidates(region1, calls, device)
+    own = next(
+        edit
+        for edit in candidates(calls, start, device)
+        if isinstance(edit, AddEntry)
+        and isinstance(edit.entry.root, Region)
+        and len(edit.entry.root.parts) == 1
+        and edit.entry.root.parts[0].cls is type(mul1)
+    )
+    start = own.apply(start)
+    configuration = Configuration(parts=(region1, own.entry.root))
     entry = Entry(root=configuration)
     profile = Profile()
     profile.add_entry(entry)
     profile.save(tmp_path / "several_regions.json")
     loaded = Profile.load(tmp_path / "several_regions.json")
     assert loaded.entries() == [entry]
-    recording = gemv_silu_mul_recording("config_several_regions", gemv1, silu1, mul1)
-    start = Profile()
     assert any(
-        entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, device)
+        isinstance(edit, AddEntry) and edit.entry == entry
+        for edit in candidates(calls, start, device)
     )
 
 
@@ -386,6 +392,26 @@ def test_tuner_keeps_the_configuration_that_pays(device):
     start = Profile()
     found = search([Timed(recording)], start, device, budget_s=60.0)
     assert any(isinstance(e.root, Configuration) for e in found.entries())
+
+
+def test_the_designs_saving_most_switches_are_proposed_first_narrowed_to_co_reside(
+    device,
+):
+    """On the Wide toy, its three designs loaded together save the most switches: the first configuration proposed.
+
+    Narrowed until their cores fit the array, which ``fit`` accepts.
+    """
+    _, recording = _wide_configuration(device)
+    calls = [Timed(recording)]
+    first = next(
+        edit
+        for edit in candidates(calls, Profile(), device)
+        if isinstance(edit, AddEntry) and isinstance(edit.entry.root, Configuration)
+    )
+    parts = first.entry.root.parts
+    assert [m.cls for m in parts] == [ReLU, Tanh, Sigmoid]
+    assert all(m.tunables["num_aie_columns"] < device.cols for m in parts)
+    assert fit(first.apply(Profile()), calls, device).ok
 
 
 def test_a_configuration_over_the_arrays_cores_is_refused(device):
