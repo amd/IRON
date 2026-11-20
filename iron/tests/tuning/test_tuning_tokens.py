@@ -18,6 +18,7 @@ from iron.operators.gemm import GEMM
 from iron.operators.rms_norm import RMSNorm
 from iron.tests.support import toys_dataflow as toys
 from iron.tests.support import toys_edges
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import fit
@@ -69,7 +70,15 @@ def _tiles_into_rows(kind: EdgeKind) -> tuple[Recording, Region]:
     )
 
 
-@unbuilt
+# Where the tiles' restage fits. npu1 builds GEMM on an array narrower than the
+# device, which a configuration beside another operator's does not take.
+_LAYOUT_FITS = [
+    pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
+    for name in sorted(DEVICES)
+]
+
+
+@pytest.mark.parametrize("device", _LAYOUT_FITS, indirect=True)
 def test_column_tiles_into_a_rowwise_consumer_are_restaged_by_layout(device):
     """``GEMM``'s 32x32 ``C`` tiles feeding ``RMSNorm``, which reads whole rows, over a staged edge.
 

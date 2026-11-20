@@ -35,7 +35,7 @@ from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
-from iron.tests.support import hang, sequences, toys_edges
+from iron.tests.support import hang, sequences, toys_composition, toys_edges
 from iron.tests.support.llama_model import llama_1b
 from iron.tune.measure import Timing, time_interleaved
 
@@ -340,12 +340,31 @@ def test_lanes_sharing_objects_both_ways_join_then_split():
     ]
 
 
-def test_an_order_no_round_gives_is_refused():
-    """GEMM's 32x32 C tiles into RMSNorm's whole rows: within every round the tiles' elements are out of row order, a layout no join or split gives."""
+def test_gemm_tiles_are_read_off_the_memtile_in_row_order():
+    """GEMM's 32x32 C tiles into RMSNorm's whole rows: a round holds the rows' elements tile by tile, which the memtile reads out a row at a time."""
     recording, _ = toys_edges.layout_transpose()
     gemm, norm = (s.op.resolved() for s in recording.steps)
-    with pytest.raises(ValueError, match="in their host order"):
-        Staging(gemm.C, norm.x)
+    plan = Staging(gemm.C, norm.x)
+    assert plan.groups == [([0], [8192], [0], [8192])]
+    (walk,) = plan.walks
+    assert (walk.sizes, walk.strides) == ((64, 4, 32), (32, 2048, 1))
+
+
+def test_column_halves_join_and_are_read_off_the_memtile_in_rows():
+    """Prefill's QK^T float32 scores, a column half a lane, into the mask add's lanes of whole rows.
+
+    One round joins both halves in turn; the memtile reads it out a row at a
+    time (64 elements of one half, then 64 of the other), split into the
+    add's eight lanes, more than a memtile sends, in two levels.
+    """
+    qk, add, _, _ = (
+        op.resolved()
+        for op in toys_composition.prefill_attention_ops(32, 128, 64, scores=np.float32)
+    )
+    plan = Staging(qk.C, add.a)
+    assert plan.groups == [([0, 1], [2048, 2048], list(range(8)), [512] * 8)]
+    (walk,) = plan.walks
+    assert (walk.sizes, walk.strides) == ((32, 2, 64), (64, 2048, 1))
 
 
 def _bounded(tile=4096):

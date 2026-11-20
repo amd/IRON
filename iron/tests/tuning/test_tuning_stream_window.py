@@ -20,6 +20,7 @@ from iron.common.declare.composition import Entry, Refinement, Region
 from iron.common.design import OperatorDesign
 from iron.common.image.compose import SHIM_SHORT, fits, transported
 from iron.common.image.step import Edge, Fusion, FusionKind
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     chain,
     fan_in_gate_up_mul,
@@ -74,14 +75,21 @@ def test_window_entry_round_trips_through_the_profile(window, tmp_path, device):
 
 
 # SelectiveScan's lanes write ``y`` by head, the multiply reads it by row: a
-# restage the composer does not build.
+# round read off a memtile in the multiply's order, built on npu2; npu1's
+# waits on host 203.
 BUILT_WINDOWS = [
-    pytest.param(w, marks=unbuilt) if w == "several_outputs" else w
+    pytest.param(
+        name,
+        w,
+        id=f"device_{name}-window_{w}",
+        marks=unbuilt if w == "several_outputs" and name == "npu1" else (),
+    )
+    for name in sorted(DEVICES)
     for w in sorted(WINDOWS)
 ]
 
 
-@pytest.mark.parametrize("window", BUILT_WINDOWS)
+@pytest.mark.parametrize(("device", "window"), BUILT_WINDOWS, indirect=["device"])
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_window_is_bit_identical_to_its_steps_run_apart(window, device):
     """A window's output is bit-identical to the same steps run apart, at its recorded size."""
@@ -118,7 +126,7 @@ def test_window_is_bit_identical_on_npu1_full_elf_and_per_step(device):
 
 
 @pytest.mark.extensive
-@pytest.mark.parametrize("window", BUILT_WINDOWS)
+@pytest.mark.parametrize(("device", "window"), BUILT_WINDOWS, indirect=["device"])
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_tuner_proposes_and_keeps_a_window_on_its_own_toy(window, device):
     """The tuner, run on the window's toy alone, keeps what is at least as fast as the window, where the window pays."""
