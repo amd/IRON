@@ -1603,11 +1603,19 @@ class Derivation:
                             for acquire in (True, False)
                         ]
                     )
+        chosen = self.region.step_phases()
         for fifo in writer.keys() & readers.keys():
             if fifo in writes or any((fifo, a) in reads for a in readers[fifo]):
                 continue
             for actor in readers[fifo]:
-                channels.append(Channel(writer[fifo], actor))
+                # A step's own fifo, or a host stream into or out of it, runs
+                # in the step's phase, as the region's edges into it do.
+                step = next(
+                    of_step[a] for a in (actor, writer[fifo]) if a < len(of_step)
+                )
+                channels.append(
+                    Channel(writer[fifo], actor, phase=chosen[step] if chosen else 0)
+                )
                 e = len(channels) - 1
                 writes.setdefault(fifo, []).append(e)
                 reads[(fifo, actor)] = e

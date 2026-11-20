@@ -45,6 +45,8 @@ _BUILT_COMBOS = {
         ),
         (HandOff.EQUAL, "fan_out", "memtile", "min", "different", "smaller"),
         (HandOff.EQUAL, "skip", "memtile", "min_minus_one", "same", "recorded"),
+        (HandOff.SLICES, "skip", "ddr", "min_minus_one", "same", "recorded"),
+        (HandOff.RATIO, "diamond", "ddr", "min_minus_one", "same", "recorded"),
         (HandOff.SPLIT, "through_memory", "memtile", "min", "same", "recorded"),
         (HandOff.LAYOUT, "feedback", "memtile", "min", "same", "recorded"),
         (HandOff.EQUAL, "chain", "l1", "min_minus_one", "same", "recorded"),
