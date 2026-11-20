@@ -7,6 +7,8 @@ import pytest
 from aie.dialects.aie import get_target_model
 
 from iron.common.graph.sdf import analyze
+from iron.common.image.step import HandOff
+from iron.tests.support import toys_composition
 from iron.tests.support import toys_dataflow as toys
 
 pytestmark = pytest.mark.usefixtures("device")
@@ -23,6 +25,21 @@ def test_balanced_chain_is_consistent_firing_once_a_tile(device):
     assert analysis.why is None
     assert analysis.repetition == {0: tiles, 1: tiles, 2: tiles}
     assert all(d == 1 for d in analysis.min_depth.values())
+
+
+@pytest.mark.parametrize(("n", "tiles"), [(None, 8), (1024, 8), (512, 4), (130, 2)])
+def test_a_bounded_call_fires_the_tiles_its_own_values_cover(n, tiles, device):
+    """``add -> mul`` over the first ``n`` of 1024 elements, a 128-element tile an object: a call fires each core once a tile its ``n`` covers.
+
+    A call that gives no ``n`` is a whole one, the largest the recording's
+    limits admit.
+    """
+    recording = toys.BoundedChain().record(a=(1024,), b=(1024,), c=(1024,))
+    region = toys.bounded_chain_region(recording)
+    analysis = analyze(region, recording, device, None if n is None else {"n": n})
+    assert analysis.consistent
+    assert analysis.repetition == {0: tiles, 1: tiles}
+    assert analysis.tokens[region.edges[0]] == ((1,), (1,))
 
 
 def test_cycle_without_a_carried_value_deadlocks_at_any_depth(device):
@@ -74,3 +91,21 @@ def test_known_multi_rate_edge_minimum_buffer(device):
     assert analysis.consistent
     assert analysis.repetition == {0: 3, 1: 2}
     assert analysis.min_depth[region.edges[0]] == 1
+
+
+def test_a_step_spliced_into_its_producers_cores_holds_each_cores_call(device):
+    """A SiLU spliced into a GEMM's cores reads each core's tiles after the GEMM's body runs through the call: the edge holds every tile a core writes.
+
+    A 64 by 128 GEMM in 32 by 32 tiles on one column takes a core a row of
+    tiles, two cores, each writing four tiles a call; three deadlock.
+    """
+    recording, region = toys_composition.gemm_silu_splice(
+        "splice", M=64, N=128, tile=32
+    )
+    analysis = analyze(region, recording, device)
+    edge = region.edges[0]
+    assert analysis.why is None
+    assert analysis.hand_off[edge] is HandOff.EQUAL
+    assert analysis.repetition == {0: 4, 1: 4}
+    assert analysis.min_depth[edge] == 4
+    assert analysis.deadlock({edge: 3}) is not None

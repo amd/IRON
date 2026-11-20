@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import itertools
 from collections.abc import Sequence
 from typing import Any
 
@@ -211,6 +212,38 @@ def _pack_conflicts(recording: Recording) -> set[tuple[int, int]]:
     return conflicts
 
 
+def memory_waits(
+    recording: Recording, match: Sequence[int], edges: Sequence[Edge]
+) -> tuple[tuple[int, int], ...]:
+    """Each pair of a region's steps that depend through host memory with no edge between them.
+
+    Two steps depend where one writes a host buffer root the other reads or
+    writes too. With no edge of the region joining them, the later in
+    recorded order runs a phase after the earlier (``Fusion.waits``), so a
+    reader sees the write landed and a writer does not overwrite what is
+    still to be read.
+
+    Args:
+        recording: The recording ``match`` is a match in.
+        match: The region's steps, as indices into ``recording.steps``.
+        edges: The region's edges, indexing ``match``.
+
+    Returns:
+        Each such pair ``(earlier, later)``, as indices into ``recording.steps``.
+    """
+    joined = {(match[e.producer], match[e.consumer]) for e in edges}
+    uses = {s: recording.steps[s].roots() for s in match}
+    return tuple(
+        (a, b)
+        for a, b in itertools.combinations(sorted(match), 2)
+        if (a, b) not in joined
+        and (
+            set(uses[a][1]) & {*uses[b][0], *uses[b][1]}
+            or set(uses[b][1]) & set(uses[a][0])
+        )
+    )
+
+
 def _pack_runs(recording: Recording) -> list[Fusion]:
     """Every maximal run of consecutive, pairwise independent steps.
 
@@ -326,11 +359,15 @@ def composed(
     region of consecutive steps runs as one stream or staged fusion where
     its on-chip edges are all streams, as one staged fusion where any is
     staged (its stream edges fed as they are), and as a pack where it has no
-    edge. A DDR edge's consumer reads what its producer wrote to host memory
-    a phase or more later (a phased fusion, ``Fusion.waits``). A cascade
+    edge and no two of its steps depend. A DDR edge's consumer reads what its
+    producer wrote to host memory a phase or more later (a phased fusion,
+    ``Fusion.waits``), and so does the later of two steps that depend
+    through host memory with no edge between them (``memory_waits``). A cascade
     edge carries its producer's output to its consumer's core over the
     cascade (``Operand.cascade_to``). Chosen phases run each step in its in-edges'
-    phase (``Fusion.phases``).
+    phase (``Fusion.phases``). An edge across calls (``Edge.across_calls``)
+    held in DDR is the recording's own carry of the buffer it names, read by
+    the next call from host memory, so it adds nothing to the fusion.
 
     A configuration of steps gives each its member's tunables; which
     designs it loads together is the packing's (``packing.configured``). The
@@ -348,13 +385,15 @@ def composed(
             reload or holding regions, a runtime plan other than one task
             group, chosen phases a fusion's demands do not meet
             (``compose.phases``, at build), or an entry rooted at a step,
-            with nested regions, inflows, shared workers, fission, a self-loop over a carried buffer, cascades beside staged or DDR
-            edges, a DDR
-            edge's chosen depth, matching steps that are not consecutive,
-            members that depend through memory with no edge between them, or
+            with nested regions, inflows, shared workers, fission, an edge
+            across calls held on chip (the carry resident between calls),
+            cascades beside staged or DDR edges, a DDR
+            edge's chosen depth, matching steps that are not consecutive, or
             an edge the composer does not build as its kind (``admits``). An edge out of a buffer steps past
             the region, a DDR edge or the host also read keeps its drain to
             host (a tee, ``Fusion.kept``).
+        ValueError: An edge across calls names a buffer the recording does
+            not carry, or one other than its consumer reads.
     """
     for kind, kept in (
         (
@@ -382,7 +421,6 @@ def composed(
     tunables: dict[int, dict[str, Any]] = {}
     fused: list[Fusion] = []
     taken: set[int] = set()
-    conflicts = _pack_conflicts(recording)
     readers, _ = recording.users()
     # The steps of the configurations concurrent under each id, run as one pack.
     at_once: dict[int, set[int]] = {}
@@ -417,20 +455,27 @@ def composed(
                 if root.concurrent is not None:
                     at_once.setdefault(root.concurrent, set()).update(match)
             continue
-        kinds = {e.kind for e in root.edges} if isinstance(root, Region) else set()
         if (
             not isinstance(root, Region)
             or not all(isinstance(part, Member) for part in root.parts)
             or root.inflows
             or any(m.part is not None for m in root.steps())
-            or any(e.producer == e.consumer for e in root.edges)
         ):
             raise NotImplementedError(
                 f"building {entry} is not built yet: the composer builds a "
-                f"region of steps with no inflow or self-loop"
+                f"region of steps with no inflow"
             )
+        across = [e for e in root.edges if e.across_calls]
+        resident = [e for e in across if e.kind is not EdgeKind.DDR]
+        if resident:
+            raise NotImplementedError(
+                f"building {entry} is not built yet: {resident[0]} holds what one "
+                f"call carries to the next on chip, resident between calls"
+            )
+        within = [e for e in root.edges if not e.across_calls]
+        kinds = {e.kind for e in within}
         chosen = root.step_phases()
-        phased = any(e.kind is EdgeKind.DDR for e in root.edges) or chosen is not None
+        phased = any(e.kind is EdgeKind.DDR for e in within) or chosen is not None
         plan = root.runtime or RuntimePlan()
         # One task group: every task issued at once, then each awaited. In one
         # phase a barrier and per-channel awaits are the same awaits.
@@ -469,8 +514,11 @@ def composed(
             raise NotImplementedError(
                 f"building {entry} is not built yet: a DDR edge's chosen depth"
             )
-        on_chip = [e for e in root.edges if e.kind is not EdgeKind.DDR]
-        through_memory = [e for e in root.edges if e.kind is EdgeKind.DDR]
+        on_chip = [e for e in within if e.kind is not EdgeKind.DDR]
+        through_memory = [e for e in within if e.kind is EdgeKind.DDR]
+        carried = set(recording.feedback) | {
+            h.ref().root for _, h in recording.states.values()
+        }
         for match in recording.occurrences(entry):
             if taken & set(match):
                 continue
@@ -479,17 +527,28 @@ def composed(
                     f"building a region of steps {match}, which are not "
                     f"consecutive, is not built yet"
                 )
-            joined = {(match[e.producer], match[e.consumer]) for e in root.edges}
-            if any(
-                (a, b) in conflicts and (a, b) not in joined
-                for a in match
-                for b in match
-                if a < b
-            ):
-                raise NotImplementedError(
-                    f"building steps {match} at once, which depend through memory "
-                    f"with no edge between them, is not built yet"
+            # Held in host memory, a carry across calls is the recording's own
+            # round trip of a carried buffer: the step reads what the call
+            # before wrote, as it does with no edge.
+            for e in across:
+                made, read = (
+                    {
+                        ref.root
+                        for ref, b in zip(step.refs(), step.op.buffers)
+                        if b.name == name
+                    }
+                    for step, name in (
+                        (recording.steps[match[e.producer]], e.output),
+                        (recording.steps[match[e.consumer]], e.input),
+                    )
                 )
+                if made != read or not made <= carried:
+                    raise ValueError(
+                        f"{e} carries {sorted(made)} into the next call, which "
+                        f"reads {sorted(read)}: a carry across calls is a buffer "
+                        f"the recording carries, read where it was written"
+                    )
+            ordered = memory_waits(recording, match, root.edges)
             kept: list[tuple[int, str]] = []
             for e in on_chip:
                 made = recording.steps[match[e.producer]]
@@ -511,6 +570,20 @@ def composed(
                     recording.steps[match[i]].op.resolved()
                     for i in (e.producer, e.consumer)
                 )
+                # Steps on one core meet lane by lane, or the consumer runs
+                # spliced into the producer's cores, and a cascade into or out
+                # of such a core runs core to core: the composer's to say.
+                grouped = {s for group in root.workers for s in group}
+                if (
+                    e.kind is EdgeKind.STREAM
+                    and any(
+                        {e.producer, e.consumer} <= set(group) for group in root.workers
+                    )
+                ) or (
+                    e.kind is EdgeKind.CASCADE
+                    and bool({e.producer, e.consumer} & grouped)
+                ):
+                    continue
                 built = admits(p, e.output, c, e.input)
                 if built is None or (
                     e.kind in (EdgeKind.STREAM, EdgeKind.CASCADE)
@@ -535,7 +608,7 @@ def composed(
                                 if EdgeKind.STAGED in kinds
                                 else FusionKind.STREAM
                             )
-                            if kinds
+                            if kinds or ordered
                             else FusionKind.PACK
                         ),
                         match,
@@ -554,11 +627,14 @@ def composed(
                             )
                             for e in on_chip
                         ),
-                        phased=phased,
+                        phased=phased or bool(ordered),
                         kept=tuple(kept),
-                        waits=tuple(
-                            (match[e.producer], match[e.consumer])
-                            for e in through_memory
+                        waits=(
+                            *(
+                                (match[e.producer], match[e.consumer])
+                                for e in through_memory
+                            ),
+                            *ordered,
                         ),
                         workers=tuple(
                             tuple(match[i] for i in group) for group in root.workers

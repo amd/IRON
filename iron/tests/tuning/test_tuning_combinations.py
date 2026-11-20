@@ -11,6 +11,7 @@ from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement
 from iron.common.graph.sdf import analyze
 from iron.common.image.step import HandOff
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     all_combinations,
     combination_toy,
@@ -23,6 +24,33 @@ from iron.tune.search import check, fit, search
 
 COMBOS = all_combinations()
 AXES = ("shape", "role", "held", "depth", "rate", "size")
+
+# Each device's combos the composer builds bit-identical, or that fit refuses
+# below the minimum, there; npu1's wait on host 203.
+_BUILT_COMBOS = {
+    "npu1": set(),
+    "npu2": {
+        (HandOff.RATIO, "chain", "memtile", "min_minus_one", "same", "recorded"),
+        (HandOff.SLICES, "chain", "memtile", "knee", "different", "smaller"),
+        (HandOff.JOIN, "diamond", "memtile", "min", "same", "recorded"),
+        (HandOff.LAYOUT, "diamond", "memtile", "more", "same", "recorded"),
+        (
+            HandOff.BROADCAST,
+            "fan_in",
+            "memtile",
+            "min_minus_one",
+            "different",
+            "recorded",
+        ),
+        (HandOff.EQUAL, "fan_out", "memtile", "min", "different", "smaller"),
+        (HandOff.EQUAL, "skip", "memtile", "min_minus_one", "same", "recorded"),
+        (HandOff.SPLIT, "through_memory", "memtile", "min", "same", "recorded"),
+        *(
+            (shape, "feedback", "l1", "min_minus_one", "same", "recorded")
+            for shape in (HandOff.EQUAL, HandOff.JOIN, HandOff.SLICES, HandOff.SPLIT)
+        ),
+    },
+}
 
 
 def _combo_id(combo: tuple) -> str:
@@ -123,8 +151,20 @@ def test_each_toy_round_trips_and_is_reached_by_candidate_edits(
     assert reached.entries() == [entry]
 
 
-@unbuilt
-@pytest.mark.parametrize("combo", COMBOS, ids=_combo_id)
+@pytest.mark.parametrize(
+    ("device", "combo"),
+    [
+        pytest.param(
+            name,
+            combo,
+            id=f"device_{name}-{_combo_id(combo)}",
+            marks=() if combo in _BUILT_COMBOS[name] else unbuilt,
+        )
+        for name in sorted(DEVICES)
+        for combo in COMBOS
+    ],
+    indirect=["device"],
+)
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(combo, device):
     """Each toy, at its depth resolved from the analysis, is bit-identical to the steps run apart; below the minimum it is refused.
@@ -136,7 +176,14 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(combo, dev
     """
     shape, role, held, depth, rate, size = combo
     _, recording, region, index = combination_toy(device, *combo)
-    analysis = analyze(region, recording, device)
+    # A bounded toy runs at the most its per-call value may be.
+    call = Timed(
+        recording,
+        values={
+            v.name: limit.hi - 1 for v, limit in zip(recording.values, recording.limits)
+        },
+    )
+    analysis = analyze(region, recording, device, call.values)
     edge = region.edges[index]
     value = depth_from_bounds(
         depth, analysis.min_depth[edge], analysis.knee_depth[edge]
@@ -144,14 +191,14 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(combo, dev
     resolved = with_resolved_depth(region, index, value)
     profile = Profile()
     profile.add_entry(Entry(resolved))
-    verdict = fit(profile, [Timed(recording)], device)
+    verdict = fit(profile, [call], device)
     if depth == "min_minus_one":
         assert not verdict.ok
         assert verdict.stage == "analysis"
         return
     assert verdict.ok, verdict.why
     base = Profile()
-    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
+    result = check(profile, base, [call], device, Refinement.EXACT)
     assert result.ok, result.why
 
 

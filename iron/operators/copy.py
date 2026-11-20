@@ -729,11 +729,9 @@ class Copy(Operator):
         return gcd(*pieces, *self._row_shares())
 
     def build(self) -> Built:
-        outs = []
-        for cons in self.x.fifos(self.x.depth):
-            fifo_out = cons.forward(depth=self.y.depth)
-            outs.append(fifo_out.cons())
-        self.y.bind(outs)
+        self.y.bind(
+            [cons.forward(depth=self.y.depth) for cons in self.x.fifos(self.x.depth)]
+        )
         return Built([])
 
     def compatible(self) -> None:

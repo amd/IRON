@@ -98,6 +98,35 @@ def test_a_build_computing_something_else_is_worse_against_the_reference(device)
     assert "out is worse" in (result.why or "")
 
 
+def test_a_base_call_reading_an_input_its_call_does_not_give_is_refused(device):
+    """A base call of another version, reading ``bias``, which the chain does not give, is refused before any build.
+
+    Base calls pair with calls by position, so their inputs must still line
+    up by name.
+    """
+    recording, _ = chain()
+    add = ElementwiseAdd(size=256, num_aie_columns=1, tile_size=256)
+    norm = RMSNorm(rows=1, tile_size=256, num_aie_columns=1)
+    last = ElementwiseMul(size=256, num_aie_columns=1, tile_size=256)
+    other = Recording.of_steps(
+        "toy_chain_renamed",
+        sequences.steps(
+            (add, "a", "b", "h"), (norm, "h", "n"), (last, "n", "bias", "out")
+        ),
+        ["a", "b", "bias"],
+        ["out"],
+    )
+    with pytest.raises(ValueError, match="does not give it bias"):
+        check(
+            Profile(),
+            Profile(),
+            [Timed(recording)],
+            device,
+            Refinement.NO_WORSE,
+            base_calls=[Timed(other)],
+        )
+
+
 def test_a_build_measured_against_itself_takes_about_as_long(device):
     """The same build timed in pairs against itself: the median paired ratio is near one."""
     recording, _ = chain()

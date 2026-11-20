@@ -26,6 +26,7 @@ from iron.common.declare.composition import (
 )
 from iron.common.declare.composition import Edge as CompositionEdge
 from iron.common.graph.record import Recording
+from iron.common.image.step import EdgeKind
 from iron.operators import (
     AXPY,
     GEMM,
@@ -118,6 +119,31 @@ def prefill_attention_ops(
     return qk, add_mask, softmax, pv
 
 
+def prefill_scores_recording(
+    name: str, qk: GEMM, add_mask: ElementwiseAdd, softmax: Softmax
+) -> Recording:
+    """Return the recording of prefill's graph up to the softmax: ``Q K^T -> + causal mask -> Softmax``."""
+    steps = sequences.steps(
+        (qk, "Q", "Kt", "scores"),
+        (add_mask, "scores", "mask", "masked"),
+        (softmax, "masked", "p"),
+    )
+    return Recording.of_steps(name, steps, ["Q", "Kt", "mask"], ["p"])
+
+
+def prefill_scores_region(
+    qk: GEMM, add_mask: ElementwiseAdd, softmax: Softmax
+) -> Region:
+    """Return ``prefill_scores_recording``'s steps as one region: QK^T's column halves staged into the mask add's rows, which stream into the softmax."""
+    return Region(
+        parts=(member(qk), member(add_mask), member(softmax)),
+        edges=(
+            CompositionEdge(0, "C", 1, "a", kind=EdgeKind.STAGED),
+            CompositionEdge(1, "y", 2, "x"),
+        ),
+    )
+
+
 def prefill_attention_recording(
     name: str, qk: GEMM, add_mask: ElementwiseAdd, softmax: Softmax, pv: GEMM
 ) -> Recording:
@@ -190,9 +216,9 @@ def axpy_operator(
 
 
 def axpy_operator_recording(name: str, axpy: AXPY) -> Recording:
-    """Return the recording of ``axpy`` alone: ``out = scalar_factor * a + b``."""
-    steps = sequences.steps((axpy, "a", "b", "out"))
-    return Recording.of_steps(name, steps, ["a", "b"], ["out"])
+    """Return the recording of ``axpy`` alone on the graph's ``x`` and ``y``: ``out = scalar_factor * x + y``."""
+    steps = sequences.steps((axpy, "x", "y", "out"))
+    return Recording.of_steps(name, steps, ["x", "y"], ["out"])
 
 
 # ----------------------------------------------------------------- two actors, one core
@@ -437,6 +463,73 @@ def cascade_reducer_region(recording: Recording) -> Region:
     for index, edge in enumerate(region.edges):
         region = region.held(index, Hold.CASCADE if edge.input == "a" else Hold.L1)
     return region
+
+
+def partial_read_twice(name: str, M: int, K: int) -> tuple[Recording, Region]:
+    """Return two ``GEMV`` partials summed by an add, the first also read by a ``SiLU``, and its region.
+
+    The region carries the first partial to the add on the cascade and to
+    the ``SiLU`` by a stream; the add runs on the second partial's core
+    (held in L1).
+    """
+    first, second = gemv_k_split_partials(M, K, 2)
+    add = ElementwiseAdd(size=M, tile_size=M)
+    silu = SiLU(size=M, tile_size=M)
+    recording = Recording.of_steps(
+        name,
+        sequences.steps(
+            (first, "A0", "B0", "p0"),
+            (second, "A1", "B1", "p1"),
+            (add, "p0", "p1", "s"),
+            (silu, "p0", "t"),
+        ),
+        ["A0", "B0", "A1", "B1"],
+        ["s", "t"],
+    )
+    region = Region(
+        tuple(member(step.op) for step in recording.steps),
+        (
+            CompositionEdge(0, "C", 2, "a", kind=EdgeKind.CASCADE),
+            CompositionEdge(0, "C", 3, "x"),
+            CompositionEdge(1, "C", 2, "b"),
+        ),
+        workers=((1, 2),),
+    )
+    return recording, region
+
+
+def gemm_silu_splice(
+    name: str, M: int = 64, N: int = 128, tile: int = 32
+) -> tuple[Recording, Region]:
+    """Return a ``GEMM`` into a ``SiLU`` on its cores, and its region.
+
+    One column, ``tile`` by ``tile`` tiles: each core writes several a
+    call, which a memtile joins into the GEMM's output lanes. On one worker
+    the SiLU is spliced into the GEMM's cores, running on each core's tile.
+    """
+    gemm = GEMM(
+        M=M,
+        K=64,
+        N=N,
+        tile_m=tile,
+        tile_n=tile,
+        num_aie_columns=1,
+        b_col_maj=True,
+        precision=Precision.MEDIUM,
+    )
+    silu = SiLU(size=M * N, tile_size=tile * tile)
+    recording = Recording.of_steps(
+        name,
+        sequences.steps((gemm, "A", "B", "c"), (silu, "c", "out")),
+        ["A", "B"],
+        ["out"],
+    )
+    region = Region(
+        (member(gemm), member(silu)),
+        (CompositionEdge(0, "C", 1, "x"),),
+        workers=((0, 1),),
+    )
+    return recording, region
 
 
 # ----------------------------------------------------------------- region shape and schedule

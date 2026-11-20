@@ -10,13 +10,21 @@ the NPU; a test is ``@unbuilt`` while what it calls raises ``NotImplementedError
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
+from aie.dialects.aie import WireBundle, get_target_model
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement, Region
+from iron.common.design import OperatorDesign
+from iron.common.image.compose import SHIM_SHORT, fits, transported
+from iron.common.image.step import Edge, Fusion, FusionKind
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     chain,
     fan_in_gate_up_mul,
+    fan_out_norm_projections,
     fan_out_norm_qkv,
     kv_write_then_read,
     scan_with_state_output,
@@ -27,7 +35,7 @@ from iron.tests.support.toys_edges import (
 )
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import candidates, check, fit, measure, search
+from iron.tune.search import BUILT_PLACERS, candidates, check, fit, measure, search
 
 
 def _outside_reader_window():
@@ -67,14 +75,21 @@ def test_window_entry_round_trips_through_the_profile(window, tmp_path, device):
 
 
 # SelectiveScan's lanes write ``y`` by head, the multiply reads it by row: a
-# restage the composer does not build.
+# round read off a memtile in the multiply's order, built on npu2; npu1's
+# waits on host 203.
 BUILT_WINDOWS = [
-    pytest.param(w, marks=unbuilt) if w == "several_outputs" else w
+    pytest.param(
+        name,
+        w,
+        id=f"device_{name}-window_{w}",
+        marks=unbuilt if w == "several_outputs" and name == "npu1" else (),
+    )
+    for name in sorted(DEVICES)
     for w in sorted(WINDOWS)
 ]
 
 
-@pytest.mark.parametrize("window", BUILT_WINDOWS)
+@pytest.mark.parametrize(("device", "window"), BUILT_WINDOWS, indirect=["device"])
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_window_is_bit_identical_to_its_steps_run_apart(window, device):
     """A window's output is bit-identical to the same steps run apart, at its recorded size."""
@@ -111,7 +126,7 @@ def test_window_is_bit_identical_on_npu1_full_elf_and_per_step(device):
 
 
 @pytest.mark.extensive
-@pytest.mark.parametrize("window", BUILT_WINDOWS)
+@pytest.mark.parametrize(("device", "window"), BUILT_WINDOWS, indirect=["device"])
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_tuner_proposes_and_keeps_a_window_on_its_own_toy(window, device):
     """The tuner, run on the window's toy alone, keeps what is at least as fast as the window, where the window pays."""
@@ -143,16 +158,59 @@ def test_a_window_over_the_arrays_cores_is_refused_before_any_build(device):
     assert "core" in (result.why or "")
 
 
-@unbuilt
-def test_a_window_over_the_shim_channels_is_refused_before_any_build(device):
-    """A window whose members fit the array's cores but outrun its shim channels is refused before any build."""
-    wide_recording, wide_region = fan_out_norm_qkv(columns=(device.cols,) * 3)
+def test_a_window_whose_drains_outrun_the_shim_joins_them_in_memtiles(device):
+    """The norm fanned into Q, K and V at the array's full width drains more lanes than the shim receives, its fills shared by packets or not.
+
+    Its build joins each run of a projection's lanes in a memtile into one
+    host lane (``Fusion.drains``), and so it fits.
+    """
+    recording, region = fan_out_norm_qkv(columns=(device.cols,) * 3)
+    designs = [OperatorDesign(step.op.resolved()) for step in recording.steps]
+    fusion = Fusion(
+        FusionKind.STREAM, (0, 1, 2, 3), tuple(Edge(0, "y", c, "B") for c in (1, 2, 3))
+    )
+    members = {str(j): d for j, d in enumerate(designs)}
+    for packets in (False, True):
+        unjoined = dataclasses.replace(fusion, packets=packets, drains=1)
+        assert SHIM_SHORT in (fits(members, fusion=unjoined) or "")
+    assert transported(fusion, designs).drains > 1
     profile = Profile()
-    profile.add_entry(Entry(wide_region))
-    result = fit(profile, [Timed(wide_recording)], device)
+    profile.add_entry(Entry(region))
+    result = fit(profile, [Timed(recording)], device)
+    assert result.ok, result.why
+
+
+def test_a_window_draining_more_outputs_than_the_shim_receives_is_refused(device):
+    """A norm fanned into one more one-column projection than the shim has receiving channels is refused by the placer, before any build.
+
+    Each projection drains an output of its own, and a drain join joins only
+    one output's lanes, so no transport fits it under any placer the build
+    takes.
+    """
+    model = get_target_model(device.resolve())
+    row = next(r for r in range(model.rows()) if model.is_shim_noc_tile(0, r))
+    receives = sum(
+        model.get_num_dest_shim_mux_connections(c, row, WireBundle.DMA)
+        for c in range(model.columns())
+        if model.is_shim_noc_tile(c, row)
+    )
+    recording, region = fan_out_norm_projections(receives + 1)
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    result = fit(profile, [Timed(recording)], device, placements=tuple(BUILT_PLACERS))
     assert not result.ok
-    assert result.stage == "counts"
-    assert "channel" in (result.why or "")
+    assert result.stage == "placer"
+    assert "ShimNOCTile" in (result.why or "")
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_window_whose_drains_outrun_the_shim_is_bit_identical(device):
+    """The full-width norm -> Q, K, V window, its drains joined in memtiles, is bit-identical to its steps run apart."""
+    recording, region = fan_out_norm_qkv(columns=(device.cols,) * 3)
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
 
 
 @unbuilt

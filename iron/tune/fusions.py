@@ -56,9 +56,11 @@ from iron.common.graph.compiled import (
 from iron.common.graph.fusion import admits, candidates
 from iron.common.graph.record import Recording
 from iron.common.image.compose import (
+    SEQUENTIAL,
     SHIM_SHORT,
     Packing,
     fused_configuration,
+    transports,
     unvalued,
 )
 from iron.common.image.packaging import plan
@@ -333,14 +335,15 @@ def _composed_module(
     cascades: Sequence[tuple[int, str, int, str]] = (),
     packets: bool = False,
     phases: Sequence[int] | None = None,
+    drains: int = 1,
 ) -> ir.Module:
     """Return the one module ``fits`` places ``designs`` as, built the same way it does.
 
     Plain (``configuration``), or, given ``kind``, as ``kind``'s own fusion wires
     ``edges`` (and ``cascades`` over the cascade), each output ``kept`` drained
     to the host too, each of ``waits`` a phase apart, each member at its
-    chosen ``phases``, its host fills packet flows given ``packets``
-    (``fused_configuration``,
+    chosen ``phases``, its host fills packet flows given ``packets`` and its
+    drains joined in runs of ``drains`` (``fused_configuration``,
     which also tells a pack's or a stream's own array per member, fuse=True, from a
     merge's shared one). Composing is cheap next to
     running the placement pipeline on the result, so a group-fit verdict's cache key is
@@ -369,6 +372,7 @@ def _composed_module(
             workers=tuple(workers),
             packets=packets,
             phases=None if phases is None else tuple(phases),
+            drains=drains,
         )
         configured, _ = fused_configuration("fused", fusion, list(designs.values()))
     return Program.compose([configured], entry=configured.runtimes[0]).resolve_program()
@@ -392,18 +396,20 @@ def group_fit_verdict(
     cascades: Sequence[tuple[int, str, int, str]] = (),
     phases: Sequence[int] | None = None,
     packet_fills: bool = True,
+    placer: str = SEQUENTIAL,
 ) -> str | None:
-    """Why the placer refuses ``ops``' resolved designs sharing one device configuration (plain, or as ``kind``'s fusion wires ``edges``).
+    """Why ``placer`` refuses ``ops``' resolved designs sharing one device configuration (plain, or as ``kind``'s fusion wires ``edges``).
 
     Each output ``kept`` drains to the host too (``Fusion.kept``), each
     output ``depths`` names is built at that depth, and each of ``waits``
     runs its consumer a phase after its producer (``Fusion.waits``); each of
     ``workers`` shares its members' cores (``Fusion.workers``); each of
     ``cascades`` carries an output to an input over the cascade. A fusion whose
-    circuits run the shim's DMA channels short is placed again with its host
-    fills as packet flows, as its build takes them (``compose.transported``),
-    unless ``packet_fills`` is False: a search pruning on "never faster
-    narrower" holds that of circuits, not of fills sharing a channel. ``phases`` are its members' chosen
+    circuits run the shim's DMA channels short is placed again as its build
+    would take it (``compose.transports``): its host fills as packet flows,
+    its drains joined in memtiles, unless ``packet_fills`` is False: a
+    search pruning on "never faster narrower" holds that of circuits, not of
+    fills sharing a channel. ``phases`` are its members' chosen
     phases (``Fusion.phases``).
 
     Or None if they co-reside; kept under ``fit_cache``, keyed on the composed module's
@@ -417,8 +423,14 @@ def group_fit_verdict(
         NotImplementedError: Composing them is not built yet.
     """
     refusal = None
-    # A fusion short of shim channels by circuits is refused for why packets are.
-    for packets in (False, True) if kind is not None and packet_fills else (False,):
+    # A fusion short of shim channels is retried as its build would be
+    # (``compose.transports``), and refused for why the last try is.
+    tries = (
+        transports([OperatorDesign(op.resolved()) for op in ops])
+        if kind is not None and packet_fills
+        else iter([(False, 1)])
+    )
+    for packets, drains in tries:
         found = _fit_record(
             ops,
             fit_cache,
@@ -431,14 +443,17 @@ def group_fit_verdict(
             cascades,
             packets,
             phases,
+            drains,
         )
         if isinstance(found, str):
             return found  # composing itself refused; no placement pass to cache
         text, record = found
+        if placer != SEQUENTIAL:
+            record = record.with_name(f"{record.name}-{placer}")
         if record.exists():
             verdict = record.read_text()
         else:
-            outcome, diagnostic = place(text)
+            outcome, diagnostic = place(text, placer)
             if outcome == "crash":
                 if ledger is not None:
                     dev = ops[0].dev
@@ -490,6 +505,7 @@ def _fit_record(
     cascades: Sequence[tuple[int, str, int, str]] = (),
     packets: bool = False,
     phases: Sequence[int] | None = None,
+    drains: int = 1,
 ) -> tuple[str, Path] | str:
     """``ops`` composed into one module, its text and its verdict's file under ``fit_cache``; or why composing them refused.
 
@@ -509,6 +525,7 @@ def _fit_record(
             cascades,
             packets,
             phases,
+            drains,
         )
     except NotImplementedError:
         raise

@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import math
 import tempfile
 from pathlib import Path
 
+import aie.utils as aie_utils
+from aie.helpers.npdtypes import np_ndarray_type_get_shape
 from aie.iron.algorithms.kernel_design import KernelDesign
 from aie.iron.kernel import ExternalFunction
 
@@ -19,22 +22,51 @@ TRACE_SIZE = 16384
 TRACE_BYTES_PER_INTERVAL = 512
 TRACE_MAX_BYTES = 4 << 20
 
-_traced: dict[str, int] = {}
+_traced: dict[tuple[str, tuple], int] = {}
 
 
-def kernel_cycles(fn: ExternalFunction) -> int:
-    """Return ``fn``'s fewest cycles a call on one core, ``KERNEL_CALLS`` calls traced in one run (mlir-aie's ``KernelDesign.cycles_per_call``).
+def kernel_cycles(fn: ExternalFunction, scalars: tuple = ()) -> int:
+    """Return ``fn``'s fewest cycles a call on one core, its calls traced in one run (mlir-aie's ``KernelDesign.cycles_per_call``).
 
-    Kept per recipe for the process. The trace buffer doubles, up to
+    ``KERNEL_CALLS`` calls, or as many as its contract says make its output:
+    a kernel writing a slice of its output tile a call fills the tile, and
+    one writing it on its last call runs its required calls. Kept per
+    recipe and scalars for the process. The trace buffer doubles, up to
     ``TRACE_MAX_BYTES``, while the run fills it.
 
+    Args:
+        fn: The kernel.
+        scalars: The scalar arguments its contract leaves unbound, in
+            order, as its operator passes them (``Elementwise.scalars``).
+
     Raises:
+        NotImplementedError: The NPU it is built for (the current device) is
+            not the one attached, or none is: its cycles are traced on that
+            NPU alone.
         ValueError: The trace holds no whole call, or fills its largest buffer.
         RuntimeError: The run fails.
     """
-    if fn.recipe_key in _traced:
-        return _traced[fn.recipe_key]
-    harness = KernelDesign(fn, calls=KERNEL_CALLS)
+    key = (fn.recipe_key, scalars)
+    if key in _traced:
+        return _traced[key]
+    built_for = aie_utils.get_current_device(probe_runtime=False)
+    runtime = aie_utils.DefaultNPURuntime
+    attached = None if runtime is None else runtime.device().resolve().name
+    if built_for is not None and built_for.resolve().name != attached:
+        raise NotImplementedError(
+            f"tracing {fn.name}'s cycles needs the {built_for.resolve().name} it "
+            f"is built for attached; this host has "
+            f"{attached or 'no NPU runtime'}"
+        )
+    contract = fn.contract
+    if contract.out_last:
+        calls = contract.required_calls
+    elif contract.out_offset is not None:
+        tile = fn.arg_types()[contract.out_index]
+        calls = math.prod(np_ndarray_type_get_shape(tile)) // contract.out_offset[1]
+    else:
+        calls = KERNEL_CALLS
+    harness = KernelDesign(fn, calls=calls, scalars=scalars)
     inputs = harness.sample_inputs()
     size = max(TRACE_SIZE, TRACE_BYTES_PER_INTERVAL * harness.traced_intervals())
     with tempfile.TemporaryDirectory() as scratch:
@@ -47,5 +79,5 @@ def kernel_cycles(fn: ExternalFunction) -> int:
             size = min(2 * size, TRACE_MAX_BYTES)
     if traced.untimed or traced.truncated or not traced.kernel:
         raise ValueError(f"{fn.name} ({fn.recipe_key}) not traced: {traced}")
-    _traced[fn.recipe_key] = min(traced.kernel)
-    return _traced[fn.recipe_key]
+    _traced[key] = min(traced.kernel)
+    return _traced[key]

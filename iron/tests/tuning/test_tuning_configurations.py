@@ -435,13 +435,20 @@ def test_residency_across_a_teardown_is_refused(device):
 
 
 def test_overlapping_columns_at_once_is_refused(device):
-    """Two configurations claiming overlapping columns while concurrent is refused before any build."""
-    gemv, silu, mul = gemv_silu_mul(M=256, cols=4, tile=64)
+    """Two configurations claiming overlapping columns while concurrent is refused before any build.
+
+    Each claims three quarters of the array's columns, so the two cannot be
+    disjoint, while each member fits its own claim.
+    """
+    gemv, silu, mul = gemv_silu_mul(M=256, cols=device.cols // 2, tile=64)
+    claimed = device.cols * 3 // 4
     left = Configuration(
-        parts=(Member(type(gemv), {"M": gemv.M, "K": gemv.K}),), columns=6, concurrent=1
+        parts=(Member(type(gemv), {"M": gemv.M, "K": gemv.K}),),
+        columns=claimed,
+        concurrent=1,
     )
     right = Configuration(
-        parts=(Member(type(mul), {"size": mul.size}),), columns=6, concurrent=1
+        parts=(Member(type(mul), {"size": mul.size}),), columns=claimed, concurrent=1
     )
     recording = _independent_pair_recording("config_overlapping_columns", gemv, mul)
     profile = Profile()

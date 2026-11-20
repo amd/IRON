@@ -6,11 +6,15 @@
 from __future__ import annotations
 
 import pytest
+from aie.dialects.aie import get_target_model
 
 from iron.common.declare.composition import Entry, Hold, Refinement
 from iron.common.declare.profile import Profile
+from iron.common.graph.sdf import analyze
+from iron.common.image.step import HandOff
 from iron.tests.support import toys_composition as toys
-from iron.tests.support.tuning import reached_by_candidates
+from iron.tests.support.tools import DEVICES
+from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import check, fit, measure, search
 
@@ -19,6 +23,36 @@ pytestmark = pytest.mark.usefixtures("device")
 M = 64
 GEMV_K = 256
 GEMM_M, GEMM_K, GEMM_N = 32, 512, 64
+
+
+def _chain_splits(name: str) -> list[int]:
+    """Return the splits, powers of two from 2, whose cascade chain the device's array holds: a path east and south."""
+    model = get_target_model(DEVICES[name]().resolve())
+    rows = sum(model.is_core_tile(0, row) for row in range(model.rows()))
+    reach = model.columns() + rows - 1
+    return [2**k for k in range(1, reach.bit_length()) if 2**k <= reach]
+
+
+# Each device's GEMM cascade reducers, by the splits its array chains.
+GEMM_CHAINS = [
+    pytest.param(name, splits, id=f"device_{name}-splits_{splits}")
+    for name in sorted(DEVICES)
+    for splits in _chain_splits(name)
+]
+
+# Where the GEMM cascade reducers place. On npu1 IRON composes them onto GEMM's
+# one-column array, where no placer lays out the cascades yet.
+_PLACES = {"npu1": False, "npu2": True}
+GEMM_FITS = [
+    pytest.param(
+        name,
+        splits,
+        id=f"device_{name}-splits_{splits}",
+        marks=() if _PLACES[name] else unbuilt,
+    )
+    for name in sorted(DEVICES)
+    for splits in _chain_splits(name)
+]
 
 PARTIALS = [
     pytest.param(lambda n: toys.gemv_k_split_partials(M, GEMV_K, n), id="gemv"),
@@ -84,6 +118,16 @@ def test_a_split_gemv_is_bit_identical_across_repeats_and_arrival_order(splits, 
         assert result.ok, result.why
 
 
+@pytest.mark.supported_devices("npu2")
+def test_a_partial_on_the_cascade_and_streamed_elsewhere_is_bit_identical(device):
+    """A partial the cascade carries to the add and a stream to a SiLU: the relay is one more reader of its lane."""
+    recording, region = toys.partial_read_twice("read_twice", M, GEMV_K)
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
 @pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("splits", [2, 4, 8])
@@ -130,3 +174,51 @@ def test_two_cascades_into_one_core_are_refused(device):
     verdict = fit(profile, [Timed(recording)], device)
     assert not verdict.ok and verdict.stage == "counts"
     assert "one cascade input" in (verdict.why or "")
+
+
+@pytest.mark.parametrize(("device", "splits"), GEMM_CHAINS, indirect=["device"])
+def test_the_gemm_cascade_reducer_runs_core_to_core(splits, device):
+    """Each add spliced into its partial's GEMM cores, the running sum carried on the cascade core to core: every edge meets as it is."""
+    recording = toys.reduction_recording(
+        f"gemm_cascade_{splits}",
+        toys.gemm_k_split_partials(GEMM_M, GEMM_K, GEMM_N, splits),
+    )
+    region = toys.cascade_reducer_region(recording)
+    analysis = analyze(region, recording, device)
+    assert analysis.why is None
+    assert all(analysis.hand_off[e] is HandOff.EQUAL for e in region.edges)
+
+
+@pytest.mark.parametrize(("device", "splits"), GEMM_FITS, indirect=["device"])
+def test_a_gemm_cascade_reducer_fits_by_the_annealing_placer(splits, device):
+    """The sequential placer, which never moves a placed cascade peer, refuses the chain; the annealing one the build falls back to places it.
+
+    So the fit takes it, where under the sequential placer alone it refuses.
+    """
+    recording = toys.reduction_recording(
+        f"gemm_fit_{splits}",
+        toys.gemm_k_split_partials(GEMM_M, GEMM_K, GEMM_N, splits),
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=toys.cascade_reducer_region(recording)))
+    verdict = fit(profile, [Timed(recording)], device)
+    assert verdict.ok, verdict.why
+    sequential = fit(profile, [Timed(recording)], device, placements=("sequential",))
+    assert not sequential.ok and sequential.stage == "placer"
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize(("device", "splits"), GEMM_CHAINS, indirect=["device"])
+def test_a_gemm_cascade_reducer_is_bit_identical_to_its_split_run_apart(splits, device):
+    """Each add on its partial's GEMM cores, the running sum on the cascade core to core, is bit for bit the split run apart.
+
+    It sums the recorded partials in the recorded order.
+    """
+    recording = toys.reduction_recording(
+        f"gemm_split_{splits}",
+        toys.gemm_k_split_partials(GEMM_M, GEMM_K, GEMM_N, splits),
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=toys.cascade_reducer_region(recording)))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why

@@ -24,10 +24,11 @@ from iron.common.graph.sdf import analyze
 from iron.common.image.step import EdgeKind
 from iron.operators import GEMM, GEMV, ElementwiseAdd, ElementwiseMul, Softmax
 from iron.tests.support import toys_composition as toys
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import unbuilt, waits_on_a_kernel
 from iron.tune.autotune import Timed
-from iron.tune.search import candidates, check, measure, search
+from iron.tune.search import candidates, check, fit, measure, search
 
 pytestmark = pytest.mark.usefixtures("device")
 
@@ -261,6 +262,43 @@ def test_decode_graph_holds_deep_cache_accuracy(position, device):
     assert result.ok, result.why
 
 
+# Where prefill's scores fit staged. npu1 builds GEMM on an array narrower than
+# the device, which a configuration beside another operator's does not take.
+_SCORES_FIT = [
+    pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
+    for name in sorted(DEVICES)
+]
+
+
+@pytest.mark.parametrize("device", _SCORES_FIT, indirect=True)
+def test_prefill_scores_stage_into_the_mask_add_and_fit(device):
+    """Prefill's float32 scores, QK^T's column halves, staged into the mask add's rows, which stream into the softmax: the region fits.
+
+    A memtile joins the halves and reads them out a row at a time.
+    """
+    qk, add_mask, softmax, _ = toys.prefill_attention_ops(
+        SEQ, KV_LEN, HEAD_DIM, scores=np.float32
+    )
+    recording = toys.prefill_scores_recording("prefill_scores", qk, add_mask, softmax)
+    profile = Profile()
+    profile.add_entry(Entry(root=toys.prefill_scores_region(qk, add_mask, softmax)))
+    result = fit(profile, [Timed(recording)], device)
+    assert result.ok, result.why
+
+
+@pytest.mark.supported_devices("npu2")
+def test_prefill_scores_staged_into_the_mask_add_are_bit_identical(device):
+    """The scores' restage moves the same float32 values the host round trip does: the region is bit-identical to its steps run apart."""
+    qk, add_mask, softmax, _ = toys.prefill_attention_ops(
+        SEQ, KV_LEN, HEAD_DIM, scores=np.float32
+    )
+    recording = toys.prefill_scores_recording("prefill_scores", qk, add_mask, softmax)
+    profile = Profile()
+    profile.add_entry(Entry(root=toys.prefill_scores_region(qk, add_mask, softmax)))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
 @pytest.mark.supported_devices("npu1", "npu2")
 @unbuilt
 def test_prefill_graph_is_no_worse_than_its_own_untuned_build(device):
@@ -321,7 +359,6 @@ def test_prefill_graph_is_no_worse_than_the_fused_mha_it_replaces(device):
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-@unbuilt
 def test_a_bf16_mul_then_add_hand_off_is_refused_against_the_fused_axpy(device):
     """``AXPY`` keeps ``scalar_factor * x`` at float32 before the add; the graph's bf16 ``mid`` is refused against it."""
     mul, add = toys.axpy_ops()
@@ -340,6 +377,7 @@ def test_a_bf16_mul_then_add_hand_off_is_refused_against_the_fused_axpy(device):
         base_calls=[Timed(operator_recording)],
     )
     assert not result.ok
+    assert "out is worse" in (result.why or "")
 
 
 @pytest.mark.extensive

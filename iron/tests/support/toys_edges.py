@@ -123,6 +123,29 @@ def fan_out_norm_qkv(columns=(1, 1, 1), size=256):
     return recording, region
 
 
+def fan_out_norm_projections(count, size=256):
+    """RMSNorm fanned into ``count`` one-column projections, each output drained on one lane of its own."""
+    norm = RMSNorm(rows=1, tile_size=size)
+    projections = [
+        GEMV(M=size // 4, K=size, feed_b=True, num_aie_columns=1) for _ in range(count)
+    ]
+    steps = sequences.steps(
+        (norm, "x", "n"),
+        *((p, f"A{i}", "n", f"o{i}") for i, p in enumerate(projections)),
+    )
+    recording = Recording.of_steps(
+        "toy_fan_out_wide",
+        steps,
+        ["x", *(f"A{i}" for i in range(count))],
+        [f"o{i}" for i in range(count)],
+    )
+    region = Region(
+        (member(norm), *(member(p) for p in projections)),
+        tuple(Edge(0, "y", i + 1, "B") for i in range(count)),
+    )
+    return recording, region
+
+
 def window_with_outside_reader(size=256):
     """Add -> RMSNorm -> GEMV -> Add: the first add's row is also the window's own second input and final residual.
 

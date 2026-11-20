@@ -173,6 +173,29 @@ class FinishStep:
     at: int
     binary: bool
 
+    @classmethod
+    def of(cls, consumer: Elementwise, at: int) -> FinishStep:
+        """Return ``consumer`` as a step run on a producer's tile held at its input ``at``: its keywords but its shape and grid."""
+        dims = tuple(
+            sorted(
+                (n, vars(consumer)[n])
+                for n, p in type(consumer).declaration.params.items()
+                if p.init
+                and n
+                not in (
+                    "size",
+                    "tile_size",
+                    "num_aie_columns",
+                    "num_channels",
+                    "finish",
+                    "uses_extra",
+                    "rides",
+                )
+                and vars(consumer)[n] is not None
+            )
+        )
+        return cls(type(consumer), dims, at, len(consumer.inputs) > 1)
+
     def consumer_at(self, line: int, dev, elements: int | None = None) -> Elementwise:
         """Return ``consumer``, resolved for ``dev``, whose cores run a ``line``-element tile matching the producer's own.
 
@@ -239,25 +262,7 @@ class Finishing(Operator):
             if self.rides or not self._can_ride():
                 return None
             rides = True
-        dims = tuple(
-            sorted(
-                (n, vars(consumer)[n])
-                for n, p in type(consumer).declaration.params.items()
-                if p.init
-                and n
-                not in (
-                    "size",
-                    "tile_size",
-                    "num_aie_columns",
-                    "num_channels",
-                    "finish",
-                    "uses_extra",
-                    "rides",
-                )
-                and vars(consumer)[n] is not None
-            )
-        )
-        step = FinishStep(type(consumer), dims, at, binary)
+        step = FinishStep.of(consumer, at)
         return self.replace(
             rides=self.rides or rides,
             finish=self.finish + (step,),

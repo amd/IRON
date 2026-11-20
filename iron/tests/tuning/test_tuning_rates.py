@@ -98,7 +98,7 @@ def test_per_call_bounded_token_count_is_a_valid_kv_length(device):
         ),
         (Edge(0, "C", 1, "x"),),
     )
-    analysis = analyze(region, recording, device)
+    analysis = analyze(region, recording, device, {"n": 16})
     assert analysis.consistent
     assert analysis.repetition == {0: 1, 1: 16}
 
