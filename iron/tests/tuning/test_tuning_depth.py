@@ -92,20 +92,49 @@ _BUILT_MINIMUMS = {
 }
 
 
+# Each device's restaged minimums the composer builds bit-identical there
+# beyond those; npu1's wait on host 203.
+_RESTAGED_MINIMUMS = {
+    "npu1": set(),
+    "npu2": {
+        *(
+            (role, shape, rate)
+            for role in ("chain", "fan_in", "diamond")
+            for shape, rate in (
+                (HandOff.SPLIT, "different"),
+                (HandOff.RATIO, "same"),
+                (HandOff.RATIO, "different"),
+                (HandOff.BROADCAST, "different"),
+                (HandOff.SLICES, "different"),
+            )
+        ),
+        ("skip", HandOff.BROADCAST, "different"),
+        ("skip", HandOff.SLICES, "different"),
+    },
+}
+
+
 @pytest.mark.parametrize(
-    ("role", "shape", "rate"),
+    ("device", "role", "shape", "rate"),
     [
         pytest.param(
+            name,
             role,
             shape,
             rate,
-            id=f"role_{role}-shape_{shape}-rate_{rate}",
-            marks=() if (role, shape, rate) in _BUILT_MINIMUMS else unbuilt,
+            id=f"device_{name}-role_{role}-shape_{shape}-rate_{rate}",
+            marks=(
+                ()
+                if (role, shape, rate) in _BUILT_MINIMUMS | _RESTAGED_MINIMUMS[name]
+                else unbuilt
+            ),
         )
+        for name in sorted(DEVICES)
         for role in toys_edges.ROLES
         for shape in toys_edges.SHAPES
         for rate in toys_edges.RATES
     ],
+    indirect=["device"],
 )
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_minimum_depth_runs_bit_identical(role, shape, rate, device):

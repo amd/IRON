@@ -20,6 +20,7 @@ from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement, Region
 from iron.common.graph.sdf import analyze
 from iron.common.image.step import EdgeKind, HandOff
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     broadcast_weight_to_columns,
     fan_out_norm_qkv,
@@ -114,13 +115,33 @@ def test_the_analysis_derives_the_named_hand_off(shape, device):
     assert all(analysis.hand_off[edge] is _REALIZES[shape] for edge in region.edges)
 
 
+# Each device's shapes the composer builds bit-identical there; npu1's
+# restages wait on host 203.
+_BUILT = {
+    "npu1": {"broadcast", "join_in_pairs"},
+    "npu2": {
+        "broadcast",
+        "join_in_pairs",
+        "ratio_three_into_two",
+        "ratio_two_into_three",
+        "split_in_two",
+    },
+}
+
+
 @pytest.mark.parametrize(
-    "shape",
+    ("device", "shape"),
     [
-        # The rest the composer does not build yet.
-        s if s in ("broadcast", "join_in_pairs") else pytest.param(s, marks=unbuilt)
+        pytest.param(
+            name,
+            s,
+            id=f"device_{name}-shape_{s}",
+            marks=() if s in _BUILT[name] else unbuilt,
+        )
+        for name in sorted(DEVICES)
         for s in sorted(SHAPES)
     ],
+    indirect=["device"],
 )
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_a_hand_off_shape_is_bit_identical_to_the_steps_run_apart(shape, device):
@@ -133,7 +154,18 @@ def test_a_hand_off_shape_is_bit_identical_to_the_steps_run_apart(shape, device)
     assert result.ok, result.why
 
 
-@unbuilt
+@pytest.mark.parametrize(
+    "device",
+    [
+        pytest.param(
+            name,
+            id=f"device_{name}",
+            marks=() if "split_in_two" in _BUILT[name] else unbuilt,
+        )
+        for name in sorted(DEVICES)
+    ],
+    indirect=True,
+)
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_a_split_into_every_column_builds_correctly_or_is_refused_statically_never_hangs(
     device,
