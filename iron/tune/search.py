@@ -2121,7 +2121,7 @@ def _restaged_on_cores(
 
     Raises:
         NotImplementedError: What ``Staging.held_fifos`` or the composer
-            does not build: a restage ``Staging`` does not plan, a round
+            does not build: a slice, a restage ``Staging`` does not plan, a round
             read in another order than it is joined, a slot of several
             objects, or an output also read elsewhere.
     """
@@ -2140,6 +2140,12 @@ def _restaged_on_cores(
         b for b in derivation.recorded[p][0].op.buffers if b.name == edge.output
     ]
     (sink,) = [b for b in derivation.recorded[c][0].op.buffers if b.name == edge.input]
+    if (c, edge.input) in {(k, name) for k, name, _ in derivation.slices}:
+        raise NotImplementedError(
+            f"{edge}: a slice held in L1 is not built yet: a reader of any slice "
+            f"but the leading one reads its producer's pool at an offset, a view "
+            f"no fifo takes yet"
+        )
     try:
         with set_current_device(derivation.device):
             staging = Staging(source, sink, held=True)

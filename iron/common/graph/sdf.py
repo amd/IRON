@@ -1196,9 +1196,10 @@ class Derivation:
         order, so every one up to the last it needs), writes the object, and
         frees what no later object of its lane needs. A consumer reading part
         of the producer's elements (a slice) is passed only the objects that
-        hold it. A memtile must do that much for any restaging; IRON's ``Staging`` plans the joins, splits and
-        joins split again among them, and whether IRON builds one is a
-        capability of its own. The producer's channels into the memtile are the edge's depth.
+        hold it. A memtile must do that much for any restaging; IRON's
+        ``Staging`` plans the joins, splits and joins split again among them,
+        and whether IRON builds one is a capability of its own. The
+        producer's channels into the memtile are the edge's depth.
         """
         programs, _, writes, reads, _ = built
         writer, readers = ends
