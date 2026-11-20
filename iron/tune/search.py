@@ -18,6 +18,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import time
+from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
@@ -174,7 +175,6 @@ NO_WORSE_QUANTILE = 0.999
 # What candidates does not propose yet, named where it stops.
 _NOT_GENERATED = (
     "regions of steps that are not consecutive",
-    "cascade edges",
     "inflows",
     "runtime plans",
     "nested regions",
@@ -520,11 +520,15 @@ def fit(
     three stages in turn. The counts are
     lower bounds from the target model, so they never refuse what fits: the
     cores its steps record (steps sharing a worker counted once, at the most
-    any of them takes), and each edge held at a chosen depth against one
-    tile's memory, and through a memtile against its buffer descriptors. The
+    any of them takes), each edge held at a chosen depth against one
+    tile's memory, and through a memtile against its buffer descriptors, and
+    its cascades: each from one core to another, at most one into and one
+    out of a core, and a chain no longer than a path east and south across
+    the array. The
     dataflow analysis then finds whether the region's steps are convex (no
     step outside it on a path between two of them), whether it balances, whether each
-    stream edge's lanes meet as they are, and whether it runs at its chosen
+    stream edge's lanes meet as they are (a cascade's one to one), and
+    whether it runs at its chosen
     depths, the rest at their minimum. The placer last places the composed
     module, where the composer builds the region as IRON's fusions do.
 
@@ -544,7 +548,7 @@ def fit(
             images held at once, a profile's schedules, variants, bindings,
             fusion or packing entries, an entry rooted at a configuration or
             a step, scoped to some runs of its shape, splitting a step by
-            fission or chaining a cascade, more fifos to or
+            fission, more fifos to or
             from the host than the shim has channels (IRON's composer gives
             each its own; mlir-aie can share them), a placer setting past the
             sequential placer, a region the composer does not build, and
@@ -568,6 +572,8 @@ def fit(
     cores_on_array = sum(
         model.is_core_tile(c, r) for c in range(model.columns()) for r in rows
     )
+    cascade_cols = model.columns()
+    cascade_rows = sum(model.is_core_tile(0, r) for r in rows)
     held_in = {
         EdgeKind.STREAM: ("a core tile", model.get_local_memory_size(), None),
         EdgeKind.STAGED: (
@@ -625,13 +631,6 @@ def fit(
                 waiting.append(
                     "a step split by fission (Member.part) is not matched or "
                     "built yet"
-                )
-                continue
-            if any(e.kind is EdgeKind.CASCADE for e, _, _ in region.wiring()[0]):
-                matched.add(index)
-                waiting.append(
-                    "a cascade chain, which rewrites a reduction rather than "
-                    "naming recorded hand-offs, is not matched or built yet"
                 )
                 continue
             found = recording.occurrences(entry)
@@ -698,6 +697,46 @@ def fit(
                 except ValueError as e:  # unresolvable or incompatible here
                     return Fit(
                         False, "counts", f"{m.cls.__name__} at {m.tunables}: {e}"
+                    )
+            core = {s: min(worker) for worker in region.workers for s in worker}
+            links = [
+                (core.get(e.producer, e.producer), core.get(e.consumer, e.consumer))
+                for e in region.edges
+                if e.kind is EdgeKind.CASCADE
+            ]
+            for p, c in links:
+                if p == c:
+                    return Fit(
+                        False,
+                        "counts",
+                        f"a cascade runs from one core to the next; steps "
+                        f"{p} and {c} share one",
+                    )
+            for end, side in ((0, "output"), (1, "input")):
+                ends = Counter(link[end] for link in links)
+                if ends and max(ends.values()) > 1:
+                    step, n = ends.most_common(1)[0]
+                    return Fit(
+                        False,
+                        "counts",
+                        f"a core has one cascade {side}; step {step}'s takes {n}",
+                    )
+            following = dict(links)
+            reach = cascade_cols + cascade_rows - 1
+            for first in following:
+                chain, at = [first], first
+                while at in following and following[at] not in chain:
+                    at = following[at]
+                    chain.append(at)
+                if at in following or len(chain) > reach:
+                    return Fit(
+                        False,
+                        "counts",
+                        f"a cascade chain of {len(chain)} cores"
+                        + (", closing a cycle," if at in following else "")
+                        + f" runs only east or south, through at most {reach} "
+                        f"cores of {device.resolve()}'s {cascade_cols} columns and "
+                        f"{cascade_rows} rows",
                     )
             try:
                 derivation = Derivation(region, recording, device)
@@ -779,15 +818,20 @@ def fit(
                 if analysis.why is not None:
                     return Fit(False, "analysis", analysis.why)
                 for edge, p, c in derivation.wired:
-                    if edge.kind is not EdgeKind.STREAM:
+                    if edge.kind not in (EdgeKind.STREAM, EdgeKind.CASCADE):
                         continue
                     shape = analysis.hand_off[edge]
-                    if shape not in (HandOff.EQUAL, HandOff.BROADCAST):
+                    if shape not in (
+                        (HandOff.EQUAL, HandOff.BROADCAST)
+                        if edge.kind is EdgeKind.STREAM
+                        else (HandOff.EQUAL,)
+                    ):
                         return Fit(
                             False,
                             "analysis",
-                            f"{edge} is a stream, whose lanes meet as they are; its "
-                            f"{shape.value} hand-off needs a restage",
+                            f"{edge} is a {edge.kind.value}, whose lanes meet one to "
+                            f"one as they are; its {shape.value} hand-off needs a "
+                            f"restage",
                         )
                 why = analysis.deadlock(
                     {e: e.depth for e, _, _ in derivation.wired if e.depth is not None}

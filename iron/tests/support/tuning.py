@@ -39,7 +39,7 @@ def _holds_reaching(start: Region, target: Region) -> list[tuple[int, Hold]]:
     Each edge's place is read off its namesake in ``target``: none there a
     ``MEMORY`` hold, a stream whose steps share a worker there ``L1``, a
     staged edge ``MEMTILE`` (or ``LATER_PHASE``, where ``target`` chooses
-    phases), a DDR edge ``DDR``. Last first: a ``MEMORY`` hold drops
+    phases), a DDR edge ``DDR``, a cascade edge ``CASCADE``. Last first: a ``MEMORY`` hold drops
     its edge, moving those after it down.
     """
     at = {
@@ -65,10 +65,10 @@ def _holds_reaching(start: Region, target: Region) -> list[tuple[int, Hold]]:
                 if target.phases is not None
                 else (Hold.MEMTILE,)
             )
-        elif kind is EdgeKind.DDR:
-            options.append((Hold.DDR,))
         else:
-            options.append((None,))
+            options.append(
+                {EdgeKind.DDR: (Hold.DDR,), EdgeKind.CASCADE: (Hold.CASCADE,)}[kind]
+            )
     for choice in itertools.product(*options):
         region, steps = start, []
         for index, place in reversed(list(enumerate(choice))):

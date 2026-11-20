@@ -17,10 +17,15 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron import Precision
-from iron.common.declare.composition import Configuration, Entry, Member, Region
+from iron.common.declare.composition import (
+    Configuration,
+    Entry,
+    Hold,
+    Member,
+    Region,
+)
 from iron.common.declare.composition import Edge as CompositionEdge
 from iron.common.graph.record import Recording
-from iron.common.image.step import EdgeKind
 from iron.operators import (
     AXPY,
     GEMM,
@@ -346,34 +351,41 @@ def gemv_k_split_partials(M: int, K: int, splits: int) -> list[GEMV]:
     """Return ``splits`` ``GEMV``s, each over its own share of ``K``, their partials to be reduced."""
     share = K // splits
     return [
-        GEMV(M=M, K=share, tile_size_input=4, tile_size_output=32)
-        for _ in range(splits)
+        GEMV(M=M, K=share, tile_size_input=4, tile_size_output=M) for _ in range(splits)
     ]
 
 
-def gemv_fan_in_recording(
-    name: str, M: int, K: int, splits: int, order: list[int] | None = None
+def reduction_recording(
+    name: str, partials: list[GEMV] | list[GEMM], order: list[int] | None = None
 ) -> Recording:
-    """Return ``splits`` ``GEMV`` partials over ``K``, reduced into one sum by a fixed-order chain of ``ElementwiseAdd``s.
+    """Return ``partials``, each over its own share of a reduction, summed by a fixed-order chain of ``ElementwiseAdd``s.
 
     ``order`` places the partials' steps in a sequence of this order (a device's actual
     completion order); the reducer still sums by the partials' own index, first to last,
     so a call with another ``order`` records a distinct recording whose bits must still
     agree.
     """
-    gemvs = gemv_k_split_partials(M, K, splits)
+    splits = len(partials)
+    (size,) = [b.elements for b in partials[0].buffers if b.name == "C"]
     order = list(range(splits)) if order is None else list(order)
     steps = []
     for i in order:
-        steps += sequences.steps((gemvs[i], f"A{i}", f"B{i}", f"p{i}"))
+        steps += sequences.steps((partials[i], f"A{i}", f"B{i}", f"p{i}"))
     inputs = [f"A{i}" for i in range(splits)] + [f"B{i}" for i in range(splits)]
     running = "p0"
     for i in range(1, splits):
-        adder = ElementwiseAdd(size=M, tile_size=min(M, 256))
+        adder = ElementwiseAdd(size=size, tile_size=min(size, 256))
         nxt = f"s{i}"
         steps += sequences.steps((adder, running, f"p{i}", nxt))
         running = nxt
     return Recording.of_steps(name, steps, inputs, [running])
+
+
+def gemv_fan_in_recording(
+    name: str, M: int, K: int, splits: int, order: list[int] | None = None
+) -> Recording:
+    """Return ``reduction_recording`` of ``splits`` ``GEMV`` partials over ``K``."""
+    return reduction_recording(name, gemv_k_split_partials(M, K, splits), order)
 
 
 def gemm_k_split_partials(M: int, K: int, N: int, splits: int) -> list[GEMM]:
@@ -385,46 +397,46 @@ def gemm_k_split_partials(M: int, K: int, N: int, splits: int) -> list[GEMM]:
     ]
 
 
-def cascade_region(member_dims: list[Member], output: str, input: str) -> Region:
-    """Return a cascade chain: each member's ``output`` carried to the next's ``input`` by ``EdgeKind.CASCADE``.
+def fan_in_reducer_region(recording: Recording) -> Region:
+    """Return ``reduction_recording``'s steps as recorded, each partial and running sum an edge into the add that reads it.
 
-    GEMV and GEMM declare no cascade variant (a reported gap: cascade kernels for them are
-    not built): this shapes the composition, not a kernel that runs a cascade put/get today.
+    Every edge a stream: the partials' objects are the adds' own. Edges by
+    producer, then consumer, as ``candidates`` orders them.
     """
-    edges = tuple(
-        CompositionEdge(i, output, i + 1, input, kind=EdgeKind.CASCADE)
-        for i in range(len(member_dims) - 1)
-    )
-    return Region(parts=tuple(member_dims), edges=edges)
-
-
-def fan_in_reducer_region(recording: Recording, splits: int) -> Region:
-    """Return ``gemv_fan_in_recording``'s partials fed to its fixed-order chain of adds, each step as recorded.
-
-    The first add reads partials 0 and 1; each later one the running sum
-    (the add before's ``y``) and the next partial. A partial is staged: the
-    GEMV's 32-element objects restage into the add's 64; the running sum
-    streams. Edges by producer, then consumer, as ``candidates`` orders them.
-    """
+    _, writers = recording.users()
     edges = []
-    running, out = 0, "C"
-    for i in range(1, splits):
-        add = splits + i - 1
-        edges += [
-            CompositionEdge(
-                running,
-                out,
-                add,
-                "a",
-                kind=EdgeKind.STREAM if i > 1 else EdgeKind.STAGED,
-            ),
-            CompositionEdge(i, "C", add, "b", kind=EdgeKind.STAGED),
-        ]
-        running, out = add, "y"
+    for c, step in enumerate(recording.steps):
+        if not isinstance(step.op, ElementwiseAdd):
+            continue
+        for sink, read in zip(step.op.buffers, step.refs()):
+            if not sink.fills:
+                continue
+            (p,) = writers[read.root]
+            made = recording.steps[p]
+            (source,) = [
+                b.name
+                for b, wrote in zip(made.op.buffers, made.refs())
+                if b.drains and wrote.root == read.root
+            ]
+            edges.append(CompositionEdge(p, source, c, sink.name))
     return Region(
         parts=tuple(member(step.op) for step in recording.steps),
         edges=tuple(sorted(edges, key=lambda e: (e.producer, e.consumer))),
     )
+
+
+def cascade_reducer_region(recording: Recording) -> Region:
+    """Return ``fan_in_reducer_region`` with its running sum on the cascade.
+
+    Each add runs on the core of the partial it reads as ``b`` (held in
+    L1), and its running sum ``a`` (the first partial, then the add
+    before's) arrives on the cascade from the core before: one chain of
+    cores, one a partial.
+    """
+    region = fan_in_reducer_region(recording)
+    for index, edge in enumerate(region.edges):
+        region = region.held(index, Hold.CASCADE if edge.input == "a" else Hold.L1)
+    return region
 
 
 # ----------------------------------------------------------------- region shape and schedule
