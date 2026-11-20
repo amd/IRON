@@ -354,6 +354,14 @@ class Profile:
         """Return the versions' schedules."""
         return list(self._schedules)
 
+    def replace_schedule(self, old: Schedule, new: Schedule) -> None:
+        """Replace the schedule ``old`` with ``new``, in its place.
+
+        Raises:
+            ValueError: ``old`` is not one of its schedules.
+        """
+        self._schedules[self._schedules.index(old)] = new
+
     def add_variants(self, variants: Variants) -> None:
         """Add a design per range of per-call values."""
         self._variants.append(variants)

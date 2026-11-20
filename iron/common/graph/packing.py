@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Applying a profile's packings (``Profile.add_packing``) to a recording.
+"""Applying a profile's packings (``Profile.add_packing``) and configurations to a recording.
 
 The steps of each packing's shapes, where it applies in the recording's version, rebuilt
 at the tunables it gives them, and their designs grouped into one device configuration,
@@ -11,10 +11,12 @@ dispatches once (``merges``).
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ..declare import Profile
+from ..declare.composition import Configuration
 from ..design import OperatorDesign
 from ..image.compose import CoResidenceError, Packing, fits
 from ..image.step import Fusion, FusionKind
@@ -79,6 +81,43 @@ def apply(
             name = OperatorDesign(recording.steps[i].op.resolved(dev)).name
         groups.setdefault(entry, {})[name] = None
     return recording, Packing(tuple(tuple(g) for g in groups.values() if len(g) > 1))
+
+
+def configured(
+    recording: Recording,
+    profile: Profile,
+    fused: Sequence[Fusion],
+    packing: Packing,
+    dev,
+) -> Packing:
+    """Return ``packing`` with each configuration ``profile``'s entries name loaded together.
+
+    At each match of a configuration entry (``Recording.occurrences``), its
+    steps' designs are one group, a step inside a fusion of ``fused`` by its
+    fusion's symbol, as ``apply`` packs it; groups sharing a design are one.
+    """
+    fusion_of = {i: f for f in fused for i in f.steps}
+    groups = [dict.fromkeys(g) for g in packing.groups]
+    for entry in profile.entries():
+        if not isinstance(entry.root, Configuration):
+            continue
+        for match in recording.occurrences(entry):
+            group: dict[str, None] = {}
+            for i in match:
+                f = fusion_of.get(i)
+                steps = (i,) if f is None else f.steps
+                names = [
+                    OperatorDesign(recording.steps[j].op.resolved(dev)).name
+                    for j in steps
+                ]
+                group[names[0] if f is None else f.name(names)] = None
+            for other in [g for g in groups if g.keys() & group.keys()]:
+                groups.remove(other)
+                group = other | group
+            groups.append(group)
+    return dataclasses.replace(
+        packing, groups=tuple(tuple(g) for g in groups if len(g) > 1)
+    )
 
 
 def merges(

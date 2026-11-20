@@ -10,7 +10,14 @@ from collections.abc import Sequence
 from typing import Any
 
 from ..declare import Operator, Unresolvable
-from ..declare.composition import Member, Region
+from ..declare.composition import (
+    Configuration,
+    Member,
+    Region,
+    RuntimePlan,
+    Schedule,
+    Switch,
+)
 from ..declare.profile import Profile
 from ..design import BuiltArray, OperatorDesign
 from ..image.step import Edge, EdgeKind, Fusion, FusionKind
@@ -322,10 +329,16 @@ def composed(
     edge. A DDR edge's consumer reads what its producer wrote to host memory
     a phase or more later (a phased fusion, ``Fusion.waits``).
 
+    A configuration of steps gives each its member's tunables; which
+    designs it loads together is the packing's (``packing.configured``).
+
     Raises:
         NotImplementedError: What the composer does not build yet: a
-            profile's schedules, variants, bindings or state layouts, or an
-            entry rooted at a configuration or a step, with nested regions,
+            profile's schedules beyond their packaging, variants, bindings or
+            state layouts, a configuration whose parts run at once, at a
+            partial width, keeping buffers resident, switched other than by a
+            reload or holding regions, a runtime plan other than one task
+            group, or an entry rooted at a step, with nested regions,
             inflows, shared workers, chosen phases, a runtime plan,
             fission, a self-loop over a carried buffer, cascade edges, a DDR
             edge's chosen depth, matching steps that are not consecutive,
@@ -335,7 +348,14 @@ def composed(
             host (a tee, ``Fusion.kept``).
     """
     for kind, kept in (
-        ("schedules", profile.schedules()),
+        (
+            "schedules beyond their packaging",
+            [
+                s
+                for s in profile.schedules()
+                if dataclasses.replace(s, packaging=None) != Schedule(s.version)
+            ],
+        ),
         ("variants", profile.variants()),
         ("bindings", profile.bindings()),
         ("state layouts", profile.state_layouts()),
@@ -349,13 +369,40 @@ def composed(
     readers, _ = recording.users()
     for entry in profile.entries():
         root = entry.root
+        if isinstance(root, Configuration):
+            unbuilt = [
+                what
+                for what, kept in (
+                    ("parts run at once", root.concurrent is not None),
+                    ("a partial width", root.columns is not None),
+                    ("buffers resident into the next", root.resident),
+                    (
+                        "a switch other than a reload",
+                        root.switch not in (None, Switch.RELOAD),
+                    ),
+                    (
+                        "regions among its parts",
+                        not all(isinstance(p, Member) for p in root.parts),
+                    ),
+                )
+                if kept
+            ]
+            if unbuilt:
+                raise NotImplementedError(
+                    f"building {entry} is not built yet: a configuration with "
+                    f"{unbuilt[0]}"
+                )
+            for match in recording.occurrences(entry):
+                for s, m in zip(match, root.steps()):
+                    for name, value in (m.tunables or {}).items():
+                        tunables.setdefault(s, {}).setdefault(name, value)
+            continue
         kinds = {e.kind for e in root.edges} if isinstance(root, Region) else set()
         if (
             not isinstance(root, Region)
             or not all(isinstance(part, Member) for part in root.parts)
             or root.inflows
             or root.phases is not None
-            or root.runtime is not None
             or any(m.part is not None for m in root.steps())
             or any(e.producer == e.consumer for e in root.edges)
             or not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED, EdgeKind.DDR}
@@ -363,7 +410,32 @@ def composed(
             raise NotImplementedError(
                 f"building {entry} is not built yet: the composer builds a "
                 f"region of steps whose edges are stream, staged or DDR, "
-                f"with no chosen phase, inflow, runtime plan or self-loop"
+                f"with no chosen phase, inflow or self-loop"
+            )
+        plan = root.runtime or RuntimePlan()
+        # One task group: every task issued at once, then each awaited. In one
+        # phase a barrier and per-channel awaits are the same awaits.
+        unbuilt = [
+            what
+            for what, kept in (
+                (
+                    "per-channel awaits between phases",
+                    plan.waits == "per_channel"
+                    and any(e.kind is EdgeKind.DDR for e in root.edges),
+                ),
+                (f"{plan.overlap} overlap", plan.overlap != "none"),
+                (f"{plan.chunks} chunks", plan.chunks != 1),
+                ("a chosen count of tasks in flight", plan.in_flight is not None),
+                ("chained buffer descriptors", plan.chained),
+                ("a chosen burst length", plan.burst is not None),
+                ("a chosen transfer size", plan.transfer_bytes is not None),
+            )
+            if kept
+        ]
+        if unbuilt:
+            raise NotImplementedError(
+                f"building {entry} is not built yet: a runtime plan with "
+                f"{unbuilt[0]}"
             )
         if root.workers and kinds - {EdgeKind.STREAM}:
             raise NotImplementedError(

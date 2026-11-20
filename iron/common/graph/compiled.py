@@ -29,6 +29,7 @@ from aie.utils import bfp
 from ml_dtypes import bfloat16
 from numpy.typing import DTypeLike
 
+from ..declare.composition import Configuration
 from ..declare.operator import device_fit, graph_recorder
 from ..declare.profile import Profile, Version
 from ..declare.value import ExtentWord
@@ -54,7 +55,7 @@ from .fusion_tunables import apply as apply_fusion_tunables
 from .fusion_tunables import rebuild
 from .handle import Carry, Dense, Handle, State, Weight, _Param, is_operand
 from .packing import apply as apply_packings
-from .packing import merges
+from .packing import configured, merges
 from .record import HostStep, Recorder, Recording, version_key
 
 logger = logging.getLogger(__name__)
@@ -613,6 +614,9 @@ class Graph:
             recording, fused, packing = apply_profile(
                 recording, profile, require_device()
             )
+            elf, torn = packaged(recording, profile)
+            full_elf = elf if full_elf is None else full_elf
+            teardown = teardown or torn
         chosen = plan(
             require_device(),
             recording,
@@ -807,8 +811,8 @@ def apply_profile(
     each one its step's caller did not pin and that moves it), its
     composition entries' tunables and regions (``composed``), which win over
     a tunable entry's, its fusions and their steps' tunables, and its
-    packings. A fusion entry's fusion overlapping a composed region gives
-    way to it.
+    packings and configurations (``configured``). A fusion entry's fusion
+    overlapping a composed region gives way to it.
     """
     folds = chosen_folds(recording, profile)
     folded = {s for f in folds for s in f.steps}
@@ -844,7 +848,44 @@ def apply_profile(
     if fused:
         recording = apply_fusion_tunables(recording, profile, fused, dev)
     recording, packing = apply_packings(recording, profile, fused, dev)
-    return recording, fused, packing
+    return recording, fused, configured(recording, profile, fused, packing, dev)
+
+
+def packaged(recording: Recording, profile: Profile) -> tuple[bool | None, bool]:
+    """Return the packaging ``profile`` chooses for ``recording``: a full ELF or not, and teardown.
+
+    A full ELF where its version's schedule packages one, an xclbin per step
+    where it packages that, and None where it chooses neither; teardown
+    where a configuration entry it runs is torn down after use.
+
+    Raises:
+        ValueError: Its version's schedules choose both packagings.
+        NotImplementedError: Its configurations differ on teardown: aiecc
+            tears down every configuration of an image or none.
+    """
+    chosen = {
+        s.packaging
+        for s in profile.schedules()
+        if s.version == recording.version and s.packaging is not None
+    }
+    if len(chosen) > 1:
+        raise ValueError(f"{recording.name}: its schedules choose {sorted(chosen)}")
+    teardown = {
+        e.root.teardown
+        for e in profile.entries()
+        if isinstance(e.root, Configuration)
+        and e.root.teardown is not None
+        and recording.occurrences(e)
+    }
+    if len(teardown) > 1:
+        raise NotImplementedError(
+            f"{recording.name}: tearing down some of its configurations and not "
+            f"others is not built yet: aiecc tears down every one or none"
+        )
+    return (
+        None if not chosen else chosen == {"full_elf"},
+        teardown == {True},
+    )
 
 
 def unbuilt_image(

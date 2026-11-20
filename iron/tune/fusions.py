@@ -47,7 +47,12 @@ from aie.iron.device import Device
 from iron.common.declare import Operator, Profile
 from iron.common.declare.profile import Version
 from iron.common.design import BuiltArray, OperatorDesign, configuration
-from iron.common.graph.compiled import CompiledGraph, _step_words, apply_profile
+from iron.common.graph.compiled import (
+    CompiledGraph,
+    _step_words,
+    apply_profile,
+    packaged,
+)
 from iron.common.graph.fusion import admits, candidates
 from iron.common.graph.record import Recording
 from iron.common.image.compose import (
@@ -896,11 +901,16 @@ class Applied:
         recording: The recording with the profile applied.
         fused: The fusions it takes.
         packing: The packing it takes.
+        full_elf: One full ELF, else an xclbin per step; None for the
+            device's default (``packaged``).
+        teardown: Whether a full ELF undoes each configuration once done.
     """
 
     recording: Recording
     fused: tuple[Fusion, ...]
     packing: Packing
+    full_elf: bool | None = None
+    teardown: bool = False
 
     @classmethod
     def of(
@@ -916,14 +926,19 @@ class Applied:
         begun = time.perf_counter()
         call.recording.code_weights()
         recording, fused, packing = apply_profile(call.recording, profile, dev)
-        out = cls(recording, fused, dataclasses.replace(packing, required=required))
+        out = cls(
+            recording,
+            fused,
+            dataclasses.replace(packing, required=required),
+            *packaged(recording, profile),
+        )
         Spent.charge(build_s=time.perf_counter() - begun)
         return out
 
     def fingerprint(self, dev) -> Hashable:
         """Return what this builds: two with one fingerprint build one image."""
         steps = tuple(_identity(s.op, dev) for s in self.recording.steps)
-        return steps, self.fused, self.packing
+        return steps, self.fused, self.packing, self.full_elf, self.teardown
 
     def built(self, dev) -> CompiledGraph:
         """Return the version, packaged as ``dev`` does."""
@@ -931,10 +946,11 @@ class Applied:
         chosen = plan(
             dev,
             self.recording,
-            None,
+            self.full_elf,
             False,
             step_words=_step_words(self.recording),
             fusions=self.fused,
+            teardown=self.teardown,
         )
         out = CompiledGraph(
             self.recording, chosen, fusions=self.fused, packing=self.packing

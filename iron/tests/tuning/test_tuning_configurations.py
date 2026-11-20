@@ -31,9 +31,9 @@ from iron.tests.support.fusable import gemv_silu_mul, gemv_silu_mul_recording
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_composition import independent_regions_recording
 from iron.tests.support.toys_edges import member
-from iron.tests.support.tuning import unbuilt
+from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import candidates, check, fit, search
+from iron.tune.search import AddEntry, candidates, check, fit, search
 
 DEVICE = DEVICES["npu2"]()
 _TARGET_MODEL = get_target_model(DEVICE.resolve())
@@ -84,18 +84,14 @@ def test_membership_as_one_design_round_trips_and_is_proposed(tmp_path):
     )
 
 
-@unbuilt
 def test_region_as_one_packing_piece_round_trips_and_is_proposed(tmp_path):
     """A region nested as one piece of a configuration's packing round-trips and is a candidate."""
     gemv, silu, mul = gemv_silu_mul(M=256, cols=4, tile=64)
     region = Region(
-        parts=(
-            Member(type(gemv), {"M": gemv.M, "K": gemv.K}),
-            Member(type(silu), {"size": silu.size}),
-        ),
+        parts=(member(gemv), member(silu)),
         edges=(CompositionEdge(0, "C", 1, "x", kind=EdgeKind.STREAM),),
     )
-    configuration = Configuration(parts=(region, Member(type(mul), {"size": mul.size})))
+    configuration = Configuration(parts=(region, member(mul)))
     entry = Entry(root=configuration)
     profile = Profile()
     profile.add_entry(entry)
@@ -103,10 +99,11 @@ def test_region_as_one_packing_piece_round_trips_and_is_proposed(tmp_path):
     loaded = Profile.load(tmp_path / "region_in_configuration.json")
     assert loaded.entries() == [entry]
     recording = gemv_silu_mul_recording("config_region_piece", gemv, silu, mul)
-    start = Profile()
+    calls = [Timed(recording)]
+    reached = reached_by_candidates(region, calls, DEVICE)
     assert any(
-        entry in edit.apply(start).entries()
-        for edit in candidates([Timed(recording)], start, DEVICE)
+        isinstance(edit, AddEntry) and edit.entry == entry
+        for edit in candidates(calls, reached, DEVICE)
     )
 
 
@@ -170,7 +167,6 @@ def test_nesting_a_region_inside_a_region_round_trips_and_is_proposed(tmp_path):
     )
 
 
-@unbuilt
 def test_concurrency_one_after_another_is_bit_identical():
     """The Alternating toy's eight steps, loaded one after another, are bit-identical to every step in a configuration of its own."""
     configuration, recording = _alternating_configuration()
@@ -223,7 +219,13 @@ def test_disjoint_columns_concurrency_is_bit_identical():
     base.add_entry(
         Entry(root=Configuration(parts=(Member(type(mul), {"size": mul.size}),)))
     )
-    recording = gemv_silu_mul_recording("config_disjoint_columns", gemv, silu, mul)
+    # The projection and a multiply of other inputs: neither reads the other.
+    recording = Recording.of_steps(
+        "config_disjoint_columns",
+        sequences.steps((gemv, "A", "B", "y"), (mul, "a", "b", "z")),
+        ["A", "B", "a", "b"],
+        ["y", "z"],
+    )
     result = check(profile, base, [Timed(recording)], DEVICE, Refinement.EXACT)
     assert result.ok, result.why
 
@@ -268,7 +270,6 @@ def test_switch_kinds_are_bit_identical_and_priced_per_core():
     )
 
 
-@unbuilt
 def test_teardown_true_and_false_are_bit_identical():
     """``Configuration.teardown`` (True or False) is bit-identical to the build's own default."""
     configuration, recording = _alternating_configuration()
@@ -312,7 +313,6 @@ def test_residency_keeps_a_buffer_on_chip_and_is_bit_identical():
     assert result.ok, result.why
 
 
-@unbuilt
 def test_packaging_full_elf_and_xclbin_per_step_are_bit_identical():
     """A configuration built as a full ELF and as an xclbin per step are bit-identical."""
     configuration, recording = _alternating_configuration()
@@ -340,7 +340,6 @@ def test_tuner_keeps_the_configuration_that_pays():
     assert any(isinstance(e.root, Configuration) for e in found.entries())
 
 
-@unbuilt
 def test_a_configuration_over_the_arrays_cores_is_refused():
     """The Wide toy's 48 cores, over the array's, are refused by counts before any build."""
     configuration, recording = _wide_configuration()
@@ -355,7 +354,6 @@ def test_a_configuration_over_the_arrays_cores_is_refused():
     assert "cores" in (result.why or "")
 
 
-@unbuilt
 def test_members_running_at_once_sharing_written_data_is_refused():
     """Two members of one configuration sharing written data while run at once (``Configuration.concurrent``) is refused before any build."""
     gemv, silu, mul = gemv_silu_mul(M=256, cols=2, tile=64)
@@ -383,7 +381,6 @@ def test_members_running_at_once_sharing_written_data_is_refused():
     assert "independent" in (result.why or "") or "shared" in (result.why or "")
 
 
-@unbuilt
 def test_residency_across_a_teardown_is_refused():
     """A buffer named resident into a configuration torn down before it is refused before any build."""
     gemv, silu, mul = gemv_silu_mul(M=256, cols=4, tile=64)
@@ -407,7 +404,6 @@ def test_residency_across_a_teardown_is_refused():
     assert "teardown" in (result.why or "")
 
 
-@unbuilt
 def test_overlapping_columns_at_once_is_refused():
     """Two configurations claiming overlapping columns while concurrent is refused before any build."""
     gemv, silu, mul = gemv_silu_mul(M=256, cols=4, tile=64)
@@ -417,7 +413,13 @@ def test_overlapping_columns_at_once_is_refused():
     right = Configuration(
         parts=(Member(type(mul), {"size": mul.size}),), columns=6, concurrent=1
     )
-    recording = gemv_silu_mul_recording("config_overlapping_columns", gemv, silu, mul)
+    # The projection and a multiply of other inputs: neither reads the other.
+    recording = Recording.of_steps(
+        "config_overlapping_columns",
+        sequences.steps((gemv, "A", "B", "y"), (mul, "a", "b", "z")),
+        ["A", "B", "a", "b"],
+        ["y", "z"],
+    )
     profile = Profile()
     profile.add_entry(Entry(root=left))
     profile.add_entry(Entry(root=right))
@@ -427,7 +429,6 @@ def test_overlapping_columns_at_once_is_refused():
     assert "column" in (result.why or "") or "disjoint" in (result.why or "")
 
 
-@unbuilt
 def test_phased_or_teardown_on_an_xclbin_is_refused():
     """A phased region, or a configuration's teardown, named on an xclbin-per-step packaging is refused before any build."""
     gemv, silu, mul = gemv_silu_mul(M=256, cols=4, tile=64)
@@ -436,8 +437,8 @@ def test_phased_or_teardown_on_an_xclbin_is_refused():
             Member(type(gemv), {"M": gemv.M, "K": gemv.K}),
             Member(type(silu), {"size": silu.size}),
         ),
-        edges=(CompositionEdge(0, "C", 1, "x", kind=EdgeKind.STREAM),),
-        phases=(0, 1),
+        edges=(CompositionEdge(0, "C", 1, "x", kind=EdgeKind.STAGED),),
+        phases=(1,),
     )
     recording = gemv_silu_mul_recording("config_phased_xclbin", gemv, silu, mul)
     profile = Profile()
