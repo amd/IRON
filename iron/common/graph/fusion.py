@@ -452,13 +452,16 @@ def composed(
                 f"building {entry} is not built yet: the composer builds a "
                 f"region of steps with no inflow"
             )
+        # Several calls a command carry from one to the next within it, as one
+        # region over the command's calls; one call a command, a carry held
+        # on chip is filled on the call and drained after it, as one through
+        # host memory is.
+        spanned = recording.spanned(entry)
+        if spanned is not None:
+            root, matches = spanned[0], (spanned[1],)
+        else:
+            matches = recording.occurrences(entry)
         across = [e for e in root.edges if e.across_calls]
-        resident = [e for e in across if e.kind is not EdgeKind.DDR]
-        if resident:
-            raise NotImplementedError(
-                f"building {entry} is not built yet: {resident[0]} holds what one "
-                f"call carries to the next on chip, resident between calls"
-            )
         within = [e for e in root.edges if not e.across_calls]
         kinds = {e.kind for e in within}
         chosen = root.step_phases()
@@ -506,7 +509,7 @@ def composed(
         carried = set(recording.feedback) | {
             h.ref().root for _, h in recording.states.values()
         }
-        for match in recording.occurrences(entry):
+        for match in matches:
             if taken & set(match):
                 continue
             if len(match) > 1 and match != tuple(range(match[0], match[-1] + 1)):

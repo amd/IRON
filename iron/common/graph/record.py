@@ -213,6 +213,8 @@ def _take_views(cls, operands, kwargs, values):
 # Call ``j``'s inputs, outputs and per-call values in a version running several
 # calls in one command (``Recording.repeated``).
 CALL_SUFFIX = "__call{}"
+# What call ``j`` of such a version carries into call ``j + 1``.
+CARRY_SUFFIX = "__carry{}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -337,7 +339,11 @@ class Recording:
         one call's do, where an intermediate the next call writes again would
         read, to a region, as read past it. Everything else (weights, states,
         the buffers carried to the next call) is one buffer every call uses in
-        turn, so what one call carries the next reads on the device.
+        turn, so what one call carries the next reads on the device; but a
+        carried buffer one step writes whole is a buffer a link (each call's
+        reads up to that step one, its write and the reads after it the
+        next), the first the carried buffer, the last too, so each call's
+        carry into the next is a buffer between two steps.
 
         Raises:
             NotImplementedError: It carries values (their next a call's
@@ -382,6 +388,37 @@ class Recording:
         values: list[PerCall] = []
         bindings: list[Binding] = []
         limits: list[Limit] = []
+        writes: dict[str, list[tuple[int, Handle, bool]]] = {}
+        for i, step in enumerate(self.steps):
+            for h, b in zip(step.slots, step.op.buffers):
+                if b.drains:
+                    writes.setdefault(h.buffer.name, []).append((i, h, b.fills))
+        chained = {
+            name: ws[0][0]
+            for name, ws in writes.items()
+            if name in self.feedback
+            and len(ws) == 1
+            and not ws[0][2]
+            and ws[0][1].layout == Dense()
+            and ws[0][1].shape == ws[0][1].buffer.shape
+            and not ws[0][1].valid
+        }
+        links = {
+            name: [
+                (
+                    writes[name][0][1].buffer
+                    if k in (0, calls)
+                    else Buffer(
+                        name + CARRY_SUFFIX.format(k),
+                        "intermediate",
+                        writes[name][0][1].buffer.shape,
+                        writes[name][0][1].buffer.dtype,
+                    )
+                )
+                for k in range(calls + 1)
+            ]
+            for name in chained
+        }
         for j in range(calls):
             suffix = CALL_SUFFIX.format(j)
             call = _CallNames(
@@ -397,7 +434,7 @@ class Recording:
                 call.values[v.name] = copied
             values += call.values.values()
             ops: dict[int, Operator] = {}
-            for step in self.steps:
+            for i, step in enumerate(self.steps):
                 op = step.op
                 if op.bound_values and id(op) not in ops:
                     ops[id(op)] = op.replace(
@@ -406,12 +443,35 @@ class Recording:
                             for name, e in op.bound_values.items()
                         }
                     )
+                # A carry's link this step reads, and the one it writes.
+                read = {name: links[name][j + (i > at)] for name, at in chained.items()}
+                wrote = {name: links[name][j + 1] for name in chained}
                 steps.append(
                     Step(
                         ops.get(id(op), op),
-                        [call.handle(h) for h in step.slots],
-                        [call.handle(h) for h in step.inputs],
-                        [call.handle(h) for h in step.outputs],
+                        [
+                            dataclasses.replace(
+                                call.handle(h),
+                                buffer=(wrote if b.drains else read).get(
+                                    h.buffer.name, call.handle(h).buffer
+                                ),
+                            )
+                            for h, b in zip(step.slots, op.buffers)
+                        ],
+                        [
+                            dataclasses.replace(
+                                call.handle(h),
+                                buffer=read.get(h.buffer.name, call.handle(h).buffer),
+                            )
+                            for h in step.inputs
+                        ],
+                        [
+                            dataclasses.replace(
+                                call.handle(h),
+                                buffer=wrote.get(h.buffer.name, call.handle(h).buffer),
+                            )
+                            for h in step.outputs
+                        ],
                     )
                 )
             inputs += [call.handle(h) for h in self.inputs]
@@ -553,6 +613,71 @@ class Recording:
         if order == list(range(len(self.steps))):
             return self
         return dataclasses.replace(self, steps=[self.steps[s] for s in order])
+
+    def spanned(self, entry: Entry) -> tuple[Region, tuple[int, ...]] | None:
+        """Return the region one command of this repeated version runs for ``entry``, and its steps, where ``entry`` carries a value across calls.
+
+        Each call's first match of ``entry`` but for its edges across calls,
+        in turn, as one region (``Region.repeated``): each such edge runs from
+        a call's producer into the next call's consumer, the carry's link
+        between them (``repeated``). None where this runs one call a command,
+        merged ones, or ``entry`` carries nothing across calls.
+
+        Raises:
+            ValueError: A call's producer does not write what the next call's
+                consumer reads: a carry across calls is a buffer the
+                recording carries, read where it was written.
+            NotImplementedError: A call holds no match of ``entry``.
+        """
+        root = entry.root
+        if (
+            self.calls == 1
+            or self.stacked
+            or not isinstance(root, Region)
+            or not any(e.across_calls for e in root.edges)
+        ):
+            return None
+        within = Entry(
+            dataclasses.replace(
+                root,
+                edges=tuple(e for e in root.edges if not e.across_calls),
+                phases=None,
+            ),
+            entry.scope,
+        )
+        n = len(self.steps) // self.calls
+        found = self.occurrences(within)
+        matches = []
+        for j in range(self.calls):
+            mine = [m for m in found if j * n <= m[0] and m[-1] < (j + 1) * n]
+            if not mine:
+                raise NotImplementedError(
+                    f"{self.name}: call {j} holds no match of {entry}: carrying "
+                    f"across some calls of a command only is not built yet"
+                )
+            matches.append(mine[0])
+        for e in root.edges:
+            if not e.across_calls:
+                continue
+            for made, reads in itertools.pairwise(matches):
+                wrote, read = (
+                    {
+                        ref.root
+                        for ref, b in zip(step.refs(), step.op.buffers)
+                        if b.name == name
+                    }
+                    for step, name in (
+                        (self.steps[made[e.producer]], e.output),
+                        (self.steps[reads[e.consumer]], e.input),
+                    )
+                )
+                if wrote != read:
+                    raise ValueError(
+                        f"{e} carries {sorted(wrote)} into the next call, which "
+                        f"reads {sorted(read)}: a carry across calls is a buffer "
+                        f"the recording carries, read where it was written"
+                    )
+        return root.repeated(self.calls), tuple(s for m in matches for s in m)
 
     def merged(self, calls: int) -> Recording:
         """Return the derived version running ``calls`` of this one's calls as one call, each step over the calls' data at once (``Operator.merged``).
