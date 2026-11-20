@@ -70,13 +70,18 @@ def test_weight_bound_toy_reports_its_share_of_the_ceiling(
     record_property("Toy share of ceiling", toy["Bandwidth"] / ceiling["Bandwidth"])
 
 
-def test_a_phased_period_waits_on_the_devices_measured_rates(device):
-    """``add -> SiLU -> mul`` with an edge through host memory runs in two phases: without the device's DDR rates, its period names what it waits on."""
+@pytest.mark.parametrize("rates", [None, {}], ids=["unmeasured", "empty"])
+def test_a_phased_period_waits_on_the_devices_measured_rates(rates, device):
+    """``add -> SiLU -> mul`` with an edge through host memory runs in two phases.
+
+    Without the device's DDR rates, or with none in them, its period names
+    what it waits on.
+    """
     add, silu, mul = toys.add_silu_mul(size=1 << 12, tile=128, cols=2)
     region = toys.add_silu_mul_region(add, silu, mul).held(0, Hold.DDR)
     recording = toys.add_silu_mul_recording("through_host", add, silu, mul)
     with pytest.raises(NotImplementedError, match="measured DDR rates"):
-        analyze(region, recording, device).period
+        analyze(region, recording, device, None, rates).period
 
 
 # npu2's: the part, power mode and clock are the attached NPU's.

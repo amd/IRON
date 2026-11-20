@@ -575,7 +575,8 @@ class Derivation:
         device: The device every operator is built for.
         values: The call's per-call values, by name (``Timed.values``).
         rates: The device's measured DDR rates (``Analysis.rates``); where
-            given, each host transfer is an actor that takes time.
+            given and not empty, each host transfer is an actor that takes
+            time.
 
     Raises:
         NotImplementedError: What the analysis does not model yet: a
@@ -605,7 +606,8 @@ class Derivation:
         self.match = matches[0]
         self.device = device
         self.values = dict(values or {})
-        self.rates = None if rates is None else dict(rates)
+        # No rates measured are none given: the host streams wait on them.
+        self.rates = dict(rates) if rates else None
         self.wired, _ = region.wiring()
         groups = [set(group) for group in region.workers]
         # A carry across calls is no splice within the call: its initial
