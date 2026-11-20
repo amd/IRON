@@ -1127,7 +1127,12 @@ def fit(
                             )
             unplaceable = []
             for edge, p, _ in derivation.wired:
-                elements = derivation.obj_elements[p].get(edge.output)
+                # Spliced, an edge holds each core's own tile.
+                elements = (
+                    int(np.prod(derivation.spliced[edge][0][2].shape))
+                    if edge in derivation.spliced
+                    else derivation.obj_elements[p].get(edge.output)
+                )
                 if edge.depth is None or edge.kind not in held_in or elements is None:
                     continue
                 tile, memory, bds = held_in[edge.kind]

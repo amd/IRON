@@ -7,6 +7,8 @@ import pytest
 from aie.dialects.aie import get_target_model
 
 from iron.common.graph.sdf import analyze
+from iron.common.image.step import HandOff
+from iron.tests.support import toys_composition
 from iron.tests.support import toys_dataflow as toys
 
 pytestmark = pytest.mark.usefixtures("device")
@@ -74,3 +76,21 @@ def test_known_multi_rate_edge_minimum_buffer(device):
     assert analysis.consistent
     assert analysis.repetition == {0: 3, 1: 2}
     assert analysis.min_depth[region.edges[0]] == 1
+
+
+def test_a_step_spliced_into_its_producers_cores_holds_each_cores_call(device):
+    """A SiLU spliced into a GEMM's cores reads each core's tiles after the GEMM's body runs through the call: the edge holds every tile a core writes.
+
+    A 64 by 128 GEMM in 32 by 32 tiles on one column takes a core a row of
+    tiles, two cores, each writing four tiles a call; three deadlock.
+    """
+    recording, region = toys_composition.gemm_silu_splice(
+        "splice", M=64, N=128, tile=32
+    )
+    analysis = analyze(region, recording, device)
+    edge = region.edges[0]
+    assert analysis.why is None
+    assert analysis.hand_off[edge] is HandOff.EQUAL
+    assert analysis.repetition == {0: 4, 1: 4}
+    assert analysis.min_depth[edge] == 4
+    assert analysis.deadlock({edge: 3}) is not None

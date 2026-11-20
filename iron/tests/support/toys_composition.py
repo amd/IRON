@@ -473,6 +473,40 @@ def partial_read_twice(name: str, M: int, K: int) -> tuple[Recording, Region]:
     return recording, region
 
 
+def gemm_silu_splice(
+    name: str, M: int = 64, N: int = 128, tile: int = 32
+) -> tuple[Recording, Region]:
+    """Return a ``GEMM`` into a ``SiLU`` on its cores, and its region.
+
+    One column, ``tile`` by ``tile`` tiles: each core writes several a
+    call, which a memtile joins into the GEMM's output lanes. On one worker
+    the SiLU is spliced into the GEMM's cores, running on each core's tile.
+    """
+    gemm = GEMM(
+        M=M,
+        K=64,
+        N=N,
+        tile_m=tile,
+        tile_n=tile,
+        num_aie_columns=1,
+        b_col_maj=True,
+        precision=Precision.MEDIUM,
+    )
+    silu = SiLU(size=M * N, tile_size=tile * tile)
+    recording = Recording.of_steps(
+        name,
+        sequences.steps((gemm, "A", "B", "c"), (silu, "c", "out")),
+        ["A", "B"],
+        ["out"],
+    )
+    region = Region(
+        (member(gemm), member(silu)),
+        (CompositionEdge(0, "C", 1, "x"),),
+        workers=((0, 1),),
+    )
+    return recording, region
+
+
 # ----------------------------------------------------------------- region shape and schedule
 
 

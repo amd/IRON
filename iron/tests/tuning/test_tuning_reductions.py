@@ -6,10 +6,14 @@
 from __future__ import annotations
 
 import pytest
+from aie.dialects.aie import get_target_model
 
 from iron.common.declare.composition import Entry, Hold, Refinement
 from iron.common.declare.profile import Profile
+from iron.common.graph.sdf import analyze
+from iron.common.image.step import HandOff
 from iron.tests.support import toys_composition as toys
+from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import reached_by_candidates
 from iron.tune.autotune import Timed
 from iron.tune.search import check, fit, measure, search
@@ -19,6 +23,22 @@ pytestmark = pytest.mark.usefixtures("device")
 M = 64
 GEMV_K = 256
 GEMM_M, GEMM_K, GEMM_N = 32, 512, 64
+
+
+def _chain_splits(name: str) -> list[int]:
+    """Return the splits, powers of two from 2, whose cascade chain the device's array holds: a path east and south."""
+    model = get_target_model(DEVICES[name]().resolve())
+    rows = sum(model.is_core_tile(0, row) for row in range(model.rows()))
+    reach = model.columns() + rows - 1
+    return [2**k for k in range(1, reach.bit_length()) if 2**k <= reach]
+
+
+# Each device's GEMM cascade reducers, by the splits its array chains.
+GEMM_CHAINS = [
+    pytest.param(name, splits, id=f"device_{name}-splits_{splits}")
+    for name in sorted(DEVICES)
+    for splits in _chain_splits(name)
+]
 
 PARTIALS = [
     pytest.param(lambda n: toys.gemv_k_split_partials(M, GEMV_K, n), id="gemv"),
@@ -140,3 +160,17 @@ def test_two_cascades_into_one_core_are_refused(device):
     verdict = fit(profile, [Timed(recording)], device)
     assert not verdict.ok and verdict.stage == "counts"
     assert "one cascade input" in (verdict.why or "")
+
+
+@pytest.mark.parametrize(("device", "splits"), GEMM_CHAINS, indirect=["device"])
+def test_the_gemm_cascade_reducer_runs_core_to_core(splits, device):
+    """Each add spliced into its partial's GEMM cores, the running sum carried on the cascade core to core: every edge meets as it is."""
+    recording = toys.reduction_recording(
+        f"gemm_cascade_{splits}",
+        toys.gemm_k_split_partials(GEMM_M, GEMM_K, GEMM_N, splits),
+    )
+    region = toys.cascade_reducer_region(recording)
+    analysis = analyze(region, recording, device)
+    assert analysis.why is None
+    assert all(analysis.hand_off[e] is HandOff.EQUAL for e in region.edges)
+

@@ -468,7 +468,9 @@ def configuration(
     owners: dict[Hashable, BuiltArray] = {}
     for key, array in arrays.items():
         owners.setdefault(of[key], array)
-    kinds = {type(a.op.array_device()).__name__ for a in owners.values()}
+    # A spliced step builds nothing: it runs on its producer's cores.
+    built = [a for a in owners.values() if not isinstance(a, SplicedArray)]
+    kinds = {type(a.op.array_device()).__name__ for a in built}
     if len(kinds) != 1:
         raise ValueError(f"{list(arrays)} are built for different devices {kinds}")
     traced = [owner for owner in owners.values() if owner.traced]
@@ -505,10 +507,9 @@ def configuration(
         )
         for key in independent
     ]
-    first = next(iter(owners.values()))
     configured = DeviceConfiguration(
         name,
-        first.op.array_device(),
+        built[0].op.array_device(),
         workers=[w for owner in owners.values() for w in owner.workers],
         runtimes=runtimes,
     )
