@@ -10,7 +10,7 @@ import pytest
 from iron.common.declare.composition import Entry, Hold, Refinement
 from iron.common.declare.profile import Profile
 from iron.tests.support import toys_composition as toys
-from iron.tests.support.tuning import reached_by_candidates, unbuilt
+from iron.tests.support.tuning import reached_by_candidates
 from iron.tune.autotune import Timed
 from iron.tune.search import check, fit, measure, search
 
@@ -59,7 +59,6 @@ def test_a_fan_in_to_a_reducer_round_trips_as_an_entry(splits, tmp_path, npu2):
     assert reached.entries() == [entry]
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("splits", [2, 4, 8])
 def test_a_cascade_chain_is_bit_identical_to_its_split_run_apart(splits, npu2):
@@ -71,7 +70,6 @@ def test_a_cascade_chain_is_bit_identical_to_its_split_run_apart(splits, npu2):
     assert result.ok, result.why
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("splits", [2, 4, 8])
 def test_a_split_gemv_is_bit_identical_across_repeats_and_arrival_order(splits, npu2):
@@ -87,7 +85,6 @@ def test_a_split_gemv_is_bit_identical_across_repeats_and_arrival_order(splits, 
 
 
 @pytest.mark.extensive
-@unbuilt
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("splits", [2, 4, 8])
 def test_search_keeps_the_split_and_mechanism_that_pay(splits, npu2):
@@ -99,11 +96,13 @@ def test_search_keeps_the_split_and_mechanism_that_pay(splits, npu2):
     with_entry.add_entry(entry)
     ratio = measure(with_entry, start, calls, npu2).ratio
     tuned = search(calls, start, npu2)
+    # Where the chain pays, what search keeps is at least as fast (it may sum
+    # the partials otherwise, as a stream, and pass this one over).
     if ratio < 0.95:
-        assert entry in tuned.entries()
+        assert measure(tuned, with_entry, calls, npu2).ratio < 1.05
     if ratio > 1.05:
         assert entry not in tuned.entries()
-    result = check(tuned, start, calls, npu2, Refinement.NO_WORSE)
+    result = check(tuned, start, calls, npu2, Refinement.EXACT)
     assert result.ok, result.why
 
 

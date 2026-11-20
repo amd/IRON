@@ -859,15 +859,15 @@ def fit(
                 made = derivation.obj_elements[p].get(edge.output)
                 taken = derivation.obj_elements[c].get(edge.input)
                 if (
-                    edge.kind is EdgeKind.STREAM
+                    edge.kind in (EdgeKind.STREAM, EdgeKind.CASCADE)
                     and made is not None
                     and taken is not None
                     and made != taken
                 ):
                     unplaceable.append(
-                        f"{edge}: a stream whose ends' objects differ ({made} "
-                        f"elements and {taken}) is not built yet; the composer "
-                        f"gives a fifo one object size"
+                        f"{edge}: a {edge.kind.value} whose ends' objects differ "
+                        f"({made} elements and {taken}) is not built yet; the "
+                        f"composer gives a fifo one object size"
                     )
             kinds = {e.kind for e in region.edges}
             if (
@@ -875,11 +875,10 @@ def fit(
                 or region.phases is not None
                 or region.runtime is not None
                 or not all(isinstance(part, Member) for part in region.parts)
-                or not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED, EdgeKind.DDR}
             ):
                 unplaceable.append(
                     "placing a region the composer does not build yet (inflows, "
-                    "chosen phases, a runtime plan, nesting, or cascade edges)"
+                    "chosen phases, a runtime plan, or nesting)"
                 )
             if "sequential" not in placements:
                 unplaceable.append(
@@ -911,7 +910,12 @@ def fit(
                     edges=[
                         (e.producer, e.output, e.consumer, e.input)
                         for e in region.edges
-                        if e.kind is not EdgeKind.DDR
+                        if e.kind in (EdgeKind.STREAM, EdgeKind.STAGED)
+                    ],
+                    cascades=[
+                        (e.producer, e.output, e.consumer, e.input)
+                        for e in region.edges
+                        if e.kind is EdgeKind.CASCADE
                     ],
                     kept=kept,
                     depths={

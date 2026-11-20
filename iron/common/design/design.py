@@ -159,15 +159,17 @@ class BuiltArray:
         staged: A fed input whose lanes do not meet its source's is staged
             through memtiles rather than refused.
         depths: Operand name -> the depth a composition chose for an edge's
-            reading end (``Operand.chosen_depth``): a fed input's own end, or
-            the end an output's lanes bind for their first on-chip reader.
+            reading end (``Operand.chosen_depth``): a fed input's own end,
+            the end an output's lanes bind for their first on-chip reader, or
+            an unfed input's fifos (the cascade fills it).
 
     Raises:
         ValueError: A full ELF is asked to carry a ``DispatchTime`` value, an
             xclbin is given no scalar for a value, a trace would reuse an
             output a full ELF consolidates, or ``Operand.feed`` refuses.
-        NotImplementedError: A chosen depth names an output whose build binds
-            its lanes itself, not through ``Operand.fifos``.
+        NotImplementedError: A chosen depth names an output, or an unfed
+            input, whose build binds its lanes itself, not through
+            ``Operand.fifos``.
     """
 
     def __init__(
@@ -224,6 +226,20 @@ class BuiltArray:
             ):
                 raise NotImplementedError(
                     f"{type(op).__name__}.{mine.name} read at a chosen depth of "
+                    f"{built.chosen_depth} is not built yet: its build makes its "
+                    f"fifos itself"
+                )
+            if (
+                built.fills
+                and built.fed_from is None
+                and built.chosen_depth is not None
+                and (
+                    not built.lane_fifos
+                    or any(f.depth != built.chosen_depth for f in built.lane_fifos)
+                )
+            ):
+                raise NotImplementedError(
+                    f"{type(op).__name__}.{mine.name} filled at a chosen depth of "
                     f"{built.chosen_depth} is not built yet: its build makes its "
                     f"fifos itself"
                 )

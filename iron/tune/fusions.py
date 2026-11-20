@@ -52,7 +52,7 @@ from iron.common.graph.fusion import admits, candidates
 from iron.common.graph.record import Recording
 from iron.common.image.compose import Packing, fused_configuration, unvalued
 from iron.common.image.packaging import plan
-from iron.common.image.step import Edge, Fusion, FusionKind
+from iron.common.image.step import Edge, EdgeKind, Fusion, FusionKind
 from iron.common.testing import draws
 
 from .autotune import (
@@ -320,12 +320,13 @@ def _composed_module(
     depths: Mapping[tuple[int, str], int] | None = None,
     waits: Sequence[tuple[int, int]] = (),
     workers: Sequence[tuple[int, ...]] = (),
+    cascades: Sequence[tuple[int, str, int, str]] = (),
 ) -> ir.Module:
     """Return the one module ``fits`` places ``designs`` as, built the same way it does.
 
     Plain (``configuration``), or, given ``kind``, as ``kind``'s own fusion wires
-    ``edges``, each output ``kept`` drained to the host too, each of ``waits`` a
-    phase apart (``fused_configuration``,
+    ``edges`` (and ``cascades`` over the cascade), each output ``kept`` drained
+    to the host too, each of ``waits`` a phase apart (``fused_configuration``,
     which also tells a pack's or a stream's own array per member, fuse=True, from a
     merge's shared one). Composing is cheap next to
     running the placement pipeline on the result, so a group-fit verdict's cache key is
@@ -343,6 +344,10 @@ def _composed_module(
             tuple(
                 Edge(p, out, c, inp, depth=(depths or {}).get((p, out)))
                 for p, out, c, inp in edges
+            )
+            + tuple(
+                Edge(p, out, c, inp, kind=EdgeKind.CASCADE)
+                for p, out, c, inp in cascades
             ),
             phased=bool(waits),
             kept=tuple(kept),
@@ -368,13 +373,15 @@ def group_fit_verdict(
     depths: Mapping[tuple[int, str], int] | None = None,
     waits: Sequence[tuple[int, int]] = (),
     workers: Sequence[tuple[int, ...]] = (),
+    cascades: Sequence[tuple[int, str, int, str]] = (),
 ) -> str | None:
     """Why the placer refuses ``ops``' resolved designs sharing one device configuration (plain, or as ``kind``'s fusion wires ``edges``).
 
     Each output ``kept`` drains to the host too (``Fusion.kept``), each
     output ``depths`` names is built at that depth, and each of ``waits``
     runs its consumer a phase after its producer (``Fusion.waits``); each of
-    ``workers`` shares its members' cores (``Fusion.workers``).
+    ``workers`` shares its members' cores (``Fusion.workers``); each of
+    ``cascades`` carries an output to an input over the cascade.
 
     Or None if they co-reside; kept under ``fit_cache``, keyed on the composed module's
     own text (``_composed_module``) and each design's build (``artifact_hash``, as
@@ -383,7 +390,9 @@ def group_fit_verdict(
     The placer runs in a process of its own (``failures.place``): a compiler crash
     refuses the group, recorded in ``ledger`` where one is given.
     """
-    found = _fit_record(ops, fit_cache, kind, edges, kept, depths, waits, workers)
+    found = _fit_record(
+        ops, fit_cache, kind, edges, kept, depths, waits, workers, cascades
+    )
     if isinstance(found, str):
         return found  # composing itself refused; no placement pass to cache
     text, record = found
@@ -434,11 +443,14 @@ def _fit_record(
     depths: Mapping[tuple[int, str], int] | None = None,
     waits: Sequence[tuple[int, int]] = (),
     workers: Sequence[tuple[int, ...]] = (),
+    cascades: Sequence[tuple[int, str, int, str]] = (),
 ) -> tuple[str, Path] | str:
     """``ops`` composed into one module, its text and its verdict's file under ``fit_cache``; or why composing them refused."""
     designs = {str(i): OperatorDesign(op.resolved()) for i, op in enumerate(ops)}
     try:
-        module = _composed_module(designs, kind, edges, kept, depths, waits, workers)
+        module = _composed_module(
+            designs, kind, edges, kept, depths, waits, workers, cascades
+        )
     except (ValueError, RuntimeError, ir.MLIRError) as e:
         return str(e)
     text = str(module)
