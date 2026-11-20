@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from aie.dialects.aie import WireBundle, get_target_model
 
 from iron.common.declare.composition import (
     Edge as CompositionEdge,
@@ -25,6 +26,7 @@ from iron.operators import (
     GEMV,
     ElementwiseAdd,
     ElementwiseMul,
+    RoPE,
     SiLU,
     Softmax,
 )
@@ -33,7 +35,16 @@ from iron.tests.support import toys_composition as toys
 from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import reached_by_candidates, unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import AddEntry, HoldEdge, candidates, check, fit, measure, search
+from iron.tune.search import (
+    BUILT_PLACERS,
+    AddEntry,
+    HoldEdge,
+    candidates,
+    check,
+    fit,
+    measure,
+    search,
+)
 
 pytestmark = pytest.mark.usefixtures("device")
 
@@ -235,13 +246,57 @@ def test_mismatched_tile_sizes_are_refused(device):
     )
 
 
-@unbuilt
-@pytest.mark.supported_devices("npu1", "npu2")
 def test_more_than_a_core_s_two_input_channels_is_refused(device):
-    """A binary consumer needs a free input channel; both of a core's are already the producer's.
+    """A consumer on its producer's core needing more input channels than the core has is refused by the placer, before any build.
 
-    ``gate``'s GEMV reads ``A`` and ``B`` through the core's two input
-    channels, so the multiply on its worker has none left for ``up``'s output.
+    RoPE has no fold hook, so a second RoPE on its core runs as an actor of
+    its own there: the first reads ``x`` and ``angles``, and the second its
+    own angles, one input more than the target model gives a core. Each on a
+    core of its own, the pair fits.
+    """
+    model = get_target_model(device.resolve())
+    row = next(r for r in range(model.rows()) if model.is_core_tile(0, r))
+    channels = model.get_num_dest_switchbox_connections(0, row, WireBundle.DMA)
+    producer = RoPE(rows=1, cols=M, angle_rows=1)
+    consumer = RoPE(rows=1, cols=M, angle_rows=1)
+    assert producer.fold(consumer, 0) is None
+    assert channels < 3
+    recording = Recording.of_steps(
+        "no_channel",
+        sequences.steps(
+            (producer, "x", "angles", "r"), (consumer, "r", "angles2", "out")
+        ),
+        ["x", "angles", "angles2"],
+        ["out"],
+    )
+    calls = [Timed(recording)]
+    apart = Profile()
+    apart.add_entry(
+        Entry(
+            root=Region(
+                parts=(member(producer), member(consumer)),
+                edges=(CompositionEdge(0, "y", 1, "x"),),
+            )
+        )
+    )
+    assert fit(apart, calls, device, placements=tuple(BUILT_PLACERS)).ok
+    joined = Profile()
+    joined.add_entry(
+        Entry(root=_joined_region(member(producer), member(consumer), "y", "x"))
+    )
+    verdict = fit(joined, calls, device, placements=tuple(BUILT_PLACERS))
+    assert not verdict.ok and verdict.stage == "placer"
+    assert "DMA channels" in (verdict.why or "")
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_fan_in_consumer_on_its_producer_s_core_rides_its_input_and_is_bit_identical(
+    device,
+):
+    """``gate`` and the multiply joined, ``up`` recorded between them, are bit-identical to the steps apart.
+
+    Gathered, the multiply folds into ``gate``'s GEMV, ``up``'s output its
+    extra input.
     """
     region = _joined_region(
         Member(GEMV, dict(M=M, K=M)),
@@ -251,9 +306,10 @@ def test_more_than_a_core_s_two_input_channels_is_refused(device):
     )
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    recording = toys.fan_in_recording("no_channel")
-    verdict = fit(profile, [Timed(recording)], device)
-    assert not verdict.ok and verdict.stage == "counts"
+    recording = toys.fan_in_recording("fan_in_rides")
+    assert fit(profile, [Timed(recording)], device).ok
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
 
 
 @pytest.mark.xfail(
