@@ -10,7 +10,7 @@ import pytest
 from iron.common.testing import time_call, vectors
 from iron.operators.gemv import GEMV
 
-pytestmark = [pytest.mark.extensive, pytest.mark.supported_devices("npu2")]
+pytestmark = [pytest.mark.extensive, pytest.mark.supported_devices("npu1", "npu2")]
 
 # (columns, channels) requested per nominal stream count; GEMV.resolve clips
 # each to what the bound device actually supports, so the achieved count
@@ -24,11 +24,13 @@ def _weight_bound_gemv(M, K, columns, channels):
 
 
 @pytest.mark.parametrize("nominal_streams", sorted(_REQUESTED))
-def test_ddr_read_ceiling_against_stream_count(nominal_streams, record_property, npu2):
-    """The ceiling: a large weight-bound GEMV's achieved read bandwidth at each stream count npu2 supports."""
+def test_ddr_read_ceiling_against_stream_count(
+    nominal_streams, record_property, device
+):
+    """The ceiling: a large weight-bound GEMV's achieved read bandwidth at each stream count the device supports."""
     columns, channels = _REQUESTED[nominal_streams]
     op = _weight_bound_gemv(8192, 2048, columns, channels)
-    resolved = op.resolved(npu2)
+    resolved = op.resolved(device)
     streams = resolved.num_aie_columns * resolved.num_channels
     record_property("Requested streams", nominal_streams)
     record_property("Achieved streams", streams)
@@ -47,7 +49,7 @@ def test_ddr_read_ceiling_against_stream_count(nominal_streams, record_property,
 
 @pytest.mark.parametrize("nominal_streams", [1, 4, 8])
 def test_weight_bound_toy_reports_its_share_of_the_ceiling(
-    nominal_streams, record_property, npu2
+    nominal_streams, record_property, device
 ):
     """A smaller weight-bound GEMV, at the same stream count as a ceiling row, records its bandwidth as a fraction of that row's.
 

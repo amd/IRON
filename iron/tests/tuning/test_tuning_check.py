@@ -14,27 +14,27 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.rms_norm import RMSNorm
 from iron.tests.support import sequences
-from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import chain, fan_out_norm_qkv, member
 from iron.tests.support.toys_settings import shared_kv_state, small_integer_weight
 from iron.tune.autotune import Timed
 from iron.tune.search import check, measure, search
 
-DEVICE = DEVICES["npu2"]()
+pytestmark = [
+    pytest.mark.usefixtures("device"),
+    pytest.mark.supported_devices("npu1", "npu2"),
+]
 
-pytestmark = [pytest.mark.usefixtures("npu2"), pytest.mark.supported_devices("npu2")]
 
-
-def test_a_stream_window_is_bit_identical_to_its_steps_apart():
+def test_a_stream_window_is_bit_identical_to_its_steps_apart(device):
     """Add, RMSNorm and multiply fused as one stream window, held to the three run apart."""
     recording, region = chain()
     profile = Profile()
     profile.add_entry(Entry(region))
-    result = check(profile, Profile(), [Timed(recording)], DEVICE, Refinement.EXACT)
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
-def test_a_build_computing_something_else_is_caught():
+def test_a_build_computing_something_else_is_caught(device):
     """The same chain held to one ending in an add, not a multiply: its ``out`` differs, and the check names it."""
     recording, region = chain()
     add = ElementwiseAdd(size=256, num_aie_columns=1, tile_size=256)
@@ -55,7 +55,7 @@ def test_a_build_computing_something_else_is_caught():
         profile,
         Profile(),
         [Timed(recording)],
-        DEVICE,
+        device,
         Refinement.EXACT,
         base_calls=[Timed(other)],
     )
@@ -63,16 +63,16 @@ def test_a_build_computing_something_else_is_caught():
     assert "out" in (result.why or "")
 
 
-def test_a_window_bit_identical_to_its_steps_is_no_worse():
+def test_a_window_bit_identical_to_its_steps_is_no_worse(device):
     """The stream window, held to no-worse: every output ties the steps apart on each draw."""
     recording, region = chain()
     profile = Profile()
     profile.add_entry(Entry(region))
-    result = check(profile, Profile(), [Timed(recording)], DEVICE, Refinement.NO_WORSE)
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.NO_WORSE)
     assert result.ok, result.why
 
 
-def test_a_build_computing_something_else_is_worse_against_the_reference():
+def test_a_build_computing_something_else_is_worse_against_the_reference(device):
     """A chain ending in a multiply, held no-worse to one ending in an add: against the add's reference its ``out`` is worse, and the check names it."""
     recording, _ = chain()
     add = ElementwiseAdd(size=256, num_aie_columns=1, tile_size=256)
@@ -90,7 +90,7 @@ def test_a_build_computing_something_else_is_worse_against_the_reference():
         Profile(),
         Profile(),
         [Timed(recording)],
-        DEVICE,
+        device,
         Refinement.NO_WORSE,
         base_calls=[Timed(other)],
     )
@@ -98,25 +98,25 @@ def test_a_build_computing_something_else_is_worse_against_the_reference():
     assert "out is worse" in (result.why or "")
 
 
-def test_a_build_measured_against_itself_takes_about_as_long():
+def test_a_build_measured_against_itself_takes_about_as_long(device):
     """The same build timed in pairs against itself: the median paired ratio is near one."""
     recording, _ = chain()
-    measured = measure(Profile(), Profile(), [Timed(recording)], DEVICE)
+    measured = measure(Profile(), Profile(), [Timed(recording)], device)
     assert 0.8 < measured.ratio < 1.25
     assert measured.seconds > 0 and measured.base_seconds > 0
 
 
-def test_a_stream_window_measures_faster_than_its_steps_apart():
+def test_a_stream_window_measures_faster_than_its_steps_apart(device):
     """Add, RMSNorm and multiply as one stream window take about a third of their time apart (one dispatch, no host round trips)."""
     recording, region = chain()
     profile = Profile()
     profile.add_entry(Entry(region))
-    measured = measure(profile, Profile(), [Timed(recording)], DEVICE)
+    measured = measure(profile, Profile(), [Timed(recording)], device)
     assert measured.ratio < 0.8
     assert measured.seconds < measured.base_seconds
 
 
-def test_a_window_whose_hand_off_steps_past_it_still_read_keeps_a_tee():
+def test_a_window_whose_hand_off_steps_past_it_still_read_keeps_a_tee(device):
     """RMSNorm streamed into Q alone, while K and V read the norm's output from host memory: bit-identical to the steps apart.
 
     The fused edge keeps the norm's drain to host memory beside Q's on-chip
@@ -126,19 +126,19 @@ def test_a_window_whose_hand_off_steps_past_it_still_read_keeps_a_tee():
     norm, q = (member(recording.steps[s].op) for s in (0, 1))
     profile = Profile()
     profile.add_entry(Entry(Region((norm, q), (Edge(0, "y", 1, "B"),))))
-    result = check(profile, Profile(), [Timed(recording)], DEVICE, Refinement.EXACT)
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
 
 
-def test_search_keeps_the_stream_window_on_the_chain():
+def test_search_keeps_the_stream_window_on_the_chain(device):
     """The tuner, on the chain alone, keeps a window of all three steps: it measures about a third of the steps apart."""
     recording, _ = chain()
-    found = search([Timed(recording)], Profile(), DEVICE, budget_s=60.0)
+    found = search([Timed(recording)], Profile(), device, budget_s=60.0)
     assert any(len(e.root.steps()) == 3 for e in found.entries())
-    assert measure(found, Profile(), [Timed(recording)], DEVICE).ratio < 0.8
+    assert measure(found, Profile(), [Timed(recording)], device).ratio < 0.8
 
 
-def test_prefill_composed_with_a_tee_carries_the_state_decode_reads():
+def test_prefill_composed_with_a_tee_carries_the_state_decode_reads(device):
     """Prefill's two adds composed into one window, run then decode, state carried: bit-identical to the steps apart.
 
     Prefill writes ``kv`` (a state, so the window keeps its host copy) and
@@ -151,7 +151,7 @@ def test_prefill_composed_with_a_tee_carries_the_state_decode_reads():
     profile = Profile()
     profile.add_entry(Entry(Region((first, second), (Edge(0, "y", 1, "a"),))))
     result = check(
-        profile, Profile(), [Timed(prefill), Timed(decode)], DEVICE, Refinement.EXACT
+        profile, Profile(), [Timed(prefill), Timed(decode)], device, Refinement.EXACT
     )
     assert result.ok, result.why
 
@@ -171,14 +171,14 @@ def _writes_kv(writer: type) -> iron.Graph:
     return WritesKV()
 
 
-def test_a_state_written_wrong_is_caught_after_the_call_that_writes_it():
+def test_a_state_written_wrong_is_caught_after_the_call_that_writes_it(device):
     """A prefill returning what the base's returns but writing another ``kv`` (a product, not a sum) is caught after prefill, by the states compared."""
     graph, other = _writes_kv(ElementwiseAdd), _writes_kv(ElementwiseMul)
     result = check(
         Profile(),
         Profile(),
         [Timed(graph.record(x=(256,))), Timed(graph.record(x=(512,)))],
-        DEVICE,
+        device,
         Refinement.EXACT,
         base_calls=[Timed(other.record(x=(256,))), Timed(other.record(x=(512,)))],
     )
