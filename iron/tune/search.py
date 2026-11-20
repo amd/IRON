@@ -1905,7 +1905,9 @@ def check(
     them starts each at both ends of its recorded range (``Recording.limits``),
     as a first call may. Held to ``NO_WORSE``,
     each call is instead no worse than the base's against its reference
-    (``_no_worse``).
+    (``_no_worse``), each side's calls one at a time; a version the profile
+    batches then holds its batches bit-identical to its calls one at a time
+    (``_batched``), as ``EXACT`` does.
 
     Args:
         profile: The profile checked.
@@ -1980,22 +1982,17 @@ def check(
             )
     if refinement is Refinement.NO_WORSE:
         for call, old in pairs:
-            why = _no_worse(profile, base, call, old, device)
+            one, batching = _one_at_a_time(profile, call.recording.version)
+            held, _ = _one_at_a_time(base, old.recording.version)
+            why = _no_worse(one, held, call, old, device)
+            if why is None and batching:
+                why = _batched(profile, one, call, call, device, batching[0])
             if why is not None:
                 return Check(False, refinement, why)
         return Check(True, refinement)
     apart = []
     for call, old in pairs:
-        batching = [
-            s
-            for s in profile.schedules()
-            if s.version == call.recording.version
-            and (
-                s.commands_in_flight > 1
-                or s.calls_per_command > 1
-                or s.size is not None
-            )
-        ]
+        _, batching = _one_at_a_time(profile, call.recording.version)
         if not batching:
             apart.append((call, old))
             continue
@@ -2052,6 +2049,27 @@ def check(
         if why is not None:
             return Check(False, refinement, why)
     return Check(True, refinement)
+
+
+def _one_at_a_time(
+    profile: Profile, version: Version
+) -> tuple[Profile, list[Schedule]]:
+    """Return ``profile`` with ``version``'s calls run one a command, one in flight and unmerged, and the schedules that batched them."""
+    one = profile.copy()
+    batching = [
+        s
+        for s in profile.schedules()
+        if s.version == version
+        and (s.commands_in_flight > 1 or s.calls_per_command > 1 or s.size is not None)
+    ]
+    for s in batching:
+        one.replace_schedule(
+            s,
+            dataclasses.replace(
+                s, calls_per_command=1, commands_in_flight=1, size=None
+            ),
+        )
+    return one, batching
 
 
 def _batched(

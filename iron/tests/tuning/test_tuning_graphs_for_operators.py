@@ -400,12 +400,16 @@ def test_search_composes_the_decode_graph_where_it_pays(device):
 
 
 @pytest.mark.extensive
+@pytest.mark.parametrize("device", _PREFILL_BUILT, indirect=True)
 @pytest.mark.supported_devices("npu1", "npu2")
-@unbuilt
 def test_search_composes_the_prefill_graph_where_it_pays(device):
-    region = _prefill_region()
-    entry = Entry(root=region)
     qk, add_mask, softmax, pv = toys.prefill_attention_ops(SEQ, KV_LEN, HEAD_DIM)
+    entry = Entry(
+        root=Region(
+            parts=tuple(member(op) for op in (qk, add_mask, softmax, pv)),
+            edges=_prefill_region().edges,
+        )
+    )
     recording = toys.prefill_attention_recording(
         "prefill_search", qk, add_mask, softmax, pv
     )
@@ -415,8 +419,10 @@ def test_search_composes_the_prefill_graph_where_it_pays(device):
     with_entry.add_entry(entry)
     ratio = measure(with_entry, start, calls, device).ratio
     tuned = search(calls, start, device)
+    # Where the graph composed pays, what search keeps is at least as fast (a
+    # later round may hold an edge or batch calls on top).
     if ratio < 0.95:
-        assert entry in tuned.entries()
+        assert measure(tuned, with_entry, calls, device).ratio < 1.05
     if ratio > 1.05:
         assert entry not in tuned.entries()
     result = check(tuned, start, calls, device, Refinement.NO_WORSE)
