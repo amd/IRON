@@ -3,9 +3,11 @@
 
 """Transformation tests for scope and variants, which design applies where and when."""
 
+import numpy as np
 import pytest
 
 import iron
+from iron import Carried, Precision
 from iron.common.declare import Profile
 from iron.common.declare.composition import (
     Binding,
@@ -33,7 +35,15 @@ from iron.tests.support.toys_settings import (
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Point, Timed
 from iron.tune.fusions import Applied
-from iron.tune.search import AddVariants, candidates, check, fit, measure, search
+from iron.tune.search import (
+    AddVariants,
+    Switches,
+    candidates,
+    check,
+    fit,
+    measure,
+    search,
+)
 
 pytestmark = pytest.mark.usefixtures("device")
 
@@ -200,7 +210,8 @@ def test_a_boundary_is_kept_only_where_its_saving_beats_a_switch_and_one_more_de
     with_entry.add_variants(_split_at_256())
     ratio = measure(with_entry, start, calls, device).ratio
     assert ratio < 0.95
-    tuned = search(calls, start, device, budget_s=5.0)
+    # On a warm build cache search reaches and prices its splits in about 190 s.
+    tuned = search(calls, start, device, budget_s=300.0)
     (kept,) = tuned.variants()
     assert kept.values == ("rows",)
     (((_, boundary),), _), _ = kept.ranges
@@ -348,6 +359,40 @@ def test_a_pack_and_a_split_are_bit_identical_on_each_design(device):
     call = Timed(recording, values={"rows": 128, "valid": 256}, points=points)
     result = check(tuned, baseline, [call], device, refinement=Refinement.EXACT)
     assert result.ok, result.why
+
+
+class _Growing(iron.Graph):
+    """A projection of ``x``'s first ``rows``, ``rows`` one more each call, as a decode position steps."""
+
+    def body(self, x, w, *, rows: Carried[np.int32]):
+        projected = GEMM.step(x[:rows], w, b_col_maj=True, precision=Precision.MEDIUM)
+        return projected, iron.carry(rows=rows + 1)
+
+
+def test_switches_follow_the_calls_order_where_the_varied_value_is_carried(device):
+    """Carried one up a call from 200, the calls cross 256 once in their 1849 calls up to 2048, into the 2048-row design.
+
+    With no order (RangedPair's ``rows`` is not carried), consecutive calls are taken as
+    independent draws of the points: 90% at 256 and 10% at 1024 switch into each design
+    0.9 x 0.1 of the time.
+    """
+    split = _split_at_256()
+    profile = Profile()
+    profile.add_variants(split)
+    growing = _Growing().record(x=(2048, 256), w=(256, 256))
+    ordered = Switches.of(Timed(growing, values={"rows": 200}), profile)
+    small, large = ((box,) for box, _ in split.ranges)
+    assert ordered.ordered
+    assert ordered.rates[small] == 0
+    assert ordered.rates[large] == pytest.approx(1 / 1849)
+    assert ordered.at[large] == {"rows": 257}
+    pair = RangedPair(K=256, N=256).record(x=(2048, 256), w=(256, 256), y=(2048,))
+    points = (Point(0.9, {"rows": 256}), Point(0.1, {"rows": 1024}))
+    drawn = Switches.of(
+        Timed(pair, values={"rows": 256, "valid": 256}, points=points), profile
+    )
+    assert not drawn.ordered
+    assert drawn.rates == {small: pytest.approx(0.09), large: pytest.approx(0.09)}
 
 
 def test_one_value_varied_by_two_sets_of_variants_is_refused(device):

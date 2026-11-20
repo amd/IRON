@@ -29,6 +29,7 @@ from typing import Literal, Protocol
 import numpy as np
 from aie import ir
 from aie.dialects.aie import get_target_model
+from aie.helpers.taplib import Affine
 from aie.iron.device import Device
 from aie.utils import set_current_device
 from aie.utils.compile.jit.params import OperatorParam
@@ -402,14 +403,12 @@ def candidates(
     interleaved, and its packaging; ``fit`` refuses one that breaks a
     dependence.
 
-    Before everything else, each per-call value a call takes and ``profile``
-    does not vary yet, split in two ranges at each power of two inside its
-    recorded range (``AddVariants``): each range's entry the first step
-    whose design its capacity changes (``Recording.at_capacity``), named by
-    its ``Profile.dims``; a capacity the graph does not record, or that
-    changes no step, is passed over. First, as which design runs a call is
-    what every other edit is priced on, and a search on a budget prices
-    what comes first.
+    Before the schedules, after the configurations, each per-call value a
+    call takes and ``profile`` does not vary yet, split in two ranges at each
+    power of two inside its recorded range (``AddVariants``): each range's
+    entry the first step whose design its capacity changes
+    (``Recording.at_capacity``), named by its ``Profile.dims``; a capacity
+    the graph does not record, or that changes no step, is passed over.
 
     Before the schedules, after each call's tunables, its configurations,
     each the designs it loads together (``Configuration``): designs that
@@ -439,46 +438,6 @@ def candidates(
     planned: list[tuple[Entry | Version, str, object]] = []
     cores = device.cols * len(device.core_rows)
     queue = get_target_model(device.resolve()).get_dma_task_queue_depth()
-    varied = {n for v in profile.variants() for n in v.values}
-    split: set[tuple[Version, str, int]] = set()
-    for timed in calls:
-        recording = timed.recording
-        for value in recording.values:
-            span = recording.value_range(value.name)
-            if value.name in varied or span is None:
-                continue
-            lo, top = span
-            for b in (1 << k for k in range(top.bit_length())):
-                if not lo <= b < top or (recording.version, value.name, b) in split:
-                    continue
-                split.add((recording.version, value.name, b))
-                try:
-                    with set_current_device(device):
-                        small = recording.at_capacity({value.name: b})
-                except (NotImplementedError, NotLegalAtCapacity):
-                    continue
-                changed = [
-                    i
-                    for i, (a, c) in enumerate(
-                        zip(recording.steps, small.steps, strict=True)
-                    )
-                    if a.op.design_key() != c.op.design_key()
-                ]
-                if not changed:
-                    continue
-                ops = [r.steps[changed[0]].op for r in (small, recording)]
-                ranges = tuple(
-                    (
-                        ((low, high),),
-                        Entry(Member(type(op), Profile.dims(type(op), vars(op)))),
-                    )
-                    for (low, high), op in zip(
-                        ((lo, b), (b + 1, top)), ops, strict=True
-                    )
-                )
-                yield AddVariants(
-                    Variants(values=(value.name,), ranges=ranges), frozenset(changed)
-                )
     for timed in calls:
         recording = timed.recording
         for entry in profile.entries():
@@ -889,6 +848,49 @@ def candidates(
             if entry not in proposed:
                 proposed.append(entry)
                 yield AddEntry(entry, touches)
+    varied = {n for v in profile.variants() for n in v.values}
+    split: set[tuple[Version, str, int]] = set()
+    proposed_splits = 0
+    for timed in calls:
+        recording = timed.recording
+        for value in recording.values:
+            span = recording.value_range(value.name)
+            if value.name in varied or span is None:
+                continue
+            lo, top = span
+            for b in (1 << k for k in range(top.bit_length())):
+                if not lo <= b < top or (recording.version, value.name, b) in split:
+                    continue
+                split.add((recording.version, value.name, b))
+                try:
+                    with set_current_device(device):
+                        small = recording.at_capacity({value.name: b})
+                except (NotImplementedError, NotLegalAtCapacity):
+                    continue
+                changed = [
+                    i
+                    for i, (a, c) in enumerate(
+                        zip(recording.steps, small.steps, strict=True)
+                    )
+                    if a.op.design_key() != c.op.design_key()
+                ]
+                if not changed:
+                    continue
+                ops = [r.steps[changed[0]].op for r in (small, recording)]
+                ranges = tuple(
+                    (
+                        ((low, high),),
+                        Entry(Member(type(op), Profile.dims(type(op), vars(op)))),
+                    )
+                    for (low, high), op in zip(
+                        ((lo, b), (b + 1, top)), ops, strict=True
+                    )
+                )
+                proposed_splits += 1
+                yield AddVariants(
+                    Variants(values=(value.name,), ranges=ranges), frozenset(changed)
+                )
+    logger.info("candidates: %d splits of a per-call value", proposed_splits)
     versions = [t.recording.version for t in calls]
     for timed in calls:
         version = timed.recording.version
@@ -2992,6 +2994,85 @@ def _in_order(
     return None
 
 
+@dataclass(frozen=True)
+class Switches:
+    """How often a call's version switches design between calls, under a profile's variants.
+
+    Attributes:
+        rates: The switches into each design per call, by design (each set
+            of variants' range, ``Recording.ranges_at``).
+        at: Values selecting each design.
+        ordered: Counted along the calls' order; else estimated from the
+            points' shares as independent draws.
+    """
+
+    rates: dict[tuple, float]
+    at: dict[tuple, dict[str, int]]
+    ordered: bool
+
+    @classmethod
+    def of(cls, call: Timed, profile: Profile) -> Switches:
+        """Return ``call``'s switches under ``profile``.
+
+        In the calls' order where its recording carries every value a set
+        of variants is over to the next call as an expression of that value
+        alone (``Recording.carry``, as a decode position steps): from each
+        timed point, its varied values stepped call by call while they stay
+        in their recorded range (``Recording.value_range``), each change of
+        design counted into the new one, over the calls stepped, weighted
+        by the point. Else each pair of consecutive calls is taken as two
+        independent draws of the points: a design's share times the rest.
+        """
+        recording = call.recording
+        names = {v.name for v in recording.values}
+        varied = [
+            n
+            for variants in profile.variants()
+            if set(variants.values) <= names
+            for n in variants.values
+        ]
+        steps = {
+            n: e
+            for n in varied
+            if isinstance(e := recording.carry.get(n), Affine) and e.value.name == n
+        }
+        ordered = bool(varied) and len(steps) == len(varied)
+        spans = {n: recording.value_range(n) for n in varied}
+        rates: dict[tuple, float] = {}
+        at: dict[tuple, dict[str, int]] = {}
+        points = call.timed_points()
+        total = sum(w for w, _ in points)
+        if not ordered:
+            shares: dict[tuple, float] = {}
+            for weight, values in points:
+                key = tuple(box for box, _ in recording.ranges_at(profile, values))
+                shares[key] = shares.get(key, 0.0) + weight / total
+                at.setdefault(key, values)
+            rates = {k: share * (1 - share) for k, share in shares.items()}
+            return cls(rates, at, False)
+        length = max(hi - lo + 1 for lo, hi in (s for s in spans.values() if s))
+        for weight, values in points:
+            keys = []
+            current = dict(values)
+            while len(keys) < length and all(
+                span is None or span[0] <= current[n] <= span[1]
+                for n, span in spans.items()
+            ):
+                key = tuple(box for box, _ in recording.ranges_at(profile, current))
+                at.setdefault(key, dict(current))
+                keys.append(key)
+                current = {
+                    **current,
+                    **{n: e.evaluate(current) for n, e in steps.items()},
+                }
+            for before, after in zip(keys, keys[1:]):
+                if before != after:
+                    rates[after] = rates.get(after, 0.0) + weight / total / len(keys)
+            for key in keys:
+                rates.setdefault(key, 0.0)
+        return cls(rates, at, True)
+
+
 def measure(
     profile: Profile,
     base: Profile,
@@ -3011,10 +3092,11 @@ def measure(
     weighted; ``ratio`` weighs each point's median paired ratio by the
     base's time there. Where ``profile`` has variants, each point runs on
     the design its values select (``Recording.ranges_at``), a call timed as
-    one call per design; one whose points select several designs adds what
-    switching into each costs (``measure.switch_cost``, at the cores of its
-    first array, ``design_cores``), weighed by the chance a call's design
-    differs from the one before (each share times the rest).
+    one call per design; one that switches designs between calls
+    (``Switches``: along the calls' order where its recording carries the
+    varied values, else as independent draws of its points) adds what each
+    switch costs on the device (``measure.switch_cost``, measured, into the
+    cores of the design's first array, ``design_cores``).
 
     Args:
         profile: The profile timed.
@@ -3037,14 +3119,21 @@ def measure(
     for call in calls:
         known = Compared()
         parts = _by_design(call, (base, profile))
-        # The time a call adds switching into the design it runs on from
-        # another, each design's share of the points weighing both ends.
-        shares: dict[tuple, float] = {}
-        for weight, values in call.timed_points():
-            selects = tuple(box for box, _ in call.recording.ranges_at(profile, values))
-            shares[selects] = shares.get(selects, 0.0) + weight
-        total = sum(shares.values())
+        switches = Switches.of(call, profile)
         switch_us = 0.0
+        if any(switches.rates.values()):
+            with set_current_device(device):
+                fixed_us, per_core_us = switch_cost(
+                    device, cache=Cache.here(), log=logger.info
+                )
+            for key, rate in switches.rates.items():
+                if not rate:
+                    continue
+                into = dataclasses.replace(call, values=switches.at[key], points=())
+                with set_current_device(device):
+                    first = Applied.of(into, profile, device).recording.steps[0].op
+                    cores = design_cores(first.resolved(device))
+                switch_us += rate * (fixed_us + per_core_us * cores)
         for part in parts:
             with set_current_device(device):
                 applied = (
@@ -3066,24 +3155,6 @@ def measure(
                         log=logger.info,
                         exact=refinement is Refinement.EXACT,
                     )
-            if len(shares) > 1:
-                share = (
-                    shares[
-                        tuple(
-                            box
-                            for box, _ in part.recording.ranges_at(profile, part.values)
-                        )
-                    ]
-                    / total
-                )
-                with set_current_device(device):
-                    fixed_us, per_core_us = switch_cost(
-                        device, cache=Cache.here(), log=logger.info
-                    )
-                    cores = design_cores(
-                        applied[1].recording.steps[0].op.resolved(device)
-                    )
-                switch_us += share * (1 - share) * (fixed_us + per_core_us * cores)
         for weight, values in call.timed_points():
             point = tuple(sorted(values.items()))
             was, now = known.medians[point]
@@ -3356,17 +3427,16 @@ def search(
             if not checked.ok:
                 logger.info("search: %s is not bit-identical: %s", edit, checked.why)
                 continue
-            if (
-                measure(
-                    edited,
-                    incumbent,
-                    calls,
-                    device,
-                    timing=PRICING,
-                    refinement=edit.refinement,
-                ).ratio
-                >= GAINS
-            ):
+            ratio = measure(
+                edited,
+                incumbent,
+                calls,
+                device,
+                timing=PRICING,
+                refinement=edit.refinement,
+            ).ratio
+            logger.info("search: %.3f on what it joins for %s", ratio, edit)
+            if ratio >= GAINS:
                 continue
             incumbent = edited
         if incumbent is base:
