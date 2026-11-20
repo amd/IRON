@@ -14,6 +14,8 @@ a test is ``@unbuilt`` while what it calls raises ``NotImplementedError`` (not b
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from iron.common.declare import Profile
@@ -136,7 +138,9 @@ def test_a_cycle_with_its_initial_values_round_trips(cycle, tmp_path, device):
             if c == "sample_drawn_token"
             else pytest.param(c, marks=unbuilt)
         )
+        # Trail's carry is checked on its own below.
         for c in sorted(CYCLES)
+        if c != "trail_across_calls"
     ],
 )
 @pytest.mark.supported_devices("npu1", "npu2")
@@ -148,6 +152,35 @@ def test_a_cycle_is_bit_identical_to_the_steps_or_calls_run_apart(cycle, device)
     base = Profile()
     result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
+
+
+# Its steps depend through memory, so they run a phase apart: a full ELF's.
+@pytest.mark.supported_devices("npu2")
+def test_a_carry_no_caller_starts_is_bit_identical_from_each_end_of_its_range(
+    device,
+):
+    """Trail's walk, its node and step count carried to the next call and given by no caller, is bit-identical started at each end of their recorded ranges."""
+    recording, region = cross_call_trail()
+    assert recording.carry, "the toy carries values across calls"
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+def test_a_carry_with_no_recorded_range_is_refused_by_name(device):
+    """A call checked apart that carries a value no caller starts and no recorded range bounds is not checked: nothing says where a first call starts it."""
+    recording, region = cross_call_trail()
+    unbounded = dataclasses.replace(
+        recording,
+        limits=[
+            limit for limit in recording.limits if limit.expression.value.name != "node"
+        ],
+    )
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    with pytest.raises(NotImplementedError, match="no recorded range"):
+        check(profile, Profile(), [Timed(unbounded)], device, Refinement.EXACT)
 
 
 @pytest.mark.extensive
