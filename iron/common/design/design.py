@@ -10,7 +10,7 @@ import functools
 import hashlib
 import inspect
 import re
-from collections.abc import Hashable, Mapping, Sequence
+from collections.abc import Collection, Hashable, Mapping, Sequence
 
 import aie.utils as aie_utils
 from aie import ir
@@ -161,6 +161,8 @@ class BuiltArray:
         depths: Operand name -> the depth a composition chose for an edge's
             reading end (``Operand.chosen_depth``): a fed input's own end, or
             the end an output's lanes bind for their first on-chip reader.
+        packeted: Operand names whose host fills ride packet flows
+            (``Operand.packeted``).
 
     Raises:
         ValueError: A full ELF is asked to carry a ``DispatchTime`` value, an
@@ -178,6 +180,7 @@ class BuiltArray:
         fed: Mapping[str, Operand] | None = None,
         staged: bool = False,
         depths: Mapping[str, int] | None = None,
+        packeted: Collection[str] = (),
     ):
         words = words or {}
         dispatch = dispatch or {}
@@ -212,6 +215,7 @@ class BuiltArray:
         for mine, built in zip(op.buffers, view.buffers):
             built.fed_from, built.staged = mine.fed_from, mine.staged
             built.chosen_depth = (depths or {}).get(mine.name)
+            built.packeted = mine.name in packeted
         self.built = view.build()
         for mine, built in zip(op.buffers, view.buffers):
             if (

@@ -526,19 +526,20 @@ def test_a_later_reader_may_run_phases_after_its_producer():
 
 
 def test_a_phased_fusion_takes_the_shims_channels_a_phase_at_a_time():
-    """Place a fusion past the shim's sending channels once it runs a sequence a phase.
+    """Place a fusion past the shim's sending channels as circuits once it runs a sequence a phase.
 
     Eight multiply lanes reading two inputs and eight down-projection lanes need 24
-    sending channels at once, past npu2's 16: as one sequence they do not place; a
-    sequence a phase, 16 then 8, they do.
+    sending channels at once, past npu2's 16: as one sequence they place only with
+    their fills as packet flows; a sequence a phase, 16 then 8, they place as
+    circuits.
     """
     whole = _composed(
         _mul_down_recording("one_sequence", *_mul_down(mul_cols=8)),
         (_mul_down_fusion(False),),
     )
     with ir.Context(), ir.Location.unknown():
-        diagnostic = places(ir.Module.parse(whole))
-    assert diagnostic is not None and "16/16 output channels used" in diagnostic
+        assert places(ir.Module.parse(whole)) is None
+    assert "packet = #aie.packet_info" in whole
     text = _composed(
         _mul_down_recording("a_sequence_a_phase", *_mul_down(mul_cols=8)),
         (_mul_down_fusion(True),),
@@ -546,6 +547,7 @@ def test_a_phased_fusion_takes_the_shims_channels_a_phase_at_a_time():
     with ir.Context(), ir.Location.unknown():
         diagnostic = places(ir.Module.parse(text))
     assert diagnostic is None, diagnostic
+    assert "packet = #aie.packet_info" not in text
     assert "aiex.run @sequence_1(" in text and "aiex.run @sequence_1(" not in whole
 
 

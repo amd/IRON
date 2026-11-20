@@ -25,7 +25,7 @@ from ..declare import Operator
 from ..design import OperatorDesign
 from .artifacts import Design
 from .callable import FullELFCallable, PerStepCallable
-from .compose import Composition, Packing, fused_configuration
+from .compose import Composition, Packing, fused_configuration, transported
 from .packaging import require_device
 from .step import Fusion
 
@@ -217,7 +217,7 @@ class FusedDesign:
         """
         configured, _ = fused_configuration(
             self.name,
-            self.fusion,
+            transported(self.fusion, self.designs),
             self.designs,
             dispatch=[
                 {v.symbol: dispatch[f"{v.symbol}_{pos}"] for v in design.op.values}

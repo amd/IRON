@@ -339,12 +339,13 @@ def composed(
         NotImplementedError: What the composer does not build yet: a
             profile's schedules beyond their packaging, variants, bindings or
             state layouts, steps run at once that are not consecutive, a
-            configuration at a partial width, keeping buffers resident, switched other than by a
-            reload or holding regions, a runtime plan other than one task
-            group, chosen phases a fusion's demands do not meet
-            (``compose.phases``, at build), or an entry rooted at a step,
-            with nested regions, inflows, shared workers, fission, a self-loop over a carried buffer, cascade edges, a DDR
-            edge's chosen depth, matching steps that are not consecutive,
+            configuration at a partial width, keeping buffers resident,
+            switched other than by a reload or holding regions, a runtime
+            plan other than one task group, chosen phases a fusion's demands
+            do not meet (``compose.phases``, at build), or an entry rooted at
+            a step, with nested regions, inflows, shared workers, fission, a
+            self-loop over a carried buffer, cascade edges, a DDR edge's
+            chosen depth, matching steps that are not consecutive,
             members that depend through memory with no edge between them, or
             an edge the composer does not build as its kind (``admits``). An edge out of a buffer steps past
             the region, a DDR edge or the host also read keeps its drain to

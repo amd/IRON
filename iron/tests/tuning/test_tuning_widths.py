@@ -9,11 +9,14 @@ import dataclasses
 
 import pytest
 from aie.dialects.aie import get_target_model
+from aie.utils import set_current_device
 
 from iron.common.declare.composition import Edge as CompositionEdge
 from iron.common.declare.composition import Entry, Member, Refinement, Region, Scope
 from iron.common.declare.profile import Profile
-from iron.common.image.step import EdgeKind
+from iron.common.design import OperatorDesign
+from iron.common.image.compose import SHIM_SHORT, fits
+from iron.common.image.step import Edge, EdgeKind, Fusion, FusionKind
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
@@ -124,16 +127,26 @@ def test_a_width_over_the_arrays_columns_is_refused_by_counts():
     assert "column" in (result.why or "") or "core" in (result.why or "")
 
 
-@unbuilt
-def test_a_width_over_a_streams_budget_is_refused_by_counts():
-    """C's narrow window (4 cores, 4 streams) wanting more DDR streams than npu2's shim channels have is refused by counts."""
+def test_a_width_over_the_shims_sending_channels_builds_by_packets():
+    """C's narrow window (4 cores, 4 streams), whose fills outrun npu2's shim sending channels as circuits, builds bit-identical with them as packet flows."""
     region, recording = _window(columns=4, channels=4, kind=EdgeKind.STAGED)
+    designs = {
+        str(i): OperatorDesign(step.op.resolved())
+        for i, step in enumerate(recording.steps)
+    }
+    fusion = Fusion(
+        FusionKind.STAGED, (0, 1, 2), (Edge(0, "C", 1, "x"), Edge(1, "y", 2, "a"))
+    )
+    with set_current_device(DEVICE):
+        assert SHIM_SHORT in (fits(designs, fusion=fusion) or "")
+        assert fits(designs, fusion=dataclasses.replace(fusion, packets=True)) is None
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    result = fit(profile, [Timed(recording)], DEVICE)
-    assert not result.ok
-    assert result.stage == "counts"
-    assert "stream" in (result.why or "") or "channel" in (result.why or "")
+    calls = [Timed(recording)]
+    fitted = fit(profile, calls, DEVICE)
+    assert fitted.ok, fitted.why
+    result = check(profile, Profile(), calls, DEVICE, Refinement.EXACT)
+    assert result.ok, result.why
 
 
 @unbuilt

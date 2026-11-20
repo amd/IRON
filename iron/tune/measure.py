@@ -1316,12 +1316,15 @@ def repeat_fusion(
 
     ``edges`` kept for any kind that takes them (``Fusion`` itself refuses any for
     ``PACK`` or ``MERGE``), so a fan-out's several edges, or a staged one, stay wired
-    the way ``candidates`` found them.
+    the way ``candidates`` found them. Its host fills stay circuits.
     """
     return Fusion(
         kind,
         tuple(base + i for i in range(n)),
         tuple(Edge(base + p, out, base + c, inp) for p, out, c, inp in edges),
+        # narrow_group prunes on "never faster narrower": true of circuits, not
+        # of fills sharing a channel.
+        packets=False,
     )
 
 

@@ -623,10 +623,10 @@ def candidates(
                 parts: list[Region | Member] = []
                 s = lo
                 while s <= hi:
-                    piece = pieces.get(s)
-                    if piece is not None and piece[1][-1] <= hi:
-                        parts.append(piece[0])
-                        s += len(piece[1])
+                    found = pieces.get(s)
+                    if found is not None and found[1][-1] <= hi:
+                        parts.append(found[0])
+                        s += len(found[1])
                     else:
                         parts.append(members[s])
                         s += 1
@@ -707,9 +707,10 @@ def fit(
     be independent of each other, their chosen columns disjoint, and are
     placed as one pack. A plan's per-channel awaits must not reuse a channel
     the host fills in more tasks than it keeps in flight: a fill reports
-    done before its data leaves the shim. A version's schedule must not run a part before one it reads, nor
-    overlap or merge calls where a step writes a buffer that outlasts the
-    call, and on an xclbin per step it takes no phased region and no
+    done before its data leaves the shim. A version's schedule must not run
+    a part before one it reads, nor overlap or merge calls where a step
+    writes a buffer that outlasts the call, and on an xclbin per step it
+    takes no phased region and no
     teardown.
 
     A refusal from any stage of any entry wins over what is not fitted yet;
@@ -731,9 +732,7 @@ def fit(
             variants, bindings, fusion or packing entries, a configuration
             the composer does not build, an entry rooted at a step, scoped
             to some runs of its shape, splitting a step by
-            fission or chaining a cascade, more fifos to or
-            from the host than the shim has channels (IRON's composer gives
-            each its own; mlir-aie can share them), a placer setting past the
+            fission or chaining a cascade, a placer setting past the
             sequential placer, a region the composer does not build, and
             what the analysis does not model (``Derivation``).
     """
@@ -1045,56 +1044,40 @@ def fit(
                     f"its steps take {needed} cores; {device.resolve()} has "
                     f"{cores_on_array}",
                 )
-            on_chip = {
-                (p, e.output)
-                for e, p, _ in derivation.wired
-                if e.kind is not EdgeKind.DDR
-            } | {
-                (c, e.input)
-                for e, _, c in derivation.wired
-                if e.kind is not EdgeKind.DDR
-            }
-            moved = set()
-            for s, ((_, recorded), lanes) in enumerate(
-                zip(derivation.recorded, derivation.lanes)
-            ):
-                owner = {f: name for name, fifos in lanes.items() for f in fifos}
-                moved |= {
-                    (t.kind, t.fifo)
-                    for t in recorded.transfers
-                    if (s, owner.get(t.fifo)) not in on_chip
+            plan = region.runtime
+            if plan is not None and plan.waits == "per_channel" and not plan.chained:
+                on_chip = {
+                    (p, e.output)
+                    for e, p, _ in derivation.wired
+                    if e.kind is not EdgeKind.DDR
+                } | {
+                    (c, e.input)
+                    for e, _, c in derivation.wired
+                    if e.kind is not EdgeKind.DDR
                 }
-                plan = region.runtime
-                if plan is None or plan.waits != "per_channel" or plan.chained:
-                    continue
-                tasks = Counter(
-                    t.fifo
-                    for t in recorded.transfers
-                    if t.kind == "fill" and (s, owner.get(t.fifo)) not in on_chip
-                )
-                for fifo, n in tasks.items():
-                    if n * plan.chunks > (plan.in_flight or queue):
-                        return Fit(
-                            False,
-                            "analysis",
-                            f"step {s} ({type(derivation.ops[s]).__name__}) fills "
-                            f"{fifo.name} from the host in {n * plan.chunks} tasks "
-                            f"a call, {plan.in_flight or queue} in flight, each "
-                            f"awaited on its own channel: the channel is reused "
-                            f"once a fill reports done, which it does before its "
-                            f"data leaves the shim, not a sure await",
-                        )
-            unplaceable = [
-                f"its steps {kind} {taken} fifos from the host, and "
-                f"{device.resolve()} has {budget} shim channels: IRON's composer "
-                f"gives each its own, and sharing them is not built yet"
-                for kind, budget in (
-                    ("fill", device.shim_dma_channels_in),
-                    ("drain", device.shim_dma_channels_out),
-                )
-                for taken in [sum(k == kind for k, _ in moved)]
-                if taken > budget
-            ]
+                for s, ((_, recorded), lanes) in enumerate(
+                    zip(derivation.recorded, derivation.lanes)
+                ):
+                    owner = {f: name for name, fifos in lanes.items() for f in fifos}
+                    tasks = Counter(
+                        t.fifo
+                        for t in recorded.transfers
+                        if t.kind == "fill" and (s, owner.get(t.fifo)) not in on_chip
+                    )
+                    for fifo, n in tasks.items():
+                        if n * plan.chunks > (plan.in_flight or queue):
+                            return Fit(
+                                False,
+                                "analysis",
+                                f"step {s} ({type(derivation.ops[s]).__name__}) "
+                                f"fills {fifo.name} from the host in "
+                                f"{n * plan.chunks} tasks a call, "
+                                f"{plan.in_flight or queue} in flight, each "
+                                f"awaited on its own channel: the channel is "
+                                f"reused once a fill reports done, which it does "
+                                f"before its data leaves the shim, not a sure await",
+                            )
+            unplaceable = []
             for edge, p, _ in derivation.wired:
                 elements = derivation.obj_elements[p].get(edge.output)
                 if edge.depth is None or edge.kind not in held_in or elements is None:

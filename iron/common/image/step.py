@@ -129,6 +129,10 @@ class Fusion:
     members' bodies in turn, the edges among them fifos within its tile.
     ``phases`` names each member's phase, in ``steps``' order, where they are
     chosen rather than derived (``compose.phases``).
+    ``packets`` True sends its members' host fills as packet flows, sharing
+    the shim's sending channels; False keeps them circuits; None leaves it to
+    the placer: packets only where circuits run the channels short and packets
+    place (``compose.transported``).
     """
 
     kind: FusionKind
@@ -139,6 +143,7 @@ class Fusion:
     waits: tuple[tuple[int, int], ...] = ()
     workers: tuple[tuple[int, ...], ...] = ()
     phases: tuple[int, ...] | None = None
+    packets: bool | None = None
 
     def __post_init__(self) -> None:
         if len(self.steps) < 2:
