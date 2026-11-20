@@ -232,8 +232,8 @@ def fused_configuration(
         )
         for producer, output in fusion.kept:
             if producer == j:
-                (kept,) = [b for b in arrays[j].op.buffers if b.name == output]
-                kept.keeps_host = True
+                (drained,) = [b for b in arrays[j].op.buffers if b.name == output]
+                drained.keeps_host = True
     for group in fusion.workers:
         share(
             group,

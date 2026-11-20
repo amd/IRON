@@ -15,7 +15,7 @@ from aie.utils.verify import Tolerance, compare
 
 from iron.common.design import BuiltArray, OperatorDesign
 from iron.common.graph.record import Recording
-from iron.common.image.compose import Composition, places
+from iron.common.image.compose import Composition, fused_configuration, places
 from iron.common.image.link import FullELF, PerStep
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef, Edge, Fusion, FusionKind
@@ -288,6 +288,22 @@ def test_a_rider_sharing_the_chains_own_input_is_refused_as_a_hazard():
     fusion = Fusion(FusionKind.STREAM, (0, 1, 2), (Edge(0, "y", 1, "a"),))
     with pytest.raises(ValueError, match="share a root with no edge between them"):
         Image(recording, FullELF(), fusions=(fusion,))
+
+
+@pytest.mark.parametrize("before", [(), ((0, "C"),)])
+def test_a_kept_output_takes_its_readers_depth_on_its_readers_end_alone(before):
+    """SiLU's tee builds its own end alike whether GEMV's output is kept before it or not."""
+    gemv, silu, mul = fusable.gemv_silu_mul(2048, 8, 256)
+    fusion = Fusion(
+        FusionKind.STREAM,
+        (0, 1, 2),
+        (Edge(0, "C", 1, "x"), Edge(1, "y", 2, "a", depth=4)),
+        kept=(*before, (1, "y")),
+    )
+    designs = [OperatorDesign(op.resolved()) for op in (gemv, silu, mul)]
+    _, members = fused_configuration("kept_then_deep", fusion, designs)
+    (made,) = [b for b in members[1].op.buffers if b.name == "y"]
+    assert {h.depth for h in made.lane_handles} == {2}
 
 
 def test_fusion_steps_must_be_increasing_and_distinct():
