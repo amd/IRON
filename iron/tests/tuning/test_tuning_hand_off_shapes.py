@@ -20,19 +20,27 @@ from aie.dialects.aie import WireBundle, get_target_model
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Refinement, Region
 from iron.common.design import OperatorDesign
+from iron.common.graph.fusion import composed
 from iron.common.graph.sdf import analyze
-from iron.common.image.compose import fits, transported
+from iron.common.image.compose import fits, fused_configuration, transported
 from iron.common.image.step import Edge, EdgeKind, Fusion, FusionKind, HandOff
+from iron.tests.support import toys_dataflow
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     broadcast_weight_to_columns,
     fan_out_norm_qkv,
+    held_in_l1,
     join_in_pairs,
+    join_of_two_streams,
+    join_rows_after_rows,
+    join_rows_into_one,
     layout_transpose,
     ratio_three_into_two,
     ratio_two_into_three,
+    ratio_two_into_three_rows,
     slices_qkv,
     split_in_two,
+    split_into_rows,
 )
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
@@ -270,4 +278,181 @@ def test_feed_refuses_a_held_input_broadcast_flips_it(device):
     profile.add_entry(Entry(region))
     base = Profile()
     result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+# Hand-off shapes held in L1, restaged on the cores their two steps share,
+# each step taking one input, so each restage fits a core. GEMM's tiles join
+# their cores in a memtile, so its layout held in L1 is RMSNorm spliced into
+# GEMM's cores; QKV's slices held in L1 are views of one core's buffer.
+HELD_IN_L1 = {
+    "join_rows_into_one": join_rows_into_one,
+    "split_into_rows": split_into_rows,
+    "ratio_two_into_three_rows": ratio_two_into_three_rows,
+    "layout_transpose": layout_transpose,
+    "slices_qkv": slices_qkv,
+}
+
+# Each device's L1-held shapes the composer builds bit-identical there.
+_BUILT_IN_L1: dict[str, set[str]] = {
+    "npu1": set(),
+    "npu2": {"join_rows_into_one", "ratio_two_into_three_rows", "split_into_rows"},
+}
+
+
+@pytest.mark.parametrize(
+    ("device", "shape"),
+    [
+        pytest.param(
+            name,
+            s,
+            id=f"device_{name}-shape_{s}",
+            marks=() if s in _BUILT_IN_L1[name] else unbuilt,
+        )
+        for name in sorted(DEVICES)
+        for s in sorted(HELD_IN_L1)
+    ],
+    indirect=["device"],
+)
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_hand_off_shape_held_in_l1_is_bit_identical_to_the_steps_run_apart(
+    shape, device
+):
+    """Each hand-off shape held in L1, on the cores its steps share, is bit-identical to the steps run apart."""
+    recording, region = held_in_l1(*HELD_IN_L1[shape]())
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    base = Profile()
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+def _refused_in_l1(recording, region, device, past):
+    """Assert ``fit`` refuses ``region`` by the counts, a restage held in L1 ``past`` a core tile's budget."""
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "counts"
+    assert "restaged in L1" in (result.why or "")
+    assert past in (result.why or "")
+
+
+def test_a_restage_held_in_l1_past_a_cores_input_channels_is_refused_before_any_build(
+    device,
+):
+    """A ratio held in L1 whose core already takes three inputs (GEMV's two, the multiply's other) is refused before any build, however it is placed."""
+    _refused_in_l1(*held_in_l1(*ratio_two_into_three(device)), device, "input channels")
+
+
+def test_a_restage_held_in_l1_past_a_cores_memory_is_refused_before_any_build(
+    device,
+):
+    """A join held in L1 whose rounds, deep enough, outgrow the joining core's memory is refused before any build."""
+    _refused_in_l1(
+        *held_in_l1(*join_rows_into_one(size=1024), depth=14), device, "bytes"
+    )
+
+
+# A split as wide as npu2's array.
+WIDE = [pytest.param("npu2", id="device_npu2")]
+
+
+@pytest.mark.parametrize("device", WIDE, indirect=True)
+def test_a_split_held_in_l1_past_a_cores_output_channels_is_refused_before_any_build(
+    device,
+):
+    """One lane split into eight held in L1 sends every lane but the leading one on a channel of its own, more than a core has."""
+    _refused_in_l1(
+        *held_in_l1(*split_into_rows(size=64, rows=8)), device, "output channels"
+    )
+
+
+def test_a_join_held_in_l1_past_a_cores_buffer_descriptors_is_refused_before_any_build(
+    device,
+):
+    """Two lanes joined into one held in L1, deep: the lane arriving by DMA takes a buffer descriptor a round, past the core's."""
+    _refused_in_l1(
+        *held_in_l1(*join_rows_into_one(size=64), depth=13),
+        device,
+        "buffer descriptors",
+    )
+
+
+def _composed_in_l1(recording, region):
+    """Compose ``region``'s one fusion as the build does; return its arrays."""
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    _, (fusion,) = composed(recording, profile)
+    designs = [OperatorDesign(recording.steps[s].op.resolved()) for s in fusion.steps]
+    _, arrays = fused_configuration("l1", fusion, designs)
+    return arrays
+
+
+def test_a_restage_held_in_l1_is_as_deep_as_its_chosen_depth(device):
+    """A join held in L1 three deep builds its pool three rounds deep, as fit counts it."""
+    recording, region = held_in_l1(*join_rows_into_one(), depth=3)
+    arrays = _composed_in_l1(recording, region)
+    (sink,) = [b for b in arrays[1].op.buffers if b.name == "x"]
+    assert [f.depth for f in sink.staged] == [3]
+
+
+def test_a_restage_held_in_l1_links_on_the_core_its_reader_runs_on(device):
+    """A join held in L1 whose producer shares its cores with an earlier step links on the core the three run on, whichever body leads it."""
+    recording, region = held_in_l1(*join_rows_after_rows())
+    arrays = _composed_in_l1(recording, region)
+    (sink,) = [b for b in arrays[2].op.buffers if b.name == "x"]
+    (fifo,) = sink.staged
+    (core,) = [
+        w
+        for a in arrays
+        for w in a.workers
+        if any(h.object_fifo is fifo for h in w.fifos)
+    ]
+    assert fifo.delegate_tile is core.tile
+
+
+def test_a_restage_held_in_l1_counts_no_channel_for_edges_on_chip(device):
+    """An add fed core to core by two SiLUs, its lanes joined in L1: the add's streamed inputs may be its neighbours' memory, so the counts do not refuse it."""
+    recording, region = join_of_two_streams()
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    try:
+        result = fit(profile, [Timed(recording)], device)
+    except NotImplementedError as e:
+        assert "restage held in L1" not in str(e)
+        return
+    assert result.ok, result.why
+
+
+def test_a_restage_held_in_l1_of_an_output_kept_too_waits(device):
+    """A split held in L1 of an output the host also drains is not built yet: fit waits rather than counting it."""
+    recording, region = held_in_l1(*split_into_rows(keep=True))
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    with pytest.raises(NotImplementedError, match="read elsewhere too"):
+        fit(profile, [Timed(recording)], device)
+
+
+@pytest.mark.parametrize(
+    "device",
+    [pytest.param("npu2", id="device_npu2")],
+    indirect=True,
+)
+@pytest.mark.supported_devices("npu2")
+def test_a_gemms_output_streams_into_anothers_a(device):
+    """One GEMM's C streamed into another's A, tile for tile, is bit-identical to the two run apart.
+
+    The consumer's memtile splits the producer's lanes through their bound
+    ends, so no end of theirs is left without a reader.
+    """
+    producer, consumer = toys_dataflow.gemm_into_gemm(
+        device, M=256, width=64, producer_tile=64, consumer_tile=64
+    )
+    recording = toys_dataflow.gemm_into_gemm_recording(
+        "gemm_into_gemm", producer, consumer
+    )
+    profile = Profile()
+    profile.add_entry(Entry(toys_dataflow.gemm_into_gemm_region(producer, consumer)))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why

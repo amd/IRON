@@ -1370,8 +1370,7 @@ class MHA(Operator):
         q_depth = 1 if pv_split else of_depth
         layout = MHA.PV_SPLIT_COLUMNS[self.width] if pv_split else None
         # Q and O are placed at the P*V split layout's shim tiles; fifos()
-        # returns the raw fifo, not an end, since each is split or joined
-        # further below.
+        # returns Q's reading ends and O's fifos, split or joined below.
         inQ = self.Q.fifos(
             of_depth,
             tiles=[
@@ -1391,16 +1390,12 @@ class MHA(Operator):
         memQ = []
         outO = [[] for _ in range(pv_cores)]
         for shim in range(self.q_shims):
-            memQ += (
-                inQ[shim]
-                .cons()
-                .split(
-                    offsets=[B_q * d * i for i in range(n_join)],
-                    obj_types=[q_ty] * n_join,
-                    to_stream=None if qk.A is None else [qk.A] * n_join,
-                    depths=[q_depth] * n_join,
-                    tile=Tile(layout.q[shim], 1) if layout is not None else AnyMemTile,
-                )
+            memQ += inQ[shim].split(
+                offsets=[B_q * d * i for i in range(n_join)],
+                obj_types=[q_ty] * n_join,
+                to_stream=None if qk.A is None else [qk.A] * n_join,
+                depths=[q_depth] * n_join,
+                tile=Tile(layout.q[shim], 1) if layout is not None else AnyMemTile,
             )
             for h in range(pv_cores):
                 outO[h] += (
@@ -1429,33 +1424,33 @@ class MHA(Operator):
             for h in range(pv_cores)
         ]
         if self.kv_paired:
-            inK = [
+            k_fifos = [
                 ObjectFifo(np.ndarray[(d, B_kv), np.dtype[dtype]], depth=of_depth)
                 for _ in k_tiles
             ]
-            inV = [ObjectFifo(v_ty, depth=of_depth) for _ in v_tiles]
+            v_fifos = [ObjectFifo(v_ty, depth=of_depth) for _ in v_tiles]
             self.KV.bind(
                 [
                     fifo.prod(tile=tile)
                     for lane in range(kv_lanes)
                     for fifo, tile in [
-                        (inK[lane], k_tiles[lane]),
+                        (k_fifos[lane], k_tiles[lane]),
                         *zip(
-                            inV[lane * pv_cores : (lane + 1) * pv_cores],
+                            v_fifos[lane * pv_cores : (lane + 1) * pv_cores],
                             v_tiles[lane * pv_cores : (lane + 1) * pv_cores],
                         ),
                     ]
                 ]
             )
+            inK = [fifo.cons() for fifo in k_fifos]
+            inV = [fifo.cons() for fifo in v_fifos]
         else:
             inK = self.K.fifos(of_depth, tiles=k_tiles)
             inV = self.V.fifos(of_depth, tiles=v_tiles)
         memK, memV = [], []
         for lane in range(kv_lanes):
             memK.append(
-                inK[lane]
-                .cons()
-                .forward(
+                inK[lane].forward(
                     to_stream=qk.B,
                     tile=Tile(layout.k, 1) if layout is not None else AnyMemTile,
                     depth=of_depth,
@@ -1463,9 +1458,7 @@ class MHA(Operator):
             )
             for h in range(pv_cores):
                 memV.append(
-                    inV[lane * pv_cores + h]
-                    .cons()
-                    .forward(
+                    inV[lane * pv_cores + h].forward(
                         to_stream=pv.B,
                         tile=Tile(layout.v[h], 1) if layout is not None else AnyMemTile,
                         depth=of_depth,
@@ -1816,16 +1809,12 @@ class MHA(Operator):
         )
         memQ, outO = [], []
         for col in range(self.num_pipelines):
-            memQ += (
-                inQ[col]
-                .cons()
-                .split(
-                    offsets=[B_q * d * k for k in range(rows)],
-                    obj_types=[q_ty] * rows,
-                    to_stream=[q_tiled] * rows,
-                    depths=[1] * rows,
-                    tile=AnyMemTile,
-                )
+            memQ += inQ[col].split(
+                offsets=[B_q * d * k for k in range(rows)],
+                obj_types=[q_ty] * rows,
+                to_stream=[q_tiled] * rows,
+                depths=[1] * rows,
+                tile=AnyMemTile,
             )
             outO += (
                 memO[col]

@@ -174,20 +174,16 @@ class LMHead(Operator):
         # The host addresses the DMAs by column. The build therefore places
         # x, w and y at the shim tiles. The placer places the other tiles.
         shim = [Tile(j, 0) for j in range(cols)]
-        (of_x,) = self.x.fifos(2, tiles=[shim[0]], obj_type=x_ty)
+        (of_x,) = self.x.fifos(2, tiles=[shim[0]], readers=cols * rows, obj_type=x_ty)
         w_fifos = self.w.fifos(2, tiles=shim, obj_type=w_col_ty)
         y_fifos = self.y.fifos(2, tiles=shim)
 
         workers, softcaps = [], []
         for j in range(cols):
-            w_cores = (
-                w_fifos[j]
-                .cons()
-                .split(
-                    [w_blk * i for i in range(rows)],
-                    obj_types=[w_blk_ty] * rows,
-                    names=[f"w{j}_{i}" for i in range(rows)],
-                )
+            w_cores = w_fifos[j].split(
+                [w_blk * i for i in range(rows)],
+                obj_types=[w_blk_ty] * rows,
+                names=[f"w{j}_{i}" for i in range(rows)],
             )
 
             y_cores = (
@@ -209,7 +205,7 @@ class LMHead(Operator):
                     Worker(
                         core_fn,
                         [
-                            of_x.cons(),
+                            of_x[j * rows + i],
                             w_cores[i].cons(),
                             y_cores[i].prod(),
                             kernel.q4nx_lm_head_rms,

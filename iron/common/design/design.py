@@ -161,6 +161,7 @@ class BuiltArray:
             (``Operand.feed``).
         staged: A fed input whose lanes do not meet its source's is staged
             through memtiles rather than refused.
+        held: Fed inputs whose restage is held in L1 (``Operand.feed``).
         depths: Operand name -> the depth a composition chose for an edge's
             reading end (``Operand.chosen_depth``): a fed input's own end,
             the end an output's lanes bind for their first on-chip reader, or
@@ -180,7 +181,8 @@ class BuiltArray:
             output a full ELF consolidates, or ``Operand.feed`` refuses.
         NotImplementedError: A chosen depth names an output, or an unfed
             input, whose build binds its lanes itself, not through
-            ``Operand.fifos``.
+            ``Operand.fifos``, or ``Operand.feed`` does not build a restage
+            held in L1.
     """
 
     def __init__(
@@ -190,6 +192,7 @@ class BuiltArray:
         dispatch: Mapping[str, object] | None = None,
         fed: Mapping[str, Operand | ObjectFifo] | None = None,
         staged: bool = False,
+        held: Collection[str] = (),
         depths: Mapping[str, int] | None = None,
         packeted: Collection[str] = (),
         splices: Collection[str] = (),
@@ -225,7 +228,9 @@ class BuiltArray:
         # feed() reads host shapes, which the layout view does not carry.
         operands = {b.name: b for b in op.buffers}
         for name, source in fed.items():
-            operands[name].feed(source, staged=staged)
+            # A restage held in L1 holds its rounds at the edge's chosen depth.
+            operands[name].chosen_depth = (depths or {}).get(name)
+            operands[name].feed(source, staged=staged, held=name in held)
         for mine, built in zip(op.buffers, view.buffers):
             built.fed_from, built.staged = mine.fed_from, mine.staged
             built.chosen_depth = (depths or {}).get(mine.name)
