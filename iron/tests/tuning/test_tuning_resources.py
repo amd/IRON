@@ -8,12 +8,16 @@ from aie.dialects.aie import get_target_model
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Member, Refinement, Region
+from iron.common.graph.record import Recording
 from iron.common.image.step import Edge, EdgeKind
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemv import GEMV
+from iron.operators.silu import SiLU
+from iron.tests.support import sequences
 from iron.tests.support import toys_dataflow as toys
 from iron.tests.support.fusable import gemv_add_recording
 from iron.tests.support.tools import DEVICES
+from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import check, fit
@@ -104,6 +108,45 @@ def test_a_core_using_every_buffer_descriptor_is_bit_identical(device):
         profiles[depth], Profile(), [Timed(recording)], device, Refinement.EXACT
     )
     assert result.ok, result.why
+
+
+@pytest.mark.parametrize(
+    "columns, fits", [((2, 1), True), ((1, 2), False)], ids=["join", "split"]
+)
+def test_a_staged_round_past_one_buffer_descriptor_waits_on_a_descriptor_chain(
+    columns, fits, device
+):
+    """Two columns' contiguous halves restaged to or from one column: the only round in the lanes' order is the whole call.
+
+    At ``1 << 18`` bfloat16 a memtile holds that round, but one buffer
+    descriptor moves less than all of it. A join reads each half into the
+    memtile as a descriptor of its own and the round out in the reader's
+    objects, so it fits. A split takes the whole round in as one object, a
+    chain of descriptors the hardware runs but mlir-aie's lowering does not
+    emit yet: ``fit`` waits on it rather than refusing it, and never hands
+    it to the placer.
+    """
+    size = 1 << 18
+    first = SiLU(size=size, tile_size=128, num_aie_columns=columns[0])
+    second = SiLU(size=size, tile_size=128, num_aie_columns=columns[1])
+    recording = Recording.of_steps(
+        "past-a-descriptor",
+        sequences.steps((first, "x", "h"), (second, "h", "y")),
+        ["x"],
+        ["y"],
+    )
+    region = Region(
+        parts=(member(first), member(second)),
+        edges=(Edge(0, "y", 1, "x", kind=EdgeKind.STAGED),),
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    if not fits:
+        with pytest.raises(NotImplementedError, match="chaining descriptors"):
+            fit(profile, [Timed(recording)], device)
+    else:
+        result = fit(profile, [Timed(recording)], device)
+        assert result.ok, result.why
 
 
 def test_more_buffer_descriptors_than_a_tile_holds_is_refused_before_any_build(device):

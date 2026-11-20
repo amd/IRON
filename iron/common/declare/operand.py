@@ -999,6 +999,10 @@ class Operand:
         return repr(self._decl)
 
 
+class PastMemtile(ValueError):
+    """A round ``Staging`` plans is past a memtile's memory."""
+
+
 class Staging:
     """``source``'s lanes restaged through memtiles into ``sink``'s, where they do not meet directly.
 
@@ -1026,10 +1030,15 @@ class Staging:
     Raises:
         ValueError: The two are not one buffer, a side's lanes do not visit
             each element once or in whole objects, a bound is not honored as
-            above, no round holds ``sink``'s elements in an order one
-            memtile walk reads, or a round is past a memtile's memory. A join
-            of more lanes than a memtile takes is a join of joins, a split to
-            more than it sends a split of splits.
+            above, or no round holds ``sink``'s elements in an order one
+            memtile walk reads. A join of more lanes than a memtile takes is
+            a join of joins, a split to more than it sends a split of splits.
+        PastMemtile: The most rounds the lanes' order allows leave a round
+            past a memtile's memory.
+        NotImplementedError: Such a round moves into or out of the memtile
+            past one buffer descriptor's length, which takes a chain of
+            descriptors for one object that mlir-aie's lowering does not
+            emit yet.
     """
 
     def __init__(self, source: Operand, sink: Operand) -> None:
@@ -1213,10 +1222,33 @@ class Staging:
                     f"in turn, holds lanes {outs} of {sink.name} in an order "
                     f"one memtile walk reads in their host order"
                 )
-            if sum(taken) * self.item > self.capacity:
-                raise ValueError(
-                    f"{edge}: a round of {sum(taken)} elements is past a "
+            whole = sum(taken)
+            if whole * self.item > self.capacity:
+                raise PastMemtile(
+                    f"{edge}: a round of {whole} elements is past a "
                     f"memtile's {self.capacity} bytes"
+                )
+            # A round moves into or out of a memtile as one buffer descriptor,
+            # but for a join read straight into the sink's objects: there each
+            # slot is its own (each part's, past a memtile's fan-in).
+            spans = [whole]
+            if len(outs) == 1 and len(ins) > 1 and walk is None:
+                size = math.ceil(len(ins) / math.ceil(len(ins) / self.fan_in))
+                spans = (
+                    taken
+                    if len(ins) <= self.fan_in
+                    else [sum(taken[at : at + size]) for at in range(0, len(ins), size)]
+                )
+            longest = max(spans)
+            if not dev.dma_bd_fits(
+                0, row, TensorAccessPattern((longest,), 0, [longest], [1]), sink.dtype
+            ):
+                raise NotImplementedError(
+                    f"{edge}: a round of {whole} elements, the most rounds its "
+                    f"lanes' order allows, moves {longest} past one memtile "
+                    f"buffer descriptor's length; chaining descriptors for one "
+                    f"object is not built yet: mlir-aie's object-fifo lowering "
+                    f"moves each object's segment as one"
                 )
             tile_p, tile_c = units
             if tile_p is not None and any(

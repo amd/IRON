@@ -50,6 +50,7 @@ from ..common.declare.composition import (
     Version,
     refinement,
 )
+from ..common.declare.operand import PastMemtile, Staging
 from ..common.design import OperatorDesign
 from ..common.graph.carried import CarriedLoop
 from ..common.graph.coded import CodedWeight, encode_all
@@ -879,8 +880,8 @@ def fit(
     any of them takes), each edge held at a chosen depth against one
     tile's memory, and through a memtile against its buffer descriptors, each
     core's fifo ends moved by DMA against its buffer descriptors, an object
-    each (``_bds_past``), and its cascades: each from one core to another,
-    at most one into and one
+    each (``_bds_past``), each staged edge's rounds as ``Staging`` plans them
+    against a memtile's memory, and its cascades: each from one core to another, at most one into and one
     out of a core, and a chain no longer than a path east and south across
     the array. The
     dataflow analysis then finds whether the region's steps are convex (no
@@ -1594,6 +1595,28 @@ def fit(
             )
             if why is not None:
                 return Fit(False, "counts", why)
+            for edge, p, c in derivation.wired:
+                if edge.kind is not EdgeKind.STAGED or edge.across_calls:
+                    continue
+                (source,) = [
+                    b
+                    for b in derivation.recorded[p][0].op.buffers
+                    if b.name == edge.output
+                ]
+                (sink,) = [
+                    b
+                    for b in derivation.recorded[c][0].op.buffers
+                    if b.name == edge.input
+                ]
+                try:
+                    with set_current_device(device):
+                        Staging(source, sink)
+                except PastMemtile as e:
+                    return Fit(False, "counts", str(e))
+                except (ValueError, NotImplementedError):
+                    # Its other refusals, and what it does not build yet, the
+                    # composer raises again at placement.
+                    continue
             # A region with no edge hands nothing on-chip: nothing to analyse.
             if region.edges:
                 try:
