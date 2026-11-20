@@ -6,13 +6,15 @@
 import math
 
 import pytest
+from aie.iron.trace import Scope
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Member, Refinement, Region
 from iron.common.graph.record import Recording
-from iron.common.graph.sdf import analyze
+from iron.common.graph.sdf import Derivation, analyze
 from iron.common.image.step import Edge
 from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs
 from iron.tests.support import sequences
 from iron.tests.support import toys_dataflow as toys
@@ -104,6 +106,30 @@ def test_per_call_bounded_token_count_is_a_valid_kv_length(device):
     analysis = analyze(region, recording, device, {"n": 16})
     assert analysis.consistent
     assert analysis.repetition == {0: 1, 1: 16}
+
+
+@pytest.mark.parametrize("n", [16, 32, 48])
+def test_a_bounded_gemms_loops_are_read_off_its_words(n, device):
+    """A GEMM over the first ``n`` of 48 rows: its loops' trips are the words its program reads at the call, not solved from the objects it moves.
+
+    Its row blocks, column tiles and K tiles each, then the padding tiles
+    and their K tiles, which object counts alone settle more than one way.
+    """
+    recording = toys.BoundedRows(tile_m=16).record(a=(48, 64), b=(64, 64))
+    gemm = recording.steps[0].op
+    region = Region(
+        (Member(cls=GEMM, dims=Profile.dims(GEMM, vars(gemm))),),
+    )
+    derivation = Derivation(region, recording, device, {"n": n})
+    (core,) = derivation.recorded[0][1].cores
+    loops = []
+    nested = [core]
+    while nested:
+        scope = nested.pop()
+        if scope is not core:
+            loops.append(derivation.read[id(scope)])
+        nested += reversed([s for s in scope.body if isinstance(s, Scope)])
+    assert loops == [n // 16, 1, 1, 3 - n // 16, 1]
 
 
 # Where GEMM composes beside another operator: npu1 builds GEMM on an array
