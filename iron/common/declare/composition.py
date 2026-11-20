@@ -32,14 +32,16 @@ class Hold(Enum):
     ``L1``: in the consumer's core, the two steps on one worker; ``MEMTILE``:
     staged through a memtile; ``DDR``: in host memory, a phase wait;
     ``LATER_PHASE``: staged, its consumer and all it feeds a phase later;
-    ``MEMORY``: no edge at all, the value left where its producer writes it,
-    a dependence the analysis derives.
+    ``CASCADE``: on the cascade from the producer's core to the adjacent
+    consumer's, in neither's memory; ``MEMORY``: no edge at all, the value
+    left where its producer writes it, a dependence the analysis derives.
     """
 
     L1 = "l1"
     MEMTILE = "memtile"
     DDR = "ddr"
     LATER_PHASE = "later_phase"
+    CASCADE = "cascade"
     MEMORY = "memory"
 
 
@@ -188,7 +190,8 @@ class Region:
 
         ``L1`` makes the edge a stream and puts its two steps on one worker,
         with any each already shares one with. ``MEMTILE`` and
-        ``LATER_PHASE`` make it staged, ``DDR`` a DDR edge. ``LATER_PHASE``
+        ``LATER_PHASE`` make it staged, ``DDR`` a DDR edge, ``CASCADE`` a
+        cascade edge. ``LATER_PHASE``
         runs its consumer a phase after its producer, and every step
         downstream of it later with it: a step's phase is the largest of its
         producers', one more across each edge held a phase later. ``MEMORY`` drops the edge (and its phase), so the
@@ -209,6 +212,7 @@ class Region:
             Hold.MEMTILE: EdgeKind.STAGED,
             Hold.DDR: EdgeKind.DDR,
             Hold.LATER_PHASE: EdgeKind.STAGED,
+            Hold.CASCADE: EdgeKind.CASCADE,
         }
         edge = self.edges[index]
         edges = tuple(

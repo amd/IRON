@@ -327,8 +327,10 @@ def composed(
     its on-chip edges are all streams, as one staged fusion where any is
     staged (its stream edges fed as they are), and as a pack where it has no
     edge. A DDR edge's consumer reads what its producer wrote to host memory
-    a phase or more later (a phased fusion, ``Fusion.waits``). Chosen phases
-    run each step in its in-edges' phase (``Fusion.phases``).
+    a phase or more later (a phased fusion, ``Fusion.waits``). A cascade
+    edge carries its producer's output to its consumer's core over the
+    cascade (``Operand.cascade_to``). Chosen phases run each step in its in-edges'
+    phase (``Fusion.phases``).
 
     A configuration of steps gives each its member's tunables; which
     designs it loads together is the packing's (``packing.configured``). The
@@ -339,13 +341,13 @@ def composed(
         NotImplementedError: What the composer does not build yet: a
             profile's schedules beyond their packaging, variants, bindings or
             state layouts, steps run at once that are not consecutive, a
-            configuration at a partial width, keeping buffers resident,
-            switched other than by a reload or holding regions, a runtime
-            plan other than one task group, chosen phases a fusion's demands
-            do not meet (``compose.phases``, at build), or an entry rooted at
-            a step, with nested regions, inflows, shared workers, fission, a
-            self-loop over a carried buffer, cascade edges, a DDR edge's
-            chosen depth, matching steps that are not consecutive,
+            configuration at a partial width, keeping buffers resident, switched other than by a
+            reload or holding regions, a runtime plan other than one task
+            group, chosen phases a fusion's demands do not meet
+            (``compose.phases``, at build), or an entry rooted at a step,
+            with nested regions, inflows, shared workers, fission, a self-loop over a carried buffer, cascades beside staged or DDR
+            edges, a DDR
+            edge's chosen depth, matching steps that are not consecutive,
             members that depend through memory with no edge between them, or
             an edge the composer does not build as its kind (``admits``). An edge out of a buffer steps past
             the region, a DDR edge or the host also read keeps its drain to
@@ -411,12 +413,10 @@ def composed(
             or root.inflows
             or any(m.part is not None for m in root.steps())
             or any(e.producer == e.consumer for e in root.edges)
-            or not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED, EdgeKind.DDR}
         ):
             raise NotImplementedError(
                 f"building {entry} is not built yet: the composer builds a "
-                f"region of steps whose edges are stream, staged or DDR, "
-                f"with no inflow or self-loop"
+                f"region of steps with no inflow or self-loop"
             )
         chosen = root.step_phases()
         phased = any(e.kind is EdgeKind.DDR for e in root.edges) or chosen is not None
@@ -444,10 +444,15 @@ def composed(
                 f"building {entry} is not built yet: a runtime plan with "
                 f"{unbuilt[0]}"
             )
-        if root.workers and kinds - {EdgeKind.STREAM}:
+        if root.workers and kinds - {EdgeKind.STREAM, EdgeKind.CASCADE}:
             raise NotImplementedError(
                 f"building {entry} is not built yet: steps on one core joined "
-                f"by edges other than streams"
+                f"by edges other than streams and cascades"
+            )
+        if EdgeKind.CASCADE in kinds and kinds - {EdgeKind.STREAM, EdgeKind.CASCADE}:
+            raise NotImplementedError(
+                f"building {entry} is not built yet: cascades beside staged or "
+                f"DDR edges"
             )
         if any(e.kind is EdgeKind.DDR and e.depth is not None for e in root.edges):
             raise NotImplementedError(
@@ -497,7 +502,8 @@ def composed(
                 )
                 built = admits(p, e.output, c, e.input)
                 if built is None or (
-                    e.kind is EdgeKind.STREAM and built is not FusionKind.STREAM
+                    e.kind in (EdgeKind.STREAM, EdgeKind.CASCADE)
+                    and built is not FusionKind.STREAM
                 ):
                     raise NotImplementedError(
                         f"building {type(p).__name__}.{e.output} -> "
@@ -528,6 +534,11 @@ def composed(
                                 e.output,
                                 match[e.consumer],
                                 e.input,
+                                kind=(
+                                    EdgeKind.CASCADE
+                                    if e.kind is EdgeKind.CASCADE
+                                    else EdgeKind.STREAM
+                                ),
                                 depth=e.depth,
                             )
                             for e in on_chip

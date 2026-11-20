@@ -19,23 +19,29 @@ from collections.abc import Hashable, Iterable, Mapping, Sequence
 
 import numpy as np
 from aie import ir
-from aie.dialects import memref
+from aie.dialects import aie as aie_d
+from aie.dialects import memref, vector
 from aie.extras.dialects.arith import constant
 from aie.helpers.npdtypes import np_ndarray_type_get_dtype, np_ndarray_type_get_shape
-from aie.helpers.util import np_ndarray_type_to_memref_type
-from aie.iron import DeviceConfiguration, Program, Runtime, Worker
+from aie.helpers.util import np_dtype_to_mlir_type, np_ndarray_type_to_memref_type
+from aie.iron import CascadeFlow, DeviceConfiguration, Program, Runtime, Worker
+from aie.iron.controlflow import range_
+from aie.iron.dataflow.objectfifo import ObjectFifoHandle
 from aie.passmanager import PassManager
 from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
 from ..design import BuiltArray, OperatorDesign, configuration, identities
-from .step import BufferRef, Edge, Fusion, FusionKind
+from .step import BufferRef, Edge, EdgeKind, Fusion, FusionKind
 
 logger = logging.getLogger(__name__)
 
 # The shim DMA addresses host memory in 32-bit words, so every buffer handed
 # to a sub-design must start on one.
 SHIM_ADDRESS_ALIGNMENT = 4
+
+# One cascade word, 512 bits on aie2 and aie2p (``aie.put_cascade``'s verifier).
+CASCADE_BYTES = 64
 
 # aiecc's own placement, lowering, buffer address and routing stages.
 _FIT_PIPELINE = "builtin.module(aie-resource-stages{{placer={placer}}})"
@@ -205,7 +211,9 @@ def fused_configuration(
     """Return ``fusion``'s members, ``designs`` in its step order, as one device configuration ``name`` and their arrays.
 
     Each array fed where an edge feeds it (staged through memtiles in a staged fusion),
-    and one sequence running every member, in one task group, or back to back in a
+    a cascade edge's lanes each carried by a pair of relays (``cascade_relay``), one
+    run after the producer's core body and one before the consumer's
+    (``share``), and one sequence running every member, in one task group, or back to back in a
     merge; a ``phased`` fusion's members in one sequence per phase (``phases``). On an
     xclbin, ``dispatch`` is each member's dispatch-time scalars. Given ``independent``,
     each of its arrays takes its own sequence beside the fusion's, in the same
@@ -215,6 +223,16 @@ def fused_configuration(
     incoming: dict[int, list[Edge]] = {}
     for e in fusion.edges:
         incoming.setdefault(e.consumer, []).append(e)
+    cascades = [e for e in fusion.edges if e.kind is EdgeKind.CASCADE]
+    for e in cascades:
+        if any(
+            (d.producer, d.output) == (e.producer, e.output) and d != e
+            for d in fusion.edges
+        ):
+            raise NotImplementedError(
+                f"{e}: an output on the cascade that also feeds another step "
+                f"on-chip is not built yet"
+            )
     # The lanes' bound ends go to their first on-chip reader (by consumer in
     # step order), unless the host's drain keeps them (a tee).
     first_reader: dict[tuple[int, str], Edge] = {}
@@ -223,11 +241,12 @@ def fused_configuration(
     kept = set(fusion.kept)
     # Each edge's depth: its chosen one; within one core, where none is chosen,
     # a call's objects a lane, since the producer's body runs through before
-    # its reader's (``share``).
+    # its reader's (``share``), as it does before its cascade relay's.
     chosen = {e: e.depth for e in fusion.edges if e.depth is not None}
     for e in fusion.edges:
-        if e in chosen or not any(
-            {e.producer, e.consumer} <= set(group) for group in fusion.workers
+        if e in chosen or not (
+            e.kind is EdgeKind.CASCADE
+            or any({e.producer, e.consumer} <= set(group) for group in fusion.workers)
         ):
             continue
         made = designs[fusion.steps.index(e.producer)].op
@@ -244,6 +263,8 @@ def fused_configuration(
     for design, j, own in zip(designs, fusion.steps, scalars, strict=True):
         fed = {}
         for e in incoming.get(j, ()):
+            if e.kind is EdgeKind.CASCADE:
+                continue
             (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
             fed[e.input] = source
         arrays[j] = BuiltArray(
@@ -274,12 +295,63 @@ def fused_configuration(
             if producer == j:
                 (drained,) = [b for b in arrays[j].op.buffers if b.name == output]
                 drained.keeps_host = True
-    for group in fusion.workers:
-        share(
+    before: dict[int, list[Worker]] = {}
+    after: dict[int, list[Worker]] = {}
+    relays: list[tuple[Worker, Worker]] = []
+    for e in cascades:
+        (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
+        (sink,) = [b for b in arrays[e.consumer].op.buffers if b.name == e.input]
+        per_object = math.prod(source.obj_shape)
+        moved = source.moved_per_lane()
+        for lane, (reading, writing) in enumerate(source.cascade_to(sink)):
+            objects = -(-moved.get(lane, 0) // per_object)
+            pair = (
+                cascade_relay(reading, objects, True),
+                cascade_relay(writing, objects, False),
+            )
+            for j, end, at, relay in (
+                (e.producer, reading, after, pair[0]),
+                (e.consumer, writing, before, pair[1]),
+            ):
+                cores = [
+                    w
+                    for w in arrays[j].workers
+                    if any(
+                        isinstance(h, ObjectFifoHandle)
+                        and h.object_fifo is end.object_fifo
+                        for h in w.fifos
+                    )
+                ]
+                if len(cores) != 1:
+                    raise NotImplementedError(
+                        f"{e}: a cascade whose lane {lane} is not one core's at "
+                        f"each end (a memtile joins or splits it) is not built yet"
+                    )
+                at.setdefault(id(cores[0]), []).append(relay)
+            relays.append(pair)
+    grouped_steps = {s for group in fusion.workers for s in group}
+    alone = [
+        (j,)
+        for j in fusion.steps
+        if j not in grouped_steps
+        and any(id(w) in before or id(w) in after for w in arrays[j].workers)
+    ]
+    joined: dict[int, Worker] = {}
+    for group in [*fusion.workers, *alone]:
+        joined |= share(
             group,
-            [e for e in fusion.edges if {e.producer, e.consumer} <= set(group)],
+            [
+                e
+                for e in fusion.edges
+                if e.kind is not EdgeKind.CASCADE
+                and {e.producer, e.consumer} <= set(group)
+            ],
             arrays,
+            before,
+            after,
         )
+    for send, receive in relays:
+        CascadeFlow(joined[id(send)], joined[id(receive)])
     grouped: dict[int, list[str]] = {}
     if fusion.phased:
         for j, p in phases(fusion, arrays).items():
@@ -297,13 +369,29 @@ def fused_configuration(
 
 
 def share(
-    group: Sequence[int], edges: Sequence[Edge], arrays: Mapping[int, BuiltArray]
-) -> None:
+    group: Sequence[int],
+    edges: Sequence[Edge],
+    arrays: Mapping[int, BuiltArray],
+    before: Mapping[int, Sequence[Worker]] | None = None,
+    after: Mapping[int, Sequence[Worker]] | None = None,
+) -> dict[int, Worker]:
     """Make ``group``'s members' cores one a lane (``Worker.join``): each lane's core runs the members' bodies in turn, in the group's (firing) order.
 
     ``edges`` pair a producer's core with its consumer's, lane by lane: the
     one writing a lane's fifo with the one reading it. The first member's
     array takes the joined workers; the others' take none.
+
+    Args:
+        group: The members, in firing order.
+        edges: The edges among them.
+        arrays: Each member's array, by step.
+        before: Workers each core runs just before its own body, by the
+            core's ``id``: a cascade's receiving relays.
+        after: Workers each core runs just after its own body, by the
+            core's ``id``: a cascade's sending relays.
+
+    Returns:
+        Each worker joined, by its ``id``, mapped to the core it joined.
 
     Raises:
         NotImplementedError: The members' cores do not pair one to one
@@ -311,6 +399,7 @@ def share(
             pinned or looping otherwise than a partner): joining those is not
             built yet.
     """
+    before, after = before or {}, after or {}
     joined: dict[int, set[int]] = {
         id(w): {id(w)} for j in group for w in arrays[j].workers
     }
@@ -340,6 +429,7 @@ def share(
             f"{[len(arrays[j].workers) for j in group]} cores, not one a lane each"
         )
     cores: list[Worker] = []
+    into: dict[int, Worker] = {}
     for lead in arrays[group[0]].workers:
         ordered = sorted(
             (workers[w] for w in joined[id(lead)]), key=lambda jw: group.index(jw[0])
@@ -349,15 +439,63 @@ def share(
                 f"one core for steps {tuple(group)} is not built yet: their cores "
                 f"do not pair one a lane ({[j for j, _ in ordered]} on one)"
             )
+        bodies = [
+            r
+            for _, w in ordered
+            for r in (*before.get(id(w), ()), w, *after.get(id(w), ()))
+        ]
         try:
-            cores.append(Worker.join([w for _, w in ordered]))
+            core = Worker.join(bodies)
         except ValueError as e:  # joining what mlir-aie does not join
             raise NotImplementedError(
                 f"one core for steps {tuple(group)} is not built yet: {e}"
             ) from e
+        cores.append(core)
+        into |= {id(w): core for w in bodies}
     arrays[group[0]].workers = cores
     for j in group[1:]:
         arrays[j].workers = []
+    return into
+
+
+def cascade_relay(end: ObjectFifoHandle, objects: int, send: bool) -> Worker:
+    """Return a worker carrying ``objects`` of ``end``'s fifo a call over the cascade.
+
+    Reading each object and putting it on the cascade (``send``), or getting
+    it off the cascade and writing it, in whole cascade words.
+
+    Raises:
+        NotImplementedError: An object is not a whole number of cascade words.
+    """
+    shape, dtype = list(end.shape), end.dtype
+    elements = math.prod(shape)
+    width = CASCADE_BYTES // bfp.itemsize(dtype)
+    if elements * bfp.itemsize(dtype) % CASCADE_BYTES:
+        raise NotImplementedError(
+            f"a cascade carrying objects of {elements} {np.dtype(dtype).name} "
+            f"elements, not whole {CASCADE_BYTES}-byte cascade words, is not built "
+            f"yet"
+        )
+
+    def relay(fifo):
+        element = np_dtype_to_mlir_type(dtype)
+        word = ir.VectorType.get([width], element)
+        for _ in range_(objects):
+            obj = fifo.acquire(1)
+            if len(shape) > 1:
+                obj = memref.collapse_shape(
+                    ir.MemRefType.get([elements], element),
+                    obj,
+                    [list(range(len(shape)))],
+                )
+            for i in range_(0, elements, width):
+                if send:
+                    aie_d.put_cascade(vector.load(word, obj, [i]))
+                else:
+                    vector.store(aie_d.get_cascade(word), obj, [i])
+            fifo.release(1)
+
+    return Worker(relay, [end])
 
 
 def phases(fusion: Fusion, arrays: Mapping[int, BuiltArray]) -> dict[int, int]:
@@ -393,6 +531,16 @@ def phases(fusion: Fusion, arrays: Mapping[int, BuiltArray]) -> dict[int, int]:
     incoming: dict[int, list[Edge]] = {}
     for e in fusion.edges:
         incoming.setdefault(e.consumer, []).append(e)
+    cascades = [e for e in fusion.edges if e.kind is EdgeKind.CASCADE]
+    for e in cascades:
+        if any(
+            (d.producer, d.output) == (e.producer, e.output) and d != e
+            for d in fusion.edges
+        ):
+            raise NotImplementedError(
+                f"{e}: an output on the cascade that also feeds another step "
+                f"on-chip is not built yet"
+            )
     seen: set[tuple[int, str]] = set()
     starts, holds, joins = [], [], []
     for j in fusion.steps:

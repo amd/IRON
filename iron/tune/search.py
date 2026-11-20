@@ -251,7 +251,6 @@ NO_WORSE_QUANTILE = 0.999
 # What candidates does not propose yet, named where it stops.
 _NOT_GENERATED = (
     "regions of steps that are not consecutive",
-    "cascade edges",
     "inflows",
     "a runtime plan's DDR burst lengths and transfer sizes",
     "nested regions",
@@ -623,10 +622,10 @@ def candidates(
                 parts: list[Region | Member] = []
                 s = lo
                 while s <= hi:
-                    found = pieces.get(s)
-                    if found is not None and found[1][-1] <= hi:
-                        parts.append(found[0])
-                        s += len(found[1])
+                    piece = pieces.get(s)
+                    if piece is not None and piece[1][-1] <= hi:
+                        parts.append(piece[0])
+                        s += len(piece[1])
                     else:
                         parts.append(members[s])
                         s += 1
@@ -688,11 +687,15 @@ def fit(
     three stages in turn. The counts are
     lower bounds from the target model, so they never refuse what fits: the
     cores its steps record (steps sharing a worker counted once, at the most
-    any of them takes), and each edge held at a chosen depth against one
-    tile's memory, and through a memtile against its buffer descriptors. The
+    any of them takes), each edge held at a chosen depth against one
+    tile's memory, and through a memtile against its buffer descriptors, and
+    its cascades: each from one core to another, at most one into and one
+    out of a core, and a chain no longer than a path east and south across
+    the array. The
     dataflow analysis then finds whether the region's steps are convex (no
     step outside it on a path between two of them), whether it balances, whether each
-    stream edge's lanes meet as they are, and whether it runs at its chosen
+    stream edge's lanes meet as they are (a cascade's one to one), and
+    whether it runs at its chosen
     depths, the rest at their minimum. The placer last places the composed
     module, where the composer builds the region as IRON's fusions do.
 
@@ -707,10 +710,9 @@ def fit(
     be independent of each other, their chosen columns disjoint, and are
     placed as one pack. A plan's per-channel awaits must not reuse a channel
     the host fills in more tasks than it keeps in flight: a fill reports
-    done before its data leaves the shim. A version's schedule must not run
-    a part before one it reads, nor overlap or merge calls where a step
-    writes a buffer that outlasts the call, and on an xclbin per step it
-    takes no phased region and no
+    done before its data leaves the shim. A version's schedule must not run a part before one it reads, nor
+    overlap or merge calls where a step writes a buffer that outlasts the
+    call, and on an xclbin per step it takes no phased region and no
     teardown.
 
     A refusal from any stage of any entry wins over what is not fitted yet;
@@ -732,7 +734,7 @@ def fit(
             variants, bindings, fusion or packing entries, a configuration
             the composer does not build, an entry rooted at a step, scoped
             to some runs of its shape, splitting a step by
-            fission or chaining a cascade, a placer setting past the
+            fission, a placer setting past the
             sequential placer, a region the composer does not build, and
             what the analysis does not model (``Derivation``).
     """
@@ -753,6 +755,8 @@ def fit(
     cores_on_array = sum(
         model.is_core_tile(c, r) for c in range(model.columns()) for r in rows
     )
+    cascade_cols = model.columns()
+    cascade_rows = sum(model.is_core_tile(0, r) for r in rows)
     held_in = {
         EdgeKind.STREAM: ("a core tile", model.get_local_memory_size(), None),
         EdgeKind.STAGED: (
@@ -908,13 +912,6 @@ def fit(
                     "built yet"
                 )
                 continue
-            if any(e.kind is EdgeKind.CASCADE for e, _, _ in region.wiring()[0]):
-                matched.add(index)
-                waiting.append(
-                    "a cascade chain, which rewrites a reduction rather than "
-                    "naming recorded hand-offs, is not matched or built yet"
-                )
-                continue
             found = recording.occurrences(entry)
             if not found:
                 continue
@@ -1027,6 +1024,46 @@ def fit(
                     return Fit(
                         False, "counts", f"{m.cls.__name__} at {m.tunables}: {e}"
                     )
+            core = {s: min(worker) for worker in region.workers for s in worker}
+            links = [
+                (core.get(e.producer, e.producer), core.get(e.consumer, e.consumer))
+                for e in region.edges
+                if e.kind is EdgeKind.CASCADE
+            ]
+            for p, c in links:
+                if p == c:
+                    return Fit(
+                        False,
+                        "counts",
+                        f"a cascade runs from one core to the next; steps "
+                        f"{p} and {c} share one",
+                    )
+            for end, side in ((0, "output"), (1, "input")):
+                ends = Counter(link[end] for link in links)
+                if ends and max(ends.values()) > 1:
+                    step, n = ends.most_common(1)[0]
+                    return Fit(
+                        False,
+                        "counts",
+                        f"a core has one cascade {side}; step {step}'s takes {n}",
+                    )
+            following = dict(links)
+            reach = cascade_cols + cascade_rows - 1
+            for first in following:
+                chain, at = [first], first
+                while at in following and following[at] not in chain:
+                    at = following[at]
+                    chain.append(at)
+                if at in following or len(chain) > reach:
+                    return Fit(
+                        False,
+                        "counts",
+                        f"a cascade chain of {len(chain)} cores"
+                        + (", closing a cycle," if at in following else "")
+                        + f" runs only east or south, through at most {reach} "
+                        f"cores of {device.resolve()}'s {cascade_cols} columns and "
+                        f"{cascade_rows} rows",
+                    )
             try:
                 derivation = Derivation(region, recording, device)
             except NotImplementedError as e:
@@ -1111,15 +1148,20 @@ def fit(
                 if analysis.why is not None:
                     return Fit(False, "analysis", analysis.why)
                 for edge, p, c in derivation.wired:
-                    if edge.kind is not EdgeKind.STREAM:
+                    if edge.kind not in (EdgeKind.STREAM, EdgeKind.CASCADE):
                         continue
                     shape = analysis.hand_off[edge]
-                    if shape not in (HandOff.EQUAL, HandOff.BROADCAST):
+                    if shape not in (
+                        (HandOff.EQUAL, HandOff.BROADCAST)
+                        if edge.kind is EdgeKind.STREAM
+                        else (HandOff.EQUAL,)
+                    ):
                         return Fit(
                             False,
                             "analysis",
-                            f"{edge} is a stream, whose lanes meet as they are; its "
-                            f"{shape.value} hand-off needs a restage",
+                            f"{edge} is a {edge.kind.value}, whose lanes meet one to "
+                            f"one as they are; its {shape.value} hand-off needs a "
+                            f"restage",
                         )
                 why = analysis.deadlock(
                     {e: e.depth for e, _, _ in derivation.wired if e.depth is not None}
@@ -1147,15 +1189,15 @@ def fit(
                 made = derivation.obj_elements[p].get(edge.output)
                 taken = derivation.obj_elements[c].get(edge.input)
                 if (
-                    edge.kind is EdgeKind.STREAM
+                    edge.kind in (EdgeKind.STREAM, EdgeKind.CASCADE)
                     and made is not None
                     and taken is not None
                     and made != taken
                 ):
                     unplaceable.append(
-                        f"{edge}: a stream whose ends' objects differ ({made} "
-                        f"elements and {taken}) is not built yet; the composer "
-                        f"gives a fifo one object size"
+                        f"{edge}: a {edge.kind.value} whose ends' objects differ "
+                        f"({made} elements and {taken}) is not built yet; the "
+                        f"composer gives a fifo one object size"
                     )
             kinds = {e.kind for e in region.edges}
             unplaceable += [
@@ -1166,10 +1208,6 @@ def fit(
                     (
                         "nested regions",
                         not all(isinstance(part, Member) for part in region.parts),
-                    ),
-                    (
-                        "cascade edges",
-                        not kinds <= {EdgeKind.STREAM, EdgeKind.STAGED, EdgeKind.DDR},
                     ),
                 )
                 if named
@@ -1205,7 +1243,12 @@ def fit(
                         edges=[
                             (e.producer, e.output, e.consumer, e.input)
                             for e in region.edges
-                            if e.kind is not EdgeKind.DDR
+                            if e.kind in (EdgeKind.STREAM, EdgeKind.STAGED)
+                        ],
+                        cascades=[
+                            (e.producer, e.output, e.consumer, e.input)
+                            for e in region.edges
+                            if e.kind is EdgeKind.CASCADE
                         ],
                         kept=kept,
                         depths={
@@ -1858,17 +1901,21 @@ def search(
 ) -> Profile:
     """Return the fastest profile found from ``start`` that passes every check.
 
-    Each edit ``candidates`` yields is applied to ``start``, fitted
+    In rounds, each from the profile the last one kept (``start`` first):
+    each edit ``candidates`` yields from it is applied to it, fitted
     (``fit``; one that waits or is refused is passed over) and measured in
-    place against ``start`` (``measure``); one under ``GAINS`` gains, and one
+    place against it (``measure``); one under ``GAINS`` gains, and one
     that does not build, or builds wrong, is refused and logged. The gainers are
     then taken best first, each applied to the profile so far (a region and
     a tunable edit of the same steps compose; a region over steps an earlier
     one holds gives way to it, as a tunable an earlier one sets does): one
     that builds what the profile so far builds is passed over; a take is
     checked against ``start`` by its refinement (``check``) and measured
-    against the profile so far, and kept where it still gains.
-    Pricing stops at ``budget_s``.
+    against the profile so far, and kept where it still gains. The next
+    round's ``candidates`` reach what composes on a take (a hold of an edge
+    of a region it adds); an edit an earlier round priced is not priced
+    again. The search ends at a round that keeps nothing, or at
+    ``budget_s``.
 
     Args:
         calls: The graph's calls, every version.
@@ -1886,67 +1933,89 @@ def search(
             "counting the images a profile loads is not built yet"
         )
     begun = time.perf_counter()
-    priced: list[tuple[float, Edit]] = []
-    edits = candidates(calls, start, device)
-    while budget_s is None or time.perf_counter() - begun < budget_s:
-        try:
-            edit = next(edits)
-        except StopIteration:
-            break
-        except NotImplementedError as e:
-            logger.info("search: %s", e)
-            break
-        edited = edit.apply(start)
-        try:
-            fitted = fit(edited, calls, device)
-        except NotImplementedError as e:
-            logger.info("search: waits: %s", e)
-            continue
-        if not fitted.ok:
-            logger.info("search: refused at %s: %s", fitted.stage, fitted.why)
-            continue
-        try:
-            ratio = measure(
-                edited, start, calls, device, timing=PRICING, refinement=edit.refinement
-            ).ratio
-        except NotBitIdentical as e:
-            logger.warning("search: refused, built wrong: %s: %s", edit, e)
-            continue
-        except NotImplementedError as e:
-            logger.info("search: waits: %s", e)
-            continue
-        except (ValueError, RuntimeError, ir.MLIRError) as e:
-            logger.warning("search: refused, does not build: %s: %s", edit, e)
-            continue
-        logger.info("search: %.3f for %s", ratio, edit)
-        if ratio < GAINS:
-            priced.append((ratio, edit))
     incumbent = start
-    for ratio, edit in sorted(priced, key=lambda pair: pair[0]):
-        edited = edit.apply(incumbent)
-        with set_current_device(device):
-            same = all(
-                Applied.of(c, edited, device).fingerprint(device)
-                == Applied.of(c, incumbent, device).fingerprint(device)
-                for c in calls
-            )
-        if same:
-            continue  # an earlier take decides what it names
-        checked = check(edited, start, calls, device, edit.refinement)
-        if not checked.ok:
-            logger.info("search: %s is not bit-identical: %s", edit, checked.why)
-            continue
-        if (
-            measure(
-                edited,
-                incumbent,
-                calls,
-                device,
-                timing=PRICING,
-                refinement=edit.refinement,
-            ).ratio
-            >= GAINS
-        ):
-            continue
-        incumbent = edited
+    tried: set[str] = set()
+    while budget_s is None or time.perf_counter() - begun < budget_s:
+        base = incumbent
+        priced: list[tuple[float, Edit]] = []
+        edits = candidates(calls, base, device)
+        while budget_s is None or time.perf_counter() - begun < budget_s:
+            try:
+                edit = next(edits)
+            except StopIteration:
+                break
+            except NotImplementedError as e:
+                logger.info("search: %s", e)
+                break
+            # Entry is unhashable, so an edit is known by its repr.
+            if repr(edit) in tried:
+                continue
+            tried.add(repr(edit))
+            edited = edit.apply(base)
+            try:
+                fitted = fit(edited, calls, device)
+            except NotImplementedError as e:
+                logger.info("search: %s waits: %s", edit, e)
+                continue
+            if not fitted.ok:
+                logger.info(
+                    "search: %s refused at %s: %s", edit, fitted.stage, fitted.why
+                )
+                continue
+            try:
+                ratio = measure(
+                    edited,
+                    base,
+                    calls,
+                    device,
+                    timing=PRICING,
+                    refinement=edit.refinement,
+                ).ratio
+            except NotBitIdentical as e:
+                logger.warning("search: refused, built wrong: %s: %s", edit, e)
+                continue
+            except NotImplementedError as e:
+                logger.info("search: %s waits: %s", edit, e)
+                continue
+            except (ValueError, RuntimeError, ir.MLIRError) as e:
+                logger.warning("search: refused, does not build: %s: %s", edit, e)
+                continue
+            logger.info("search: %.3f for %s", ratio, edit)
+            if ratio < GAINS:
+                priced.append((ratio, edit))
+        for ratio, edit in sorted(priced, key=lambda pair: pair[0]):
+            try:
+                edited = edit.apply(incumbent)
+            except ValueError as e:
+                # An earlier take replaced the entry it edits; the next round
+                # proposes it again on what that take left.
+                logger.info("search: %s gives way: %s", edit, e)
+                continue
+            with set_current_device(device):
+                same = all(
+                    Applied.of(c, edited, device).fingerprint(device)
+                    == Applied.of(c, incumbent, device).fingerprint(device)
+                    for c in calls
+                )
+            if same:
+                continue  # an earlier take decides what it names
+            checked = check(edited, start, calls, device, edit.refinement)
+            if not checked.ok:
+                logger.info("search: %s is not bit-identical: %s", edit, checked.why)
+                continue
+            if (
+                measure(
+                    edited,
+                    incumbent,
+                    calls,
+                    device,
+                    timing=PRICING,
+                    refinement=edit.refinement,
+                ).ratio
+                >= GAINS
+            ):
+                continue
+            incumbent = edited
+        if incumbent is base:
+            break
     return incumbent

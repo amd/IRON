@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from iron.common.declare.composition import (
@@ -179,6 +181,20 @@ def test_search_keeps_the_pair_joined_where_it_pays(name, npu2):
         assert entry not in tuned.entries()
     result = check(tuned, start, calls, npu2, Refinement.EXACT)
     assert result.ok, result.why
+
+
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu2")
+def test_search_prices_a_hold_on_the_window_it_took(npu2, caplog):
+    """A hold names an edge of a region the profile holds: search prices one only in a round after it takes the GEMV -> SiLU window."""
+    _, recording = _named_region_and_recording("gemv_silu")
+    with caplog.at_level(logging.INFO, logger="iron.tune.search"):
+        tuned = search([Timed(recording)], Profile(), npu2)
+    assert any(isinstance(e.root, Region) for e in tuned.entries())
+    assert any(
+        r.getMessage().startswith("search: ") and "HoldEdge(" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 @pytest.mark.supported_devices("npu2")
