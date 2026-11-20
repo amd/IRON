@@ -52,8 +52,8 @@ def _decode_region(
             Member(GEMV, dict(M=head_dim, K=kv_len)),
         ),
         edges=(
-            CompositionEdge(0, "C", 1, "x"),
-            CompositionEdge(1, "y", 2, "B"),
+            CompositionEdge(0, "C", 1, "x", kind=EdgeKind.STAGED),
+            CompositionEdge(1, "y", 2, "B", kind=EdgeKind.STAGED),
         ),
     )
 
@@ -215,7 +215,8 @@ def test_prefill_s_float32_scores_do_not_fit_the_bf16_mask_add(device):
         analyze(region, recording, device)
 
 
-@pytest.mark.supported_devices("npu1", "npu2")
+# npu1's waits on host 203.
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "rows, kv_len",
     [
@@ -228,7 +229,6 @@ def test_prefill_s_float32_scores_do_not_fit_the_bf16_mask_add(device):
     ],
     ids=["padding_free_of_nan", "stale_past_bound", "mid_block_start"],
 )
-@unbuilt
 def test_decode_graph_is_no_worse_than_its_own_untuned_build(rows, kv_len, device):
     qk, softmax, pv = toys.decode_attention_ops(kv_len, HEAD_DIM, rows)
     recording = toys.decode_attention_recording("decode_bounded", qk, softmax, pv)
@@ -243,7 +243,10 @@ def test_decode_graph_is_no_worse_than_its_own_untuned_build(rows, kv_len, devic
 @pytest.mark.parametrize(
     "position",
     [
-        pytest.param(1023, id="position_1023", marks=unbuilt),
+        # npu1's waits on host 203.
+        pytest.param(
+            1023, id="position_1023", marks=pytest.mark.supported_devices("npu2")
+        ),
         # A whole 32704-key row fits no core: a split-KV merge kernel.
         pytest.param(32703, id="position_32703", marks=waits_on_a_kernel),
     ],

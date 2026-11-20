@@ -543,15 +543,15 @@ class Derivation:
         # Per step, the graph expression each of its per-call values is bound
         # to, and its extents at this call.
         bindings: list[tuple[dict[str, Any], dict[str, int]]] = []
-        for i, (s, member) in enumerate(zip(matches[0], region.steps())):
+        for i, (s, given) in enumerate(zip(matches[0], region.step_tunables())):
             step = recording.steps[s]
             op = step.op
             bound = {
                 b.member.name: b.expression for b in recording.bindings if b.op is op
             }
-            if member.tunables:
+            if given:
                 with set_current_device(device):
-                    op = op._with_tunables(**member.tunables).resolved(device)
+                    op = op._with_tunables(**given).resolved(device)
             bindings.append(
                 (
                     bound,
