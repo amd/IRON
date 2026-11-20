@@ -446,15 +446,11 @@ class GEMM(Operator):
             start_row = i * n_A_tiles_per_shim
             stop_row = start_row + n_A_tiles_per_shim
             of_offsets = [m * k * j for j in range(stop_row - start_row)]
-            a_tmp_fifos = (
-                A_l3l2_fifos[i]
-                .cons()
-                .split(
-                    of_offsets,
-                    obj_types=[A_l1_ty] * (stop_row - start_row),
-                    to_stream=[streams.A] * (stop_row - start_row),
-                    tile=Tile(a_cols[i], 1) if pinned else AnyMemTile,
-                )
+            a_tmp_fifos = A_l3l2_fifos[i].split(
+                of_offsets,
+                obj_types=[A_l1_ty] * (stop_row - start_row),
+                to_stream=[streams.A] * (stop_row - start_row),
+                tile=Tile(a_cols[i], 1) if pinned else AnyMemTile,
             )
             for j in range(stop_row - start_row):
                 A_l2l1_fifos[j + start_row] = a_tmp_fifos[j]
