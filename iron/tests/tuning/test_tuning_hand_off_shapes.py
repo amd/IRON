@@ -27,12 +27,16 @@ from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     broadcast_weight_to_columns,
     fan_out_norm_qkv,
+    held_in_l1,
     join_in_pairs,
+    join_rows_into_one,
     layout_transpose,
     ratio_three_into_two,
     ratio_two_into_three,
+    ratio_two_into_three_rows,
     slices_qkv,
     split_in_two,
+    split_into_rows,
 )
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
@@ -271,3 +275,99 @@ def test_feed_refuses_a_held_input_broadcast_flips_it(device):
     base = Profile()
     result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
     assert result.ok, result.why
+
+
+# Hand-off shapes held in L1, restaged on the cores their two steps share,
+# each step taking one input, so each restage fits a core. GEMM's tiles join
+# their cores in a memtile, so its layout held in L1 is RMSNorm spliced into
+# GEMM's cores; QKV's slices held in L1 are views of one core's buffer.
+HELD_IN_L1 = {
+    "join_rows_into_one": join_rows_into_one,
+    "split_into_rows": split_into_rows,
+    "ratio_two_into_three_rows": ratio_two_into_three_rows,
+    "layout_transpose": layout_transpose,
+    "slices_qkv": slices_qkv,
+}
+
+# Each device's L1-held shapes the composer builds bit-identical there.
+_BUILT_IN_L1: dict[str, set[str]] = {"npu1": set(), "npu2": set()}
+
+
+@pytest.mark.parametrize(
+    ("device", "shape"),
+    [
+        pytest.param(
+            name,
+            s,
+            id=f"device_{name}-shape_{s}",
+            marks=() if s in _BUILT_IN_L1[name] else unbuilt,
+        )
+        for name in sorted(DEVICES)
+        for s in sorted(HELD_IN_L1)
+    ],
+    indirect=["device"],
+)
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_hand_off_shape_held_in_l1_is_bit_identical_to_the_steps_run_apart(
+    shape, device
+):
+    """Each hand-off shape held in L1, on the cores its steps share, is bit-identical to the steps run apart."""
+    recording, region = held_in_l1(*HELD_IN_L1[shape]())
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    base = Profile()
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+def _refused_in_l1(recording, region, device, past):
+    """Assert ``fit`` refuses ``region`` by the counts, a restage held in L1 ``past`` a core tile's budget."""
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "counts"
+    assert "restaged in L1" in (result.why or "")
+    assert past in (result.why or "")
+
+
+def test_a_restage_held_in_l1_past_a_cores_input_channels_is_refused_before_any_build(
+    device,
+):
+    """A ratio held in L1 whose core already takes three inputs (GEMV's two, the multiply's other) is refused before any build, however it is placed."""
+    _refused_in_l1(*held_in_l1(*ratio_two_into_three(device)), device, "input channels")
+
+
+def test_a_restage_held_in_l1_past_a_cores_memory_is_refused_before_any_build(
+    device,
+):
+    """A join held in L1 whose rounds, deep enough, outgrow the joining core's memory is refused before any build."""
+    _refused_in_l1(
+        *held_in_l1(*join_rows_into_one(size=1024), depth=14), device, "bytes"
+    )
+
+
+# Past what a core's neighbours reach: more lanes than reach one core's memory.
+WIDE = [pytest.param("npu2", id="device_npu2")]
+
+
+@pytest.mark.parametrize("device", WIDE, indirect=True)
+def test_a_split_held_in_l1_past_a_cores_output_channels_is_refused_before_any_build(
+    device,
+):
+    """One lane split into eight held in L1 sends the lanes past its core's neighbours on channels of its own, more than a core has."""
+    _refused_in_l1(
+        *held_in_l1(*split_into_rows(size=64, rows=8)), device, "output channels"
+    )
+
+
+@pytest.mark.parametrize("device", WIDE, indirect=True)
+def test_a_join_held_in_l1_past_a_cores_buffer_descriptors_is_refused_before_any_build(
+    device,
+):
+    """Five lanes joined into one held in L1, deep: the lane past the core's neighbours takes a buffer descriptor a round, past the core's."""
+    _refused_in_l1(
+        *held_in_l1(*join_rows_into_one(size=64, rows=5), depth=13),
+        device,
+        "buffer descriptors",
+    )
