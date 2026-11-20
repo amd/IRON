@@ -10,15 +10,16 @@ import aie.utils as aie_utils
 import pytest
 
 from iron.common.declare import Profile
-from iron.common.declare.composition import Entry, Region
+from iron.common.declare.composition import Entry, Hold, Region
 from iron.common.graph.clock import kernel_cycles
+from iron.common.graph.record import Recording
 from iron.common.graph.sdf import analyze
 from iron.common.image.step import Edge, EdgeKind
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.silu import SiLU
+from iron.tests.support import sequences, toys_schedule
 from iron.tests.support import toys_dataflow as toys
-from iron.tests.support import toys_schedule
 from iron.tests.support.toys_edges import member
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
@@ -72,6 +73,32 @@ def test_every_core_is_priced_its_kernels_own_scalars_and_calls(device):
     assert len(priced) == 3
     assert all(cycles > 0 for cycles in priced)
     assert ((norm.epsilon,),) in analysis.scalars
+
+
+# npu1's waits on host 203.
+@pytest.mark.supported_devices("npu2")
+def test_steps_on_one_core_cost_each_its_own_kernel_in_turn(device):
+    """Two SiLUs on one core, eight tiles a core: each pass runs both, so the pair's period is twice the steps' apart.
+
+    Each step's kernel is priced before its own outputs, the second's
+    drained to the host as the first's feed the second.
+    """
+    size = 2048 * 8 * 2
+    first = SiLU(size=size, tile_size=2048, num_aie_columns=2)
+    second = SiLU(size=size, tile_size=2048, num_aie_columns=2)
+    recording = Recording.of_steps(
+        "two_silus",
+        sequences.steps((first, "x", "h"), (second, "h", "y")),
+        ["x"],
+        ["y"],
+    )
+    apart = Region((member(first), member(second)), (Edge(0, "y", 1, "x"),))
+    joined = apart.held(0, Hold.L1)
+    assert joined.workers == ((0, 1),)
+    assert (
+        analyze(joined, recording, device).period
+        == 2 * analyze(apart, recording, device).period
+    )
 
 
 @pytest.mark.supported_devices("npu1", "npu2")

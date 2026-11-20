@@ -16,6 +16,7 @@ limit comes from the device's target model.
 from __future__ import annotations
 
 import functools
+import itertools
 import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -221,10 +222,15 @@ class Flow:
         ``floor``.
 
         Raises:
-            NotImplementedError: An edge runs in a later phase.
+            NotImplementedError: An edge runs in a later phase: a phase
+                starts empty, and its host transfers, which the analysis
+                does not time, bound it where its kernels are light.
         """
         if any(c.phase for c in self.channels):
-            raise NotImplementedError("a period over phases is not modelled yet")
+            raise NotImplementedError(
+                "a period over phases is not modelled yet: a phase starts empty "
+                "and its host transfers, which the analysis does not time, bound it"
+            )
         depths = {e: max(depths[e], c.floor) for e, c in enumerate(self.channels)}
         filled = [c.initial for c in self.channels]
         changed = [Fraction(0)] * len(self.channels)
@@ -332,7 +338,13 @@ class Analysis:
             contract leaves unbound, as its operator passes them.
         work: Per actor, the accesses its work comes before: each output
             it releases (once, not again for each reader a broadcast writes
-            to), or, where it writes none, each input it frees.
+            to), or, where it writes none, each input it frees; for steps on
+            one core, each step's.
+        fired: Per actor, for each access of its work, the kernels (indices
+            into its ``kernels``) one of whose calls comes before it: the
+            one its member calls, for steps on one core in their firing
+            order; several where one core's body calls several, in an order
+            its accesses do not record; none for no kernel.
     """
 
     tokens: dict[Edge, tuple[tuple[int, ...], tuple[int, ...]]]
@@ -349,6 +361,7 @@ class Analysis:
     kernels: list[tuple[ExternalFunction, ...]] = field(repr=False, compare=False)
     scalars: list[tuple[tuple, ...]] = field(repr=False, compare=False)
     work: list[list[int]] = field(repr=False, compare=False)
+    fired: list[list[tuple[int, ...]]] = field(repr=False, compare=False)
 
     def deadlock(self, depths: Mapping[Edge, int]) -> str | None:
         """Return why the region deadlocks with ``depths`` on the edges it names and the minimum on every other, or None where it runs.
@@ -365,26 +378,36 @@ class Analysis:
 
     @functools.cached_property
     def costs(self) -> list[list[Fraction]]:
-        """Per actor, the cycles it spends before each access: one call of its kernel, traced alone (``clock.kernel_cycles``), before each access of its work.
+        """Per actor, the cycles it spends before each access: one call of its kernel, traced alone on its own NPU, before each access of its work.
+
+        Steps on one core cost each its own kernel's call, in their firing
+        order.
 
         Raises:
-            NotImplementedError: A core calls several kernels, whose calls a
-                firing the recording does not hold.
+            NotImplementedError: One core's body calls several kernels, in an
+                order its accesses do not record, or a kernel is built for
+                an NPU other than the one attached (``kernel_cycles``).
         """
         costs = []
-        for kernels, scalars, work, program in zip(
-            self.kernels, self.scalars, self.work, self.flow.programs, strict=True
+        for kernels, scalars, work, fired, program in zip(
+            self.kernels,
+            self.scalars,
+            self.work,
+            self.fired,
+            self.flow.programs,
+            strict=True,
         ):
-            if len(kernels) > 1:
-                raise NotImplementedError(
-                    f"pricing a core that calls {len(kernels)} kernels "
-                    f"({', '.join(fn.name for fn in kernels)}) is not modelled yet"
-                )
-            each = Fraction(kernel_cycles(kernels[0], scalars[0]) if kernels else 0)
-            marked = set(work)
-            costs.append(
-                [each if i in marked else Fraction(0) for i in range(len(program))]
-            )
+            row = [Fraction(0)] * len(program)
+            for i, ks in zip(work, fired, strict=True):
+                if len(ks) > 1:
+                    raise NotImplementedError(
+                        f"pricing a core whose body calls {len(ks)} kernels "
+                        f"({', '.join(kernels[k].name for k in ks)}), in an order "
+                        f"its accesses do not record, is not modelled yet"
+                    )
+                for k in ks:
+                    row[i] = Fraction(kernel_cycles(kernels[k], scalars[k]))
+            costs.append(row)
         return costs
 
     @functools.cached_property
@@ -1136,6 +1159,10 @@ class Derivation:
         programs: list[list[tuple[ObjectFifo, bool, bool, int]]] = []
         actor_kernels: list[tuple[ExternalFunction, ...]] = []
         actor_scalars: list[tuple[tuple, ...]] = []
+        # Per actor, for each access, the kernels one of which comes before it,
+        # and the actor whose core makes it, before steps on one core join.
+        fires: list[list[tuple[int, ...]]] = []
+        made_by: list[list[int]] = []
         repetition: dict[int, int] = {}
         # Per actor, the step whose core it is; None for a link.
         actor_step: list[int | None] = []
@@ -1164,6 +1191,8 @@ class Derivation:
                         for a in self._events(core.body, trips)
                     ]
                 )
+                fires.append([tuple(range(len(actor_kernels[-1])))] * len(programs[-1]))
+                made_by.append([len(programs) - 1] * len(programs[-1]))
                 if k == 0:
                     outermost = [s for s in core.body if isinstance(s, Scope)]
                     repetition[i] = trips[id(outermost[0])] if outermost else 1
@@ -1172,6 +1201,8 @@ class Derivation:
                 actor_scalars.append(())
                 actor_step.append(None)
                 programs.append(self._link_events(link))
+                fires.append([()] * len(programs[-1]))
+                made_by.append([len(programs) - 1] * len(programs[-1]))
         writer: dict[ObjectFifo, int] = {}
         readers: dict[ObjectFifo, list[int]] = {}
         for actor, program in enumerate(programs):
@@ -1218,11 +1249,24 @@ class Derivation:
         for first, members in joined.items():
             ordered = sorted(members, key=lambda a: firing[actor_step[a]])
             programs[first] = [event for a in ordered for event in programs[a]]
+            offsets = list(
+                itertools.accumulate(
+                    (len(actor_kernels[a]) for a in ordered), initial=0
+                )
+            )
+            fires[first] = [
+                tuple(k + at for k in ks)
+                for a, at in zip(ordered, offsets)
+                for ks in fires[a]
+            ]
+            made_by[first] = [m for a in ordered for m in made_by[a]]
             actor_kernels[first] = tuple(f for a in ordered for f in actor_kernels[a])
             actor_scalars[first] = tuple(s for a in ordered for s in actor_scalars[a])
             for a in members:
                 if a != first:
                     programs[a] = []
+                    fires[a] = []
+                    made_by[a] = []
                     actor_kernels[a] = ()
                     actor_scalars[a] = ()
         if lead:
@@ -1413,23 +1457,41 @@ class Derivation:
                     fixed[e] = fifo.depth
         actor_kernels += [()] * (len(programs) - len(actor_kernels))
         actor_scalars += [()] * (len(programs) - len(actor_scalars))
+        fires += [[()] * len(p) for p in programs[len(fires) :]]
+        made_by += [[a] * len(programs[a]) for a in range(len(made_by), len(programs))]
         events: list[list[Event]] = []
         work: list[list[int]] = []
+        fired: list[list[tuple[int, ...]]] = []
         for actor, program in enumerate(programs):
             expanded: list[Event] = []
-            outputs: list[int] = []
-            inputs: list[int] = []
-            for fifo, producer, acquire, count in program:
+            # By the core that makes them, the outputs it releases and the
+            # inputs it frees.
+            outputs: dict[int, list[int]] = {}
+            inputs: dict[int, list[int]] = {}
+            follows: list[tuple[int, ...]] = []
+            for (fifo, producer, acquire, count), ks, maker in zip(
+                program, fires[actor], made_by[actor], strict=True
+            ):
                 ends = (
                     writes.get(fifo, [])
                     if producer
                     else [reads[(fifo, actor)]] if (fifo, actor) in reads else []
                 )
                 if ends and not acquire:
-                    (outputs if producer else inputs).append(len(expanded))
+                    (outputs if producer else inputs).setdefault(maker, []).append(
+                        len(expanded)
+                    )
                 expanded += [Event(e, producer, acquire, count) for e in ends]
+                follows += [ks] * len(ends)
             events.append(expanded)
-            work.append(outputs or inputs)
+            work.append(
+                sorted(
+                    i
+                    for maker in dict.fromkeys(made_by[actor])
+                    for i in outputs.get(maker) or inputs.get(maker, [])
+                )
+            )
+            fired.append([follows[i] for i in work[-1]])
         flow = Flow(channels, events)
         why = flow.balance()
         depths, deadlock = flow.minimum_depths(fixed)
@@ -1479,6 +1541,7 @@ class Derivation:
             kernels=actor_kernels,
             scalars=actor_scalars,
             work=work,
+            fired=fired,
         )
 
 

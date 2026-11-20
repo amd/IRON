@@ -844,6 +844,7 @@ def fit(
             model.get_num_bds(0, mem_row),
         ),
     }
+    locks = model.get_max_lock_value()
     shim_row = next(r for r in rows if model.is_shim_noc_tile(0, r))
     queue = model.get_dma_task_queue_depth()
     entries = profile.entries()
@@ -1221,33 +1222,11 @@ def fit(
                             )
             unplaceable = []
             for edge, p, _ in derivation.wired:
-                # Spliced, an edge holds each core's own tile.
-                elements = (
-                    int(np.prod(derivation.spliced[edge][0][2].shape))
-                    if edge in derivation.spliced
-                    else derivation.obj_elements[p].get(edge.output)
-                )
-                if edge.depth is None or edge.kind not in held_in or elements is None:
+                if edge.depth is None:
                     continue
-                tile, memory, bds = held_in[edge.kind]
-                (source,) = [
-                    b for b in derivation.ops[p].buffers if b.name == edge.output
-                ]
-                held = edge.depth * elements * np.dtype(source.dtype).itemsize
-                if held > memory:
-                    return Fit(
-                        False,
-                        "counts",
-                        f"{edge} holds {edge.depth} objects, {held} bytes; {tile} "
-                        f"holds {memory}",
-                    )
-                if bds is not None and edge.depth > bds:
-                    return Fit(
-                        False,
-                        "counts",
-                        f"{edge} holds {edge.depth} objects, a buffer descriptor "
-                        f"each; {tile} has {bds}",
-                    )
+                why = _held_past(derivation, edge, p, edge.depth, held_in, locks)
+                if why is not None:
+                    return Fit(False, "counts", why)
             # A region with no edge hands nothing on-chip: nothing to analyse.
             if region.edges:
                 try:
@@ -1275,6 +1254,16 @@ def fit(
                 )
                 if why is not None:
                     return Fit(False, "analysis", f"at its chosen depths, it {why}")
+                # An edge with no chosen depth is built at the analysis's least.
+                for edge, p, _ in derivation.wired:
+                    least = analysis.min_depth.get(edge)
+                    if edge.depth is not None or least is None:
+                        continue
+                    why = _held_past(derivation, edge, p, least, held_in, locks)
+                    if why is not None:
+                        return Fit(
+                            False, "analysis", f"at the least depth it runs at, {why}"
+                        )
             kept = sorted(
                 {
                     (p, edge.output)
@@ -1605,6 +1594,42 @@ def _independent(
                     f"steps {span}: what runs at once must be independent, no "
                     f"written data shared",
                 )
+    return None
+
+
+def _held_past(
+    derivation: Derivation,
+    edge: Edge,
+    producer: int,
+    depth: int,
+    held_in: Mapping[EdgeKind, tuple[str, int, int | None]],
+    locks: int,
+) -> str | None:
+    """Return why ``edge``, ``depth`` objects deep, is past where it is held: a tile's memory or descriptors, or a lock's count; else None.
+
+    A fifo end of ``depth`` objects starts its producer's lock at that many
+    free ones, so a lock's range bounds it as a tile's memory does.
+    """
+    # Spliced, an edge holds each core's own tile.
+    elements = (
+        int(np.prod(derivation.spliced[edge][0][2].shape))
+        if edge in derivation.spliced
+        else derivation.obj_elements[producer].get(edge.output)
+    )
+    if edge.kind not in held_in or elements is None:
+        return None
+    tile, memory, bds = held_in[edge.kind]
+    (source,) = [b for b in derivation.ops[producer].buffers if b.name == edge.output]
+    held = depth * elements * np.dtype(source.dtype).itemsize
+    if held > memory:
+        return f"{edge} holds {depth} objects, {held} bytes; {tile} holds {memory}"
+    if bds is not None and depth > bds:
+        return (
+            f"{edge} holds {depth} objects, a buffer descriptor each; {tile} has "
+            f"{bds}"
+        )
+    if depth > locks:
+        return f"{edge} holds {depth} objects, more than a lock counts ({locks})"
     return None
 
 
