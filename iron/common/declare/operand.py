@@ -8,8 +8,10 @@ Each with an ``obj_shape=`` is its own stream into the array.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import math
+from collections.abc import Sequence
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +38,23 @@ active_runtime: ContextVar[OperatorRuntime | None] = ContextVar(
 )
 
 
+@dataclasses.dataclass
+class Join:
+    """How each lane of an output is joined in a memtile from per-core fifos, which the build's cores write.
+
+    Attributes:
+        offsets: Each core's offset in a lane's object, in elements.
+        obj_types: Each core's object type.
+        depths: Each core fifo's depth.
+        tiles: Each lane's memtile.
+    """
+
+    offsets: list[int]
+    obj_types: list[Any]
+    depths: list[int]
+    tiles: list[Any]
+
+
 class Operand:
     """An operand as one operator holds it (``op.x``).
 
@@ -44,22 +63,29 @@ class Operand:
     not drain. ``lane_fifos`` holds the fifos ``fifos()`` made for each lane, kept past
     binding so another reader can add more ends to one already bound.
 
-    A fed input reads ``fed_from``'s lanes, or ``staged`` fifos where ``Staging``
+    A fed input reads ``fed_from``'s lanes (or one fifo's, a lane source), or ``staged`` fifos where ``Staging``
     restaged them; an output lists every input it ``feeds``, and one that
     ``keeps_host`` drains to the host too, its inputs reading ends of their own.
     Where a composition chose an edge's depth, which names the edge's reading
     end, ``chosen_depth`` holds it: on a fed input, the depth of the end it
     reads through; on an output, that of the end its lanes bind for their
-    first on-chip reader; on an input the cascade fills, its fifos' own.
+    first on-chip reader (spliced, each core's fifo); on an input the
+    cascade fills, its fifos' own.
     An output and the input it carries to over the cascade each hold the
-    other as ``cascade`` (``cascade_to``).
+    other as ``cascade`` (``cascade_to``). An output whose lanes are each
+    joined in a memtile from its cores' fifos holds the ``join``, and each
+    lane's ``core_fifos``, those its build's cores write. Where a
+    composition ``splices`` a stage into it, those are fifos of the cores'
+    own, and the stage's outputs write the join (``join_from``), each
+    holding the output ``into`` which it writes; the stage's host operands
+    move ``along`` that output's lanes, in its host order.
     """
 
     def __init__(self, member: Any, op: Operator) -> None:
         self.op = op
         self.lane_handles: list[Any] = []
         self.lane_fifos: list[Any] = []
-        self.fed_from: Operand | None = None
+        self.fed_from: Operand | ObjectFifo | None = None
         self.staged: list[ObjectFifo] | None = None
         self.feeds: list[Operand] = []
         self.keeps_host = False
@@ -67,6 +93,11 @@ class Operand:
         self.packeted = False
         self.chosen_depth: int | None = None
         self.cascade: Operand | None = None
+        self.join: Join | None = None
+        self.core_fifos: list[list[ObjectFifo]] = []
+        self.splices = False
+        self.along: Operand | None = None
+        self.into: Operand | None = None
         self.read_lanes: set[int] = set()
         self._decl = member.of(op)
 
@@ -160,7 +191,7 @@ class Operand:
         """
         if self.fed_from is not None:
             raise ValueError(
-                f"{self.name} is fed from {self.fed_from.name}: its build must "
+                f"{self.name} is fed on-chip: its build must "
                 f"take its lanes from fifos(), not bind()"
             )
         handles = list(handles) if isinstance(handles, (list, tuple)) else [handles]
@@ -180,6 +211,7 @@ class Operand:
         readers: int | None = None,
         tiles: list | None = None,
         obj_type: Any = None,
+        join: Join | None = None,
         **objectfifo_kwargs: Any,
     ) -> list[Any]:
         """Return a fifo per lane, bound as this operand's lanes.
@@ -187,7 +219,8 @@ class Operand:
         Plain (``readers=None``, ``tiles=None``), returns the build's end of each: an
         input's consumer end, an output's producer end. A fed input gets its source's
         ends or fifos the same way, through ``Operand.reader``; a ``staged`` input
-        reads fifos built for it.
+        reads fifos built for it. An output given a ``join`` returns, for each lane,
+        the fifos its cores write (``core_fifos``), which the lane joins in a memtile.
 
         Args:
             depth: Fifo depth; ``l1_depth`` when None.
@@ -197,16 +230,28 @@ class Operand:
             tiles: Places each lane's host end and returns the fifo itself,
                 one per lane, rather than an end.
             obj_type: The fifo element type; this operand's own when None.
+            join: Joins each lane of an output in a memtile from its cores'
+                fifos.
             objectfifo_kwargs: Reach every lane's ``ObjectFifo(...)``.
 
         Raises:
             ValueError: ``readers`` and ``tiles`` are both given, ``readers``
-                is asked of an output, or ``tiles`` does not name one tile a
-                lane.
+                is asked of an output, ``tiles`` does not name one tile a
+                lane, or ``join`` is asked of an input.
         """
         if readers is not None and tiles is not None:
             raise ValueError(f"{self.name}.fifos(): readers= and tiles= do not combine")
+        if join is not None and not self.drains:
+            raise ValueError(f"{self.name} is an input: join= joins an output's lanes")
         source, staged = self.fed_from, self.staged
+        if isinstance(source, ObjectFifo):
+            # The composition made the fifo, and its depth with it.
+            reading = source.depth
+            if tiles is not None:
+                return [source]
+            if readers is None:
+                return [source.cons(reading)]
+            return [[source.cons(reading) for _ in range(readers)]]
         if source is not None:
             if tiles is not None:
                 return list(source.lane_fifos if staged is None else staged)
@@ -251,9 +296,29 @@ class Operand:
         ]
         self.lane_fifos = made
         if self.drains:
-            self.bind(
-                [f.cons(self.chosen_depth, tile=t) for f, t in zip(made, lane_tiles)]
-            )
+            spliced = self.splices and join is not None
+            # Spliced, the first on-chip reader is each core's stage.
+            reading = None if spliced else self.chosen_depth
+            self.bind([f.cons(reading, tile=t) for f, t in zip(made, lane_tiles)])
+            if join is not None:
+                self.join = join
+                self.core_fifos = [
+                    (
+                        [
+                            ObjectFifo(t, depth=max(d, self.chosen_depth or 0))
+                            for t, d in zip(join.obj_types, join.depths)
+                        ]
+                        if spliced
+                        else f.prod().join(
+                            join.offsets,
+                            tile=join.tiles[lane],
+                            depths=join.depths,
+                            obj_types=join.obj_types,
+                        )
+                    )
+                    for lane, f in enumerate(made)
+                ]
+                return self.core_fifos
             if tiles is not None:
                 return made
             return [f.prod() for f in made]
@@ -264,25 +329,62 @@ class Operand:
             return [f.cons() for f in made]
         return [[f.cons() for _ in range(readers)] for f in made]
 
-    def feed(self, source: Operand, staged: bool = False) -> None:
-        """Take this input's stream on-chip from ``source``, another operator's output.
+    def join_from(self, lane: int, stages: Sequence[Operand]) -> None:
+        """Join lane ``lane`` in its memtile from ``stages``, one output a core, at the ``join``'s offsets.
+
+        Each of ``stages`` is a one-lane output on chip, writing the core's
+        place in the join (its ``into``).
+
+        Raises:
+            ValueError: This output splices no stage into a join, or
+                ``stages`` are not one a core of the join's object types.
+        """
+        join = self.join
+        if not self.splices or join is None:
+            raise ValueError(f"{self.name} splices no stage into a join of its lanes")
+        types = [s.obj_type for s in stages]
+        if types != join.obj_types or any(s.lanes != 1 for s in stages):
+            raise ValueError(
+                f"{self.name}'s lane {lane} joins one lane of {join.obj_types}, one "
+                f"a core; the stages write {types}"
+            )
+        for s in stages:
+            s.into = self
+        tile = join.tiles[lane]
+        if tile is AnyMemTile:
+            tile = tile.copy()
+        ObjectFifoLink(
+            [s.reader(0) for s in stages],
+            self.lane_fifos[lane].prod(),
+            tile,
+            join.offsets,
+            [],
+        )
+
+    def feed(self, source: Operand | ObjectFifo, staged: bool = False) -> None:
+        """Take this input's stream on-chip from ``source``, another operator's output or one fifo (a lane source).
 
         Neither is a host transfer; several inputs may each be fed one source.
+        A lane source feeds a one-lane input its objects as they come: whose
+        elements they are is the composition's, which made the fifo.
 
         Args:
-            source: The output, its lanes bound, whose stream this input reads.
+            source: The output, its lanes bound, whose stream this input
+                reads, or a fifo whose consumer end it reads.
             staged: Where the lanes do not meet directly, restage them
                 through memtiles (``Staging``) rather than refuse.
 
         Raises:
             ValueError: This is not a streamed input, ``source`` not a bound
                 output, this is a held (``replicate``) input, ``source`` is
-                pinned rather than streamed, or, unless ``staged`` and
-                ``Staging`` takes them, their lanes or objects differ or a
-                lane's host access pattern does not visit the same elements
-                in the same order on both sides.
+                pinned rather than streamed, a lane source feeds more than
+                one lane or objects of another type, or, unless ``staged``
+                and ``Staging`` takes them, their lanes or objects differ or
+                a lane's host access pattern does not visit the same
+                elements in the same order on both sides.
         """
-        if not (self.streamed and self.fills) or not source.drains:
+        drains = source.drains if isinstance(source, Operand) else True
+        if not (self.streamed and self.fills) or not drains:
             raise ValueError(
                 f"{self.name} can be fed only as a streamed input, from an output"
             )
@@ -291,6 +393,14 @@ class Operand:
                 f"{self.name} holds one line the whole call, every core meeting "
                 f"it: it cannot be fed a source's per-iteration stream"
             )
+        if isinstance(source, ObjectFifo):
+            if self.lanes != 1 or source.obj_type != self.obj_type:
+                raise ValueError(
+                    f"{self.name} reads {self.lanes} lanes of {self.obj_type}; a "
+                    f"lane source feeds one lane of {source.obj_type}"
+                )
+            self.fed_from = source
+            return
         if any(isinstance(h, DmaEndpoint) for h in source.handles):
             raise ValueError(
                 f"{source.name} is pinned to shim channels, not a fifo: it "
@@ -419,8 +529,10 @@ class Operand:
 
     @property
     def on_chip(self) -> bool:
-        """Whether this operand's stream stays on-chip, fed to or from another operator or on the cascade, with no host transfer."""
+        """Whether this operand's stream stays on-chip, fed to or from another operator, on the cascade or spliced into a stage, with no host transfer."""
         if self.fills and self.cascade is not None:
+            return True
+        if (self.splices and self.join is not None) or self.into is not None:
             return True
         return self.fed_from is not None or (
             (bool(self.feeds) or self.cascade is not None) and not self.keeps_host
@@ -649,15 +761,34 @@ class Operand:
     ) -> list[tuple[int, TensorAccessPattern, Value | None, int | None]]:
         """Return the ``(lane, tap, length_parameter, length_unit)`` transfers.
 
-        What an operator writing its own sequence describes (``lane_transfers``), else
-        derived: the whole buffer (one lane or replicated) or one block of the first
-        non-batch axis per lane; under a bound, round-robin by tile instead.
+        Moving ``along`` another output's lanes, that output's. Else what an operator
+        writing its own sequence describes (``lane_transfers``), else derived: the
+        whole buffer (one lane or replicated) or one block of the first non-batch axis
+        per lane; under a bound, round-robin by tile instead.
 
         Raises:
-            ValueError: No ``obj_shape=``, or the split does not divide, cannot
+            ValueError: ``along`` moves another count of elements, no ``obj_shape=``, or the split does not divide, cannot
                 bound that axis, or does not fit a descriptor.
         """
         name = f"{type(self.op).__name__}.{self.name}"
+        along = self.along
+        if along is not None:
+            if along.elements != self.elements:
+                raise ValueError(
+                    f"{name} moves along {along.name}'s lanes, whose {along.elements} "
+                    f"elements are not its {self.elements}"
+                )
+            return [
+                (
+                    lane,
+                    TensorAccessPattern(
+                        tuple(self.shape), tap.offset, tap.sizes, tap.strides
+                    ),
+                    word,
+                    unit,
+                )
+                for lane, tap, word, unit in along.transfers()
+            ]
         if not self.streamed:
             raise ValueError(
                 f"{name} has no obj_shape=, so its sequence cannot be derived; add "

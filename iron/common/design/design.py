@@ -21,6 +21,7 @@ from aie.iron import (
     DispatchTime,
     Flow,
     Lock,
+    ObjectFifo,
     PacketFlow,
     Program,
     ScratchpadParameter,
@@ -28,9 +29,9 @@ from aie.iron import (
 )
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
-from ..declare import Operator
+from ..declare import Built, Operator
 from ..declare.operand import Operand
-from .runtime import MergedRuntime, OperatorRuntime
+from .runtime import MergedRuntime, OperatorRuntime, SplicedRuntime
 
 
 class OperatorDesign:
@@ -155,7 +156,8 @@ class BuiltArray:
             with others that always hold the same number.
         dispatch: On an xclbin, each per-call value's dispatch-time scalar,
             by device symbol.
-        fed: Input name -> the built output it is fed on-chip (``Operand.feed``).
+        fed: Input name -> the built output, or a fifo, it is fed on-chip
+            (``Operand.feed``).
         staged: A fed input whose lanes do not meet its source's is staged
             through memtiles rather than refused.
         depths: Operand name -> the depth a composition chose for an edge's
@@ -164,6 +166,8 @@ class BuiltArray:
             an unfed input's fifos (the cascade fills it).
         packeted: Operand names whose host fills ride packet flows
             (``Operand.packeted``).
+        splices: Output names a composition splices a stage into, where
+            their build joins their cores' fifos (``Operand.splices``).
 
     Raises:
         ValueError: A full ELF is asked to carry a ``DispatchTime`` value, an
@@ -179,10 +183,11 @@ class BuiltArray:
         design: OperatorDesign,
         words: Mapping[str, str] | None = None,
         dispatch: Mapping[str, object] | None = None,
-        fed: Mapping[str, Operand] | None = None,
+        fed: Mapping[str, Operand | ObjectFifo] | None = None,
         staged: bool = False,
         depths: Mapping[str, int] | None = None,
         packeted: Collection[str] = (),
+        splices: Collection[str] = (),
     ):
         words = words or {}
         dispatch = dispatch or {}
@@ -218,14 +223,24 @@ class BuiltArray:
             built.fed_from, built.staged = mine.fed_from, mine.staged
             built.chosen_depth = (depths or {}).get(mine.name)
             built.packeted = mine.name in packeted
+            built.splices = mine.name in splices
         self.built = view.build()
         for mine, built in zip(op.buffers, view.buffers):
+            chosen = built.chosen_depth
             if (
                 built.drains
-                and built.chosen_depth is not None
+                and chosen is not None
                 and (
                     not built.lane_fifos
-                    or any(h.depth != built.chosen_depth for h in built.lane_handles)
+                    or (
+                        any(
+                            (f.depth or 0) < chosen
+                            for fifos in built.core_fifos
+                            for f in fifos
+                        )
+                        if built.splices and built.join is not None
+                        else any(h.depth != chosen for h in built.lane_handles)
+                    )
                 )
             ):
                 raise NotImplementedError(
@@ -250,6 +265,8 @@ class BuiltArray:
         for mine, built in zip(op.buffers, view.buffers):
             mine.lane_handles = built.lane_handles
             mine.lane_fifos = built.lane_fifos
+            mine.splices, mine.join = built.splices, built.join
+            mine.core_fifos = built.core_fifos
         self.design = design
         self.op = op
         self.workers = [w for w in self.built.objects if isinstance(w, Worker)]
@@ -330,6 +347,65 @@ class BuiltArray:
                 self.built,
                 objects=[b for b in self.built.objects if isinstance(b, reached)],
             ),
+            name=name,
+        )
+
+
+class SplicedArray(BuiltArray):
+    """A step whose kernel a composition splices into another's cores, as the array its sequence runs over.
+
+    It builds nothing of its own: its stage runs on the producer's cores,
+    and each of its host operands moves along the producer's output's lanes
+    (``Operand.along``), the input the producer feeds on-chip.
+
+    Args:
+        design: The step's design.
+        source: The producer's output, spliced (``Operand.splices``).
+        input: The step's input ``source`` feeds.
+        hosts: Each other operand's lane ends, by name: the fifos the stage's
+            other inputs read, or ``source``'s own, which carry its output.
+        stages: Each core's stage, whose runtime parameters its sequence
+            writes.
+    """
+
+    def __init__(
+        self,
+        design: OperatorDesign,
+        source: Operand,
+        input: str,
+        hosts: Mapping[str, list],
+        stages: Sequence[BuiltArray],
+    ):
+        self._words, self._dispatch = {}, {}
+        op = design.op.copy()
+        for b in op.buffers:
+            if b.name == input:
+                b.fed_from = source
+                continue
+            b.along = source
+            b.lane_handles = list(hosts[b.name])
+        self.built = Built([])
+        self.design = design
+        self.op = op
+        self.workers = []
+        self.traced = []
+        self.stages = list(stages)
+
+    def runtime(self, other: BuiltArray, name: str | None) -> OperatorRuntime:
+        """Its own sequence, named ``name``: each stage's parameters, then its host transfers.
+
+        Raises:
+            ValueError: ``other`` is another array.
+        """
+        if other is not self:
+            raise ValueError(
+                f"{type(other.op).__name__}'s sequence cannot run over a spliced "
+                f"{type(self.op).__name__}'s array"
+            )
+        return SplicedRuntime(
+            self.op,
+            self.built,
+            [OperatorRuntime(s.op, s.built) for s in self.stages],
             name=name,
         )
 

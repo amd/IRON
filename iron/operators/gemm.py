@@ -34,6 +34,7 @@ from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Precision, Rtp, Unresolvable
 from iron.common.declare import Operand
+from iron.common.declare.operand import Join
 from iron.common.declare.operator import LaneTransfers
 from iron.common.testing import Case, Testing
 
@@ -405,7 +406,6 @@ class GEMM(Operator):
 
         A_l2_ty = self.A.obj_type
         B_l2_ty = self.B.obj_type
-        C_l2_ty = self.C.obj_type
         A_l1_ty = np.ndarray[(m, k), np.dtype[input_dtype]]
         B_l1_ty = np.ndarray[(k, n), np.dtype[input_dtype]]
         C_l1_ty = np.ndarray[(m * n,), np.dtype[output_dtype]]
@@ -426,7 +426,6 @@ class GEMM(Operator):
         B_l3l2_fifos: list[Any] = [None] * n_aie_cols
         B_l2l1_fifos: list[Any] = [None] * n_aie_cols
         C_l1l2_fifos: list[list[Any]] = [[None] * n_aie_cols for _ in range(n_aie_rows)]
-        C_l2l3_fifos: list[Any] = [None] * n_aie_cols
 
         bounded = self.value("valid").in_scratchpad
         k_bounded = self.value("valid_k").per_call
@@ -456,6 +455,22 @@ class GEMM(Operator):
             for j in range(stop_row - start_row):
                 A_l2l1_fifos[j + start_row] = a_tmp_fifos[j]
 
+        c_cores = self.C.fifos(
+            FIFO_DEPTH,
+            tiles=[Tile(c, 0) for c in range(n_aie_cols)],
+            to_stream=streams.C,
+            join=Join(
+                offsets=[m * n * i for i in range(n_aie_rows)],
+                obj_types=[C_l1_ty] * n_aie_rows,
+                depths=[fifo_depth_out] * n_aie_rows,
+                tiles=[
+                    Tile(col, 1) if pinned else AnyMemTile for col in range(n_aie_cols)
+                ],
+            ),
+        )
+        for col in range(n_aie_cols):
+            for j in range(n_aie_rows):
+                C_l1l2_fifos[j][col] = c_cores[col][j]
         for col in range(n_aie_cols):
             B_l3l2_fifos[col] = ObjectFifo(B_l2_ty, depth=FIFO_DEPTH)
             B_l2l1_fifos[col] = (
@@ -467,24 +482,6 @@ class GEMM(Operator):
                     tile=Tile(col, 1) if pinned else AnyMemTile,
                 )
             )
-            C_l2l3_fifos[col] = ObjectFifo(
-                C_l2_ty,
-                depth=FIFO_DEPTH,
-                to_stream=streams.C,
-            )
-            of_offsets = [m * n * i for i in range(n_aie_rows)]
-            c_tmp_fifos = (
-                C_l2l3_fifos[col]
-                .prod()
-                .join(
-                    of_offsets,
-                    obj_types=[C_l1_ty] * n_aie_rows,
-                    depths=[fifo_depth_out] * n_aie_rows,
-                    tile=Tile(col, 1) if pinned else AnyMemTile,
-                )
-            )
-            for j in range(n_aie_rows):
-                C_l1l2_fifos[j][col] = c_tmp_fifos[j]
 
         def core_fn(
             in_a,
@@ -575,7 +572,6 @@ class GEMM(Operator):
             [f.prod(tile=Tile(a_cols[c], 0)) for c, f in enumerate(A_l3l2_fifos)]
         )
         self.B.bind([f.prod(tile=Tile(c, 0)) for c, f in enumerate(B_l3l2_fifos)])
-        self.C.bind([f.cons(tile=Tile(c, 0)) for c, f in enumerate(C_l2l3_fifos)])
         return Built(workers, rtps)
 
     def sequence(self, rt):

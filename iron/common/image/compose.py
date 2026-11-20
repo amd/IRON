@@ -24,14 +24,28 @@ from aie.dialects import memref, vector
 from aie.extras.dialects.arith import constant
 from aie.helpers.npdtypes import np_ndarray_type_get_dtype, np_ndarray_type_get_shape
 from aie.helpers.util import np_dtype_to_mlir_type, np_ndarray_type_to_memref_type
-from aie.iron import CascadeFlow, DeviceConfiguration, Program, Runtime, Worker
+from aie.iron import (
+    CascadeFlow,
+    DeviceConfiguration,
+    ObjectFifo,
+    Program,
+    Runtime,
+    Worker,
+)
 from aie.iron.controlflow import range_
 from aie.iron.dataflow.objectfifo import ObjectFifoHandle
 from aie.passmanager import PassManager
 from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
-from ..design import BuiltArray, OperatorDesign, configuration, identities
+from ..design import (
+    BuiltArray,
+    OperatorDesign,
+    SplicedArray,
+    configuration,
+    identities,
+)
+from ..elementwise import Elementwise, FinishStep, Rowwise
 from .step import BufferRef, Edge, EdgeKind, Fusion, FusionKind
 
 logger = logging.getLogger(__name__)
@@ -260,7 +274,32 @@ def fused_configuration(
     on_chip = {(e.consumer, e.input) for e in fusion.edges} | {
         (p, output) for (p, output) in first_reader if (p, output) not in kept
     }
+    # A stream within one worker group whose producer joins its cores' fifos
+    # in a memtile: its consumer's kernel is spliced into those cores.
+    joined_in = {
+        e
+        for e in fusion.edges
+        if e.kind is EdgeKind.STREAM
+        and any({e.producer, e.consumer} <= set(group) for group in fusion.workers)
+    }
+    spliced: dict[int, Edge] = {}
     for design, j, own in zip(designs, fusion.steps, scalars, strict=True):
+        into = [
+            e
+            for e in incoming.get(j, ())
+            if e in joined_in
+            and next(
+                b for b in arrays[e.producer].op.buffers if b.name == e.output
+            ).join
+            is not None
+        ]
+        if into:
+            (e,) = into
+            arrays[j] = splice(
+                e, design, arrays[e.producer], incoming.get(j, ()), words
+            )
+            spliced[j] = e
+            continue
         fed = {}
         for e in incoming.get(j, ()):
             if e.kind is EdgeKind.CASCADE:
@@ -290,6 +329,7 @@ def fused_configuration(
                 if fusion.packets
                 else ()
             ),
+            splices=[e.output for e in joined_in if e.producer == j],
         )
         for producer, output in fusion.kept:
             if producer == j:
@@ -338,6 +378,13 @@ def fused_configuration(
     ]
     joined: dict[int, Worker] = {}
     for group in [*fusion.workers, *alone]:
+        if any(j in spliced for j in group):
+            if len(group) != 2 or spliced.get(group[1]) is None:
+                raise NotImplementedError(
+                    f"one core for steps {tuple(group)} is not built yet: a step "
+                    f"spliced into its producer's cores shares them with no other"
+                )
+            continue
         joined |= share(
             group,
             [
@@ -366,6 +413,123 @@ def fused_configuration(
         phases=[grouped[p] for p in sorted(grouped)],
     )
     return configured, [arrays[j] for j in fusion.steps]
+
+
+def splice(
+    edge: Edge,
+    design: OperatorDesign,
+    producer: BuiltArray,
+    incoming: Sequence[Edge],
+    words: Mapping[str, str] | None = None,
+) -> SplicedArray:
+    """Splice step ``design``'s kernel into ``producer``'s cores, which ``edge`` streams it from: a stage on each core.
+
+    ``producer``'s output joins its cores' fifos in a memtile, and was built
+    to splice (``Operand.splices``). Each core runs the step on its own
+    tile, as a finish step would (``FinishStep.consumer_at``), joined after
+    its own body; the stage's output takes the core's place in the join, so
+    the output's lanes carry the step's. Each other input arrives in the
+    same tiles: its host buffer moves along the output's lanes, split in a
+    memtile at the join's offsets and in its order (the output's
+    ``to_stream`` as the split's ``from_stream``).
+
+    Args:
+        edge: The stream from the producer's output into the step.
+        design: The step's design.
+        producer: The producer's array; its workers become the joined cores.
+        incoming: Every edge into the step.
+        words: On a full ELF, the shared scratchpad words.
+
+    Returns:
+        The step's array, its host operands moving along the output's lanes.
+
+    Raises:
+        NotImplementedError: The step is not an elementwise operator over
+            tiles, has another output or a per-call value, another of its
+            inputs is fed on-chip, or the output is read by another step or
+            the host too: splicing those is not built yet.
+        ValueError: The stage's output tile is not the core's (``Operand.join_from``).
+    """
+    op = design.op
+    (source,) = [b for b in producer.op.buffers if b.name == edge.output]
+    join = source.join
+    assert join is not None, "splice() takes an output its build joined"
+    if (
+        not isinstance(op, Elementwise)
+        or isinstance(op, Rowwise)
+        or len(op.outputs) != 1
+        or op.values
+    ):
+        raise NotImplementedError(
+            f"splicing {type(op).__name__} into {type(producer.op).__name__}'s "
+            f"cores is not built yet: a step spliced into a producer's cores is "
+            f"an elementwise operator over tiles, with one output and no per-call "
+            f"value"
+        )
+    if [e for e in incoming if e != edge] or source.keeps_host or source.feeds:
+        raise NotImplementedError(
+            f"splicing {type(op).__name__} into {type(producer.op).__name__}'s "
+            f"cores is not built yet where another of its inputs is fed on-chip "
+            f"or {source.name} is read elsewhere too"
+        )
+    names = [b.name for b in op.inputs]
+    step = FinishStep.of(op, names.index(edge.input))
+    (out,) = op.outputs
+    moved = source.moved_per_lane()
+    per_object = math.prod(source.obj_shape)
+    hosts: dict[str, list] = {b.name: [] for b in op.buffers if b.name != edge.input}
+    hosts[out.name] = list(source.handles)
+    stages: list[BuiltArray] = []
+    for lane, cores in enumerate(source.core_fifos):
+        objects = -(-moved.get(lane, 0) // per_object)
+        tiles: dict[str, list[ObjectFifo]] = {}
+        for b in op.inputs:
+            if b.name == edge.input:
+                continue
+            mirror = ObjectFifo(
+                np.ndarray[tuple(source.obj_shape), np.dtype[b.dtype]],
+                depth=source.lane_fifos[lane].depth,
+            )
+            hosts[b.name].append(mirror.prod())
+            tiles[b.name] = mirror.cons(
+                from_stream=source.lane_fifos[lane].to_stream
+            ).split(
+                join.offsets,
+                tile=join.tiles[lane],
+                obj_types=[
+                    np.ndarray[tuple(c.shape), np.dtype[b.dtype]] for c in cores
+                ],
+                depths=join.depths,
+            )
+        ends = []
+        for k, core in enumerate(cores):
+            line = math.prod(core.shape)
+            stage = BuiltArray(
+                OperatorDesign(step.consumer_at(line, op.dev, objects * line)),
+                words,
+                fed={edge.input: core} | {n: fifos[k] for n, fifos in tiles.items()},
+            )
+            stages.append(stage)
+            (made,) = stage.op.outputs
+            ends.append(made)
+            (writer,) = [
+                w
+                for w in producer.workers
+                if any(
+                    isinstance(h, ObjectFifoHandle) and h.object_fifo is core
+                    for h in w.fifos
+                )
+            ]
+            try:
+                joined = Worker.join([writer, *stage.workers])
+            except ValueError as e:  # joining what mlir-aie does not join
+                raise NotImplementedError(
+                    f"splicing {type(op).__name__} into "
+                    f"{type(producer.op).__name__}'s cores is not built yet: {e}"
+                ) from e
+            producer.workers = [joined if w is writer else w for w in producer.workers]
+        source.join_from(lane, ends)
+    return SplicedArray(design, source, edge.input, hosts, stages)
 
 
 def share(
