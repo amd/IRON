@@ -1764,12 +1764,19 @@ def fit(
                     )
                 elif refused is not None:
                     return Fit(False, "placer", refused)
+        # A returned output no step reads before its last write is the host's
+        # after each call, though pinned as written in parts.
+        handed = {
+            root
+            for root in {h.ref().root for h in recording.returned}
+            if -1 not in writers.get(root, [-1]) + readers.get(root, [])
+            and all(r > max(writers[root]) for r in readers.get(root, []))
+        }
         persist = (
             set(recording.feedback)
             | {h.ref().root for _, h in recording.states.values()}
             | {h.ref().root for h in recording.inputs}
-            # A returned output pinned as written in parts is the host's after each call.
-            | set(recording.pinned) - {h.ref().root for h in recording.returned}
+            | set(recording.pinned) - handed
             | set(recording.residents)
         )
         carried = [

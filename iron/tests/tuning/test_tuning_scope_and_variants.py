@@ -18,7 +18,9 @@ from iron.common.declare.composition import (
 )
 from iron.common.graph.record import Recording
 from iron.common.image.packaging import SCRATCHPAD_WORDS
+from iron.common.image.step import BufferRef, SequenceStep
 from iron.operators.copy import Copy
+from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.tests.support.toys_settings import RangedPair
@@ -174,6 +176,39 @@ def test_a_boundary_is_kept_only_where_its_saving_beats_a_switch_and_one_more_de
     assert ratio < 0.95
     tuned = search(calls, start, device, budget_s=5.0)
     assert variants in tuned.variants()
+
+
+@pytest.mark.parametrize("read_first", [True, False])
+def test_an_output_written_in_parts_and_read_before_its_last_write_breaks_a_merge(
+    device, read_first
+):
+    """A returned output written in halves outlasts the call where a step reads the second half before writing it.
+
+    Each call then reads what the call before left there, so merging calls is refused
+    before any build. Read only after both halves are written, it is the host's after
+    each call, and the merge waits on what is not built rather than being refused.
+    """
+    add = ElementwiseAdd(size=256, tile_size=128, num_aie_columns=1)
+    first, second = BufferRef("out", 0, 512), BufferRef("out", 512, 512)
+    writes = [
+        SequenceStep(add, (BufferRef("x"), BufferRef("x"), first)),
+        SequenceStep(add, (BufferRef("x"), BufferRef("x"), second)),
+    ]
+    reads = SequenceStep(add, (BufferRef("x"), second, BufferRef("t")))
+    steps = [writes[0], reads, writes[1]] if read_first else [*writes, reads]
+    recording = Recording.of_steps(
+        "halves", steps, ["x"], ["out", "t"], pinned={"out": 1024}
+    )
+    profile = Profile()
+    profile.add_schedule(Schedule(version=recording.version, size="merged_2x"))
+    if not read_first:
+        with pytest.raises(NotImplementedError, match="part of out"):
+            fit(profile, [Timed(recording)], device)
+        return
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "analysis"
+    assert "breaks a dependence" in (result.why or "")
 
 
 def test_ranges_that_do_not_tile_the_value_space_are_refused(device):
