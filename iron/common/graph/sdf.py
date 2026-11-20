@@ -424,43 +424,68 @@ class Derivation:
     or a state the graph holds) arrives whole, so its edge starts the call
     holding every object the call moves on it.
 
+    One call is analysed, at its per-call values: a lane whose length a
+    per-call word sizes moves that word's tiles at the call's extents
+    (``Operand.transfers``), the one array serving every extent. A value the
+    call does not give is the largest the recording's limits admit, a whole
+    call.
+
     Args:
         region: The composed region.
         recording: The recording its steps are matched in.
         device: The device every operator is built for.
+        values: The call's per-call values, by name (``Timed.values``).
 
     Raises:
         NotImplementedError: What the analysis does not model yet: a
-            run-time branch or a ``forever_`` in a core, a per-call count, a
-            slice, a restaging IRON's ``Staging`` cannot plan, or a loop no
-            fifo's objects settle.
+            run-time branch or a ``forever_`` in a core, a transfer sized
+            per call other than by a lane's length word, a slice, a
+            restaging IRON's ``Staging`` cannot plan, or a loop no fifo's
+            objects settle.
         ValueError: The region matches none of the recording's steps, a
-            member's tunables do not resolve (``Unresolvable``), or an edge's
-            two ends are not one buffer.
+            member's tunables do not resolve (``Unresolvable``), an edge's
+            two ends are not one buffer, or a per-call value the call does
+            not give is bounded by no limit of the recording.
     """
 
-    def __init__(self, region: Region, recording: Recording, device: Device) -> None:
+    def __init__(
+        self,
+        region: Region,
+        recording: Recording,
+        device: Device,
+        values: Mapping[str, int] | None = None,
+    ) -> None:
         matches = recording.occurrences(Entry(region))
         if not matches:
             raise ValueError("the region matches none of the recording's steps")
         self.region = region
         self.device = device
+        self.values = dict(values or {})
         self.wired, _ = region.wiring()
         self.ops: list[Operator] = []
         self.recorded: list[tuple[Any, Recorded]] = []
         self.refs: list[dict[str, BufferRef]] = []
+        # Per step, the graph expression each of its per-call values is bound
+        # to, and its extents at this call.
+        bindings: list[tuple[dict[str, Any], dict[str, int]]] = []
         for s, member in zip(matches[0], region.steps()):
             step = recording.steps[s]
             op = step.op
+            bound = {
+                b.member.name: b.expression for b in recording.bindings if b.op is op
+            }
             if member.tunables:
                 with set_current_device(device):
                     op = op._with_tunables(**member.tunables).resolved(device)
-            if op.bound_extents:
-                raise NotImplementedError(
-                    f"{type(op).__name__} is bounded per call "
-                    f"({', '.join(op.bound_extents)}); analysing a call at "
-                    f"its own values is not modelled yet"
+            bindings.append(
+                (
+                    bound,
+                    {
+                        name: self._evaluate(recording, bound[name])
+                        for name in op.bound_extents
+                    },
                 )
+            )
             self.ops.append(op)
             self.refs.append({b.name: ref for ref, b in zip(step.refs(), op.buffers)})
             with set_current_device(device), record() as recorded:
@@ -473,31 +498,84 @@ class Derivation:
         self.objects: dict[ObjectFifo, int] = {}
         self.lanes: list[dict[str, list[ObjectFifo]]] = []
         self.obj_elements: list[dict[str, int]] = []
-        for array, recorded in self.recorded:
+        for op, (array, recorded), (bound, extents) in zip(
+            self.ops, self.recorded, bindings, strict=True
+        ):
             lanes: dict[str, list[ObjectFifo]] = {}
             obj_elements: dict[str, int] = {}
+            # Per fifo, the elements each transfer its lane's per-call length
+            # sizes moves this call, in order.
+            sized: dict[ObjectFifo, list[int]] = {}
+            per_call = any(t.elements is None for t in recorded.transfers)
             for b in array.op.buffers:
                 if not b.streamed or not b.lane_handles:
                     continue
                 lanes[b.name] = [h.object_fifo for h in b.lane_handles]
                 obj_elements[b.name] = math.prod(b.obj_shape)
+                for lane, _, length, unit in b.transfers() if per_call else ():
+                    if length is None:
+                        continue
+                    tiles = (
+                        self._evaluate(recording, bound[length.name])
+                        if length.name in bound
+                        else op.derived_at(length.name, **extents)
+                    )
+                    sized.setdefault(lanes[b.name][lane], []).append(tiles * unit)
             moved: dict[ObjectFifo, int] = {}
             for transfer in recorded.transfers:
-                if transfer.elements is None:
+                fifo = transfer.fifo
+                elements = transfer.elements
+                if elements is None and sized.get(fifo):
+                    elements = sized[fifo].pop(0)
+                if elements is None:
                     site = transfer.site
                     raise NotImplementedError(
                         f"{type(array.op).__name__}'s {transfer.kind} of "
-                        f"{transfer.fifo.name} is sized per call"
+                        f"{fifo.name} is sized per call"
                         + (f" ({site.filename}:{site.line})" if site else "")
-                        + "; analysing a call at its own values is not modelled yet"
+                        + " other than by a lane's length; analysing it is not "
+                        "modelled yet"
                     )
-                moved[transfer.fifo] = moved.get(transfer.fifo, 0) + -(
-                    -transfer.elements // math.prod(transfer.fifo.shape)
-                )
+                moved[fifo] = moved.get(fifo, 0) + -(-elements // math.prod(fifo.shape))
             self.objects.update(moved)
             self.lanes.append(lanes)
             self.obj_elements.append(obj_elements)
             self._through_links(recorded.links)
+
+    def _evaluate(self, recording: Recording, expression: Any) -> int:
+        """Return graph ``expression`` at this call: its value as the call gives it, else the largest every limit of the recording on it admits.
+
+        Raises:
+            ValueError: The call does not give the value and no limit of the
+                recording bounds it, or the limits do not settle one.
+        """
+        name = expression.value.name
+        if name not in self.values:
+            on = [
+                limit
+                for limit in recording.limits
+                if limit.plus is None
+                and limit.expression.value.name == name
+                and limit.expression.linear
+                and limit.expression.scale > 0
+            ]
+            if not on:
+                raise ValueError(
+                    f"{recording.name}: the call does not give {name}, and no limit "
+                    f"of the recording bounds it"
+                )
+            most = min(
+                (limit.hi - 1 - limit.expression.bias) // limit.expression.scale
+                for limit in on
+            )
+            if not all(
+                limit.lo <= limit.evaluate({name: most}) < limit.hi for limit in on
+            ):
+                raise ValueError(
+                    f"{recording.name}: the limits on {name} settle no largest value"
+                )
+            self.values[name] = most
+        return expression.evaluate(self.values)
 
     def _through_links(self, links: Sequence[ObjectFifoLink]) -> None:
         """Carry the objects a call moves across ``links``, from the fifos that know them to those that do not."""
@@ -981,10 +1059,12 @@ class Derivation:
                     f"rides another's or is held whole); an edge with it is not "
                     f"modelled yet"
                 )
+            # More objects than its own buffer holds; a call bounded short of
+            # it moves fewer.
             if (
                 sizes[1] is not None
                 and all(f in self.objects for f in ins)
-                and sum(self.objects[f] for f in ins) != sink.elements // sizes[1]
+                and sum(self.objects[f] for f in ins) > sink.elements // sizes[1]
             ):
                 raise NotImplementedError(
                     f"{edge}: {sink.name}'s fifos carry another buffer's objects "
@@ -1104,12 +1184,25 @@ class Derivation:
         )
 
 
-def analyze(region: Region, recording: Recording, device: Device) -> Analysis:
-    """Analyze ``region`` of ``recording`` on ``device``, the device every operator is built for.
+def analyze(
+    region: Region,
+    recording: Recording,
+    device: Device,
+    values: Mapping[str, int] | None = None,
+) -> Analysis:
+    """Analyze ``region`` of ``recording`` on ``device``, the device every operator is built for, for one call at ``values``.
+
+    Args:
+        region: The composed region.
+        recording: The recording its steps are matched in.
+        device: The device.
+        values: The call's per-call values, by name; one it leaves out is
+            the largest the recording's limits admit (``Derivation``).
 
     Raises:
         NotImplementedError: What the analysis does not model yet
             (``Derivation``).
-        ValueError: The region matches none of the recording's steps.
+        ValueError: The region matches none of the recording's steps, or a
+            per-call value the call leaves out is bounded nowhere.
     """
-    return Derivation(region, recording, device).analysis()
+    return Derivation(region, recording, device, values).analysis()

@@ -173,6 +173,23 @@ class BoundedRows(iron.Graph):
         return RMSNorm.step(rows, num_aie_columns=1)
 
 
+class BoundedChain(iron.Graph):
+    """``add -> mul`` over the first ``n`` of 1024 elements, 128-element tiles: each moves the tiles a call's ``n`` covers."""
+
+    def body(self, a, b, c, *, n: Scratchpad[np.int32]):
+        h = ElementwiseAdd.step(
+            a[:n], b[:n], size=1024, tile_size=128, num_aie_columns=1
+        )
+        return ElementwiseMul.step(
+            h, c[:n], size=1024, tile_size=128, num_aie_columns=1
+        )
+
+
+def bounded_chain_region(recording: Recording) -> Region:
+    """Return ``BoundedChain``'s steps as one stream region, the add's output feeding the multiply."""
+    return Region(tuple(member(s.op) for s in recording.steps), (Edge(0, "y", 1, "a"),))
+
+
 def gemm_into_gemm(
     dev: Device,
     M: int,
