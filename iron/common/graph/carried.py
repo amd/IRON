@@ -22,7 +22,7 @@ from ...operators.emit import ROW, UNCLAMPED, Emit
 from ..image.artifacts import Parameter
 from ..image.callable import FullELFCallable, FullELFRun
 from .handle import Dense, Handle, State
-from .record import Recording, Step
+from .record import CALL_SUFFIX, Recording, Step
 
 if TYPE_CHECKING:
     from .compiled import CompiledGraph, Word
@@ -196,7 +196,9 @@ class CarriedLoop:
     ``body`` carries values, the first call's are the host's and each
     later call's the Emit of the call before, as ``steps``' are. A buffer
     or state carried from one call to the next stays on the device between
-    them, as commands on one context run in turn.
+    them, as commands on one context run in turn. A version running several
+    calls a command (``Recording.repeated``) takes the batch that many at a
+    time, each call's tensors and values its own.
     """
 
     def __init__(self, first: CompiledGraph, body: CompiledGraph, depth: int = 2):
@@ -243,7 +245,9 @@ class CarriedLoop:
                 call before's Emit writes its values).
 
         Raises:
-            ValueError: A later call gives values ``body``'s Emit writes, or
+            ValueError: The batch is not whole commands of a version running
+                several calls a command, a later call gives values ``body``'s
+                Emit writes, or
                 tensors (a carried version after its first call takes none).
             NotImplementedError: ``depth`` is past one and ``body`` returns
                 an output outside its output buffer, which a later run in
@@ -273,6 +277,29 @@ class CarriedLoop:
                 f"of the call before, and it takes no tensor; give only the first "
                 f"call's"
             )
+        per = self.body.recording.calls
+        if len(batch) % per:
+            raise ValueError(
+                f"{self.body.recording.name} runs {per} calls a command; got "
+                f"{len(batch)}"
+            )
+        # A command of a repeated version takes each of its calls' tensors in
+        # turn, and each call's values under its own names.
+        batch = [
+            (
+                [t for tensors, _ in batch[k : k + per] for t in tensors],
+                (
+                    {
+                        name + CALL_SUFFIX.format(j): value
+                        for j, (_, values) in enumerate(batch[k : k + per])
+                        for name, value in values.items()
+                    }
+                    if per > 1
+                    else batch[k][1]
+                ),
+            )
+            for k in range(0, len(batch), per)
+        ]
         call = self.body.callable
         assert isinstance(call, FullELFCallable), "a loop's runs are a full ELF's"
         runs = [call.new_run(owned=("input", "output")) for _ in range(self.depth)]
@@ -301,7 +328,17 @@ class CarriedLoop:
             call.wait(*(run for _, run in out))
             for run in runs:
                 run.wired = False
-        return results
+        if per == 1:
+            return results
+        return [
+            {
+                name.removesuffix(CALL_SUFFIX.format(j)): value
+                for name, value in returned.items()
+                if name.endswith(CALL_SUFFIX.format(j))
+            }
+            for returned in results
+            for j in range(per)
+        ]
 
     def run(self, steps: int, /, *tensors, **values) -> Iterator[int]:
         """``start`` now, then ``steps``, each index yielded once complete."""

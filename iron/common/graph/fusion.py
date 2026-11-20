@@ -339,8 +339,9 @@ def composed(
 
     Raises:
         NotImplementedError: What the composer does not build yet: a
-            profile's schedules beyond their packaging and commands in
-            flight (the host's, ``CarriedLoop``), variants, bindings or
+            profile's schedules beyond their packaging, calls a command
+            (``Recording.repeated``) and commands in flight (the host's,
+            ``CarriedLoop``), variants, bindings or
             state layouts, steps run at once that are not consecutive, a
             configuration at a partial width, keeping buffers resident, switched other than by a
             reload or holding regions, a runtime plan other than one task
@@ -356,11 +357,14 @@ def composed(
     """
     for kind, kept in (
         (
-            "schedules beyond their packaging and commands in flight",
+            "schedules beyond their packaging, calls a command and commands "
+            "in flight",
             [
                 s
                 for s in profile.schedules()
-                if dataclasses.replace(s, packaging=None, commands_in_flight=1)
+                if dataclasses.replace(
+                    s, packaging=None, commands_in_flight=1, calls_per_command=1
+                )
                 != Schedule(s.version)
             ],
         ),

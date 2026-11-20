@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import subprocess
 import time
 from collections import Counter
 from collections.abc import Iterator, Sequence
@@ -45,22 +46,26 @@ from ..common.declare.composition import (
 )
 from ..common.design import OperatorDesign
 from ..common.graph.carried import CarriedLoop
+from ..common.graph.compiled import _words
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
 from ..common.graph.fusion import composed
 from ..common.graph.record import Recording
 from ..common.graph.sdf import Derivation
+from ..common.image.packaging import SCRATCHPAD_WORDS
 from ..common.image.step import Edge, EdgeKind, FusionKind, HandOff
 from .autotune import Timed, refusal, settings
+from .cli import WATCHDOG_HEADROOM, watchdog_s
 from .fusions import (
     Applied,
     Compared,
     NotBitIdentical,
+    _bound_points,
     _random_tensor,
     compare_graphs,
     drawn_inputs,
     group_fit_verdict,
 )
-from .measure import Timing
+from .measure import Cache, Timing
 
 
 class Edit(Protocol):
@@ -714,7 +719,12 @@ def fit(
     done before its data leaves the shim. A version's schedule must not run a part before one it reads, nor
     overlap or merge calls where a step writes a buffer that outlasts the
     call, and on an xclbin per step it takes no phased region and no
-    teardown.
+    teardown; its calls a command (``Recording.repeated``) must write no
+    more scratchpad words than a command holds, nor, where the driver's
+    watchdog is readable and every step has a cached standalone time
+    (``measure.Cache``), outrun the watchdog over ``WATCHDOG_HEADROOM`` as
+    the tuner's preflight holds a command; where either is unknown, as
+    there, nothing is refused and the log says which.
 
     A refusal from any stage of any entry wins over what is not fitted yet;
     only where nothing refuses is the first of those raised.
@@ -1356,16 +1366,72 @@ def fit(
                         f"which outlasts the call, so a call depends on the one "
                         f"before",
                     )
+            if schedule.calls_per_command > 1:
+                try:
+                    repeated = recording.repeated(schedule.calls_per_command)
+                except NotImplementedError as e:
+                    waiting.append(str(e))
+                else:
+                    words, _ = _words(repeated, share=True, extents=False)
+                    if len(words) > SCRATCHPAD_WORDS:
+                        return Fit(
+                            False,
+                            "counts",
+                            f"its {schedule.calls_per_command} calls a command "
+                            f"write {len(words)} scratchpad words; a command's "
+                            f"scratchpad holds {SCRATCHPAD_WORDS}",
+                        )
+                limit = watchdog_s()
+                unknown = (
+                    "the driver's watchdog is not readable" if limit is None else None
+                )
+                total_us = 0.0
+                if unknown is None:
+                    try:
+                        cache = Cache.here()
+                    except (OSError, subprocess.CalledProcessError, RuntimeError):
+                        unknown = "xrt-smi reports no platform to key cached times"
+                for i, step in enumerate(recording.steps if unknown is None else ()):
+                    with set_current_device(device):
+                        measured = cache.get(cache.key(step.op, dict(timed.values)))
+                    if measured is None:
+                        unknown = f"step {i} has no cached standalone time"
+                        break
+                    total_us += measured.t_step_us
+                if unknown is not None:
+                    logger.info(
+                        "fit: %s's %d calls a command are not held to the "
+                        "watchdog: %s",
+                        recording.name,
+                        schedule.calls_per_command,
+                        unknown,
+                    )
+                elif (
+                    limit is not None
+                    and limit
+                    < WATCHDOG_HEADROOM * schedule.calls_per_command * total_us / 1e6
+                ):
+                    return Fit(
+                        False,
+                        "counts",
+                        f"its {schedule.calls_per_command} calls a command take "
+                        f"about {schedule.calls_per_command * total_us / 1e6:.2f} "
+                        f"s; the driver's watchdog ({limit:g} s) allows "
+                        f"1/{WATCHDOG_HEADROOM:g} of it",
+                    )
             waiting += [
                 f"building a schedule's {what} is not built yet"
                 for what, kept in (
                     ("order beyond dependences", schedule.order),
                     ("recomputed steps", schedule.recompute),
-                    ("calls per command", schedule.calls_per_command != 1),
                     ("calls overlapped", schedule.calls_overlapped),
                     (
-                        "commands in flight on an xclbin per step",
-                        schedule.commands_in_flight != 1
+                        "several calls a command or commands in flight on an "
+                        "xclbin per step",
+                        (
+                            schedule.commands_in_flight != 1
+                            or schedule.calls_per_command != 1
+                        )
                         and (
                             schedule.packaging == "xclbin"
                             or not device.can_dispatch_full_elf
@@ -1552,9 +1618,10 @@ def check(
     same seeded inputs and states at its values and at each of its bounds
     halved; every output within its bound, carried buffer and state must be
     bit-identical (``compare_graphs``, every point marked known so nothing
-    is timed). A version whose schedule keeps commands in flight also runs
-    its draws that many in flight against them called one at a time
-    (``_in_flight``). Calls that hold state run in order instead, each side's
+    is timed). A version whose schedule runs several calls a command or
+    keeps commands in flight runs its draws so batched instead, against them
+    called one at a time (``_batched``). Calls that hold state run in order
+    instead, each side's
     states carried into its next call (``_in_order``). Held to ``NO_WORSE``,
     each call is instead no worse than the base's against its reference
     (``_no_worse``).
@@ -1594,21 +1661,23 @@ def check(
             if why is not None:
                 return Check(False, refinement, why)
         return Check(True, refinement)
+    apart = []
     for call in calls:
-        depth = max(
-            (
-                s.commands_in_flight
-                for s in profile.schedules()
-                if s.version == call.recording.version
-            ),
-            default=1,
+        batching = [
+            s
+            for s in profile.schedules()
+            if s.version == call.recording.version
+            and (s.commands_in_flight > 1 or s.calls_per_command > 1)
+        ]
+        if not batching:
+            apart.append(call)
+            continue
+        why = _batched(
+            profile, base, call, olds[call.recording.version], device, batching[0]
         )
-        if depth > 1:
-            why = _in_flight(
-                profile, base, call, olds[call.recording.version], device, depth
-            )
-            if why is not None:
-                return Check(False, refinement, why)
+        if why is not None:
+            return Check(False, refinement, why)
+    calls = apart
     if len(calls) > 1 and any(c.recording.states for c in calls):
         why = _in_order(profile, base, calls, olds, device)
         return Check(why is None, refinement, why)
@@ -1619,29 +1688,43 @@ def check(
     return Check(True, refinement)
 
 
-def _in_flight(
+def _batched(
     profile: Profile,
     base: Profile,
     call: Timed,
     old: Timed,
     device: Device,
-    depth: int,
+    schedule: Schedule,
 ) -> str | None:
-    """Return how ``call``'s draws, run ``depth`` commands in flight under ``profile``, first differ from them called one at a time under ``base``, or None.
+    """Return how ``call``'s draws, run as ``schedule`` batches them under ``profile``, first differ from them called one at a time under ``base``, or None.
 
-    ``2 * depth + 1`` calls, each on its seeded draw at the call's values,
-    from one set of seeded states; in flight through ``CarriedLoop.calls``
-    (where the version carries values, the first call's, the Emit giving
-    the rest), apart each an ordinary call. Every returned output of each
-    call, and every state after the last, must be bit-identical.
+    ``calls_per_command * (2 * commands_in_flight + 1)`` calls, each on its
+    seeded draw, in turn at the call's values and at each of its bounds
+    halved (``_bound_points``), so calls of one command differ, from one set
+    of seeded states:
+    batched through ``CarriedLoop.calls`` (where the version carries values,
+    the first call's, the Emit giving the rest), ``calls_per_command`` a
+    command and ``commands_in_flight`` commands in flight; apart each an
+    ordinary call. Every returned output of each call, and every state after
+    the last, must be bit-identical.
+
+    Raises:
+        NotImplementedError: ``base`` batches the version's calls too.
     """
     recording = call.recording
-    values = dict(call.values)
-    draws = [drawn_inputs(recording, seed) for seed in range(2 * depth + 1)]
+    points = [dict(call.values), *_bound_points(recording, dict(call.values))]
+    per, depth = schedule.calls_per_command, schedule.commands_in_flight
+    draws = [drawn_inputs(recording, seed) for seed in range(per * (2 * depth + 1))]
+    at = [points[k % len(points)] for k in range(len(draws))]
     with set_current_device(device):
         graphs = (
             Applied.of(old, base, device).built(device),
             Applied.of(call, profile, device).built(device),
+        )
+    if graphs[0].recording.calls > 1:
+        raise NotImplementedError(
+            "checking a batched schedule against a base that batches too is not "
+            "built yet"
         )
     rng = np.random.default_rng(len(draws))
     states = {h.name: _random_tensor(h, rng) for _, h in recording.states.values()}
@@ -1651,23 +1734,23 @@ def _in_flight(
             for name, content in states.items():
                 graph.write(own[name], content)
         apart = []
-        for tensors in draws:
+        for tensors, values in zip(draws, at, strict=True):
             graphs[0](*tensors, **values)
             apart.append(graphs[0].returned())
         with set_current_device(device):
             loop = CarriedLoop(graphs[1], graphs[1], depth)
-            at_once = loop.calls(
+            batched = loop.calls(
                 [
                     (tensors, values) if k == 0 or graphs[1].emit is None else ((), {})
-                    for k, tensors in enumerate(draws)
+                    for k, (tensors, values) in enumerate(zip(draws, at, strict=True))
                 ]
             )
-        for k, (want, got) in enumerate(zip(apart, at_once, strict=True)):
+        for k, (want, got) in enumerate(zip(apart, batched, strict=True)):
             differ = [n for n in want if not np.array_equal(want[n], got[n])]
             if differ:
                 return (
-                    f"{recording.name}: call {k} of {len(draws)}, {depth} in "
-                    f"flight: {', '.join(differ)} not bit-identical"
+                    f"{recording.name}: call {k} of {len(draws)}, {per} a command "
+                    f"and {depth} in flight: {', '.join(differ)} not bit-identical"
                 )
         differ = [
             name
@@ -1678,8 +1761,8 @@ def _in_flight(
         ]
         if differ:
             return (
-                f"{recording.name}: after {len(draws)} calls, {depth} in flight: "
-                f"{', '.join(differ)} not bit-identical"
+                f"{recording.name}: after {len(draws)} calls, {per} a command and "
+                f"{depth} in flight: {', '.join(differ)} not bit-identical"
             )
     finally:
         for graph in graphs:
