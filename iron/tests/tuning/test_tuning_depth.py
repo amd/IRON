@@ -92,8 +92,8 @@ _BUILT_MINIMUMS = {
 }
 
 
-# Each device's restaged minimums the composer builds bit-identical there
-# beyond those; npu1's wait on host 203.
+# Each device's minimums the composer builds bit-identical there beyond those
+# (restages, and steps ordered through memory); npu1's wait on host 203.
 _RESTAGED_MINIMUMS = {
     "npu1": set(),
     "npu2": {
@@ -118,6 +118,11 @@ _RESTAGED_MINIMUMS = {
         ("skip", HandOff.SPLIT, "different"),
         ("skip", HandOff.RATIO, "same"),
         ("skip", HandOff.RATIO, "different"),
+        *(
+            ("through_memory", shape, rate)
+            for shape in toys_edges.SHAPES
+            for rate in toys_edges.RATES
+        ),
     },
 }
 

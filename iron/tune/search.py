@@ -49,7 +49,7 @@ from ..common.design import OperatorDesign
 from ..common.graph.carried import CarriedLoop
 from ..common.graph.compiled import _words
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
-from ..common.graph.fusion import composed
+from ..common.graph.fusion import composed, memory_waits
 from ..common.graph.record import Recording
 from ..common.graph.sdf import Derivation
 from ..common.image.packaging import SCRATCHPAD_WORDS
@@ -948,6 +948,10 @@ def fit(
                     and (
                         part.phases is not None
                         or any(e.kind is EdgeKind.DDR for e in part.edges)
+                        or (
+                            part is region
+                            and memory_waits(recording, found[0], part.edges)
+                        )
                     )
                 ):
                     return Fit(
@@ -1239,6 +1243,11 @@ def fit(
             if unplaceable:
                 waiting += unplaceable
                 continue
+            position = {s: i for i, s in enumerate(found[0])}
+            ordered = [
+                (position[a], position[b])
+                for a, b in memory_waits(recording, found[0], region.edges)
+            ]
             with set_current_device(device):
                 try:
                     refused = group_fit_verdict(
@@ -1249,7 +1258,7 @@ def fit(
                                 if EdgeKind.STAGED in kinds
                                 else FusionKind.STREAM
                             )
-                            if kinds
+                            if kinds or ordered
                             else None
                         ),
                         edges=[
@@ -1269,9 +1278,12 @@ def fit(
                             if e.depth is not None and e.kind is not EdgeKind.DDR
                         },
                         waits=[
-                            (e.producer, e.consumer)
-                            for e in region.edges
-                            if e.kind is EdgeKind.DDR
+                            *(
+                                (e.producer, e.consumer)
+                                for e in region.edges
+                                if e.kind is EdgeKind.DDR
+                            ),
+                            *ordered,
                         ],
                         workers=region.workers,
                         phases=region.step_phases(),
@@ -1667,8 +1679,9 @@ def check(
             ``base_calls`` does not pair with ``calls`` as above (or pairs
             calls of one version with base calls of several).
         NotImplementedError: What is not checked yet: a no-worse call that
-            carries state (``_no_worse``), and what ``fit`` or the composer
-            (``composed``) does not take yet.
+            carries state (``_no_worse``), a call checked apart that carries
+            values to the next without being given them, and what ``fit`` or
+            the composer (``composed``) does not take yet.
     """
     fitted = fit(profile, calls, device)
     if not fitted.ok:
@@ -1743,6 +1756,14 @@ def check(
         why = _batched(profile, base, call, old, device, batching[0])
         if why is not None:
             return Check(False, refinement, why)
+    for call, _ in apart:
+        unfed = sorted(set(call.recording.carry) - set(call.values))
+        if unfed:
+            raise NotImplementedError(
+                f"{call.recording.name}: checking calls that carry "
+                f"{', '.join(unfed)} from one to the next, one call apart, is not "
+                f"built yet: no first call starts the carry"
+            )
     if len(apart) > 1 and any(call.recording.states for call, _ in apart):
         why = _in_order(profile, base, apart, device)
         return Check(why is None, refinement, why)

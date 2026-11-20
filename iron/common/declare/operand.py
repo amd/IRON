@@ -152,7 +152,11 @@ class Operand:
     def bind(self, handles) -> None:
         """Bind each lane, in lane order, to the fifo end ``build()`` built for it.
 
-        A one-lane operand may take its handle bare.
+        A one-lane operand may take its handle bare. An output may take each
+        lane's fifo itself (an ``ObjectFifo``, as ``forward()`` makes one):
+        the lane binds the fifo's consumer end, at ``chosen_depth`` where a
+        composition chose one, and keeps the fifo for later readers, as
+        ``fifos()`` does for the fifos it makes.
 
         Raises:
             ValueError: Not one handle per lane, the operand is bound already,
@@ -171,6 +175,9 @@ class Operand:
             )
         if self.lane_handles:
             raise ValueError(f"{self.name} is already bound")
+        if self.drains and all(isinstance(h, ObjectFifo) for h in handles):
+            self.lane_fifos = handles
+            handles = [f.cons(self.chosen_depth) for f in handles]
         self.lane_handles = handles
 
     def fifos(
