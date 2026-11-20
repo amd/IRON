@@ -9,6 +9,7 @@ import math
 import tempfile
 from pathlib import Path
 
+import aie.utils as aie_utils
 from aie.helpers.npdtypes import np_ndarray_type_get_shape
 from aie.iron.algorithms.kernel_design import KernelDesign
 from aie.iron.kernel import ExternalFunction
@@ -39,12 +40,24 @@ def kernel_cycles(fn: ExternalFunction, scalars: tuple = ()) -> int:
             order, as its operator passes them (``Elementwise.scalars``).
 
     Raises:
+        NotImplementedError: The NPU it is built for (the current device) is
+            not the one attached, or none is: its cycles are traced on that
+            NPU alone.
         ValueError: The trace holds no whole call, or fills its largest buffer.
         RuntimeError: The run fails.
     """
     key = (fn.recipe_key, scalars)
     if key in _traced:
         return _traced[key]
+    built_for = aie_utils.get_current_device(probe_runtime=False)
+    runtime = aie_utils.DefaultNPURuntime
+    attached = None if runtime is None else runtime.device().resolve().name
+    if built_for is not None and built_for.resolve().name != attached:
+        raise NotImplementedError(
+            f"tracing {fn.name}'s cycles needs the {built_for.resolve().name} it "
+            f"is built for attached; this host has "
+            f"{attached or 'no NPU runtime'}"
+        )
     contract = fn.contract
     if contract.out_last:
         calls = contract.required_calls

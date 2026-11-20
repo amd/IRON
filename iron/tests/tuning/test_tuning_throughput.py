@@ -6,10 +6,12 @@
 import dataclasses
 from fractions import Fraction
 
+import aie.utils as aie_utils
 import pytest
 
 from iron.common.declare import Profile
 from iron.common.declare.composition import Entry, Region
+from iron.common.graph.clock import kernel_cycles
 from iron.common.graph.sdf import analyze
 from iron.common.image.step import Edge, EdgeKind
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -26,6 +28,21 @@ pytestmark = pytest.mark.usefixtures("device")
 
 # Elements a measured toy moves: its cores' work, not a call's dispatch, sets its time.
 MEASURED = 1 << 18
+
+
+def test_a_kernel_is_priced_only_on_the_npu_it_is_built_for(device):
+    """A kernel's cycles are traced on its own NPU: built for any other than the one attached, or with none attached, its pricing waits.
+
+    So the analysis has no knee there, and candidates proposes the depth
+    doublings alone rather than failing on the device.
+    """
+    runtime = aie_utils.DefaultNPURuntime
+    attached = None if runtime is None else runtime.device().resolve().name
+    if device.resolve().name == attached:
+        pytest.skip(f"{attached} is attached, so its kernels are traced")
+    add = ElementwiseAdd(size=256, num_aie_columns=1, tile_size=256)
+    with pytest.raises(NotImplementedError, match="it is built for attached"):
+        kernel_cycles(add.kernel(), add.scalars())
 
 
 # npu1's waits on host 203.
