@@ -846,7 +846,7 @@ def fit(
                     )
             for e, p in zip(part.edges, part.phases):
                 made = phase.get(e.producer, 0)
-                if e.producer != e.consumer and made > p:
+                if not e.across_calls and made > p:
                     return Fit(
                         False,
                         "analysis",
@@ -947,7 +947,10 @@ def fit(
                     and isinstance(part, Region)
                     and (
                         part.phases is not None
-                        or any(e.kind is EdgeKind.DDR for e in part.edges)
+                        or any(
+                            e.kind is EdgeKind.DDR and not e.across_calls
+                            for e in part.edges
+                        )
                         or (
                             part is region
                             and memory_waits(recording, found[0], part.edges)
@@ -1215,7 +1218,7 @@ def fit(
                         f"({made} elements and {taken}) is not built yet; the "
                         f"composer gives a fifo one object size"
                     )
-            kinds = {e.kind for e in region.edges}
+            kinds = {e.kind for e in region.edges if not e.across_calls}
             unplaceable += [
                 f"placing a region with {what} is not built yet: the composer "
                 f"does not build it"
@@ -1281,7 +1284,7 @@ def fit(
                             *(
                                 (e.producer, e.consumer)
                                 for e in region.edges
-                                if e.kind is EdgeKind.DDR
+                                if e.kind is EdgeKind.DDR and not e.across_calls
                             ),
                             *ordered,
                         ],

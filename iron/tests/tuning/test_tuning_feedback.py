@@ -17,10 +17,11 @@ from __future__ import annotations
 import pytest
 
 from iron.common.declare import Profile
-from iron.common.declare.composition import Entry, Refinement, Region
+from iron.common.declare.composition import Entry, Hold, Refinement, Region
 from iron.common.graph.record import Recording
 from iron.common.image.step import Edge
 from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.elementwise_mul import ElementwiseMul
 from iron.tests.support import sequences
 from iron.tests.support.toys_edges import (
     cross_call_trail,
@@ -63,10 +64,36 @@ def _running_accumulator(carried: bool):
     return recording, region
 
 
+def _accumulator_into_mul():
+    """Return ``acc = acc + x`` carried, streamed on chip into a multiply by ``up``; the self-loop is edge 0."""
+    add = ElementwiseAdd(
+        size=_ACCUMULATOR_SIZE, num_aie_columns=1, tile_size=_ACCUMULATOR_SIZE
+    )
+    mul = ElementwiseMul(
+        size=_ACCUMULATOR_SIZE, num_aie_columns=1, tile_size=_ACCUMULATOR_SIZE
+    )
+    steps = sequences.steps((add, "acc", "x", "acc"), (mul, "acc", "up", "out"))
+    recording = Recording.of_steps(
+        "toy_accumulator_into_mul", steps, ["x", "up"], ["out"], feedback=["acc"]
+    )
+    region = Region(
+        (member(add), member(mul)), (Edge(0, "y", 0, "a"), Edge(0, "y", 1, "a"))
+    )
+    return recording, region
+
+
 CYCLES = {
     "scan_running_state": _scan_region,
     "sample_drawn_token": _sample_region,
     "trail_across_calls": cross_call_trail,
+}
+
+# Each cycle whose carry is one buffer the recording carries: its self-loop
+# is edge 0.
+CARRIED = {
+    "running_accumulator": lambda: _running_accumulator(carried=True),
+    "accumulator_into_mul": _accumulator_into_mul,
+    "scan_running_state": _scan_region,
 }
 
 
@@ -151,6 +178,47 @@ def test_a_cycle_without_enough_initial_values_is_refused_before_any_build(devic
     assert not result.ok
     assert result.stage == "analysis"
     assert "deadlock" in (result.why or "") or "initial" in (result.why or "")
+
+
+@pytest.mark.parametrize(
+    "cycle",
+    [
+        # The scan's lanes staged into the multiply wait on the composer.
+        (pytest.param(c, marks=unbuilt) if c == "scan_running_state" else c)
+        for c in sorted(CARRIED)
+    ],
+)
+@pytest.mark.supported_devices("npu2")
+def test_a_carry_held_in_host_memory_is_bit_identical_to_the_calls_run_apart(
+    cycle, device
+):
+    """A cycle whose carry across calls waits in host memory builds, its other edges on chip, bit-identical to its steps run apart."""
+    recording, region = CARRIED[cycle]()
+    profile = Profile()
+    profile.add_entry(Entry(region.held(0, Hold.DDR)))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+def test_a_carry_through_host_memory_with_no_initial_value_is_refused(device):
+    """A self-loop held in host memory over a buffer the recording does not carry is refused before any build: the first call has nothing to read."""
+    recording, region = _running_accumulator(carried=False)
+    profile = Profile()
+    profile.add_entry(Entry(region.held(0, Hold.DDR)))
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "analysis"
+    assert "no initial value" in (result.why or "")
+
+
+@pytest.mark.parametrize("hold", [Hold.L1, Hold.MEMTILE])
+def test_a_carry_held_on_chip_between_calls_waits_on_residency(hold, device):
+    """A carry across calls held on chip is not built: it stays resident between commands, which nothing loads or keeps yet."""
+    recording, region = _running_accumulator(carried=True)
+    profile = Profile()
+    profile.add_entry(Entry(region.held(0, hold)))
+    with pytest.raises(NotImplementedError, match="resident between calls"):
+        fit(profile, [Timed(recording)], device)
 
 
 @unbuilt
