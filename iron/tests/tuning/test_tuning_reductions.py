@@ -205,3 +205,20 @@ def test_a_gemm_cascade_reducer_fits_by_the_annealing_placer(splits, device):
     assert verdict.ok, verdict.why
     sequential = fit(profile, [Timed(recording)], device, placements=("sequential",))
     assert not sequential.ok and sequential.stage == "placer"
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize(("device", "splits"), GEMM_CHAINS, indirect=["device"])
+def test_a_gemm_cascade_reducer_is_bit_identical_to_its_split_run_apart(splits, device):
+    """Each add on its partial's GEMM cores, the running sum on the cascade core to core, is bit for bit the split run apart.
+
+    It sums the recorded partials in the recorded order.
+    """
+    recording = toys.reduction_recording(
+        f"gemm_split_{splits}",
+        toys.gemm_k_split_partials(GEMM_M, GEMM_K, GEMM_N, splits),
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=toys.cascade_reducer_region(recording)))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why

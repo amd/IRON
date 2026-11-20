@@ -276,3 +276,13 @@ def test_gemv_refuses_under_repeat(device):
     verdict = fit(profile, [Timed(recording)], device)
     assert not verdict.ok and verdict.stage == "analysis"
     assert "repeat" in (verdict.why or "")
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_consumer_spliced_into_a_gemms_cores_is_bit_identical(device):
+    """A SiLU spliced into a GEMM's cores, each core running it on its own tiles before the memtile joins them, is bit-identical to the two steps run apart."""
+    recording, region = toys.gemm_silu_splice("gemm_silu_splice")
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
