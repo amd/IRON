@@ -14,6 +14,7 @@ import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie import ir
+from aie.dialects.aie import WireBundle, get_target_model
 from aie.utils.verify import compare
 
 from iron import Profile
@@ -76,6 +77,22 @@ def _qkv(num_aie_columns=(8, 4, 4)):
     k = LLAMA_NPU2_PROFILE.make(GEMV, M=512, K=2048, num_aie_columns=kc)
     v = LLAMA_NPU2_PROFILE.make(GEMV, M=512, K=2048, num_aie_columns=vc)
     return q, k, v
+
+
+def _qkv_gate(name):
+    """Return q/k/v (``_qkv``) plus a full-width gate projection (M=8192, K=2048), each its own weight over one shared row, and the four GEMVs."""
+    q, k, v = _qkv()
+    gate = LLAMA_NPU2_PROFILE.make(GEMV, M=8192, K=2048, num_aie_columns=8)
+    steps = sequences.steps(
+        (q, "Aq", "x", "oq"),
+        (k, "Ak", "x", "ok"),
+        (v, "Av", "x", "ov"),
+        (gate, "Ag", "x", "og"),
+    )
+    recording = Recording.of_steps(
+        name, steps, ["Aq", "Ak", "Av", "Ag", "x"], ["oq", "ok", "ov", "og"]
+    )
+    return recording, (q, k, v, gate)
 
 
 def _qkv_steps(q, k, v):
@@ -157,17 +174,7 @@ def test_pack_whose_drains_outrun_the_shim_places_with_them_joined():
     and so the four share one device. Fit is decided by placing, not refused
     up front.
     """
-    q, k, v = _qkv()
-    gate = LLAMA_NPU2_PROFILE.make(GEMV, M=8192, K=2048, num_aie_columns=8)
-    steps = sequences.steps(
-        (q, "Aq", "x", "oq"),
-        (k, "Ak", "x", "ok"),
-        (v, "Av", "x", "ov"),
-        (gate, "Ag", "x", "og"),
-    )
-    recording = Recording.of_steps(
-        "pack_too_wide", steps, ["Aq", "Ak", "Av", "Ag", "x"], ["oq", "ok", "ov", "og"]
-    )
+    recording, _ = _qkv_gate("pack_too_wide")
     image = Image(
         recording, FullELF(), fusions=(Fusion(FusionKind.PACK, (0, 1, 2, 3)),)
     )
@@ -177,6 +184,40 @@ def test_pack_whose_drains_outrun_the_shim_places_with_them_joined():
         diagnostic = places(ir.Module.parse(text))
     assert diagnostic is None
     assert "aie.objectfifo.link" in text
+
+
+def test_pack_draining_more_outputs_than_the_shim_receives_does_not_place():
+    """One more one-column GEMV than the shim has receiving channels, packed, cannot share one device.
+
+    Each drains an output of its own, and a drain join joins only one
+    output's lanes, so no transport fits them (``compose.transports``).
+    Fit is decided by placing, before any build.
+    """
+    model = get_target_model(aie_utils.ensure_current_device().resolve())
+    row = next(r for r in range(model.rows()) if model.is_shim_noc_tile(0, r))
+    receives = sum(
+        model.get_num_dest_shim_mux_connections(c, row, WireBundle.DMA)
+        for c in range(model.columns())
+        if model.is_shim_noc_tile(c, row)
+    )
+    gemvs = [GEMV(M=64, K=256, num_aie_columns=1) for _ in range(receives + 1)]
+    steps = sequences.steps(*((g, f"A{i}", "x", f"o{i}") for i, g in enumerate(gemvs)))
+    recording = Recording.of_steps(
+        "pack_past_the_shim",
+        steps,
+        [*(f"A{i}" for i in range(len(gemvs))), "x"],
+        [f"o{i}" for i in range(len(gemvs))],
+    )
+    image = Image(
+        recording,
+        FullELF(),
+        fusions=(Fusion(FusionKind.PACK, tuple(range(len(gemvs)))),),
+    )
+    image._prepare()
+    text = Composition(image).text()
+    with ir.Context(), ir.Location.unknown():
+        diagnostic = places(ir.Module.parse(text))
+    assert diagnostic is not None and "ShimNOCTile" in diagnostic
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +472,48 @@ def test_pack_of_qkv_gemvs_matches_reference_and_unfused(record_property):
     record_property("Packed median us", statistics.median(packed_stats.samples_us))
     record_property("Unfused min us", min(unfused_stats.samples_us))
     record_property("Unfused median us", statistics.median(unfused_stats.samples_us))
+
+
+@pytest.mark.supported_devices("npu2")
+def test_pack_whose_drains_outrun_the_shim_matches_reference_and_unfused():
+    """q/k/v plus a full-width gate GEMV, packed with their drains joined in memtiles and their fills as packet flows.
+
+    Each GEMV is held to its own reference and is bit-equal to the same
+    steps unfused, which drain each lane on its own.
+    """
+
+    def build(fusions):
+        recording, gemvs = _qkv_gate("pack_too_wide_device")
+        img = Image(recording, FullELF(), fusions=fusions)
+        img.compile()
+        return img.get_callable(), gemvs
+
+    packed_run, gemvs = build((Fusion(FusionKind.PACK, (0, 1, 2, 3)),))
+    plain_run, _ = build(())
+    weights = [vectors(g, seed=s).inputs["A"] for g, s in zip(gemvs, (0, 7, 11, 13))]
+    x = vectors(gemvs[0], seed=3).inputs["B"]
+    refs = [np.asarray(g.reference(a, x)) for g, a in zip(gemvs, weights)]
+    # The profile may code A: each buffer holds the form its GEMV reads.
+    held = [g.resolved().A.device_form(a) for g, a in zip(gemvs, weights)]
+
+    def dispatch(run):
+        for name, a in zip(("Aq", "Ak", "Av", "Ag"), held):
+            run.get_buffer(BufferRef(name)).numpy_view()[:] = a.reshape(-1)
+        run.get_buffer(BufferRef("x")).numpy_view()[: x.size] = x.reshape(-1)
+        run()
+        return [
+            run.get_buffer(BufferRef(out)).numpy()[: g.M].copy()
+            for out, g in zip(("oq", "ok", "ov", "og"), gemvs)
+        ]
+
+    for out, ref, baseline, g, label in zip(
+        dispatch(packed_run), refs, dispatch(plain_run), gemvs, ("q", "k", "v", "gate")
+    ):
+        verdict = compare(out, ref, g.tolerance())
+        assert verdict, f"{label}: {verdict.detail}"
+        assert np.array_equal(
+            out.view(np.uint16), baseline.view(np.uint16)
+        ), f"{label}: the packed and unpacked devices differ"
 
 
 @pytest.mark.supported_devices("npu2")
