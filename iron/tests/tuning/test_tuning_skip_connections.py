@@ -81,8 +81,8 @@ def test_a_reconvergent_diamond_round_trips():
 @pytest.mark.parametrize(
     "held",
     [
-        # One worker past IRON's folds, a DDR edge and chosen phases wait.
-        h if h == "memtile" else pytest.param(h, marks=unbuilt)
+        # One worker past IRON's folds and a DDR edge wait.
+        h if h in ("memtile", "later_phase") else pytest.param(h, marks=unbuilt)
         for h in HELDS
     ],
 )
