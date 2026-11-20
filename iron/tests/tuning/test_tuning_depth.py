@@ -7,10 +7,11 @@ import multiprocessing
 
 import numpy as np
 import pytest
+from aie.dialects.aie import get_target_model
 from aie.utils import set_current_device
 
 from iron.common.declare import Profile
-from iron.common.declare.composition import Entry, Refinement
+from iron.common.declare.composition import Entry, Hold, Refinement
 from iron.common.graph.sdf import analyze
 from iron.common.image.step import HandOff
 from iron.tests.support import toys_dataflow as toys
@@ -201,6 +202,62 @@ def test_depth_over_l1_or_memtile_is_refused(role, device):
     result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "counts"
+
+
+def test_a_least_depth_past_a_core_s_memory_is_refused_before_any_build(device):
+    """``add -> SiLU`` on one core, a call's 1024 tiles a core held between them, is refused before any build: past a core's memory.
+
+    One core runs each step's whole call in turn, so its fifo holds all of
+    the first's tiles; with no depth chosen, the build takes the analysis's.
+    """
+    add, silu, mul = toys.add_silu_mul(size=1 << 18, cols=2)
+    recording = toys.add_silu_mul_recording("past_memory", add, silu, mul)
+    profile = Profile()
+    profile.add_entry(
+        Entry(root=toys.add_silu_mul_region(add, silu, mul).held(0, Hold.L1))
+    )
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "analysis"
+    assert "a core tile holds" in (result.why or "")
+
+
+@pytest.mark.parametrize("past", [0, 1])
+def test_a_least_depth_past_what_a_lock_counts_is_refused_before_any_build(
+    past, device
+):
+    """``add -> SiLU`` on one core, small tiles, fits at as many tiles a call as a lock counts, and one more is refused before any build.
+
+    The depth the analysis needs is then past a lock's range, which the
+    target model gives.
+    """
+    locks = get_target_model(device.resolve()).get_max_lock_value()
+    add, silu, mul = toys.add_silu_mul(size=32 * (locks + past), tile=32, cols=1)
+    recording = toys.add_silu_mul_recording("past_locks", add, silu, mul)
+    profile = Profile()
+    profile.add_entry(
+        Entry(root=toys.add_silu_mul_region(add, silu, mul).held(0, Hold.L1))
+    )
+    result = fit(profile, [Timed(recording)], device)
+    assert result.ok is not bool(past), result.why
+    if past:
+        assert result.stage == "analysis"
+        assert "a lock counts" in (result.why or "")
+
+
+# npu1's waits on host 203.
+@pytest.mark.supported_devices("npu2")
+def test_a_pair_on_one_core_at_what_a_lock_counts_is_bit_identical(device):
+    """The same pair at as many tiles as a lock counts, the depth one short of the refusal, runs bit-identical to the steps apart."""
+    locks = get_target_model(device.resolve()).get_max_lock_value()
+    add, silu, mul = toys.add_silu_mul(size=32 * locks, tile=32, cols=1)
+    recording = toys.add_silu_mul_recording("at_locks", add, silu, mul)
+    profile = Profile()
+    profile.add_entry(
+        Entry(root=toys.add_silu_mul_region(add, silu, mul).held(0, Hold.L1))
+    )
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
 
 
 def test_skip_diamond_minimum_depth_is_one(device):
