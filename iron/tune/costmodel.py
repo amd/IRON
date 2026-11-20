@@ -14,7 +14,7 @@ them far. A tune writes its refit to ``<device>.json`` under the NPU cache
 (``NPU_CACHE_HOME/iron/costs``), so one device's tunes bootstrap the next;
 ``costs/<device>.json`` beside this module seeds a device without one.
 
-Beside the terms, the device's DDR rates per power mode, as ``ddr.py``
+Beside the terms, the device's DDR rates per part and power mode, as ``ddr.py``
 measures them: the bytes a host stream moves a core cycle, against how many
 run at once and an object's size.
 """
@@ -59,8 +59,9 @@ class CostModel:
     )
     # What the terms are pulled toward: PRIOR, or a device's measured switch.
     prior: dict[str, float] = dataclasses.field(default_factory=lambda: dict(PRIOR))
-    # Per power mode, ddr.py's curves (``Ceiling``'s fields), as measured.
-    ddr: dict[str, dict] = dataclasses.field(default_factory=dict)
+    # Per part (xrt-smi's platform name) and power mode, ddr.py's curves
+    # (``Ceiling``'s fields), as measured.
+    ddr: dict[str, dict[str, dict]] = dataclasses.field(default_factory=dict)
 
     @classmethod
     def calibrated(cls, fixed_us: float, per_core_us: float) -> CostModel:

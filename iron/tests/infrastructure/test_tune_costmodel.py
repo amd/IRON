@@ -46,15 +46,15 @@ def test_a_model_round_trips_through_its_file(tmp_path):
     assert CostModel.load("npu3", tmp_path) is None
 
 
-def test_a_models_ddr_rates_round_trip_by_power_mode(tmp_path):
+def test_a_models_ddr_rates_round_trip_by_part_and_power_mode(tmp_path):
     ceiling = Ceiling(1800.0, {2: 4.02, 16: 2.99}, {256: 3.1}, {1: 3.9})
     model = CostModel()
-    model.ddr["turbo"] = ceiling.as_json()
+    model.ddr["NPU Strix Halo"] = {"turbo": ceiling.as_json()}
     model.save("npu2", tmp_path)
     loaded = CostModel.load("npu2", tmp_path)
     assert loaded == model
-    assert Ceiling.from_json(loaded.ddr["turbo"]) == ceiling
-    assert "default" not in loaded.ddr
+    assert Ceiling.from_json(loaded.ddr["NPU Strix Halo"]["turbo"]) == ceiling
+    assert "default" not in loaded.ddr["NPU Strix Halo"]
 
 
 def test_a_refit_is_kept_in_the_cache_and_the_packaged_seed_is_untouched(tmp_path):
