@@ -1612,7 +1612,9 @@ class Derivation:
                     writes.setdefault(out, []).append(e)
                     reads[(inp, actor)] = e
                     edge_channels.setdefault(edge, []).append(e)
-        if self.rates is not None:
+        # Where the composer does not group the phases, a host stream's phase
+        # is not known: its lanes stay unbounded, and the period waits.
+        if self.rates is not None and grouped is not None:
             # The region's own host transfers: a fill into a fifo no edge
             # feeds, a drain from one no edge reads.
             for _, recorded in self.recorded:
