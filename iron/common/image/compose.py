@@ -341,6 +341,7 @@ def fused_configuration(
     spliced_from: dict[int, int] = {}
     slice_at = {(c, name): at for c, name, at in fusion.slices}
     sliced: dict[tuple[int, str], Any] = {}
+    slicings: dict[tuple[int, str], Slicing] = {}
     for design, j, own in zip(designs, fusion.steps, scalars, strict=True):
         into = [
             e
@@ -373,7 +374,8 @@ def fused_configuration(
                 continue
             (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
             if (j, e.input) in slice_at and (j, e.input) not in sliced:
-                # One memtile splits the output among every slice of it.
+                # One split, on a memtile or in place on the producer's core,
+                # sends every slice of the output.
                 group = [
                     d
                     for d in fusion.edges
@@ -395,14 +397,20 @@ def fused_configuration(
                         )
                         for d in group
                     ],
+                    e in joined_in,
                 )
                 by_start = sorted(group, key=lambda d: slice_at[(d.consumer, d.input)])
                 sliced.update(
                     ((d.consumer, d.input), fifo)
                     for d, fifo in zip(by_start, slicing.build(), strict=True)
                 )
+                slicings |= {(d.consumer, d.input): slicing for d in group}
             (sink,) = [b for b in design.op.buffers if b.name == e.input]
-            if e in joined_in and sink.mismatch(source) is not None:
+            if (
+                e in joined_in
+                and (j, e.input) not in slice_at
+                and sink.mismatch(source) is not None
+            ):
                 if (
                     (e.producer, e.output) in kept
                     or not source.lane_fifos
@@ -463,6 +471,12 @@ def fused_configuration(
             ),
             delivers={o: t for (p, o), t in delivered.items() if p == j},
         )
+        # A slice read in place pairs its core with its producer's, and links
+        # once share() makes them one (``Slicing.wire``).
+        for b in arrays[j].op.buffers:
+            slicing = slicings.get((j, b.name))
+            if slicing is not None and slicing.held:
+                b.restage, b.staged = slicing, [sliced[(j, b.name)]]
         for producer, output in fusion.kept:
             if producer == j:
                 (drained,) = [b for b in arrays[j].op.buffers if b.name == output]

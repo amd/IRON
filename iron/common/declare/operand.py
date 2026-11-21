@@ -1526,23 +1526,37 @@ class Slicing(Staging):
     each sink its slice in turn, so the slices, in order of their starts,
     cover ``source`` end to end. Derived from both sides' ``transfers()``.
 
+    ``held``, the slices are read in place on ``source``'s core instead: its
+    one lane's one object a call is the pool a split on that core shares
+    with every sink, each reading its slice as its one object a call. Each
+    sink's lane runs on ``source``'s lane's core (``pairs``); ``build``
+    makes the sinks' fifos, and ``wire`` links them once the core's tile is
+    known.
+
     Args:
         source: The output sliced.
         sinks: Each one-lane input and the element of ``source`` its slice
             starts at.
+        held: Read the slices in place on ``source``'s core, not off a
+            memtile.
 
     Raises:
         ValueError: A side moves a per-call length; ``source``'s lanes do not
             each move one run of its elements in order; a sink is not one
             lane moving its slice in order, or of ``source``'s type; fewer
             than two slices, or more than a memtile sends, or slices that do
-            not cover ``source`` end to end; or ``source`` is past a
-            memtile's memory.
+            not cover ``source`` end to end; ``source`` is past a memtile's
+            memory; or, ``held``, ``source`` moves more than one lane's one
+            object a call, or a sink more than one object.
     """
 
-    def __init__(self, source: Operand, sinks: Sequence[tuple[Operand, int]]) -> None:
+    def __init__(
+        self, source: Operand, sinks: Sequence[tuple[Operand, int]], held: bool = False
+    ) -> None:
         edge = f"{type(source.op).__name__}.{source.name}'s slices"
-        self.source = source
+        self.source, self.held = source, held
+        self.pairs = [(0, 0)]
+        self.links: list[tuple[Any, ...]] = []
         self.sinks = sorted(sinks, key=lambda s: s[1])
         self.sink = self.sinks[0][0]
         streams = []
@@ -1598,8 +1612,13 @@ class Slicing(Staging):
         self.fan_in = tm.get_num_dest_switchbox_connections(0, row, WireBundle.DMA)
         self.fan_out = tm.get_num_source_switchbox_connections(0, row, WireBundle.DMA)
         self.capacity = tm.get_mem_tile_size()
+        self.holder = "a memtile"
+        if held:
+            self.capacity = tm.get_local_memory_size()
+            self.holder = "a core tile"
         self.item = bfp.itemsize(source.dtype)
-        if len(self.sinks) > self.fan_out:
+        # Held, every slice is read in place: no channel sends it.
+        if not held and len(self.sinks) > self.fan_out:
             raise ValueError(
                 f"{edge}: {len(self.sinks)} slices, more than a memtile's "
                 f"{self.fan_out} sending channels"
@@ -1607,18 +1626,37 @@ class Slicing(Staging):
         if source.elements * self.item > self.capacity:
             raise ValueError(
                 f"{edge}: {source.name}'s {source.elements * self.item} bytes are "
-                f"past a memtile's {self.capacity}"
+                f"past {self.holder}'s {self.capacity}"
             )
         self.slots = [len(streams[0][k]) for k in self.lanes]
+        if held and (
+            source.lanes != 1
+            or math.prod(source.obj_shape) != source.elements
+            or any(math.prod(s.obj_shape) != s.elements for s, _ in self.sinks)
+        ):
+            raise ValueError(
+                f"{edge}: held in L1, a slice is read in place only as one "
+                f"object of its producer's one lane's one object a call"
+            )
 
     def build(self) -> list[ObjectFifo]:
         """Wire the memtile over ends of ``source``'s lanes (``Operand.reader``).
+
+        ``held``, make each sink's fifo, as deep as ``source``'s lane, for
+        ``wire`` to link on ``source``'s core.
 
         Returns:
             Per sink, in order of their starts (``sinks``), the fifo it
             reads, of its ``obj_type``.
         """
         source = self.source
+        if self.held:
+            depth = source.lane_fifos[0].depth
+            fifos = [ObjectFifo(s.obj_type, depth=depth) for s, _ in self.sinks]
+            self.links = [("distribute", 0, fifos)]
+            for sink, _ in self.sinks:
+                source.feeds.append(sink)
+            return fifos
         if source.keeps_host:
             # The host's drain keeps each lane's bound end.
             source.read_lanes.update(range(source.lanes))
@@ -1630,6 +1668,28 @@ class Slicing(Staging):
         for sink, _ in self.sinks:
             source.feeds.append(sink)
         return fifos
+
+    def wire(self, source_tiles: Sequence[Any], sink_tiles: Sequence[Any]) -> None:
+        """Link what ``build`` made, held: a split on ``source``'s lane's core, every slice read in place.
+
+        Once: each sink's edge asks, and the first links them all.
+
+        Args:
+            source_tiles: ``source``'s lane's core tile.
+            sink_tiles: The sink's core tile, ``source``'s lane's.
+        """
+        if not self.links:
+            return
+        ((_, lane, fifos),) = self.links
+        self.links = []
+        tile = source_tiles[lane]
+        end = self.source.reader(lane)
+        self._shares(end, tile)
+        for fifo in fifos:
+            fifo.delegate_tile = tile
+        ObjectFifoLink(
+            end, [f.prod() for f in fifos], tile, [], [at for _, at in self.sinks]
+        )
 
 
 def _walk(index: np.ndarray) -> tuple[int, list[int], list[int]] | None:

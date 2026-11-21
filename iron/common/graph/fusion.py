@@ -680,7 +680,7 @@ def composed(
             )
             kept: list[tuple[int, str]] = []
             slices: list[tuple[int, str, int]] = []
-            sliced: dict[tuple[int, str], list[tuple[Operator, str, int]]] = {}
+            sliced: dict[tuple[int, str, bool], list[tuple[Operator, str, int]]] = {}
             for e in on_chip:
                 made = recording.steps[match[e.producer]]
                 ((made_ref, made_buffer),) = [
@@ -722,14 +722,20 @@ def composed(
                     at = (read_ref.start - made_ref.start) // bfp.itemsize(
                         made_buffer.dtype
                     )
-                    if e.kind is not EdgeKind.STAGED:
+                    # A slice is read off a memtile, or in place on its
+                    # producer's core where the two share a worker.
+                    held = e.kind is EdgeKind.STREAM and any(
+                        {e.producer, e.consumer} <= set(group) for group in root.workers
+                    )
+                    if e.kind is not EdgeKind.STAGED and not held:
                         raise NotImplementedError(
                             f"building {e}, whose consumer reads part of what its "
                             f"producer makes, as a {e.kind.value} edge is not "
-                            f"built yet: a slice is restaged through a memtile"
+                            f"built yet: a slice is restaged through a memtile, "
+                            f"or read in place on its producer's core"
                         )
                     slices.append((match[e.consumer], e.input, at))
-                    sliced.setdefault((e.producer, e.output), []).append(
+                    sliced.setdefault((e.producer, e.output, held), []).append(
                         (c, e.input, at)
                     )
                     continue
@@ -754,7 +760,7 @@ def composed(
                         f"not built yet: the composer builds it "
                         + ("neither way" if built is None else f"only {built.value}")
                     )
-            for (i, output), group in sliced.items():
+            for (i, output, held), group in sliced.items():
                 made = recording.steps[match[i]].op._with_tunables(**given[i])
                 try:
                     (source,) = [
@@ -775,6 +781,7 @@ def composed(
                             )
                             for c, input_, at in group
                         ],
+                        held,
                     )
                 except ValueError as why:
                     raise NotImplementedError(

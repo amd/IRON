@@ -29,6 +29,7 @@ from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     broadcast_weight_to_columns,
     fan_out_norm_qkv,
+    halves_in_one_object,
     held_in_l1,
     join_in_pairs,
     join_of_two_streams,
@@ -284,6 +285,7 @@ def test_feed_refuses_a_held_input_broadcast_flips_it(device):
 # their cores in a memtile, so its layout held in L1 is RMSNorm spliced into
 # GEMM's cores; QKV's slices held in L1 are views of one core's buffer.
 HELD_IN_L1 = {
+    "halves_in_one_object": halves_in_one_object,
     "join_rows_into_one": join_rows_into_one,
     "split_into_rows": split_into_rows,
     "ratio_two_into_three_rows": ratio_two_into_three_rows,
