@@ -363,10 +363,29 @@ def fused_configuration(
             spliced_from[j] = e.producer
             continue
         fed = {}
+        # A stream within one worker group whose lanes do not meet: restaged
+        # in L1, linked on its lanes' cores once share() makes them.
+        held: list[str] = []
         for e in incoming.get(j, ()):
             if e.kind is EdgeKind.CASCADE:
                 continue
             (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
+            (sink,) = [b for b in design.op.buffers if b.name == e.input]
+            if e in joined_in and sink.mismatch(source) is not None:
+                if (
+                    (e.producer, e.output) in kept
+                    or not source.lane_fifos
+                    or sum(
+                        (d.producer, d.output) == (e.producer, e.output)
+                        for d in fusion.edges
+                    )
+                    != 1
+                ):
+                    raise NotImplementedError(
+                        f"{e}: a restage held in L1 of an output read elsewhere "
+                        f"too, or bound without its fifos, is not built yet"
+                    )
+                held.append(e.input)
             fed[e.input] = source
         arrays[j] = BuiltArray(
             design,
@@ -374,6 +393,7 @@ def fused_configuration(
             own,
             fed=fed,
             staged=fusion.kind is FusionKind.STAGED,
+            held=held,
             depths={
                 **{
                     e.output: chosen[e]
@@ -502,6 +522,25 @@ def fused_configuration(
             arrays,
             before,
             after,
+        )
+    # Each restage held in L1 links on the cores its lanes run on, joined.
+    cores = [w for j in fusion.steps for w in arrays[j].workers]
+    for e in joined_in:
+        (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
+        (sink,) = [b for b in arrays[e.consumer].op.buffers if b.name == e.input]
+        restage = sink.restage
+        if restage is None or not restage.held:
+            continue
+        restage.wire(
+            *(
+                [
+                    next(
+                        w for w in cores if any(h.object_fifo is f for h in w.fifos)
+                    ).tile
+                    for f in fifos
+                ]
+                for fifos in (source.lane_fifos, sink.staged)
+            )
         )
     for send, receive in relays:
         CascadeFlow(joined[id(send)], joined[id(receive)])
@@ -772,8 +811,10 @@ def share(
     """Make ``group``'s members' cores one a lane (``Worker.join``): each lane's core runs the members' bodies in turn, in the group's (firing) order.
 
     ``edges`` pair a producer's core with its consumer's, lane by lane: the
-    one writing a lane's fifo with the one reading it. The first member's
-    array takes the joined workers; the others' take none.
+    one writing a lane's fifo with the one reading it, or for an edge
+    restaged on the cores, the one reading the input's lane of that index;
+    a restage's lanes past the other step's run alone. The first member's
+    array takes the cores; the others' take none.
 
     Args:
         group: The members, in firing order.
@@ -797,16 +838,26 @@ def share(
     joined: dict[int, set[int]] = {
         id(w): {id(w)} for j in group for w in arrays[j].workers
     }
+    restaged = False
     for e in edges:
         (made,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
-        for lane, fifo in enumerate(made.lane_fifos):
+        (taken,) = [b for b in arrays[e.consumer].op.buffers if b.name == e.input]
+        # Restaged on the cores (``Staging``), a sink lane is on the core of
+        # the source lane its first piece leads.
+        restaged |= taken.staged is not None
+        pairs = (
+            list(zip(made.lane_fifos, made.lane_fifos))
+            if taken.restage is None
+            else [(made.lane_fifos[k], taken.staged[j]) for k, j in taken.restage.pairs]
+        )
+        for lane, (fifo, read) in enumerate(pairs):
             ends = [
                 [
                     w
                     for w in arrays[j].workers
-                    if any(h.object_fifo is fifo for h in w.fifos)
+                    if any(h.object_fifo is f for h in w.fifos)
                 ]
-                for j in (e.producer, e.consumer)
+                for j, f in ((e.producer, fifo), (e.consumer, read))
             ]
             if any(len(found) != 1 for found in ends):
                 raise NotImplementedError(
@@ -817,27 +868,35 @@ def share(
             for w in merged:
                 joined[w] = merged
     workers = {id(w): (j, w) for j in group for w in arrays[j].workers}
-    if len(workers) != len(group) * len(arrays[group[0]].workers):
+    if not restaged and len(workers) != len(group) * len(arrays[group[0]].workers):
         raise NotImplementedError(
             f"one core for steps {tuple(group)} is not built yet: they place "
             f"{[len(arrays[j].workers) for j in group]} cores, not one a lane each"
         )
     cores: list[Worker] = []
     into: dict[int, Worker] = {}
-    for lead in arrays[group[0]].workers:
+    for _, lead in workers.values():
+        if id(lead) in into:
+            continue
         ordered = sorted(
             (workers[w] for w in joined[id(lead)]), key=lambda jw: group.index(jw[0])
         )
-        if [j for j, _ in ordered] != list(group):
+        steps = [j for j, _ in ordered]
+        # A restage's lanes past the other step's run alone.
+        if steps != list(group) and not (restaged and len(set(steps)) == len(steps)):
             raise NotImplementedError(
                 f"one core for steps {tuple(group)} is not built yet: their cores "
-                f"do not pair one a lane ({[j for j, _ in ordered]} on one)"
+                f"do not pair one a lane ({steps} on one)"
             )
         bodies = [
             r
             for _, w in ordered
             for r in (*before.get(id(w), ()), w, *after.get(id(w), ()))
         ]
+        if len(bodies) == 1:
+            cores.append(lead)
+            into[id(lead)] = lead
+            continue
         try:
             core = Worker.join(bodies)
         except ValueError as e:  # joining what mlir-aie does not join

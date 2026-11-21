@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``Operand.fifos()``'s ``readers=`` (several consumer ends of one lane) and ``tiles=`` (the raw fifo, placed) extensions.
+"""``Operand.fifos()``'s ``readers=`` (several consumer ends of one lane) and ``tiles=`` (each lane's host end placed) extensions.
 
 And ``feed()``'s refusal of a held (``replicate``) input.
 """
@@ -86,12 +86,13 @@ def test_feed_refuses_a_held_weighted_input():
         norm.weight.feed(source)
 
 
-def test_fifos_refuses_readers_and_tiles_together():
+def test_fifos_reads_an_input_placed_at_its_tiles_through_several_ends():
     op = Clamp(
         size=2048, num_aie_columns=1, tile_size=2048, low=0.0, high=1.0
     ).resolved()
-    with pytest.raises(ValueError, match="do not combine"):
-        op.layout().x.fifos(readers=2, tiles=[None])
+    ((first, second),) = op.layout().x.fifos(readers=2, tiles=[None])
+    assert first is not second
+    assert first.object_fifo is second.object_fifo
 
 
 def test_fifos_refuses_readers_on_an_output():
