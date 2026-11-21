@@ -49,6 +49,7 @@ _BUILT_COMBOS = {
         (HandOff.SLICES, "skip", "ddr", "min_minus_one", "same", "recorded"),
         (HandOff.RATIO, "diamond", "ddr", "min_minus_one", "same", "recorded"),
         (HandOff.LAYOUT, "chain", "ddr", "min_minus_one", "same", "recorded"),
+        (HandOff.RATIO, "fan_out", "later_phase", "min_minus_one", "same", "recorded"),
         (HandOff.SPLIT, "through_memory", "memtile", "min", "same", "recorded"),
         (HandOff.LAYOUT, "feedback", "memtile", "min", "same", "recorded"),
         (HandOff.EQUAL, "chain", "l1", "min_minus_one", "same", "recorded"),
@@ -257,7 +258,7 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(
         assert verdict.stage == "analysis"
         return
     least = analysis.min_depth[edge]
-    knee = analysis.knee_depth[edge] if depth in ("knee", "more") else least
+    knee = least if depth == "min_minus_one" else analysis.knee_depth[edge]
     resolved = with_resolved_depth(region, index, depth_from_bounds(depth, least, knee))
     profile = Profile()
     profile.add_entry(Entry(resolved))
