@@ -166,8 +166,8 @@ class BuiltArray:
             reading end (``Operand.chosen_depth``): a fed input's own end,
             the end an output's lanes bind for their first on-chip reader, or
             an unfed input's fifos (the cascade fills it).
-        packeted: Operand names whose host fills ride packet flows
-            (``Operand.packeted``).
+        packeted: Operand names whose host fills, or a held restage's
+            pieces, ride packet flows (``Operand.packeted``).
         splices: Output names a composition splices a stage into, where
             their build joins their cores' fifos (``Operand.splices``).
         joined_drains: Output name -> the lanes each host lane joins in a
@@ -230,6 +230,7 @@ class BuiltArray:
         for name, source in fed.items():
             # A restage held in L1 holds its rounds at the edge's chosen depth.
             operands[name].chosen_depth = (depths or {}).get(name)
+            operands[name].packeted = name in packeted
             operands[name].feed(source, staged=staged, held=name in held)
         for mine, built in zip(op.buffers, view.buffers):
             built.fed_from, built.staged = mine.fed_from, mine.staged

@@ -133,9 +133,11 @@ class Fusion:
     cores are one, in firing order: each lane's core runs the group's
     members' bodies in turn, the edges among them fifos within its tile.
     ``packets`` True sends its members' host fills as packet flows, sharing
-    the shim's sending channels; False keeps them circuits; None leaves it to
-    the placer: packets only where circuits run the channels short and packets
-    place (``compose.transported``). ``drains`` above one joins each run of
+    the shim's sending channels, and joins each restage held in L1 out of
+    order over packets, sharing the joining core's input channel; False
+    keeps them circuits; None leaves it to the placer: packets only where
+    circuits run the channels short and packets place
+    (``compose.transported``). ``drains`` above one joins each run of
     that many lanes of a member's output drained only to the host in a
     memtile into one host lane, taking fewer of the shim's receiving
     channels; 1 drains each lane on its own; None leaves it to the placer,

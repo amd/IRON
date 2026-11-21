@@ -97,7 +97,8 @@ class Operand:
         self.restage: Staging | None = None
         self.feeds: list[Operand] = []
         self.keeps_host = False
-        # Its host transfers ride packet flows, sharing the shim's channels.
+        # Its host transfers ride packet flows, sharing the shim's channels; a
+        # held restage's pieces into a join share the joining core's.
         self.packeted = False
         self.chosen_depth: int | None = None
         self.cascade: Operand | None = None
@@ -1349,6 +1350,10 @@ class Staging:
         taking several joins them on its core into a fifo of its own. Every
         fifo is ``sink``'s ``chosen_depth`` rounds deep, and a call's at
         least: a core runs its producer's whole call before its consumer's.
+        A ``packeted`` sink's distributed pieces into a join ride packet
+        flows out of order, sharing the joining core's one input channel
+        (``shared`` names those sink lanes): as each pool holds a call, no
+        packet waits on a full pool and stalls the others.
 
         Returns:
             Per lane of ``sink``, the fifo it reads, of ``sink``'s
@@ -1381,6 +1386,16 @@ class Staging:
         # A sink object not of rank 1 is read as its own type, by DMA.
         read_as = None if len(sink.obj_shape) == 1 else sink.obj_type
         parts: dict[tuple[int, int], ObjectFifo] = {}
+        # A whole source lane's fifo is its producer's, so a join taking one
+        # by DMA stays on circuits.
+        self.shared = {
+            j
+            for j, pieces in taking.items()
+            if sink.packeted
+            and len(pieces) > 1
+            and all(len(cut[k]) > 1 or to == 0 for k, _, _, to, _ in pieces)
+        }
+        packets = Transport.dma(packet=Packet(), out_of_order=True)
         for k, pieces in cut.items():
             if len(pieces) == 1:
                 continue
@@ -1389,6 +1404,7 @@ class Staging:
                     np.ndarray[(size,), elements],
                     depth=depth,
                     consumer_obj_type=read_as if len(taking[j]) == 1 else None,
+                    transport=packets if j in self.shared else None,
                 )
                 for _, j, _, _, size in pieces
             ]
@@ -1443,9 +1459,11 @@ class Staging:
                 continue
             tile = sink_tiles[lane]
             ends = []
+            # Packets out of order share one channel only where they pin it.
+            port = Port.dma(0) if lane in self.shared else None
             for k, j, _, at, _ in pieces:
                 if (k, j) in self.parts:
-                    ends.append(self.parts[(k, j)].cons())
+                    ends.append(self.parts[(k, j)].cons(port=port))
                     continue
                 end = self.source.reader(k)
                 if at == 0:

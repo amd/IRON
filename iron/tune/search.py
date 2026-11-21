@@ -2386,8 +2386,10 @@ def _restaged_on_cores(
     a call as the composer chooses it, and a call's rounds at least. A piece
     leading a pool, its sink lane's only one or its source lane whole, may
     meet it in place (on the pool's core or a neighbour's); a distributed
-    piece a sink lane joins, and any other, takes a channel and a buffer
-    descriptor a round at each end. A pool holds a lock pair a slot. Each core
+    piece a sink lane joins, and any other, takes a buffer descriptor a round
+    at each end and a channel, which the pieces into or out of one core share
+    out of order over packets, each pool holding a call. A pool holds a lock
+    pair a slot. Each core
     also holds its steps' other fifos, once where both ends are on it, a
     lock pair each, and a channel and descriptors for each with an end off
     the array or in a memtile; one an on-chip stream or cascade carries, or
@@ -2409,7 +2411,10 @@ def _restaged_on_cores(
         NotImplementedError: What ``Staging.held_fifos`` or the composer
             does not build: a slice, a restage ``Staging`` does not plan, a round
             read in another order than it is joined, a slot of several
-            objects, or an output also read elsewhere.
+            objects, an output also read elsewhere, or pieces past a core's
+            channels on circuits that share one only where packets are not
+            built yet (out of one core, or into a join of whole source lanes
+            or of a pool read through a DMA).
     """
     p, c = ends
     region = derivation.region
@@ -2535,14 +2540,24 @@ def _restaged_on_cores(
     for j in joins:
         held[core[j]] += deep * consume * item
         locks[core[j]] += 2 * taking[j]
+    # Pieces moved by DMA take a channel each on circuits. Out of order over
+    # packets, those into one core share one channel (and those out of one
+    # core could, a queue pushed as the core releases): each pool holds a
+    # call, so no packet waits on a full pool and stalls the others.
+    taken, sent = [0] * cores, [0] * cores
+    # A join shares its channel only into a pool its core reads in place, of
+    # pieces a distribute sends: a whole source lane's fifo is its producer's.
+    shares = [True] * cores
     for k, j, at, to, size in pieces:
         # In place at best: the leading piece of a distribute a sink lane
         # reads whole, or a whole source lane leading a join.
         whole = cut[k] == 1
         if (not whole and at == 0 and taking[j] == 1) or (whole and to == 0):
             continue
-        outputs[k] += 1
-        inputs[core[j]] += 1
+        sent[k] += 1
+        taken[core[j]] += 1
+        if taking[j] > 1 and (whole or len(sink.obj_shape) != 1):
+            shares[core[j]] = False
         bds[k] += deep
         bds[core[j]] += deep
         if whole:
@@ -2552,27 +2567,35 @@ def _restaged_on_cores(
             held[core[j]] += deep * size * item
             locks[core[j]] += 2
     col, row = 0, next(r for r in range(model.rows()) if model.is_core_tile(0, r))
+    most_in = model.get_num_dest_switchbox_connections(col, row, WireBundle.DMA)
+    most_out = model.get_num_source_switchbox_connections(col, row, WireBundle.DMA)
+    waits = []
     for k in range(cores):
         for what, n, most in (
-            (
-                "input channels",
-                inputs[k],
-                model.get_num_dest_switchbox_connections(col, row, WireBundle.DMA),
-            ),
-            (
-                "output channels",
-                outputs[k],
-                model.get_num_source_switchbox_connections(col, row, WireBundle.DMA),
-            ),
+            ("input channels", inputs[k] + min(taken[k], 1), most_in),
+            ("output channels", outputs[k] + min(sent[k], 1), most_out),
             ("bytes", held[k], model.get_local_memory_size()),
             ("buffer descriptors", bds[k], model.get_num_bds(col, row)),
             ("locks", locks[k], model.get_num_locks(col, row)),
         ):
             if n > most:
-                return (
-                    f"{edge}, restaged in L1, takes {n} {what} on core {k} of its "
-                    f"steps' worker, however it is placed; a core tile has {most}"
+                shared = " even with its pieces sharing one by packets" * (
+                    what.endswith("channels")
                 )
+                return (
+                    f"{edge}, restaged in L1, takes {n} {what}{shared} on core {k} "
+                    f"of its steps' worker, however it is placed; a core tile has "
+                    f"{most}"
+                )
+        if inputs[k] + taken[k] > most_in and not shares[k]:
+            waits.append(f"{taken[k]} pieces joined on core {k} into one input channel")
+        if outputs[k] + sent[k] > most_out:
+            waits.append(f"{sent[k]} pieces sent from core {k} on one output channel")
+    if waits:
+        raise NotImplementedError(
+            f"{edge}: a restage held in L1 on packet-shared core channels "
+            f"({'; '.join(waits)}) is not built yet"
+        )
     if not sliced and (unbuilt or not planned):
         raise NotImplementedError(
             f"{edge}: a restage held in L1 of an output read elsewhere too, "

@@ -56,6 +56,7 @@ from iron.common.graph.compiled import (
 from iron.common.graph.fusion import admits, candidates
 from iron.common.graph.record import Recording
 from iron.common.image.compose import (
+    CORE_SHORT,
     SEQUENTIAL,
     SHIM_SHORT,
     Packing,
@@ -482,7 +483,7 @@ def group_fit_verdict(
         if verdict == "fits":
             return None
         refusal = verdict.removeprefix("refused: ")
-        if SHIM_SHORT not in refusal:
+        if SHIM_SHORT not in refusal and CORE_SHORT not in refusal:
             break
     return refusal
 

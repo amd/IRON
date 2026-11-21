@@ -68,6 +68,9 @@ SEQUENTIAL, ANNEALED = "sequential_placer", "sa_placer"
 # The sequential placer's diagnostic where no shim tile has a channel left.
 SHIM_SHORT = "DMA channel(s) free"
 
+# Its diagnostic where the core it chose takes more channels than it has.
+CORE_SHORT = "output DMA channels, but only"
+
 # Each packed group's or lone fusion's placer and the diagnostic where none
 # routes it, by its designs' identities or the fusion's symbol.
 _placed: dict[Hashable, tuple[str, str | None]] = {}
@@ -223,12 +226,12 @@ def transported(
     words: Mapping[str, str] | None = None,
     beside: Mapping[str, OperatorDesign] | None = None,
 ) -> Fusion:
-    """Return ``fusion`` under the first of its ``transports`` the sequential placer places, where circuits run the shim's DMA channels short.
+    """Return ``fusion`` under the first of its ``transports`` the sequential placer places, where circuits run the shim's or a core's DMA channels short.
 
     Decided by the sequential placer (``fits``), with ``beside``'s designs
     packed in the same configuration. Where none places, or the first
-    refusal is not the shim's channels, ``fusion`` is returned as given,
-    for the build to report.
+    refusal is not the channels, ``fusion`` is returned as given, for the
+    build to report.
     """
     members = dict(zip((str(j) for j in fusion.steps), designs, strict=True))
     members.update(beside or {})
@@ -239,7 +242,7 @@ def transported(
         refused = fits(members, words, fusion=tried)
         if refused is None:
             return fusion if k == 0 else tried
-        if SHIM_SHORT not in refused:
+        if SHIM_SHORT not in refused and CORE_SHORT not in refused:
             return fusion
     return fusion
 
@@ -325,7 +328,8 @@ def fused_configuration(
     arrays: dict[int, BuiltArray] = {}
     scalars = [None] * len(designs) if dispatch is None else dispatch
     # A member's buffers on-chip edges carry stay circuits: fed inputs, and
-    # outputs read on-chip whose drain the host does not keep.
+    # outputs read on-chip whose drain the host does not keep. A restage held
+    # in L1 joins its pieces out of order over packets instead.
     on_chip = {(e.consumer, e.input) for e in fusion.edges} | {
         (p, output) for (p, output) in first_reader if (p, output) not in kept
     }
@@ -453,6 +457,7 @@ def fused_configuration(
                     for b in design.op.buffers
                     if not b.drains and (j, b.name) not in on_chip
                 ]
+                + held
                 if fusion.packets
                 else ()
             ),
