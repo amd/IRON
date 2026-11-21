@@ -21,7 +21,6 @@ from iron.operators.silu import SiLU
 from iron.tests.support import sequences, toys_schedule
 from iron.tests.support import toys_dataflow as toys
 from iron.tests.support.toys_edges import member
-from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import measure
 
@@ -149,7 +148,6 @@ def test_widening_a_non_bottleneck_actor_leaves_the_period_unchanged(device):
     assert narrow_period == wide_period
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_measured_seconds_a_call_tracks_the_analyzed_period(device):
     """Narrowing the bottleneck's tunable, as a profile edit over one recorded toy, raises both the analyzed period and the measured seconds a call.

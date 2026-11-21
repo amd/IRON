@@ -1725,9 +1725,8 @@ def fit(
                         Staging(source, sink)
                 except PastMemtile as e:
                     return Fit(False, "counts", str(e))
-                except (ValueError, NotImplementedError):
-                    # Its other refusals, and what it does not build yet, the
-                    # composer raises again at placement.
+                except ValueError:
+                    # Staging's other refusals are the composer's, at the placer.
                     continue
             # Restages held in L1, on the cores their two steps share.
             on_cores: list[tuple[Edge, int, int]] = []
