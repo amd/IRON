@@ -1559,7 +1559,8 @@ class Derivation:
         # actor, running their programs in the worker's firing order. Where
         # the lanes differ, a reader joins the producer lane whose first
         # element its own first is (``Staging.pairs``); the rest run alone,
-        # restaged as a memtile would.
+        # restaged as a memtile would. A lane several cores read joins its
+        # producer's core to the first of them; the rest read it apart.
         lead: dict[int, int] = {}
         # A step spliced into its producer's cores: each core and its stage.
         for cores in self.spliced.values():
@@ -1578,7 +1579,7 @@ class Derivation:
                 outs = self.lanes[p].get(edge.output, [])
                 ins = self.lanes[c].get(edge.input, [])
                 if (
-                    any(len(readers.get(f, [])) != 1 for f in ins)
+                    any(not readers.get(f) for f in ins)
                     or any(actor_step[writer[f]] is None for f in outs)
                     or any(actor_step[readers[f][0]] is None for f in ins)
                 ):

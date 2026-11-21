@@ -27,7 +27,8 @@ COMBOS = all_combinations()
 AXES = ("shape", "role", "held", "depth", "rate", "size")
 
 # Each device's combos the composer builds bit-identical, or that fit refuses
-# below the minimum, there; npu1's wait on host 203.
+# below the minimum, or where the analysis finds no depth that runs, there;
+# npu1's wait on host 203.
 _BUILT_COMBOS = {
     "npu1": set(),
     "npu2": {
@@ -58,6 +59,17 @@ _BUILT_COMBOS = {
         ),
         (HandOff.SPLIT, "diamond", "l1", "min_minus_one", "different", "smaller"),
         (HandOff.BROADCAST, "diamond", "l1", "min_minus_one", "same", "recorded"),
+        (HandOff.BROADCAST, "fan_out", "l1", "min_minus_one", "same", "recorded"),
+        (HandOff.JOIN, "fan_out", "l1", "min_minus_one", "same", "recorded"),
+        (HandOff.SLICES, "fan_out", "l1", "more", "same", "recorded"),
+        *(
+            (shape, role, "later_phase", depth, rate, "recorded")
+            for shape, role, depth, rate in (
+                (HandOff.JOIN, "skip", "more", "different"),
+                (HandOff.EQUAL, "diamond", "knee", "same"),
+                (HandOff.SLICES, "fan_in", "min", "same"),
+            )
+        ),
         *(
             (shape, role, "l1", "min_minus_one", "same", "recorded")
             for shape, role in (
@@ -82,6 +94,7 @@ _REFUSED_COMBOS = {
         (HandOff.RATIO, "skip", "l1", "min", "same", "smaller"),
         (HandOff.SPLIT, "skip", "l1", "min", "same", "recorded"),
         (HandOff.BROADCAST, "skip", "l1", "knee", "same", "recorded"),
+        (HandOff.SPLIT, "chain", "later_phase", "more", "same", "recorded"),
     },
 }
 
@@ -207,7 +220,8 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(
 ):
     """Each toy, at its depth resolved from the analysis, is bit-identical to the steps run apart; below the minimum it is refused.
 
-    A toy past a core's channels (``refused``) is refused at every depth.
+    A toy past a core's channels (``refused``) is refused at every depth, as
+    is one the analysis finds no depth for (an L1 hold across a phase, say).
 
     The depth is resolved from ``analyze`` inside this test body, never at
     collection or in the toy builder: a hard-coded depth is not the minimum
@@ -234,6 +248,14 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(
         None if ceiling is None else ceiling.mixed,
     )
     edge = region.edges[index]
+    if edge not in analysis.min_depth:
+        # No depth the region runs at: refused at every one.
+        profile = Profile()
+        profile.add_entry(Entry(region))
+        verdict = fit(profile, [call], device)
+        assert not verdict.ok
+        assert verdict.stage == "analysis"
+        return
     least = analysis.min_depth[edge]
     knee = analysis.knee_depth[edge] if depth in ("knee", "more") else least
     resolved = with_resolved_depth(region, index, depth_from_bounds(depth, least, knee))

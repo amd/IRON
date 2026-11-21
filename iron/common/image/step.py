@@ -219,14 +219,15 @@ class Fusion:
                 )
         grouped = [s for group in self.workers for s in group]
         if self.workers and (
-            self.kind is not FusionKind.STREAM
+            self.kind not in (FusionKind.STREAM, FusionKind.STAGED)
             or len(grouped) != len(set(grouped))
             or not set(grouped) <= members
             or any(len(group) < 2 for group in self.workers)
         ):
             raise ValueError(
                 f"fusion {self.steps}: workers {self.workers} are not disjoint "
-                f"groups of two or more of its members, in a stream fusion"
+                f"groups of two or more of its members, in a stream or staged "
+                f"fusion"
             )
         made = {(e.producer, e.output) for e in self.edges}
         for producer, output in self.kept:

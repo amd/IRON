@@ -39,7 +39,7 @@ from aie.passmanager import PassManager
 from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
-from ..declare.operand import Operand, Slicing
+from ..declare.operand import Operand, Slicing, in_place
 from ..design import (
     BuiltArray,
     OperatorDesign,
@@ -573,13 +573,24 @@ def fused_configuration(
             before,
             after,
         )
-    # Each restage held in L1 links on the cores its lanes run on, joined.
+    # Each restage held in L1 links on the cores its lanes run on, joined;
+    # a lane several cores read stays on its producer's, read in place by
+    # the cores that reach it.
     cores = [w for j in fusion.steps for w in arrays[j].workers]
     for e in joined_in:
         (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
         (sink,) = [b for b in arrays[e.consumer].op.buffers if b.name == e.input]
         restage = sink.restage
-        if restage is None or not restage.held:
+        if restage is None:
+            for fifo in source.lane_fifos:
+                ends = [(w, h) for w in cores for h in w.fifos if h.object_fifo is fifo]
+                readers = sum(h.handle_type == "cons" for _, h in ends)
+                if readers > 1 and in_place(fifo):
+                    fifo.delegate_tile = next(
+                        w for w, h in ends if h.handle_type == "prod"
+                    ).tile
+            continue
+        if not restage.held:
             continue
         restage.wire(
             *(
@@ -909,11 +920,14 @@ def share(
                 ]
                 for j, f in ((e.producer, fifo), (e.consumer, read))
             ]
-            if any(len(found) != 1 for found in ends):
+            if len(ends[0]) != 1 or not ends[1]:
                 raise NotImplementedError(
                     f"one core for steps {tuple(group)} is not built yet: lane "
                     f"{lane} of {e.output} is not one core's into one core's"
                 )
+            # A lane several cores read: the first shares its producer's core,
+            # the rest read it apart.
+            restaged |= len(ends[1]) > 1
             merged = joined[id(ends[0][0])] | joined[id(ends[1][0])]
             for w in merged:
                 joined[w] = merged

@@ -625,10 +625,14 @@ def composed(
                 f"building {entry} is not built yet: a runtime plan with "
                 f"{unbuilt[0]}"
             )
-        if root.workers and kinds - {EdgeKind.STREAM, EdgeKind.CASCADE}:
+        if root.workers and kinds - {
+            EdgeKind.STREAM,
+            EdgeKind.CASCADE,
+            EdgeKind.STAGED,
+        }:
             raise NotImplementedError(
                 f"building {entry} is not built yet: steps on one core joined "
-                f"by edges other than streams and cascades"
+                f"by edges other than streams, cascades and memtile stages"
             )
         if EdgeKind.CASCADE in kinds and kinds - {EdgeKind.STREAM, EdgeKind.CASCADE}:
             raise NotImplementedError(
