@@ -1613,9 +1613,8 @@ def fit(
                         Staging(source, sink)
                 except PastMemtile as e:
                     return Fit(False, "counts", str(e))
-                except (ValueError, NotImplementedError):
-                    # Its other refusals, and what it does not build yet, the
-                    # composer raises again at placement.
+                except ValueError:
+                    # Staging's other refusals are the composer's, at the placer.
                     continue
             # A region with no edge hands nothing on-chip: nothing to analyse.
             if region.edges:

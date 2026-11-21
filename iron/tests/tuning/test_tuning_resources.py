@@ -110,21 +110,17 @@ def test_a_core_using_every_buffer_descriptor_is_bit_identical(device):
     assert result.ok, result.why
 
 
-@pytest.mark.parametrize(
-    "columns, fits", [((2, 1), True), ((1, 2), False)], ids=["join", "split"]
-)
-def test_a_staged_round_past_one_buffer_descriptor_waits_on_a_descriptor_chain(
-    columns, fits, device
+@pytest.mark.parametrize("columns", [(2, 1), (1, 2)], ids=["join", "split"])
+def test_a_staged_round_past_one_buffer_descriptor_fits_as_a_descriptor_chain(
+    columns, device
 ):
     """Two columns' contiguous halves restaged to or from one column: the only round in the lanes' order is the whole call.
 
     At ``1 << 18`` bfloat16 a memtile holds that round, but one buffer
     descriptor moves less than all of it. A join reads each half into the
-    memtile as a descriptor of its own and the round out in the reader's
-    objects, so it fits. A split takes the whole round in as one object, a
-    chain of descriptors the hardware runs but mlir-aie's lowering does not
-    emit yet: ``fit`` waits on it rather than refusing it, and never hands
-    it to the placer.
+    memtile as a descriptor of its own; a split takes the whole round in as
+    one object, which the memtile moves as a chain of descriptors under one
+    lock. Both fit, the placer's verdict included.
     """
     size = 1 << 18
     first = SiLU(size=size, tile_size=128, num_aie_columns=columns[0])
@@ -141,12 +137,8 @@ def test_a_staged_round_past_one_buffer_descriptor_waits_on_a_descriptor_chain(
     )
     profile = Profile()
     profile.add_entry(Entry(root=region))
-    if not fits:
-        with pytest.raises(NotImplementedError, match="chaining descriptors"):
-            fit(profile, [Timed(recording)], device)
-    else:
-        result = fit(profile, [Timed(recording)], device)
-        assert result.ok, result.why
+    result = fit(profile, [Timed(recording)], device)
+    assert result.ok, result.why
 
 
 def test_more_buffer_descriptors_than_a_tile_holds_is_refused_before_any_build(device):
