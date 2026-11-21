@@ -359,13 +359,24 @@ WIDE = [pytest.param("npu2", id="device_npu2")]
 
 
 @pytest.mark.parametrize("device", WIDE, indirect=True)
-def test_a_split_held_in_l1_past_a_cores_output_channels_is_refused_before_any_build(
+def test_a_split_held_in_l1_past_a_cores_buffer_descriptors_is_refused_however_its_pieces_share_a_channel(
     device,
 ):
-    """One lane split into eight held in L1 sends every lane but the leading one on a channel of its own, more than a core has."""
+    """One lane split into eight held in L1: its seven pieces could share an output channel by packets, but their descriptors are past a core's."""
     _refused_in_l1(
-        *held_in_l1(*split_into_rows(size=64, rows=8)), device, "output channels"
+        *held_in_l1(*split_into_rows(size=64, rows=8)), device, "buffer descriptors"
     )
+
+
+def test_a_split_held_in_l1_past_a_cores_output_channels_waits_for_packet_shared_channels(
+    device,
+):
+    """One lane split into four held in L1 sends three pieces, past a core's output channels on circuits, within one packet-shared channel not built yet."""
+    recording, region = held_in_l1(*split_into_rows(size=64, rows=4))
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    with pytest.raises(NotImplementedError, match="packet-shared core channels"):
+        fit(profile, [Timed(recording)], device)
 
 
 def test_a_join_held_in_l1_past_a_cores_buffer_descriptors_is_refused_before_any_build(

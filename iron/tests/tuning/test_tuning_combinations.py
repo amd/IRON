@@ -73,14 +73,14 @@ _BUILT_COMBOS = {
 }
 
 # Each device's combos fit refuses at every depth before any build, however
-# placed: a restage held in L1 past a core tile's channels.
+# placed: a restage held in L1 past a core tile's channels, even with its
+# pieces sharing one by packets.
 _REFUSED_COMBOS = {
     "npu1": set(),
     "npu2": {
         (HandOff.RATIO, "skip", "l1", "min", "same", "smaller"),
         (HandOff.SPLIT, "skip", "l1", "min", "same", "recorded"),
         (HandOff.BROADCAST, "skip", "l1", "knee", "same", "recorded"),
-        (HandOff.RATIO, "fan_in", "l1", "more", "same", "recorded"),
     },
 }
 
