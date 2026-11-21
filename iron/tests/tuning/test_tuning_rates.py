@@ -24,7 +24,7 @@ from iron.tests.support import toys_dataflow as toys
 from iron.tests.support.tools import DEVICES
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import candidates, check, fit, search
+from iron.tune.search import _balanced_at, candidates, check, fit, search
 
 pytestmark = pytest.mark.usefixtures("device")
 
@@ -294,6 +294,34 @@ def _delivered(device, reader: str, depth: int | None):
     (made,) = [b for b in arrays[fusion.steps.index(step)].op.buffers if b.name == "C"]
     assert made.delivers is not None
     return made
+
+
+def test_balance_is_held_at_three_of_every_residue_of_the_bounds_period(device):
+    """``BoundedRows`` over 1024 rows: fit analyses three values of each of ``n``'s 64 classes.
+
+    What a call moves repeats every 64 of ``n`` (a block of 16-row tiles,
+    one a core row, four rows). The first 64 values, 64 from the middle and the last 64: a count the
+    two ends move differs on each class by a polynomial of degree two at
+    most, so three roots make it zero on every admitted value. The region
+    is refused at the first unbalanced one.
+    """
+    recording = toys.BoundedRows(tile_m=16).record(a=(1024, 64), b=(64, 64))
+    region = Region(
+        tuple(
+            Member(cls=type(s.op), dims=Profile.dims(type(s.op), vars(s.op)))
+            for s in recording.steps
+        ),
+        (Edge(0, "C", 1, "x"),),
+    )
+    points = _balanced_at(
+        Derivation(region, recording, device), recording, "n", 0, 1024
+    )
+    assert points == [*range(64), *range(512, 576), *range(961, 1025)]
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert "at n = 1," in result.why
 
 
 # GEMM beside another operator waits on npu1 (see ``_GEMM_BESIDE``).

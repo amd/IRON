@@ -255,9 +255,9 @@ logger = logging.getLogger(__name__)
 
 # A measured ratio under this gains: past the paired timing's noise.
 GAINS = 0.95
-# The admitted values of a per-call value a region's balance is held at
-# every one of; past it, both ends of its range and an odd stride across it.
-BALANCED_POINTS = 64
+# The most values of a per-call value fit analyses a region at to hold its
+# balance over the range (``_balanced_at``); past it, the region waits.
+BALANCED_POINTS = 512
 # How an edit is priced: IRON's verify timing, lighter than measure's own.
 PRICING = Timing(rounds=4, calls=10)
 
@@ -1614,12 +1614,15 @@ def fit(
                     admitted = recording.value_range(name)
                     if admitted is None:
                         continue
-                    lo, hi = admitted
-                    stride = max(1, (hi - lo) // BALANCED_POINTS) | 1
-                    for at in sorted(
-                        {lo, lo + 1, hi - 1, hi, *range(lo, hi + 1, stride)}
-                        & set(range(lo, hi + 1))
-                    ):
+                    points = _balanced_at(derivation, recording, name, *admitted)
+                    if points is None:
+                        waits = waits or (
+                            f"holding its balance over {name} in "
+                            f"{list(admitted)} takes more than {BALANCED_POINTS} "
+                            f"analyses; it waits"
+                        )
+                        continue
+                    for at in points:
                         if timed.values.get(name) == at:
                             continue
                         try:
@@ -2092,6 +2095,93 @@ def _untiled(
     if held != whole:
         return f"they hold {held} of the {whole} values within {tuple(space)}"
     return None
+
+
+def _balanced_at(
+    derivation: Derivation, recording: Recording, name: str, lo: int, hi: int
+) -> list[int] | None:
+    """Return the values of ``name`` in ``[lo, hi]`` at which a region's balance holds it at every one.
+
+    What a call moves varies with ``name`` only through its steps' per-call
+    words and the objects each lane a word sizes moves, each a step function
+    of it: past its first values, ``f(n + p) - f(n)`` is constant for some
+    least ``p``, read off the function's own values (the period of its
+    differences). With ``L`` the least common multiple of every such ``p``,
+    a count an edge's two ends move differs by a polynomial in ``k`` on
+    each class ``r + kL``, of degree two at most where two of a call's
+    varying counts multiply (a loop's trips by the objects in it): the
+    analysis at three of each class's values, ``L`` at each end of the
+    range and ``L`` from its middle, holds every value. The whole range
+    where that is no fewer.
+
+    Returns:
+        The values, in order; None where more than ``BALANCED_POINTS``.
+    """
+    match, *_ = recording.occurrences(Entry(derivation.region))
+    others = {k: v for k, v in derivation.values.items() if k != name}
+    series: list[list[int]] = []
+    for s, op, (array, _) in zip(match, derivation.ops, derivation.recorded):
+        bound = {
+            b.member.name: b.expression
+            for b in recording.bindings
+            if b.op is recording.steps[s].op
+        }
+        if not any(e.value.name == name for e in bound.values()):
+            continue
+        rows: list[list[int]] = []
+        for n in range(lo, hi + 1):
+            values = {**others, name: n}
+            try:
+                extents = {e: bound[e].evaluate(values) for e in op.bound_extents}
+                words = {
+                    v.name: (
+                        bound[v.name].evaluate(values)
+                        if v.name in bound
+                        else op.derived_at(v.name, **extents)
+                    )
+                    for v in op.values
+                    if v.name in bound or v.derive is not None
+                }
+            except (ValueError, TypeError):
+                return (
+                    None if hi - lo + 1 > BALANCED_POINTS else list(range(lo, hi + 1))
+                )
+            row = [words[k] for k in sorted(words)]
+            for b in array.op.buffers:
+                if not b.streamed or not b.lane_handles:
+                    continue
+                for _, _, length, unit in b.transfers():
+                    if length is not None and length.name in words:
+                        row.append(
+                            -(-words[length.name] * unit // math.prod(b.obj_shape))
+                        )
+            rows.append(row)
+        series += [list(column) for column in zip(*rows)]
+    period = 1
+    for values in series:
+        steps = [b - a for a, b in zip(values, values[1:])]
+        # The least p with steps[i] == steps[i + p] throughout: a border's
+        # complement (the prefix function's last value).
+        border = [0] * len(steps)
+        for i in range(1, len(steps)):
+            k = border[i - 1]
+            while k and steps[i] != steps[k]:
+                k = border[k - 1]
+            border[i] = k + (steps[i] == steps[k])
+        period = math.lcm(period, len(steps) - border[-1] if steps else 1)
+    size = hi - lo + 1
+    if 3 * period >= size:
+        return list(range(lo, hi + 1)) if size <= BALANCED_POINTS else None
+    if 3 * period > BALANCED_POINTS:
+        return None
+    middle = lo + (size // 2 // period) * period
+    return sorted(
+        {
+            *range(lo, lo + period),
+            *range(middle, middle + period),
+            *range(hi - period + 1, hi + 1),
+        }
+    )
 
 
 def _held_past(
