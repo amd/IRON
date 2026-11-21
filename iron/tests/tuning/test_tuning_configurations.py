@@ -399,8 +399,8 @@ _CONFIGURATION_PAYS = [
     for name in sorted(DEVICES)
 ]
 
-# The search on npu2 prices the configuration that pays 49 s in and ends at
-# 123 s; with margin.
+# The search on npu2 prices the configuration that pays 21 to 49 s in and
+# ends at 41 to 123 s (warm and cold compile caches); with margin.
 _CONFIGURATION_BUDGET_S = 300.0
 
 
