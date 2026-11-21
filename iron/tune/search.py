@@ -2176,7 +2176,6 @@ def _restaged_on_cores(
             *derivation.lanes[r].get(e.input, []),
         )
     }
-    inputs, outputs, held, bds, locks = ([0] * cores for _ in range(5))
     # A fifo with an end off the array or in a memtile moves by DMA; one
     # between two cores of a step may be a neighbour's memory.
     off = {
@@ -2194,17 +2193,21 @@ def _restaged_on_cores(
     on_core: list[list] = [[] for _ in range(cores)]
     for step, fifos, at in ((p, lanes[0], range(len(lanes[0]))), (c, lanes[1], core)):
         for k, fifo in zip(at, fifos):
-            (worker,) = [
+            # A lane several cores read: the first on core k, the rest apart.
+            for n, worker in enumerate(
                 w.owner
                 for w in derivation.recorded[step][1].cores
                 if any(h.object_fifo is fifo for h in w.owner.fifos)
-            ]
-            on_core[k] += [
-                h
-                for h in worker.fifos
-                if h.object_fifo not in on_chip
-                and h.object_fifo not in (*lanes[0], *lanes[1])
-            ]
+            ):
+                if n:
+                    on_core.append([])
+                on_core[len(on_core) - 1 if n else k] += [
+                    h
+                    for h in worker.fifos
+                    if h.object_fifo not in on_chip
+                    and h.object_fifo not in (*lanes[0], *lanes[1])
+                ]
+    inputs, outputs, held, bds, locks = ([0] * len(on_core) for _ in range(5))
     for k, handles in enumerate(on_core):
         here = Counter(h.object_fifo for h in handles)
         for h in handles:
@@ -2248,7 +2251,7 @@ def _restaged_on_cores(
             held[core[j]] += deep * size * staging.item
             locks[core[j]] += 2
     col, row = 0, next(r for r in range(model.rows()) if model.is_core_tile(0, r))
-    for k in range(cores):
+    for k in range(len(on_core)):
         for what, n, most in (
             (
                 "input channels",

@@ -1418,19 +1418,9 @@ class Staging:
             )
 
     def _shares(self, end: Any, tile: Any) -> None:
-        """Keep ``end``'s fifo's objects in ``tile``'s memory where nothing forces them through a DMA.
-
-        That is: rank 1, no walk, no repeat, no DMA transport, one object type.
-        """
+        """Keep ``end``'s fifo's objects in ``tile``'s memory where it can share a link's pool: rank 1, read as written (``in_place``)."""
         fifo = end.object_fifo
-        if (
-            len(fifo.shape) == 1
-            and fifo.to_stream is None
-            and end.from_stream is None
-            and fifo.repeat_count is None
-            and (fifo.transport is None or fifo.transport.mode != "dma")
-            and fifo.consumer_obj_type == fifo.obj_type
-        ):
+        if len(fifo.shape) == 1 and end.from_stream is None and in_place(fifo):
             fifo.delegate_tile = tile
 
     def split(self, end: Any, given: list[int]) -> list[ObjectFifo]:
@@ -1515,6 +1505,17 @@ class Staging:
             ends, fifo.prod(), AnyMemTile, offsets if len(ends) > 1 else [], []
         )
         return fifo
+
+
+def in_place(fifo: ObjectFifo) -> bool:
+    """Return whether nothing forces ``fifo`` through a DMA: no walk to or from the stream, no repeat, no DMA transport, one object type."""
+    return (
+        fifo.to_stream is None
+        and fifo.from_stream_per_cons is None
+        and fifo.repeat_count is None
+        and (fifo.transport is None or fifo.transport.mode != "dma")
+        and fifo.consumer_obj_type == fifo.obj_type
+    )
 
 
 def _walk(index: np.ndarray) -> tuple[int, list[int], list[int]] | None:
