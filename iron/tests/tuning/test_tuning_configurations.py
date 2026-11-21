@@ -399,10 +399,9 @@ _CONFIGURATION_PAYS = [
     for name in sorted(DEVICES)
 ]
 
-# The seconds the search takes on npu2 to price the configuration that pays
-# (326 s: a configuration before it hangs the placer to its 300 s limit),
-# with margin.
-_CONFIGURATION_BUDGET_S = 600.0
+# The search on npu2 prices the configuration that pays 49 s in and ends at
+# 123 s; with margin.
+_CONFIGURATION_BUDGET_S = 300.0
 
 
 @pytest.mark.extensive
