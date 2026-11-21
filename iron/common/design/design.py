@@ -172,8 +172,8 @@ class BuiltArray:
             their build joins their cores' fifos (``Operand.splices``).
         joined_drains: Output name -> the lanes each host lane joins in a
             memtile (``Operand.drain_join``).
-        delivers: Output name -> the smaller object type its first on-chip
-            reader takes (``Operand.delivers``).
+        delivers: Output name -> the object type its first on-chip reader
+            takes, either a whole number of the other (``Operand.delivers``).
 
     Raises:
         ValueError: A full ELF is asked to carry a ``DispatchTime`` value, an
@@ -253,7 +253,12 @@ class BuiltArray:
                             for f in fifos
                         )
                         if built.splices and built.join is not None
-                        else any(h.depth != chosen for h in built.lane_handles)
+                        # A delivered stream's depth is its producer's end's.
+                        else (
+                            any(f.depth != chosen for f in built.lane_fifos)
+                            if built.delivers is not None
+                            else any(h.depth != chosen for h in built.lane_handles)
+                        )
                     )
                 )
             ):

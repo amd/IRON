@@ -25,6 +25,7 @@ from fractions import Fraction
 from typing import Any, get_origin
 
 import numpy as np
+from aie import ir
 from aie.dialects._aie_enum_gen import ObjectFifoLinkMode, ObjectFifoPort
 from aie.iron import Program, Worker
 from aie.iron.dataflow.objectfifo import ObjectFifo, ObjectFifoLink
@@ -542,8 +543,10 @@ class Derivation:
 
     Each step's operator is built on the host with ``aie.iron.trace``
     recording: its cores' acquires and releases in program order, its memtile
-    links, and which fifo is which operand lane. A loop's trip count is a
-    per-call value the build does not hold, so it is solved from what the
+    links, and which fifo is which operand lane. A loop's trip count is
+    read off the resolved program where its bounds come from words the call
+    fixes (constants, the words the sequence writes, the call's scratchpad
+    parameters); any other is solved from what the
     call moves: the objects the runtime sequence fills or drains on each
     fifo (an operand riding another's fifo, GEMV's B in its A, counted with
     it), carried through the links to the fifos the cores touch. A region edge joins the producer's output lanes to the
@@ -723,6 +726,21 @@ class Derivation:
             if e.kind is EdgeKind.CASCADE
             and ((p, e.output) in self.per_core or (c, e.input) in self.per_core)
         ]
+        # Each per-call word a core may read, by its device symbol, at this
+        # call; one the call does not fix is left out, its loops solved from
+        # the objects they move.
+        words: dict[str, int] = {}
+        for op, (bound, extents) in zip(self.ops, bindings, strict=True):
+            for v in op.values:
+                try:
+                    if v.name in bound:
+                        words[v.symbol] = self._evaluate(recording, bound[v.name])
+                    elif v.derive is not None:
+                        words[v.symbol] = op.derived_at(v.name, **extents)
+                except ValueError:
+                    pass
+        # A loop's trips the program reads off this call's words, by id of its scope.
+        self.read: dict[int, int] = {}
         part = {i: frozenset([i]) for i in range(len(self.recorded))}
         for p, c in [(p, c) for c, (p, _) in spliced_into.items()] + [
             (p, c) for _, p, c in relayed
@@ -755,7 +773,7 @@ class Derivation:
                     )
                     arrays[steps[0]].workers += [w for pair in pairs for w in pair]
                 if len(steps) == 1:
-                    arrays[steps[0]].program().resolve_program()
+                    module = arrays[steps[0]].program().resolve_program()
                 else:
                     configured = configuration(
                         "analysed",
@@ -763,9 +781,10 @@ class Derivation:
                         steps=[str(j) for j in steps],
                         fuse=True,
                     )
-                    Program.compose(
+                    module = Program.compose(
                         [configured], entry=configured.runtimes[0]
                     ).resolve_program()
+            self._read_trips(module, resolved.cores, words)
             # A spliced step's host operands move along its producer's lanes:
             # their transfers are its own.
             fifo_step = {
@@ -904,6 +923,140 @@ class Derivation:
             self.values[name] = admitted[1]
         return expression.evaluate(self.values)
 
+    def _read_trips(
+        self, module: ir.Module, cores: Sequence[Scope], words: Mapping[str, int]
+    ) -> None:
+        """Note each loop of ``cores`` whose bounds ``module`` computes from words the call fixes: its trips, by ``id`` of its scope.
+
+        The program's cores are the recorded ones in order, and each core's
+        ``scf.for`` ops, in order, its ``for`` scopes, each at its scope's
+        source line; a core where they differ is not read. A bound is
+        followed back through ``arith`` to constants, the words its
+        sequence writes to a buffer (``aiex.npu.rtp_write``), and the
+        scratchpad parameters ``words`` gives (``Value.symbol``).
+        """
+        written: dict[tuple[str, int], int | None] = {}
+        programs: list[list[ir.Operation]] = []
+        stack = [module.operation]
+        while stack:
+            operation = stack.pop()
+            if operation.name == "aie.core":
+                programs.append([])
+            elif operation.name == "scf.for" and programs:
+                programs[-1].append(operation)
+            elif operation.name == "aiex.npu.rtp_write":
+                key = (
+                    ir.FlatSymbolRefAttr(operation.attributes["buffer"]).value,
+                    ir.IntegerAttr(operation.attributes["index"]).value,
+                )
+                value = self._word(operation.operands[0], {}, words)
+                written[key] = value if written.get(key, value) == value else None
+            stack += reversed(
+                [
+                    inner.operation
+                    for region in operation.regions
+                    for block in region.blocks
+                    for inner in block.operations
+                ]
+            )
+        if len(programs) != len(cores):
+            return
+        for core, loops in zip(cores, programs):
+            scopes: list[Scope] = []
+            nested = [core]
+            while nested:
+                scope = nested.pop()
+                if scope is not core and scope.kind == "for":
+                    scopes.append(scope)
+                nested += reversed([n for n in scope.body if isinstance(n, Scope)])
+            if len(scopes) != len(loops) or any(
+                scope.site is None
+                or f'"{scope.site.filename}":{scope.site.line}:'
+                not in str(loop.location)
+                for scope, loop in zip(scopes, loops)
+            ):
+                continue
+            for scope, loop in zip(scopes, loops):
+                bounds = [self._word(v, written, words) for v in loop.operands[:3]]
+                if None not in bounds:
+                    self.read[id(scope)] = len(range(*bounds))
+
+    def _word(
+        self,
+        value: ir.Value,
+        written: Mapping[tuple[str, int], int | None],
+        words: Mapping[str, int],
+    ) -> int | None:
+        """Return ``value`` at this call as the program computes it, None where a word it reads is not known."""
+        owner = value.owner
+        if not isinstance(owner, ir.OpView):
+            return None  # a block argument: a loop's index
+        operation = owner.operation
+        name = operation.name
+        if name == "arith.constant":
+            attribute = operation.attributes["value"]
+            return attribute.value if isinstance(attribute, ir.IntegerAttr) else None
+        if name == "aiex.read_scratchpad_parameter":
+            return words.get(
+                ir.FlatSymbolRefAttr(operation.attributes["parameter"]).value
+            )
+        if name == "memref.load":
+            buffer = operation.operands[0].owner
+            if (
+                not isinstance(buffer, ir.OpView)
+                or buffer.operation.name != "aie.buffer"
+            ):
+                return None
+            index = [self._word(v, written, words) for v in operation.operands[1:]]
+            if len(index) != 1 or index[0] is None:
+                return None
+            return written.get(
+                (ir.StringAttr(buffer.operation.attributes["sym_name"]).value, index[0])
+            )
+        args = [self._word(v, written, words) for v in operation.operands]
+        if None in args:
+            return None
+        # An unsigned op reads a negative word as a large one: not modelled.
+        if name.endswith("ui") and min(args) < 0:
+            return None
+        if name in (
+            "arith.index_cast",
+            "arith.index_castui",
+            "arith.extsi",
+            "arith.extui",
+        ):
+            return args[0]
+        if name == "arith.addi":
+            return args[0] + args[1]
+        if name == "arith.subi":
+            return args[0] - args[1]
+        if name == "arith.muli":
+            return args[0] * args[1]
+        if (
+            name
+            in (
+                "arith.divsi",
+                "arith.divui",
+                "arith.ceildivsi",
+                "arith.ceildivui",
+                "arith.floordivsi",
+            )
+            and args[1] == 0
+        ):
+            return None
+        if name in ("arith.divsi", "arith.divui"):
+            quotient = abs(args[0]) // abs(args[1])
+            return quotient if (args[0] < 0) == (args[1] < 0) else -quotient
+        if name in ("arith.ceildivsi", "arith.ceildivui"):
+            return -(-args[0] // args[1])
+        if name == "arith.floordivsi":
+            return args[0] // args[1]
+        if name in ("arith.minsi", "arith.minui"):
+            return min(args)
+        if name in ("arith.maxsi", "arith.maxui"):
+            return max(args)
+        return None
+
     def _through_links(self, links: Sequence[ObjectFifoLink]) -> None:
         """Carry the objects a call moves across ``links``, from the fifos that know them to those that do not."""
         changed = True
@@ -965,9 +1118,14 @@ class Derivation:
                 elif node.kind == "release":
                     releases.append((node, outer))
         fixed = {
-            id(loop): len(range(*loop.owner))
+            id(loop): (
+                len(range(*loop.owner))
+                if loop.owner and all(isinstance(b, int) for b in loop.owner)
+                else self.read[id(loop)]
+            )
             for loop in loops
-            if loop.owner and all(isinstance(b, int) for b in loop.owner)
+            if (loop.owner and all(isinstance(b, int) for b in loop.owner))
+            or id(loop) in self.read
         }
         equations: list[tuple[int, list[tuple[int, tuple[int, ...]]]]] = [
             (
@@ -1141,11 +1299,24 @@ class Derivation:
             edge_channels.setdefault(edge, []).append(len(channels) - 1)
         return len(channels) - 1
 
-    def _streams(self, operand: Any) -> list[np.ndarray]:
-        """Return each of ``operand``'s lanes' elements, in the order the lane moves them."""
+    def _streams(self, operand: Any, whole: bool = False) -> list[np.ndarray]:
+        """Return each of ``operand``'s lanes' elements this call, in the order the lane moves them.
+
+        A lane a per-call length shortens moves the first of its walk's
+        elements, its objects this call's worth; ``whole`` takes every
+        lane's walk whole.
+        """
         taps = {lane: tap for lane, tap, _, _ in operand.transfers()}
         index = np.arange(operand.elements)
-        return [taps[lane].gather(index) for lane in range(operand.lanes)]
+        streams = []
+        for lane, handle in enumerate(operand.lane_handles):
+            stream = taps[lane].gather(index)
+            fifo = handle.object_fifo
+            objects = None if whole else self.objects.get(fifo)
+            streams.append(
+                stream if objects is None else stream[: objects * math.prod(fifo.shape)]
+            )
+        return streams
 
     def _restaged(
         self,
@@ -1559,6 +1730,11 @@ class Derivation:
                     f"{sink.name}'s lanes; an edge into it is not modelled yet"
                 )
             produced, consumed = self._streams(source), self._streams(sink)
+            # Ends moving other counts this call: their walks whole, the
+            # mismatch the balance's to show.
+            if sum(map(len, produced)) != sum(map(len, consumed)):
+                produced = self._streams(source, whole=True)
+                consumed = self._streams(sink, whole=True)
             if (
                 len(outs) != len(ins)
                 or sizes[0] != sizes[1]

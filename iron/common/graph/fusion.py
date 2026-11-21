@@ -58,12 +58,12 @@ def admits(
         if made.streamed and taken.streamed
         else (0, 0)
     )
-    # Streamed, a whole number of the reader's objects in each of the
-    # producer's: one fifo delivers them (``Operand.delivers``).
+    # Streamed, either end's objects a whole number of the other's: one fifo
+    # delivers them (``Operand.delivers``).
     delivers = (
         {output: taken.obj_type}
         if sizes[0] != sizes[1]
-        and sizes[0] % sizes[1] == 0
+        and max(sizes) % min(sizes) == 0
         and np.dtype(made.dtype) == np.dtype(taken.dtype)
         else {}
     )
