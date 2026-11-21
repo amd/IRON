@@ -197,9 +197,10 @@ def test_a_boundary_is_kept_only_where_its_saving_beats_a_switch_and_one_more_de
 
     The split is sized so that its small side is clearly faster than the single design
     bounded at the full 2048 (``measure``'s ratio under 0.95), so ``search`` must keep it.
-    The call runs most of its points at 256 rows and some at 1024, so it switches
-    designs between calls now and then; ``search`` keeps a boundary that puts the two
-    apart, wherever on its grid that is.
+    The call runs most of its points at 256 rows and some at 1024. ``search`` keeps
+    the split over ``rows`` that pays most, at a power of two from 256 up so the
+    256-row point runs on a design smaller than the bounded one: on npu2, at 1024,
+    both points on its 1024-row design with no switch between calls.
     """
     g = RangedPair(K=256, N=256)
     recording = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
@@ -215,7 +216,7 @@ def test_a_boundary_is_kept_only_where_its_saving_beats_a_switch_and_one_more_de
     (kept,) = tuned.variants()
     assert kept.values == ("rows",)
     (((_, boundary),), _), _ = kept.ranges
-    assert 256 <= boundary < 1024
+    assert boundary in (256, 512, 1024)
 
 
 @pytest.mark.parametrize(
