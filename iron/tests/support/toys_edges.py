@@ -465,7 +465,10 @@ def broadcast_weight_to_columns(dev: Device, size=2048):
 
 
 def slices_qkv(size=2048):
-    """One GEMV computing ``[q|k|v]`` into one buffer, each third read by its own consumer: realizes ``HandOff.SLICES``."""
+    """One GEMV computing ``[q|k|v]`` into one buffer, each third read by its own consumer: realizes ``HandOff.SLICES``.
+
+    A consumer reading part of a stream takes it off a memtile: the edges are staged.
+    """
     qkv = GEMV(M=3 * size, K=size, num_aie_columns=1, feed_b=True)
     third = size * np.dtype(bfloat16).itemsize
     readers = [SiLU(size=size, num_aie_columns=1) for _ in range(3)]
@@ -479,7 +482,32 @@ def slices_qkv(size=2048):
     recording = Recording.of_steps("toy_slices", steps, ["A", "x"], ["q", "k", "v"])
     region = Region(
         tuple(member(s.op) for s in recording.steps),
-        tuple(Edge(0, "C", k, "x") for k in (1, 2, 3)),
+        tuple(Edge(0, "C", k, "x", kind=EdgeKind.STAGED) for k in (1, 2, 3)),
+    )
+    return recording, region
+
+
+def halves_in_one_object(size=512):
+    """An add writing ``[p|q]`` as its one object a call, each half read whole by its own SiLU: ``HandOff.SLICES`` a core can hold.
+
+    Held in L1, the two SiLUs read their halves in place on the add's core,
+    the second through an alias of the add's buffer at its offset: one core's
+    two drains and two fills, within a core tile's channels.
+    """
+    add = ElementwiseAdd(size=2 * size, num_aie_columns=1, tile_size=2 * size)
+    half = size * np.dtype(bfloat16).itemsize
+    readers = [SiLU(size=size, num_aie_columns=1, tile_size=size) for _ in range(2)]
+    steps = sequences.steps(
+        (add, "a", "b", "pq"),
+        *(
+            (silu, BufferRef("pq", k * half, half), name)
+            for k, (silu, name) in enumerate(zip(readers, ("p", "q")))
+        ),
+    )
+    recording = Recording.of_steps("toy_halves", steps, ["a", "b"], ["p", "q"])
+    region = Region(
+        tuple(member(s.op) for s in recording.steps),
+        tuple(Edge(0, "y", k, "x", kind=EdgeKind.STAGED) for k in (1, 2)),
     )
     return recording, region
 

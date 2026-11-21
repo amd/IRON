@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
+from aie.utils import bfp
 
 from ..declare import Operator, Unresolvable
 from ..declare.composition import (
@@ -22,6 +23,7 @@ from ..declare.composition import (
     Schedule,
     Switch,
 )
+from ..declare.operand import Slicing
 from ..declare.profile import Profile
 from ..design import BuiltArray, OperatorDesign
 from ..image.step import Edge, EdgeKind, Fusion, FusionKind
@@ -677,13 +679,24 @@ def composed(
                 *((match[a], match[b]) for a, b in turns),
             )
             kept: list[tuple[int, str]] = []
+            slices: list[tuple[int, str, int]] = []
+            sliced: dict[tuple[int, str, bool], list[tuple[Operator, str, int]]] = {}
             for e in on_chip:
                 made = recording.steps[match[e.producer]]
-                (root_name,) = {
-                    ref.root
+                ((made_ref, made_buffer),) = [
+                    (ref, b)
                     for ref, b in zip(made.refs(), made.op.buffers)
                     if b.name == e.output
-                }
+                ]
+                (read_ref,) = [
+                    ref
+                    for ref, b in zip(
+                        recording.steps[match[e.consumer]].refs(),
+                        recording.steps[match[e.consumer]].op.buffers,
+                    )
+                    if b.name == e.input
+                ]
+                root_name = made_ref.root
                 if (
                     set(readers.get(root_name, [])) - set(match)
                     or root_name in recording.held
@@ -702,6 +715,30 @@ def composed(
                 # spliced into the producer's cores, and a cascade into or out
                 # of such a core runs core to core: the composer's to say.
                 grouped = {s for group in root.workers for s in group}
+                if (read_ref.start, read_ref.nbytes) != (
+                    made_ref.start,
+                    made_ref.nbytes,
+                ):
+                    at = (read_ref.start - made_ref.start) // bfp.itemsize(
+                        made_buffer.dtype
+                    )
+                    # A slice is read off a memtile, or in place on its
+                    # producer's core where the two share a worker.
+                    held = e.kind is EdgeKind.STREAM and any(
+                        {e.producer, e.consumer} <= set(group) for group in root.workers
+                    )
+                    if e.kind is not EdgeKind.STAGED and not held:
+                        raise NotImplementedError(
+                            f"building {e}, whose consumer reads part of what its "
+                            f"producer makes, as a {e.kind.value} edge is not "
+                            f"built yet: a slice is restaged through a memtile, "
+                            f"or read in place on its producer's core"
+                        )
+                    slices.append((match[e.consumer], e.input, at))
+                    sliced.setdefault((e.producer, e.output, held), []).append(
+                        (c, e.input, at)
+                    )
+                    continue
                 if (
                     e.kind is EdgeKind.STREAM
                     and any(
@@ -723,6 +760,34 @@ def composed(
                         f"not built yet: the composer builds it "
                         + ("neither way" if built is None else f"only {built.value}")
                     )
+            for (i, output, held), group in sliced.items():
+                made = recording.steps[match[i]].op._with_tunables(**given[i])
+                try:
+                    (source,) = [
+                        b
+                        for b in OperatorDesign(made.resolved()).op.buffers
+                        if b.name == output
+                    ]
+                    Slicing(
+                        source,
+                        [
+                            (
+                                next(
+                                    b
+                                    for b in OperatorDesign(c).op.buffers
+                                    if b.name == input_
+                                ),
+                                at,
+                            )
+                            for c, input_, at in group
+                        ],
+                        held,
+                    )
+                except ValueError as why:
+                    raise NotImplementedError(
+                        f"building {type(made).__name__}.{output}'s slices is not "
+                        f"built yet: {why}"
+                    ) from why
             # The first entry naming a step's tunable wins, as for its region.
             for s, named in zip(match, given):
                 for name, value in named.items():
@@ -768,6 +833,7 @@ def composed(
                             tuple(match[i] for i in group) for group in root.workers
                         ),
                         phases=chosen,
+                        slices=tuple(slices),
                     )
                 )
                 taken.update(match)

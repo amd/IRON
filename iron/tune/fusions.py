@@ -336,13 +336,15 @@ def _composed_module(
     packets: bool = False,
     phases: Sequence[int] | None = None,
     drains: int = 1,
+    slices: Sequence[tuple[int, str, int]] = (),
 ) -> ir.Module:
     """Return the one module ``fits`` places ``designs`` as, built the same way it does.
 
     Plain (``configuration``), or, given ``kind``, as ``kind``'s own fusion wires
     ``edges`` (and ``cascades`` over the cascade), each output ``kept`` drained
     to the host too, each of ``waits`` a phase apart, each member at its
-    chosen ``phases``, its host fills packet flows given ``packets`` and its
+    chosen ``phases``, each of ``slices`` read off a memtile (``Fusion.slices``),
+    its host fills packet flows given ``packets`` and its
     drains joined in runs of ``drains`` (``fused_configuration``,
     which also tells a pack's or a stream's own array per member, fuse=True, from a
     merge's shared one). Composing is cheap next to
@@ -373,6 +375,7 @@ def _composed_module(
             packets=packets,
             phases=None if phases is None else tuple(phases),
             drains=drains,
+            slices=tuple(slices),
         )
         configured, _ = fused_configuration("fused", fusion, list(designs.values()))
     return Program.compose([configured], entry=configured.runtimes[0]).resolve_program()
@@ -397,6 +400,7 @@ def group_fit_verdict(
     phases: Sequence[int] | None = None,
     packet_fills: bool = True,
     placer: str = SEQUENTIAL,
+    slices: Sequence[tuple[int, str, int]] = (),
 ) -> str | None:
     """Why ``placer`` refuses ``ops``' resolved designs sharing one device configuration (plain, or as ``kind``'s fusion wires ``edges``).
 
@@ -410,7 +414,8 @@ def group_fit_verdict(
     its drains joined in memtiles, unless ``packet_fills`` is False: a
     search pruning on "never faster narrower" holds that of circuits, not of
     fills sharing a channel. ``phases`` are its members' chosen
-    phases (``Fusion.phases``).
+    phases (``Fusion.phases``), and each of ``slices`` reads part of an output
+    off a memtile (``Fusion.slices``).
 
     Or None if they co-reside; kept under ``fit_cache``, keyed on the composed module's
     own text (``_composed_module``) and each design's build (``artifact_hash``, as
@@ -444,6 +449,7 @@ def group_fit_verdict(
             packets,
             phases,
             drains,
+            slices,
         )
         if isinstance(found, str):
             return found  # composing itself refused; no placement pass to cache
@@ -510,6 +516,7 @@ def _fit_record(
     packets: bool = False,
     phases: Sequence[int] | None = None,
     drains: int = 1,
+    slices: Sequence[tuple[int, str, int]] = (),
 ) -> tuple[str, Path] | str:
     """``ops`` composed into one module, its text and its verdict's file under ``fit_cache``; or why composing them refused.
 
@@ -530,6 +537,7 @@ def _fit_record(
             packets,
             phases,
             drains,
+            slices,
         )
     except NotImplementedError:
         raise

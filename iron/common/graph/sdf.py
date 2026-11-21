@@ -34,7 +34,7 @@ from aie.iron.kernel import ExternalFunction
 from aie.iron.kernels import Param
 from aie.iron.trace import Access, Scope, record
 from aie.iron.trace import Recording as Recorded
-from aie.utils import set_current_device
+from aie.utils import bfp, set_current_device
 
 from ..declare import Operator
 from ..declare.composition import Entry, Region
@@ -1299,6 +1299,35 @@ class Derivation:
             edge_channels.setdefault(edge, []).append(len(channels) - 1)
         return len(channels) - 1
 
+    @functools.cached_property
+    def slices(self) -> tuple[tuple[int, str, int], ...]:
+        """Each on-chip edge's ``(consumer, input, at)`` whose consumer reads a slice of its producer's output.
+
+        The slice starts at the producer's element ``at`` (``Fusion.slices``).
+
+        Raises:
+            ValueError: A consumer reads from inside one of its producer's
+                elements, or past what its producer makes.
+        """
+        found = []
+        for edge, p, c in self.wired:
+            made, read = self.refs[p][edge.output], self.refs[c][edge.input]
+            if edge.kind is EdgeKind.DDR or (read.start, read.nbytes) == (
+                made.start,
+                made.nbytes,
+            ):
+                continue
+            (source,) = [b for b in self.ops[p].buffers if b.name == edge.output]
+            (sink,) = [b for b in self.ops[c].buffers if b.name == edge.input]
+            at, skew = divmod(read.start - made.start, bfp.itemsize(source.dtype))
+            if skew or at < 0 or at + sink.elements > source.elements:
+                raise ValueError(
+                    f"{edge}: {sink.name} reads {read}, which is not a run of "
+                    f"whole elements of what {source.name} makes, {made}"
+                )
+            found.append((c, edge.input, at))
+        return tuple(found)
+
     def _streams(self, operand: Any, whole: bool = False) -> list[np.ndarray]:
         """Return each of ``operand``'s lanes' elements this call, in the order the lane moves them.
 
@@ -1336,10 +1365,12 @@ class Derivation:
         elements it holds; an emit actor a consumer lane, for each object it
         writes, holds the objects passed to it that hold its elements (in
         order, so every one up to the last it needs), writes the object, and
-        frees what no later object of its lane needs. A memtile must do that
-        much for any restaging; IRON's ``Staging`` plans the joins, splits and
-        joins split again among them, and whether IRON builds one is a
-        capability of its own. The producer's channels into the memtile are the edge's depth.
+        frees what no later object of its lane needs. A consumer reading part
+        of the producer's elements (a slice) is passed only the objects that
+        hold it. A memtile must do that much for any restaging; IRON's
+        ``Staging`` plans the joins, splits and joins split again among them,
+        and whether IRON builds one is a capability of its own. The
+        producer's channels into the memtile are the edge's depth.
         """
         programs, _, writes, reads, _ = built
         writer, readers = ends
@@ -1426,6 +1457,11 @@ class Derivation:
                 e = self._channel(built, edge, emit, reader, phase, False)
                 writes.setdefault((edge, "emit", j), []).append(e)
                 reads[(ins[j], reader)] = e
+        read = np.zeros(len(lane_of), dtype=bool)
+        for stream in consumed:
+            read[stream] = True
+        if not read.all():
+            return HandOff.SLICES
         fed = [set(t) for t in taken]
         feeds = [sum(lane in f for f in fed) for lane in range(len(produced))]
         if all(len(f) == 1 for f in fed) and all(n == 1 for n in feeds):
@@ -1601,6 +1637,7 @@ class Derivation:
         edge_channels: dict[Edge, list[int]] = {}
         hand_off: dict[Edge, HandOff] = {}
         feeds = Counter((p, edge.output) for edge, p, _ in self.wired)
+        slice_at = {(c, name): at for c, name, at in self.slices}
         # Per actor the host runs, the fifo it fills or drains.
         hosted: dict[int, ObjectFifo] = {}
         phases = self.region.phases
@@ -1687,24 +1724,26 @@ class Derivation:
                 self.obj_elements[p].get(edge.output),
                 self.obj_elements[c].get(edge.input),
             )
-            made, read = self.refs[p][edge.output], self.refs[c][edge.input]
-            if (read.start, read.nbytes) != (made.start, made.nbytes):
-                raise NotImplementedError(
-                    f"{edge}: reading part of what its producer makes (slices) "
-                    f"is not modelled yet"
-                )
+            made = self.refs[p][edge.output]
             source = next(
                 b for b in self.recorded[p][0].op.buffers if b.name == edge.output
             )
             sink = next(
                 b for b in self.recorded[c][0].op.buffers if b.name == edge.input
             )
-            if source.elements != sink.elements or source.dtype != sink.dtype:
+            # A reader of part of what its producer makes (a slice) takes the
+            # producer's elements from ``at`` on.
+            at = slice_at.get((c, edge.input), 0)
+            sliced = (c, edge.input) in slice_at
+            if source.dtype != sink.dtype or (
+                not sliced and source.elements != sink.elements
+            ):
                 raise ValueError(
                     f"{edge}: {source.name}'s {source.elements} elements of "
                     f"{np.dtype(source.dtype).name} and {sink.name}'s "
-                    f"{sink.elements} of {np.dtype(sink.dtype).name} are not one "
-                    f"buffer"
+                    f"{sink.elements} of {np.dtype(sink.dtype).name}"
+                    + (f" from its element {at}" if sliced else "")
+                    + " are not one buffer"
                 )
             unstreamed = [b.name for b in (source, sink) if not b.streamed]
             if unstreamed:
@@ -1735,8 +1774,10 @@ class Derivation:
             if sum(map(len, produced)) != sum(map(len, consumed)):
                 produced = self._streams(source, whole=True)
                 consumed = self._streams(sink, whole=True)
+            consumed = [lane + at for lane in consumed]
             if (
-                len(outs) != len(ins)
+                sliced
+                or len(outs) != len(ins)
                 or sizes[0] != sizes[1]
                 or not all(np.array_equal(a, b) for a, b in zip(produced, consumed))
             ):

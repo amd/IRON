@@ -39,7 +39,7 @@ from aie.passmanager import PassManager
 from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
-from ..declare.operand import Operand
+from ..declare.operand import Operand, Slicing
 from ..design import (
     BuiltArray,
     OperatorDesign,
@@ -339,6 +339,9 @@ def fused_configuration(
     }
     spliced: dict[int, Spliced] = {}
     spliced_from: dict[int, int] = {}
+    slice_at = {(c, name): at for c, name, at in fusion.slices}
+    sliced: dict[tuple[int, str], Any] = {}
+    slicings: dict[tuple[int, str], Slicing] = {}
     for design, j, own in zip(designs, fusion.steps, scalars, strict=True):
         into = [
             e
@@ -362,7 +365,7 @@ def fused_configuration(
             arrays[j] = spliced[j].array
             spliced_from[j] = e.producer
             continue
-        fed = {}
+        fed: dict[str, Operand | Any] = {}
         # A stream within one worker group whose lanes do not meet: restaged
         # in L1, linked on its lanes' cores once share() makes them.
         held: list[str] = []
@@ -370,8 +373,44 @@ def fused_configuration(
             if e.kind is EdgeKind.CASCADE:
                 continue
             (source,) = [b for b in arrays[e.producer].op.buffers if b.name == e.output]
+            if (j, e.input) in slice_at and (j, e.input) not in sliced:
+                # One split, on a memtile or in place on the producer's core,
+                # sends every slice of the output.
+                group = [
+                    d
+                    for d in fusion.edges
+                    if (d.producer, d.output) == (e.producer, e.output)
+                    and (d.consumer, d.input) in slice_at
+                ]
+                slicing = Slicing(
+                    source,
+                    [
+                        (
+                            next(
+                                b
+                                for b in designs[
+                                    fusion.steps.index(d.consumer)
+                                ].op.buffers
+                                if b.name == d.input
+                            ),
+                            slice_at[(d.consumer, d.input)],
+                        )
+                        for d in group
+                    ],
+                    e in joined_in,
+                )
+                by_start = sorted(group, key=lambda d: slice_at[(d.consumer, d.input)])
+                sliced.update(
+                    ((d.consumer, d.input), fifo)
+                    for d, fifo in zip(by_start, slicing.build(), strict=True)
+                )
+                slicings |= {(d.consumer, d.input): slicing for d in group}
             (sink,) = [b for b in design.op.buffers if b.name == e.input]
-            if e in joined_in and sink.mismatch(source) is not None:
+            if (
+                e in joined_in
+                and (j, e.input) not in slice_at
+                and sink.mismatch(source) is not None
+            ):
                 if (
                     (e.producer, e.output) in kept
                     or not source.lane_fifos
@@ -386,7 +425,7 @@ def fused_configuration(
                         f"too, or bound without its fifos, is not built yet"
                     )
                 held.append(e.input)
-            fed[e.input] = source
+            fed[e.input] = sliced.get((j, e.input), source)
         arrays[j] = BuiltArray(
             design,
             words,
@@ -432,6 +471,12 @@ def fused_configuration(
             ),
             delivers={o: t for (p, o), t in delivered.items() if p == j},
         )
+        # A slice read in place pairs its core with its producer's, and links
+        # once share() makes them one (``Slicing.wire``).
+        for b in arrays[j].op.buffers:
+            slicing = slicings.get((j, b.name))
+            if slicing is not None and slicing.held:
+                b.restage, b.staged = slicing, [sliced[(j, b.name)]]
         for producer, output in fusion.kept:
             if producer == j:
                 (drained,) = [b for b in arrays[j].op.buffers if b.name == output]

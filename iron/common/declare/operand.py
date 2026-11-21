@@ -1529,6 +1529,181 @@ class Staging:
         return fifo
 
 
+class Slicing(Staging):
+    """``source``'s lanes gathered whole on a memtile, each of several inputs reading its slice of it.
+
+    Each sink reads part of what ``source`` makes, from the element of
+    ``source`` its slice starts at. A memtile holds all of ``source``, its
+    lanes joined in element order (``Staging.joined``), and one split sends
+    each sink its slice in turn, so the slices, in order of their starts,
+    cover ``source`` end to end. Derived from both sides' ``transfers()``.
+
+    ``held``, the slices are read in place on ``source``'s core instead: its
+    one lane's one object a call is the pool a split on that core shares
+    with every sink, each reading its slice as its one object a call. Each
+    sink's lane runs on ``source``'s lane's core (``pairs``); ``build``
+    makes the sinks' fifos, and ``wire`` links them once the core's tile is
+    known.
+
+    Args:
+        source: The output sliced.
+        sinks: Each one-lane input and the element of ``source`` its slice
+            starts at.
+        held: Read the slices in place on ``source``'s core, not off a
+            memtile.
+
+    Raises:
+        ValueError: A side moves a per-call length; ``source``'s lanes do not
+            each move one run of its elements in order; a sink is not one
+            lane moving its slice in order, or of ``source``'s type; fewer
+            than two slices, or more than a memtile sends, or slices that do
+            not cover ``source`` end to end; ``source`` is past a memtile's
+            memory; or, ``held``, ``source`` moves more than one lane's one
+            object a call, or a sink more than one object.
+    """
+
+    def __init__(
+        self, source: Operand, sinks: Sequence[tuple[Operand, int]], held: bool = False
+    ) -> None:
+        edge = f"{type(source.op).__name__}.{source.name}'s slices"
+        self.source, self.held = source, held
+        self.pairs = [(0, 0)]
+        self.links: list[tuple[Any, ...]] = []
+        self.sinks = sorted(sinks, key=lambda s: s[1])
+        self.sink = self.sinks[0][0]
+        streams = []
+        for side in (source, *(s for s, _ in self.sinks)):
+            transfers = side.transfers()
+            if any(w is not None for _, _, w, _ in transfers):
+                raise ValueError(
+                    f"{edge}: {side.name}'s lanes move a per-call length; a slice "
+                    f"bounded per call is not built yet"
+                )
+            if side is not source and (side.lanes != 1 or side.dtype != source.dtype):
+                raise ValueError(
+                    f"{edge}: {side.name} reads {side.lanes} lanes of "
+                    f"{bfp.dtype_name(side.dtype)}; a slice is read on one lane of "
+                    f"{bfp.dtype_name(source.dtype)}"
+                )
+            taps = {lane: tap for lane, tap, _, _ in transfers}
+            index = np.arange(side.elements)
+            streams.append([taps[lane].gather(index) for lane in range(side.lanes)])
+        produced = sorted(streams[0], key=lambda s: int(s[0]))
+        self.lanes = sorted(range(source.lanes), key=lambda k: int(streams[0][k][0]))
+        if not np.array_equal(np.concatenate(produced), np.arange(source.elements)):
+            raise ValueError(
+                f"{edge}: {source.name}'s lanes do not each move one run of its "
+                f"elements in order"
+            )
+        starts = [at for _, at in self.sinks]
+        reach = [at + s.elements for s, at in self.sinks]
+        unread = [
+            f"{type(s.op).__name__}.{s.name}"
+            for (s, _), (stream,) in zip(self.sinks, streams[1:], strict=True)
+            if not np.array_equal(stream, np.arange(s.elements))
+        ]
+        if unread:
+            raise ValueError(
+                f"{edge}: {', '.join(unread)} do not read their slice in order"
+            )
+        if (
+            len(self.sinks) < 2
+            or starts[0] != 0
+            or starts[1:] != reach[:-1]
+            or reach[-1] != source.elements
+        ):
+            raise ValueError(
+                f"{edge}: slices from elements {starts} to {reach} do not cover "
+                f"{source.name}'s {source.elements} end to end, in two or more"
+            )
+        dev = source.op.dev
+        if dev is None:
+            raise Unresolvable("Slicing needs a bound device")
+        tm = get_target_model(dev.resolve())
+        row = next(r for r in range(tm.rows()) if tm.is_mem_tile(0, r))
+        self.fan_in = tm.get_num_dest_switchbox_connections(0, row, WireBundle.DMA)
+        self.fan_out = tm.get_num_source_switchbox_connections(0, row, WireBundle.DMA)
+        self.capacity = tm.get_mem_tile_size()
+        self.holder = "a memtile"
+        if held:
+            self.capacity = tm.get_local_memory_size()
+            self.holder = "a core tile"
+        self.item = bfp.itemsize(source.dtype)
+        # Held, every slice is read in place: no channel sends it.
+        if not held and len(self.sinks) > self.fan_out:
+            raise ValueError(
+                f"{edge}: {len(self.sinks)} slices, more than a memtile's "
+                f"{self.fan_out} sending channels"
+            )
+        if source.elements * self.item > self.capacity:
+            raise ValueError(
+                f"{edge}: {source.name}'s {source.elements * self.item} bytes are "
+                f"past {self.holder}'s {self.capacity}"
+            )
+        self.slots = [len(streams[0][k]) for k in self.lanes]
+        if held and (
+            source.lanes != 1
+            or math.prod(source.obj_shape) != source.elements
+            or any(math.prod(s.obj_shape) != s.elements for s, _ in self.sinks)
+        ):
+            raise ValueError(
+                f"{edge}: held in L1, a slice is read in place only as one "
+                f"object of its producer's one lane's one object a call"
+            )
+
+    def build(self) -> list[ObjectFifo]:
+        """Wire the memtile over ends of ``source``'s lanes (``Operand.reader``).
+
+        ``held``, make each sink's fifo, as deep as ``source``'s lane, for
+        ``wire`` to link on ``source``'s core.
+
+        Returns:
+            Per sink, in order of their starts (``sinks``), the fifo it
+            reads, of its ``obj_type``.
+        """
+        source = self.source
+        if self.held:
+            depth = source.lane_fifos[0].depth
+            fifos = [ObjectFifo(s.obj_type, depth=depth) for s, _ in self.sinks]
+            self.links = [("distribute", 0, fifos)]
+            for sink, _ in self.sinks:
+                source.feeds.append(sink)
+            return fifos
+        if source.keeps_host:
+            # The host's drain keeps each lane's bound end.
+            source.read_lanes.update(range(source.lanes))
+        whole = self.joined([source.reader(k) for k in self.lanes], self.slots, None)
+        fifos = whole.cons().split(
+            [at for _, at in self.sinks],
+            obj_types=[s.obj_type for s, _ in self.sinks],
+        )
+        for sink, _ in self.sinks:
+            source.feeds.append(sink)
+        return fifos
+
+    def wire(self, source_tiles: Sequence[Any], sink_tiles: Sequence[Any]) -> None:
+        """Link what ``build`` made, held: a split on ``source``'s lane's core, every slice read in place.
+
+        Once: each sink's edge asks, and the first links them all.
+
+        Args:
+            source_tiles: ``source``'s lane's core tile.
+            sink_tiles: The sink's core tile, ``source``'s lane's.
+        """
+        if not self.links:
+            return
+        ((_, lane, fifos),) = self.links
+        self.links = []
+        tile = source_tiles[lane]
+        end = self.source.reader(lane)
+        self._shares(end, tile)
+        for fifo in fifos:
+            fifo.delegate_tile = tile
+        ObjectFifoLink(
+            end, [f.prod() for f in fifos], tile, [], [at for _, at in self.sinks]
+        )
+
+
 def _walk(index: np.ndarray) -> tuple[int, list[int], list[int]] | None:
     """Return ``(offset, sizes, strides)`` of the strided walk visiting ``index`` in order, outermost dimension first, or None where none does.
 

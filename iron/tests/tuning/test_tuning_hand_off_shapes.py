@@ -29,6 +29,7 @@ from iron.tests.support.tools import DEVICES
 from iron.tests.support.toys_edges import (
     broadcast_weight_to_columns,
     fan_out_norm_qkv,
+    halves_in_one_object,
     held_in_l1,
     join_in_pairs,
     join_of_two_streams,
@@ -76,24 +77,13 @@ _REALIZES = {
     "layout_transpose": HandOff.LAYOUT,
 }
 
-# The hand-offs the analysis derives today; a slice's objects are not
-# modelled yet, so its case stays strict xfail.
-_DERIVED = set(SHAPES) - {"slices_qkv"}
-
 # Any ratio and broadcast are representable gaps today (operand.py:260-299):
 # searchable, strict xfail, compiler-failure entries once the hardware could
 # run them and the compiler refuses.
 REPRESENTABLE_GAPS = {"ratio_two_into_three", "ratio_three_into_two", "broadcast"}
 
 
-@pytest.mark.parametrize(
-    "shape",
-    [
-        # An edge reading part of a buffer (a slice) is not proposed yet.
-        pytest.param(s, marks=unbuilt) if s == "slices_qkv" else s
-        for s in sorted(SHAPES)
-    ],
-)
+@pytest.mark.parametrize("shape", sorted(SHAPES))
 @pytest.mark.usefixtures("device")
 def test_a_hand_off_shape_round_trips_through_the_profile(shape, tmp_path, device):
     """Each hand-off shape round-trips through the profile, and ``candidates`` proposes it."""
@@ -112,13 +102,7 @@ def test_a_hand_off_shape_round_trips_through_the_profile(shape, tmp_path, devic
 
 
 @pytest.mark.usefixtures("device")
-@pytest.mark.parametrize(
-    "shape",
-    [
-        pytest.param(name, marks=() if name in _DERIVED else unbuilt)
-        for name in sorted(SHAPES)
-    ],
-)
+@pytest.mark.parametrize("shape", sorted(SHAPES))
 def test_the_analysis_derives_the_named_hand_off(shape, device):
     """The dataflow analysis derives every edge of each toy as the hand-off its lane counts realize; the toy never states it."""
     recording, region = SHAPES[shape](device) if shape in SIZED else SHAPES[shape]()
@@ -136,6 +120,7 @@ _BUILT = {
         "layout_transpose",
         "ratio_three_into_two",
         "ratio_two_into_three",
+        "slices_qkv",
         "split_in_two",
     },
 }
@@ -201,6 +186,20 @@ def test_tuner_keeps_the_shape_that_pays_against_narrowing_to_equal_lanes(device
     start = Profile()
     found = search([Timed(recording)], start, device, budget_s=60.0)
     assert any(isinstance(e.root, Region) and e.root.edges for e in found.entries())
+
+
+def test_slices_leaving_the_end_of_their_buffer_unread_wait(device):
+    """GEMV's ``[q|k|v]`` fused with q's and k's readers alone: not built yet, so ``fit`` waits before any build.
+
+    One memtile split sends each slice on to the next's start and the last
+    on to the buffer's end, so v's third, read off the chip, would reach
+    k's reader too.
+    """
+    recording, region = slices_qkv()
+    profile = Profile()
+    profile.add_entry(Entry(Region(region.parts[:3], region.edges[:2])))
+    with pytest.raises(NotImplementedError, match="do not cover"):
+        fit(profile, [Timed(recording)], device)
 
 
 def test_a_restage_over_a_memtiles_memory_is_refused_before_any_build(device):
@@ -286,6 +285,7 @@ def test_feed_refuses_a_held_input_broadcast_flips_it(device):
 # their cores in a memtile, so its layout held in L1 is RMSNorm spliced into
 # GEMM's cores; QKV's slices held in L1 are views of one core's buffer.
 HELD_IN_L1 = {
+    "halves_in_one_object": halves_in_one_object,
     "join_rows_into_one": join_rows_into_one,
     "split_into_rows": split_into_rows,
     "ratio_two_into_three_rows": ratio_two_into_three_rows,
