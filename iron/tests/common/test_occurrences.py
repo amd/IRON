@@ -12,6 +12,7 @@ from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
 from iron.tests.support import sequences
+from iron.tests.support import toys_composition as toys
 from iron.tests.support.fusable import gemv_silu_mul
 
 M = 256
@@ -105,3 +106,20 @@ def test_an_edge_naming_an_operand_its_step_lacks_is_refused():
     region = Region(_chain().parts, (Edge(0, "C", 1, "z"),))
     with pytest.raises(ValueError, match="no operand 'z'"):
         _two_layers().occurrences(Entry(region))
+
+
+def test_a_fan_in_repeated_eight_calls_a_command_matches_once_a_call():
+    """Eight GEMV partials summed by seven adds, eight calls a command: one match a call, each within its own call's steps.
+
+    Its partials share one shape and no edge, so placed in recorded order every
+    choice of eight of the 64 GEMVs is tried before an add can refuse one; placed
+    along the edges, each partial is the one its add reads.
+    """
+    recording = toys.gemv_fan_in_recording("eight_calls", 64, 256, 8)
+    entry = Entry(root=toys.cascade_reducer_region(recording))
+    single = recording.occurrences(entry)
+    repeated = recording.repeated(8)
+    steps = len(recording.steps)
+    assert repeated.occurrences(entry) == tuple(
+        tuple(s + j * steps for s in single[0]) for j in range(8)
+    )
