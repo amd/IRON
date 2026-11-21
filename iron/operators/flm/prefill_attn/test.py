@@ -53,6 +53,31 @@ OPERATORS = {
             (0, 512, 1024),
         ],
     ),
+    # Head dim 128 (Qwen3, the Llama-shaped models): causal on the sliding
+    # design with the window at the whole cache, so no key ever leaves it.
+    "attn128": (
+        PrefillAttention,
+        dict(max_context=2048, head_dim=128),
+        [
+            (0, 128, 2048),
+            (0, 512, 2048),
+            (128, 384, 2048),
+            # Every key from token 0 to 2047: past any 512-key window.
+            (1024, 2048, 2048),
+            (0, 256, 512),
+        ],
+    ),
+    "swa128": (
+        PrefillSlidingAttention,
+        dict(max_context=2048, window=512, head_dim=128),
+        [
+            (0, 128, 2048),
+            (0, 1024, 2048),
+            (512, 1024, 2048),
+            (1024, 2048, 2048),
+            (0, 512, 1024),
+        ],
+    ),
 }
 
 
@@ -123,7 +148,12 @@ def _build(kind, **overrides):
 
 # One 512-token prompt chunk per operator, the chunk length of Gemma 4's engine.
 # The sliding-window chunk starts past the window, so the window cuts its keys.
-BENCH = {("attn", 0, 512, 1024, 1), ("swa", 512, 1024, 2048, 1)}
+# At head dim 128, a chunk deep in the cache, where attention costs most.
+BENCH = {
+    ("attn", 0, 512, 1024, 1),
+    ("swa", 512, 1024, 2048, 1),
+    ("attn128", 1024, 2048, 2048, 1),
+}
 
 # Every range at the GQA ratio the other tests in this file use (num_kv_heads=1),
 # plus one case per kind at ratio 4 (num_kv_heads=2) to confirm the grouping
@@ -156,6 +186,15 @@ def test_one_image_serves_every_range(kind):
     for seed, i in enumerate((0, 1, 1, 2, 4, 3, 0)):
         L_begin, L_end, max_l = ranges[i]
         _check(op, L_begin, L_end, max_l, seed)
+
+
+@pytest.mark.parametrize(
+    "cls, head_dim", [(PrefillAttention, 256), (PrefillSlidingAttention, 512)]
+)
+def test_refuses_unbuilt_head_dims(cls, head_dim):
+    """Each operator names the head dims it builds."""
+    with pytest.raises(ValueError, match="head_dim"):
+        cls(max_context=1024, num_heads=NUM_HEADS, num_kv_heads=1, head_dim=head_dim)
 
 
 @pytest.mark.parametrize(

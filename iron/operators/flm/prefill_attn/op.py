@@ -15,7 +15,6 @@ from iron.operators.flm.prefill_attn import reference
 from iron.operators.flm.prefill_attn.design import (
     CAUSAL,
     SLIDING,
-    Geometry,
     Variant,
     prefill_attn,
 )
@@ -28,7 +27,8 @@ class _PrefillAttentionBase(Operator):
     and the cache's row count are set per call; see README.md.
     """
 
-    variant: ClassVar[Variant]
+    # The head dims the operator builds; the first is the default.
+    head_dims: ClassVar[tuple[int, ...]]
     # Keys per query, including the query's own key. None: every key up to the
     # query.
     window = None
@@ -36,7 +36,7 @@ class _PrefillAttentionBase(Operator):
     max_context: int = param()
     num_heads: int = param()
     num_kv_heads: int = param()
-    head_dim: int = param(derive=lambda op: Geometry.of(op.kernel()).dh, repr=False)
+    head_dim: int = param(default=lambda op: op.head_dims[0])
     qo_len: int = param(
         derive=lambda op: op.max_context * op.num_heads * op.head_dim, repr=False
     )
@@ -53,13 +53,25 @@ class _PrefillAttentionBase(Operator):
     L_end = per_call(np.int32)
     max_l = per_call(np.int32)
 
+    @property
+    def variant(self) -> Variant:
+        """Return the design the head dim runs on."""
+        raise NotImplementedError
+
     def kernel(self) -> ExternalFunction:
-        """Return the variant's kernel."""
+        """Return the variant's kernel, built for the head dim."""
         # The factory reads the architecture of the bound device.
         self.dev
+        if self.variant.windowed:
+            return self.variant.factory(head_dim=self.head_dim)
         return self.variant.factory()
 
     def validate(self) -> None:
+        if self.head_dim not in self.head_dims:
+            dims = " or ".join(map(str, self.head_dims))
+            raise ValueError(
+                f"{type(self).__name__}: head_dim ({self.head_dim}) must be {dims}"
+            )
         for name in ("max_context", "num_heads", "num_kv_heads"):
             if vars(self)[name] <= 0:
                 raise ValueError(
@@ -116,13 +128,33 @@ class _PrefillAttentionBase(Operator):
 
 
 class PrefillAttention(_PrefillAttentionBase):
-    """Causal prefill attention with a head dim of 512, from a KV cache."""
+    """Causal prefill attention with a head dim of 512 or 128, from a KV cache.
 
-    variant = CAUSAL
+    128 runs on the sliding-window design with a window of the whole cache.
+    """
+
+    head_dims = (512, 128)
+
+    @property
+    def variant(self) -> Variant:
+        """Return the global design at 512, else the sliding-window one."""
+        return CAUSAL if self.head_dim == 512 else SLIDING
+
+    @property
+    def window(
+        self,
+    ) -> int | None:  # pyright: ignore[reportIncompatibleVariableOverride]
+        """Return None at 512; at 128, the cache's rows, which no query sees past."""
+        return None if self.head_dim == 512 else self.max_context
 
 
 class PrefillSlidingAttention(_PrefillAttentionBase):
-    """Sliding-window causal prefill attention with a head dim of 256, from a KV cache."""
+    """Sliding-window causal prefill attention with a head dim of 256 or 128, from a KV cache."""
 
-    variant = SLIDING
+    head_dims = (256, 128)
     window: int = param(default=512)
+
+    @property
+    def variant(self) -> Variant:
+        """Return the sliding-window design."""
+        return SLIDING
