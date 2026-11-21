@@ -12,14 +12,18 @@ each channel a stream in and a stream out; read alone is a weight-bound
 request.
 
 ``python -m iron.tune.ddr`` measures the attached NPU and writes its curves,
-under its power mode, to the cost store (``CostModel.ddr``).
+under its part and power mode, to the cost store (``CostModel.ddr``). They
+are read back only on that part, in that mode, at the core clock they were
+measured at: another part (Strix, Krackan) waits until it is measured.
 """
 
 from __future__ import annotations
 
 import argparse
 import dataclasses
+import subprocess
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 
 import aie.utils as aie_utils
 import numpy as np
@@ -31,8 +35,8 @@ from iron.common.testing import run_test, vectors
 from iron.operators.copy import Copy
 from iron.operators.gemv import GEMV
 
-from .costmodel import CostModel
-from .measure import pmode
+from .costmodel import REFITS, CostModel
+from .measure import platform
 
 # bf16 elements a stream moves, the sizes its slope is fitted across.
 PER_STREAM = (1 << 17, 1 << 18, 1 << 19, 1 << 20)
@@ -157,13 +161,26 @@ class Ceiling:
         return cls(core_mhz, mixed, objects, read)
 
     @classmethod
-    def stored(cls, device: str) -> Ceiling | None:
-        """Return ``device``'s ceiling in the NPU's present power mode, as the cost store keeps it; None where it is not measured."""
-        model = CostModel.load(device)
-        if model is None or not model.ddr:
+    def stored(cls, device: str, directory: Path = REFITS) -> Ceiling | None:
+        """Return ``device``'s ceiling on the attached part in its present power mode, as the cost store keeps it.
+
+        None where it is not measured on that part in that mode, it was
+        measured at another core clock than the runtime's, or no part can be
+        read (no XRT).
+        """
+        model = CostModel.load(device, directory)
+        runtime = aie_utils.DefaultNPURuntime
+        if model is None or not model.ddr or runtime is None:
             return None
-        kept = model.ddr.get(pmode())
-        return None if kept is None else cls.from_json(kept)
+        try:
+            report = platform()
+        except (OSError, subprocess.CalledProcessError, RuntimeError):
+            return None
+        kept = model.ddr.get(report["Name"], {}).get(report["Power Mode"])
+        if kept is None:
+            return None
+        ceiling = cls.from_json(kept)
+        return ceiling if ceiling.core_mhz == float(runtime.core_mhz) else None
 
     @classmethod
     def from_json(cls, data: Mapping) -> Ceiling:
@@ -187,14 +204,15 @@ def main() -> None:
     device = require_device()
     name = device.name
     ceiling = Ceiling.measure(device)
-    mode = pmode()
+    report = platform()
+    part, mode = report["Name"], report["Power Mode"]
     for field in FIELDS:
         curve = ", ".join(f"{k}: {v:.2f}" for k, v in vars(ceiling)[field].items())
         print(
-            f"{name} ({mode}) {field}, bytes a stream a cycle at {ceiling.core_mhz:.0f} MHz: {curve}"
+            f"{part} ({mode}) {field}, bytes a stream a cycle at {ceiling.core_mhz:.0f} MHz: {curve}"
         )
     model = CostModel.load(name) or CostModel()
-    model.ddr[mode] = ceiling.as_json()
+    model.ddr.setdefault(part, {})[mode] = ceiling.as_json()
     print(f"wrote {model.save(name)}")
 
 

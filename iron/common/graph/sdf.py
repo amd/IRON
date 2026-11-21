@@ -578,7 +578,8 @@ class Derivation:
         device: The device every operator is built for.
         values: The call's per-call values, by name (``Timed.values``).
         rates: The device's measured DDR rates (``Analysis.rates``); where
-            given, each host transfer is an actor that takes time.
+            given and not empty, each host transfer is an actor that takes
+            time.
 
     Raises:
         NotImplementedError: What the analysis does not model yet: a
@@ -608,7 +609,8 @@ class Derivation:
         self.match = matches[0]
         self.device = device
         self.values = dict(values or {})
-        self.rates = None if rates is None else dict(rates)
+        # No rates measured are none given: the host streams wait on them.
+        self.rates = dict(rates) if rates else None
         self.wired, _ = region.wiring()
         groups = [set(group) for group in region.workers]
         # A carry across calls is no splice within the call: its initial
@@ -864,20 +866,16 @@ class Derivation:
         self.links = [link for _, recorded in self.recorded for link in recorded.links]
         self._through_links(self.links)
 
-    def _actor_phases(
-        self, of_step: Sequence[int], channels: Sequence[Channel], actors: int
-    ) -> list[int] | None:
-        """Return each actor's phase as the build's phased fusion groups it (``compose.phases``), or None where the composer does not group the steps.
+    def _step_phases(self) -> list[int] | None:
+        """Return each of the region's steps' phase as the build's phased fusion groups them (``compose.phases``).
 
-        A region without chosen phases or a DDR edge runs in one. A core or
-        memtile link is its step's. An actor the analysis adds (a host
-        stream, a memtile restaging an edge) is that of the actors it writes
-        to, or, writing to none, of those it reads from.
+        A region without chosen phases or a DDR edge runs in one. None where
+        the composer does not group the steps.
         """
         if self.region.phases is None and not any(
             e.kind is EdgeKind.DDR for e in self.region.edges
         ):
-            return [0] * actors
+            return [0] * len(self.match)
         alone = Profile()
         alone.add_entry(Entry(self.region))
         arrays = {s: array for s, (array, _) in zip(self.match, self.recorded)}
@@ -888,7 +886,24 @@ class Derivation:
                 step = compose.phases(fusion, arrays)
         except (NotImplementedError, ValueError):
             return None
-        phase = {a: step[self.match[i]] for a, i in enumerate(of_step)}
+        return [step[s] for s in self.match]
+
+    def _actor_phases(
+        self,
+        grouped: Sequence[int] | None,
+        of_step: Sequence[int],
+        channels: Sequence[Channel],
+        actors: int,
+    ) -> list[int] | None:
+        """Return each actor's phase, its steps' phases ``grouped`` (``_step_phases``), or None where the composer does not group them.
+
+        A core or memtile link is its step's. An actor the analysis adds (a
+        host stream, a memtile restaging an edge) is that of the actors it
+        writes to, or, writing to none, of those it reads from.
+        """
+        if grouped is None:
+            return None
+        phase = {a: grouped[i] for a, i in enumerate(of_step)}
         while len(phase) < actors:
             known = dict(phase)
             for a in range(actors):
@@ -1640,6 +1655,9 @@ class Derivation:
         slice_at = {(c, name): at for c, name, at in self.slices}
         # Per actor the host runs, the fifo it fills or drains.
         hosted: dict[int, ObjectFifo] = {}
+        # One phase source for channels and actors: the composer's grouping,
+        # else the chosen phases, whose period then waits (Flow.period).
+        grouped = self._step_phases()
         phases = self.region.phases
         uncarried = [
             f"{edge} carries {self.refs[p][edge.output].root} into the next call "
@@ -1651,7 +1669,7 @@ class Derivation:
             and self.refs[p][edge.output].root not in self.carried
         ]
         for n, (edge, p, c) in enumerate(self.wired):
-            phase = phases[n] if phases else 0
+            phase = grouped[c] if grouped is not None else phases[n] if phases else 0
             # Spliced, a core's tile stays on the core: its stage reads it.
             # A cascade into or out of such cores runs core to core.
             if edge in self.spliced or (
@@ -1838,7 +1856,7 @@ class Derivation:
                             for acquire in (True, False)
                         ]
                     )
-        chosen = self.region.step_phases()
+        chosen = grouped if grouped is not None else self.region.step_phases()
         for fifo in writer.keys() & readers.keys():
             if fifo in writes or any((fifo, a) in reads for a in readers[fifo]):
                 continue
@@ -1894,7 +1912,9 @@ class Derivation:
             )
             fired.append([follows[i] for i in work[-1]])
         flow = Flow(
-            channels, events, self._actor_phases(of_step, channels, len(events))
+            channels,
+            events,
+            self._actor_phases(grouped, of_step, channels, len(events)),
         )
         why = flow.balance()
         depths, deadlock = flow.minimum_depths(fixed)

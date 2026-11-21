@@ -412,7 +412,9 @@ def candidates(
     planned: list[tuple[Entry | Version, str, object]] = []
     cores = device.cols * len(device.core_rows)
     queue = get_target_model(device.resolve()).get_dma_task_queue_depth()
-    ceiling = Ceiling.stored(device.name)
+    # Read once a region is analysed: it asks the NPU for its power mode.
+    ceiling: Ceiling | None = None
+    looked = False
     for timed in calls:
         recording = timed.recording
         for entry in profile.entries():
@@ -444,6 +446,8 @@ def candidates(
                         continue
                     planned.append((entry, name, value))
                     yield PlanRegion(entry, name, value, touches)
+            if not looked:
+                ceiling, looked = Ceiling.stored(device.name), True
             try:
                 analysis = Derivation(
                     root,
@@ -1001,6 +1005,9 @@ def fit(
     images = 0
     versions: set[Version] = set()
     ranged: list[tuple[Timed, Variants]] = []
+    # The knee's rates, read once a region is analysed (``candidates``).
+    ceiling: Ceiling | None = None
+    looked = False
     for timed in calls:
         recording = timed.recording
         if recording.version in versions:
@@ -1534,8 +1541,16 @@ def fit(
                         f"cores of {device.resolve()}'s {cascade_cols} columns and "
                         f"{cascade_rows} rows",
                     )
+            if not looked:
+                ceiling, looked = Ceiling.stored(device.name), True
             try:
-                derivation = Derivation(region, recording, device, timed.values)
+                derivation = Derivation(
+                    region,
+                    recording,
+                    device,
+                    timed.values,
+                    None if ceiling is None else ceiling.mixed,
+                )
             except NotImplementedError as e:
                 waiting.append(str(e))
                 continue
@@ -1662,6 +1677,21 @@ def fit(
                         "analysis",
                         f"{edge} is a {edge.kind.value}, whose lanes meet as "
                         f"they are; its {shape.value} hand-off needs a restage",
+                    )
+                # Below its least depth an edge deadlocks however deep the rest.
+                below = [
+                    f"{e} is held {e.depth} deep, below its least depth, "
+                    f"{analysis.min_depth[e]}"
+                    for e, _, _ in derivation.wired
+                    if e.depth is not None
+                    and e in analysis.min_depth
+                    and e.depth < analysis.min_depth[e]
+                ]
+                if below:
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"at its chosen depths, it deadlocks: {below[0]}",
                     )
                 why = analysis.deadlock(
                     {e: e.depth for e, _, _ in derivation.wired if e.depth is not None}

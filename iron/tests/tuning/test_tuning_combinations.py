@@ -47,6 +47,7 @@ _BUILT_COMBOS = {
         (HandOff.EQUAL, "skip", "memtile", "min_minus_one", "same", "recorded"),
         (HandOff.SLICES, "skip", "ddr", "min_minus_one", "same", "recorded"),
         (HandOff.RATIO, "diamond", "ddr", "min_minus_one", "same", "recorded"),
+        (HandOff.LAYOUT, "chain", "ddr", "min_minus_one", "same", "recorded"),
         (HandOff.SPLIT, "through_memory", "memtile", "min", "same", "recorded"),
         (HandOff.LAYOUT, "feedback", "memtile", "min", "same", "recorded"),
         (HandOff.EQUAL, "chain", "l1", "min_minus_one", "same", "recorded"),
@@ -211,7 +212,9 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(
     The depth is resolved from ``analyze`` inside this test body, never at
     collection or in the toy builder: a hard-coded depth is not the minimum
     for every edge, so only the analysis, run on this toy's own region and
-    recording, says what minimum/knee are here.
+    recording, says what minimum/knee are here. It is the analysis ``fit``
+    runs, at the device's stored DDR rates, and one below the minimum is
+    refused naming that minimum, so the minimum is the boundary.
     """
     shape, role, held, depth, rate, size = combo
     _, recording, region, index = combination_toy(device, *combo)
@@ -231,16 +234,16 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(
         None if ceiling is None else ceiling.mixed,
     )
     edge = region.edges[index]
-    value = depth_from_bounds(
-        depth, analysis.min_depth[edge], analysis.knee_depth[edge]
-    )
-    resolved = with_resolved_depth(region, index, value)
+    least = analysis.min_depth[edge]
+    knee = analysis.knee_depth[edge] if depth in ("knee", "more") else least
+    resolved = with_resolved_depth(region, index, depth_from_bounds(depth, least, knee))
     profile = Profile()
     profile.add_entry(Entry(resolved))
     verdict = fit(profile, [call], device)
     if depth == "min_minus_one":
         assert not verdict.ok
         assert verdict.stage == "analysis"
+        assert f"below its least depth, {least}" in (verdict.why or "")
         return
     if refused:
         assert not verdict.ok
