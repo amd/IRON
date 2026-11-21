@@ -29,6 +29,8 @@ from typing import Literal, Protocol
 import numpy as np
 from aie import ir
 from aie.dialects.aie import WireBundle, get_target_model
+from aie.iron import Worker
+from aie.iron.dataflow.objectfifo import ObjectFifo, ObjectFifoHandle
 from aie.iron.device import Device
 from aie.utils import bfp, set_current_device
 from aie.utils.compile.jit.params import OperatorParam
@@ -48,7 +50,7 @@ from ..common.declare.composition import (
     Version,
     refinement,
 )
-from ..common.declare.operand import Staging
+from ..common.declare.operand import PastMemtile, Staging
 from ..common.design import OperatorDesign
 from ..common.graph.carried import CarriedLoop
 from ..common.graph.coded import CodedWeight, encode_all
@@ -886,8 +888,10 @@ def fit(
     lower bounds from the target model, so they never refuse what fits: the
     cores its steps record (steps sharing a worker counted once, at the most
     any of them takes), each edge held at a chosen depth against one
-    tile's memory, and through a memtile against its buffer descriptors, and
-    its cascades: each from one core to another, at most one into and one
+    tile's memory, and through a memtile against its buffer descriptors, each
+    core's fifo ends moved by DMA against its buffer descriptors, an object
+    each (``_bds_past``), each staged edge's rounds as ``Staging`` plans them
+    against a memtile's memory, and its cascades: each from one core to another, at most one into and one
     out of a core, and a chain no longer than a path east and south across
     the array. The
     dataflow analysis then finds whether the region's steps are convex (no
@@ -1119,6 +1123,8 @@ def fit(
             model.get_num_bds(0, mem_row),
         ),
     }
+    core_row = next(r for r in rows if model.is_core_tile(0, r))
+    core_bds = model.get_num_bds(0, core_row)
     locks = model.get_max_lock_value()
     shim_row = next(r for r in rows if model.is_shim_noc_tile(0, r))
     queue = model.get_dma_task_queue_depth()
@@ -1606,6 +1612,34 @@ def fit(
                 why = _held_past(derivation, edge, p, edge.depth, held_in, locks)
                 if why is not None:
                     return Fit(False, "counts", why)
+            # An edge with no chosen depth is built at least one object deep.
+            why = _bds_past(
+                derivation, {e: e.depth or 1 for e, _, _ in derivation.wired}, core_bds
+            )
+            if why is not None:
+                return Fit(False, "counts", why)
+            for edge, p, c in derivation.wired:
+                if edge.kind is not EdgeKind.STAGED or edge.across_calls:
+                    continue
+                (source,) = [
+                    b
+                    for b in derivation.recorded[p][0].op.buffers
+                    if b.name == edge.output
+                ]
+                (sink,) = [
+                    b
+                    for b in derivation.recorded[c][0].op.buffers
+                    if b.name == edge.input
+                ]
+                try:
+                    with set_current_device(device):
+                        Staging(source, sink)
+                except PastMemtile as e:
+                    return Fit(False, "counts", str(e))
+                except (ValueError, NotImplementedError):
+                    # Its other refusals, and what it does not build yet, the
+                    # composer raises again at placement.
+                    continue
             # Restages held in L1, on the cores their two steps share.
             on_cores: list[tuple[Edge, int, int]] = []
             # A region with no edge hands nothing on-chip: nothing to analyse.
@@ -2456,6 +2490,87 @@ def _restaged_on_cores(
             f"reading a round in another order, or a slot of several objects, "
             f"is not built yet"
         )
+
+
+def _bds_past(
+    derivation: Derivation, depths: Mapping[Edge, int], bds: int
+) -> str | None:
+    """Return why a core of ``derivation``'s fused region moves more objects by DMA than a core tile has buffer descriptors; else None.
+
+    Each object of a fifo end a core moves by DMA is a buffer descriptor of
+    its tile. An end is counted where every other end of its fifo is off the
+    core array (a memtile link or the host): one meeting another core may
+    share its memory, free of the DMA, so it is not counted. A stream's
+    consumer reads its producer's lane fifo at the edge's depth in
+    ``depths``, counted where no core produces that fifo; a stream's
+    producer and a cascade's ends are on-chip. Steps sharing a worker are
+    one core a lane. A lower bound: what the placer adds it counts itself.
+
+    Args:
+        derivation: The region's derivation, each step built alone.
+        depths: Each edge's depth in the fused build.
+        bds: The buffer descriptors a core tile has.
+
+    Returns:
+        The first core past ``bds``, named by its steps and lane, or None.
+    """
+    region = derivation.region
+    group = {s: min(worker) for worker in region.workers for s in worker}
+    made_on_cores = {
+        h.object_fifo
+        for _, recorded in derivation.recorded
+        for core in recorded.cores
+        if isinstance(core.owner, Worker)
+        for h in core.owner.fifos
+        if isinstance(h, ObjectFifoHandle) and h.handle_type == "prod"
+    }
+    on_chip: set[ObjectFifo] = set()
+    read_at: dict[ObjectFifo, int] = {}
+    for edge, p, c in derivation.wired:
+        if edge.across_calls or edge.kind not in (EdgeKind.STREAM, EdgeKind.CASCADE):
+            continue
+        made = derivation.lanes[p].get(edge.output, [])
+        taken = derivation.lanes[c].get(edge.input, [])
+        on_chip.update(made)
+        if (
+            edge.kind is EdgeKind.CASCADE
+            or group.get(p, p) == group.get(c, c)
+            or any(f in made_on_cores for f in made)
+        ):
+            on_chip.update(taken)
+        else:
+            read_at |= {f: depths[edge] for f in taken}
+    moved: dict[tuple[int, int], int] = {}
+    for s, (_, recorded) in enumerate(derivation.recorded):
+        workers = list(
+            dict.fromkeys(
+                core.owner for core in recorded.cores if isinstance(core.owner, Worker)
+            )
+        )
+        for k, worker in enumerate(workers):
+            key = (group.get(s, s), k)
+            for h in worker.fifos:
+                if not isinstance(h, ObjectFifoHandle):
+                    continue
+                fifo = h.object_fifo
+                if fifo in read_at:
+                    moved[key] = moved.get(key, 0) + read_at[fifo]
+                elif fifo not in on_chip and not any(
+                    isinstance(e, Worker)
+                    for e in h.all_of_endpoints()
+                    if e is not worker
+                ):
+                    moved[key] = moved.get(key, 0) + h.depth
+    for (s, k), n in moved.items():
+        if n > bds:
+            steps = [t for t in range(len(derivation.ops)) if group.get(t, t) == s]
+            names = ", ".join(
+                f"{t} ({type(derivation.ops[t]).__name__})" for t in steps
+            )
+            return (
+                f"step{'s' if len(steps) > 1 else ''} {names}'s core {k} moves {n} "
+                f"objects by DMA, a buffer descriptor each; a core tile has {bds}"
+            )
     return None
 
 
