@@ -1,7 +1,7 @@
 
 # IRON
 
-Tested on `2026_11_21_20_41_36` at commit `b7e8ea9`.
+Tested on `2026_11_22_17_36_52` at commit `b7e8ea9`.
 
 <details>
 <summary>tests/applications/embedding_gemma2</summary>
@@ -21,38 +21,38 @@ Tested on `2026_11_21_20_41_36` at commit `b7e8ea9`.
         <tr><td>TestAudio::test_audio_features[name_medium]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>TestAudio::test_audio_features[name_passage]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>TestAudio::test_audio_features[name_short]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestAudio::test_audio_latency[name_extended]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>4814750.03</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestAudio::test_audio_latency[name_long]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>5097653.36</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestAudio::test_audio_latency[name_medium]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>4971478.38</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestAudio::test_audio_latency[name_passage]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>4815767.19</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestAudio::test_audio_latency[name_short]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>4781178.22</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_image_processor[name_cats-shape_(1080, 1920)-tokens_140]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>38137.53</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_image_processor[name_cats-shape_(17, 23)-tokens_140]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>16293.51</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_image_processor[name_cats-shape_(2003, 97)-tokens_140]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>36035.79</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_image_processor[name_cats-shape_(3024, 4032)-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>98356.78</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_image_processor[name_cats-shape_(333, 517)-tokens_140]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>25940.60</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_image_processor[name_cats-shape_(4032, 3024)-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>99935.68</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_image_processor[name_cats-shape_(4096, 3072)-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>100406.58</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_image_processor[name_cats-shape_(480, 640)-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>31259.04</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_image_processor[name_cats-shape_(672, 517)-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>31498.26</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_image_processor[name_cats-shape_(672, 960)-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>33259.72</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_image_processor[name_cats-shape_None-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>27422.15</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_image_processor[name_living_room-shape_None-tokens_140]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>27216.63</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_image_processor[name_stop_sign-shape_None-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>27057.53</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestAudio::test_audio_latency[name_extended]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>4876914.16</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestAudio::test_audio_latency[name_long]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>5044795.69</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestAudio::test_audio_latency[name_medium]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>4802747.85</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestAudio::test_audio_latency[name_passage]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>5055136.35</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestAudio::test_audio_latency[name_short]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>4758664.62</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_image_processor[name_cats-shape_(1080, 1920)-tokens_140]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>41375.72</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_image_processor[name_cats-shape_(17, 23)-tokens_140]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>22008.38</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_image_processor[name_cats-shape_(2003, 97)-tokens_140]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>31636.94</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_image_processor[name_cats-shape_(3024, 4032)-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>100151.74</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_image_processor[name_cats-shape_(333, 517)-tokens_140]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>26342.41</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_image_processor[name_cats-shape_(4032, 3024)-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>97399.60</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_image_processor[name_cats-shape_(4096, 3072)-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>95337.44</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_image_processor[name_cats-shape_(480, 640)-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>33640.02</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_image_processor[name_cats-shape_(672, 517)-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>27655.08</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_image_processor[name_cats-shape_(672, 960)-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>27840.91</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_image_processor[name_cats-shape_None-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>33052.17</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_image_processor[name_living_room-shape_None-tokens_140]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>27142.12</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_image_processor[name_stop_sign-shape_None-tokens_280]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>35067.41</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>TestVision::test_vision_accuracy[name_cats]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>TestVision::test_vision_accuracy[name_living_room]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>TestVision::test_vision_accuracy[name_stop_sign]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_vision_latency[name_cats]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>2135044.79</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestVision::test_vision_latency[name_living_room]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>1571117.34</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_vision_latency[name_cats]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>2114247.23</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestVision::test_vision_latency[name_living_room]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>1505599.38</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embeddinggemma_2_accuracy[document]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embeddinggemma_2_accuracy[long_document]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embeddinggemma_2_accuracy[near_the_limit]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embeddinggemma_2_accuracy[past_the_window]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embeddinggemma_2_accuracy[query]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embeddinggemma_2_determinism[test_embeddinggemma_2_determinism]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_embeddinggemma_2_latency[long_document]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>1733833.55</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_embeddinggemma_2_latency[past_the_window]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>2978191.18</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_embeddinggemma_2_latency[query]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>1237922.86</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_embeddinggemma_2_latency[long_document]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>1832343.05</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_embeddinggemma_2_latency[past_the_window]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>2909336.87</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_embeddinggemma_2_latency[query]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>1255492.99</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embeddinggemma_2_multimodal[case_audio]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embeddinggemma_2_multimodal[case_both]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embeddinggemma_2_multimodal[case_image]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -114,10 +114,10 @@ Tested on `2026_11_21_20_41_36` at commit `b7e8ea9`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td><td>MaxKL (mean)</td><td>Top1Mismatches (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>TestEachStep::test_granite_4_2_3b_each_step[granite_4_2_3b_prompt_1024_tokens_1]</td><td>✅ 1/1</td><td>5.81</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestEachStep::test_granite_4_2_3b_each_step[granite_4_2_3b_prompt_1024_tokens_40]</td><td>✅ 1/1</td><td>6.19</td><td>1.19</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestEachStep::test_granite_4_2_3b_each_step[granite_4_2_3b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>4.91</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestEachStep::test_granite_4_2_3b_each_step[granite_4_2_3b_prompt_13_tokens_40]</td><td>✅ 1/1</td><td>4.79</td><td>1.17</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_granite_4_2_3b_each_step[granite_4_2_3b_prompt_1024_tokens_1]</td><td>✅ 1/1</td><td>5.85</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_granite_4_2_3b_each_step[granite_4_2_3b_prompt_1024_tokens_40]</td><td>✅ 1/1</td><td>6.32</td><td>1.17</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_granite_4_2_3b_each_step[granite_4_2_3b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>4.83</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_granite_4_2_3b_each_step[granite_4_2_3b_prompt_13_tokens_40]</td><td>✅ 1/1</td><td>4.83</td><td>1.17</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>TestEachStep::test_granite_4_2_3b_each_step_accuracy[test_granite_4_2_3b_each_step_accuracy]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>0.00</td><td>0.00</td></tr>
         <tr><td>TestEachStep::test_granite_4_2_3b_each_step_determinism[test_granite_4_2_3b_each_step_determinism]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
@@ -152,10 +152,10 @@ Tested on `2026_11_21_20_41_36` at commit `b7e8ea9`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td><td>MaxKL (mean)</td><td>Top1Mismatches (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>TestEachStep::test_granite_4_0_h_1b_each_step[granite_4_0_h_1b_prompt_1024_tokens_1]</td><td>✅ 1/1</td><td>23.38</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestEachStep::test_granite_4_0_h_1b_each_step[granite_4_0_h_1b_prompt_1024_tokens_40]</td><td>✅ 1/1</td><td>23.90</td><td>1.16</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestEachStep::test_granite_4_0_h_1b_each_step[granite_4_0_h_1b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>19.62</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestEachStep::test_granite_4_0_h_1b_each_step[granite_4_0_h_1b_prompt_13_tokens_40]</td><td>✅ 1/1</td><td>19.64</td><td>1.18</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_granite_4_0_h_1b_each_step[granite_4_0_h_1b_prompt_1024_tokens_1]</td><td>✅ 1/1</td><td>23.50</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_granite_4_0_h_1b_each_step[granite_4_0_h_1b_prompt_1024_tokens_40]</td><td>✅ 1/1</td><td>23.81</td><td>1.17</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_granite_4_0_h_1b_each_step[granite_4_0_h_1b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>19.64</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_granite_4_0_h_1b_each_step[granite_4_0_h_1b_prompt_13_tokens_40]</td><td>✅ 1/1</td><td>19.65</td><td>1.18</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>TestEachStep::test_granite_4_0_h_1b_each_step_accuracy[test_granite_4_0_h_1b_each_step_accuracy]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>0.01</td><td>2.00</td></tr>
         <tr><td>TestEachStep::test_granite_4_0_h_1b_each_step_determinism[test_granite_4_0_h_1b_each_step_determinism]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
@@ -199,20 +199,20 @@ Tested on `2026_11_21_20_41_36` at commit `b7e8ea9`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td><td>MaxKL (mean)</td><td>Top1Mismatches (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_1b-prompt_1024_tokens_1]</td><td>✅ 1/1</td><td>1.88</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_1b-prompt_1024_tokens_40]</td><td>✅ 1/1</td><td>2.18</td><td>3.18</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_1b-prompt_1024_tokens_1]</td><td>✅ 1/1</td><td>1.90</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_1b-prompt_1024_tokens_40]</td><td>✅ 1/1</td><td>2.21</td><td>3.16</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_1b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>1.70</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_1b-prompt_13_tokens_40]</td><td>✅ 1/1</td><td>1.73</td><td>3.19</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_3b-prompt_1024_tokens_1]</td><td>✅ 1/1</td><td>2.93</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_3b-prompt_1024_tokens_40]</td><td>✅ 1/1</td><td>3.25</td><td>1.62</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_3b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>1.92</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_3b-prompt_13_tokens_40]</td><td>✅ 1/1</td><td>2.17</td><td>1.68</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_1b-prompt_13_tokens_40]</td><td>✅ 1/1</td><td>1.69</td><td>3.18</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_3b-prompt_1024_tokens_1]</td><td>✅ 1/1</td><td>2.87</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_3b-prompt_1024_tokens_40]</td><td>✅ 1/1</td><td>2.40</td><td>1.65</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_3b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>1.79</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_llama_3_2_each_step[llama_3.2_3b-prompt_13_tokens_40]</td><td>✅ 1/1</td><td>1.69</td><td>1.64</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>TestEachStep::test_llama_3_2_each_step_accuracy[llama_3.2_1b]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>0.01</td><td>1.00</td></tr>
         <tr><td>TestEachStep::test_llama_3_2_each_step_accuracy[llama_3.2_3b]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>0.03</td><td>1.00</td></tr>
         <tr><td>TestEachStep::test_llama_3_2_each_step_determinism[llama_3.2_1b]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>TestEachStep::test_llama_3_2_each_step_determinism[llama_3.2_3b]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestEachStep::test_llama_3_2_each_step_sampling[llama_3.2_1b]</td><td>✅ 1/1</td><td>1.72</td><td>3.27</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>TestEachStep::test_llama_3_2_each_step_sampling[llama_3.2_3b]</td><td>✅ 1/1</td><td>2.01</td><td>1.64</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_llama_3_2_each_step_sampling[llama_3.2_1b]</td><td>✅ 1/1</td><td>1.72</td><td>3.15</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>TestEachStep::test_llama_3_2_each_step_sampling[llama_3.2_3b]</td><td>✅ 1/1</td><td>1.95</td><td>1.66</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -249,12 +249,7 @@ Tested on `2026_11_21_20_41_36` at commit `b7e8ea9`.
         <tr><td>test_decode_deep_in_the_cache[gemma4_e2b_each_step-32768]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_decode_deep_in_the_cache[gemma4_e2b_each_step-4096]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_decode_deep_in_the_cache[gemma4_e2b_each_step-65536]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_decode_deep_in_the_cache[gemma4_e2b_each_step-whole]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_decode_deep_in_the_cache[granite_4.0_h_1b_each_step-16384]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_decode_deep_in_the_cache[granite_4.0_h_1b_each_step-32768]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_decode_deep_in_the_cache[granite_4.0_h_1b_each_step-4096]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_decode_deep_in_the_cache[granite_4.0_h_1b_each_step-65536]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_decode_deep_in_the_cache[granite_4.0_h_1b_each_step-whole]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_decode_deep_in_the_cache[gemma4_e2b_each_step-whole]</td><td>❌ 0/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_decode_deep_in_the_cache[granite_4.2_3b_each_step-16384]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_decode_deep_in_the_cache[granite_4.2_3b_each_step-32768]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_decode_deep_in_the_cache[granite_4.2_3b_each_step-4096]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -285,12 +280,6 @@ Tested on `2026_11_21_20_41_36` at commit `b7e8ea9`.
         <tr><td>test_prompt_deep_in_the_cache[gemma4_e2b_each_step-32768]</td><td>❌ 0/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_prompt_deep_in_the_cache[gemma4_e2b_each_step-4096]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_prompt_deep_in_the_cache[gemma4_e2b_each_step-65536]</td><td>❌ 0/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_deep_in_the_cache[gemma4_e2b_each_step-whole]</td><td>❌ 0/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_deep_in_the_cache[granite_4.0_h_1b_each_step-16384]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_deep_in_the_cache[granite_4.0_h_1b_each_step-32768]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_deep_in_the_cache[granite_4.0_h_1b_each_step-4096]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_deep_in_the_cache[granite_4.0_h_1b_each_step-65536]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_deep_in_the_cache[granite_4.0_h_1b_each_step-whole]</td><td>❌ 0/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_prompt_deep_in_the_cache[granite_4.2_3b_each_step-16384]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_prompt_deep_in_the_cache[granite_4.2_3b_each_step-32768]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_prompt_deep_in_the_cache[granite_4.2_3b_each_step-4096]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -306,51 +295,40 @@ Tested on `2026_11_21_20_41_36` at commit `b7e8ea9`.
         <tr><td>test_prompt_deep_in_the_cache[llama_3.2_3b_each_step-4096]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_prompt_deep_in_the_cache[llama_3.2_3b_each_step-65536]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_prompt_deep_in_the_cache[llama_3.2_3b_each_step-whole]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[gemma4_e2b_each_step-16384]</td><td>✅ 1/1</td><td>120.63</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[gemma4_e2b_each_step-32768]</td><td>✅ 1/1</td><td>121.11</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[gemma4_e2b_each_step-65536]</td><td>✅ 1/1</td><td>120.09</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[gemma4_e2b_each_step-whole]</td><td>✅ 1/1</td><td>119.29</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[granite_4.0_h_1b_each_step-16384]</td><td>✅ 1/1</td><td>190.27</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[granite_4.0_h_1b_each_step-32768]</td><td>✅ 1/1</td><td>190.20</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[granite_4.0_h_1b_each_step-65536]</td><td>✅ 1/1</td><td>190.10</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[granite_4.0_h_1b_each_step-whole]</td><td>✅ 1/1</td><td>190.24</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[granite_4.2_3b_each_step-16384]</td><td>✅ 1/1</td><td>119.73</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[granite_4.2_3b_each_step-32768]</td><td>✅ 1/1</td><td>119.77</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_8k[gemma4_e2b_each_step-16384]</td><td>✅ 1/1</td><td>120.67</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_8k[gemma4_e2b_each_step-32768]</td><td>✅ 1/1</td><td>120.91</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_8k[gemma4_e2b_each_step-65536]</td><td>✅ 1/1</td><td>120.12</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_8k[granite_4.2_3b_each_step-16384]</td><td>✅ 1/1</td><td>119.82</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_8k[granite_4.2_3b_each_step-32768]</td><td>✅ 1/1</td><td>119.92</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_prompt_time_at_8k[granite_4.2_3b_each_step-65536]</td><td>✅ 1/1</td><td>119.79</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_prompt_time_at_8k[granite_4.2_3b_each_step-whole]</td><td>❌ 0/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[llama_3.2_1b_each_step-16384]</td><td>✅ 1/1</td><td>17.49</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[llama_3.2_1b_each_step-32768]</td><td>✅ 1/1</td><td>17.44</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[llama_3.2_1b_each_step-65536]</td><td>✅ 1/1</td><td>17.51</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[llama_3.2_1b_each_step-whole]</td><td>✅ 1/1</td><td>17.57</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[llama_3.2_3b_each_step-16384]</td><td>✅ 1/1</td><td>41.46</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[llama_3.2_3b_each_step-32768]</td><td>✅ 1/1</td><td>41.47</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[llama_3.2_3b_each_step-65536]</td><td>✅ 1/1</td><td>41.45</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_8k[llama_3.2_3b_each_step-whole]</td><td>✅ 1/1</td><td>41.53</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[gemma4_e2b_each_step-16384]</td><td>✅ 1/1</td><td>306.82</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_8k[llama_3.2_1b_each_step-16384]</td><td>✅ 1/1</td><td>17.46</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_8k[llama_3.2_1b_each_step-32768]</td><td>✅ 1/1</td><td>17.54</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_8k[llama_3.2_1b_each_step-65536]</td><td>✅ 1/1</td><td>17.48</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_8k[llama_3.2_1b_each_step-whole]</td><td>✅ 1/1</td><td>17.60</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_8k[llama_3.2_3b_each_step-16384]</td><td>✅ 1/1</td><td>41.52</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_8k[llama_3.2_3b_each_step-32768]</td><td>✅ 1/1</td><td>41.53</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_8k[llama_3.2_3b_each_step-65536]</td><td>✅ 1/1</td><td>41.54</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_8k[llama_3.2_3b_each_step-whole]</td><td>✅ 1/1</td><td>41.48</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[gemma4_e2b_each_step-16384]</td><td>✅ 1/1</td><td>307.03</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_prompt_time_at_the_whole_context[gemma4_e2b_each_step-32768]</td><td>❌ 0/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[gemma4_e2b_each_step-4096]</td><td>✅ 1/1</td><td>49.74</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[gemma4_e2b_each_step-4096]</td><td>✅ 1/1</td><td>49.31</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_prompt_time_at_the_whole_context[gemma4_e2b_each_step-65536]</td><td>❌ 0/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[gemma4_e2b_each_step-whole]</td><td>❌ 0/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[granite_4.0_h_1b_each_step-16384]</td><td>✅ 1/1</td><td>388.14</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[granite_4.0_h_1b_each_step-32768]</td><td>✅ 1/1</td><td>806.32</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[granite_4.0_h_1b_each_step-4096]</td><td>✅ 1/1</td><td>94.31</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[granite_4.0_h_1b_each_step-65536]</td><td>✅ 1/1</td><td>1733.95</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[granite_4.0_h_1b_each_step-whole]</td><td>❌ 0/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[granite_4.2_3b_each_step-16384]</td><td>✅ 1/1</td><td>399.27</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[granite_4.2_3b_each_step-32768]</td><td>✅ 1/1</td><td>1436.49</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[granite_4.2_3b_each_step-4096]</td><td>✅ 1/1</td><td>40.06</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[granite_4.2_3b_each_step-16384]</td><td>✅ 1/1</td><td>399.28</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[granite_4.2_3b_each_step-32768]</td><td>✅ 1/1</td><td>1436.19</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[granite_4.2_3b_each_step-4096]</td><td>✅ 1/1</td><td>40.05</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_prompt_time_at_the_whole_context[granite_4.2_3b_each_step-65536]</td><td>❌ 0/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_prompt_time_at_the_whole_context[granite_4.2_3b_each_step-whole]</td><td>❌ 0/1</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-16384]</td><td>✅ 1/1</td><td>47.60</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-32768]</td><td>✅ 1/1</td><td>146.69</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-4096]</td><td>✅ 1/1</td><td>7.31</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-65536]</td><td>✅ 1/1</td><td>497.16</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-whole]</td><td>✅ 1/1</td><td>1810.54</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_3b_each_step-16384]</td><td>✅ 1/1</td><td>109.26</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_3b_each_step-32768]</td><td>✅ 1/1</td><td>323.98</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_3b_each_step-4096]</td><td>✅ 1/1</td><td>17.67</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_3b_each_step-65536]</td><td>✅ 1/1</td><td>1070.04</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_3b_each_step-whole]</td><td>✅ 1/1</td><td>3829.92</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-16384]</td><td>✅ 1/1</td><td>47.85</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-32768]</td><td>✅ 1/1</td><td>146.53</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-4096]</td><td>✅ 1/1</td><td>7.29</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-65536]</td><td>✅ 1/1</td><td>497.57</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-whole]</td><td>✅ 1/1</td><td>1810.78</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_3b_each_step-16384]</td><td>✅ 1/1</td><td>109.18</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_3b_each_step-32768]</td><td>✅ 1/1</td><td>323.69</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_3b_each_step-4096]</td><td>✅ 1/1</td><td>17.57</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_3b_each_step-65536]</td><td>✅ 1/1</td><td>1070.50</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_prompt_time_at_the_whole_context[llama_3.2_3b_each_step-whole]</td><td>✅ 1/1</td><td>3829.35</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
