@@ -50,6 +50,29 @@ def test_a_deep_buffer_within_the_memtile_budget_is_counted_and_fits(device):
     assert result.ok
 
 
+def test_a_staged_edge_counts_the_rounds_its_memtile_pools(device):
+    """GEMV's two-element objects into an add's 256-element tile, held a call's 128 objects deep, fit.
+
+    The memtile pools the add's 256-element rounds, a buffer descriptor
+    each, not the GEMV's objects: 128 of them are one round, well inside a
+    memtile's descriptors.
+    """
+    gemv = GEMV(M=256, K=256, num_aie_columns=1)
+    add = ElementwiseAdd(size=256, tile_size=256)
+    region = Region(
+        parts=(
+            Member(cls=GEMV, dims={"M": gemv.M, "K": gemv.K}),
+            Member(cls=ElementwiseAdd, dims={"size": add.size}),
+        ),
+        edges=(Edge(0, "C", 1, "b", kind=EdgeKind.STAGED, depth=128),),
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    recording = gemv_add_recording("rounds", gemv, add)
+    result = fit(profile, [Timed(recording)], device)
+    assert result.ok, result.why
+
+
 def test_a_strided_token_pattern_counts_its_buffer_descriptors(device):
     """A row-tiled edge counts the buffer descriptors its stride needs, with the rest of its core's.
 

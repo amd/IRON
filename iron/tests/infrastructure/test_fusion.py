@@ -23,7 +23,9 @@ from iron.common.testing import vectors
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Gather
 from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
+from iron.operators.silu import SiLU
 from iron.tests.support import fusable, sequences
 from iron.tune.measure import Timing, time_interleaved
 
@@ -415,6 +417,58 @@ def test_fused_matches_reference_and_unfused():
 
     # A 1-ulp intermediate becomes at most 2 ulps of the product, plus half an
     # ulp for each of the device's and the reference's rounding.
+    tol = Tolerance.bf16_ulps(
+        3,
+        atol=mul.tolerance().atol,
+        note="SiLU's 1 ulp through the multiply (2), plus both roundings",
+    )
+    verdict = compare(out, y_ref, tol)
+    assert verdict, verdict.detail
+    assert np.array_equal(
+        out.view(np.uint16), baseline.view(np.uint16)
+    ), "the fused and unfused devices differ"
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize(
+    "made, taken", [(1024, 512), (512, 1024)], ids=["reader_smaller", "reader_larger"]
+)
+def test_tiles_a_whole_number_of_the_other_s_fused_match_reference_and_unfused(
+    made, taken
+):
+    """silu(gate) * up, SiLU's tiles streamed into the multiply's on one fifo, either a whole number of the other.
+
+    Each end runs at its own object size; held to the references and
+    bit-equal to the steps unfused.
+    """
+    size = 2048
+
+    def build(fusions):
+        silu = SiLU(size=size, tile_size=made, num_aie_columns=1)
+        mul = ElementwiseMul(size=size, tile_size=taken, num_aie_columns=1)
+        img = Image(
+            fusable.silu_mul_recording("delivered_device", silu, mul),
+            FullELF(),
+            fusions=fusions,
+        )
+        img.compile()
+        return img.get_callable(), silu, mul
+
+    fused_run, silu, mul = build((fusable.stream(0, "y", "a"),))
+    plain_run, _, _ = build(())
+
+    gate = vectors(silu).inputs["x"]
+    up = vectors(mul, seed=7).inputs["b"]
+    y_ref = np.asarray(mul.reference(silu.reference(gate), up))
+
+    def dispatch(run):
+        run.get_buffer(BufferRef("x")).numpy_view()[: gate.size] = gate.reshape(-1)
+        run.get_buffer(BufferRef("up")).numpy_view()[: up.size] = up.reshape(-1)
+        run()
+        return run.get_buffer(BufferRef("out")).numpy()[:size].copy()
+
+    out = dispatch(fused_run)
+    baseline = dispatch(plain_run)
     tol = Tolerance.bf16_ulps(
         3,
         atol=mul.tolerance().atol,

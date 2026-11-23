@@ -268,7 +268,9 @@ def test_a_carry_held_on_chip_is_bit_identical_to_the_calls_run_apart(
 def test_a_carry_kept_in_one_core_across_calls_takes_each_call_s_inputs_there(device):
     """Two calls a command, the carry kept in one core's memory, put both calls' adds on that core: the placer refuses it before any build.
 
-    Each call's add brings its own input streams to the one core.
+    Each call's add brings its own input stream to the one core: three
+    streams into a core tile's two input channels, which neither the
+    sequential placer nor the annealing one places.
     """
     recording, region = _accumulator_into_mul()
     profile = Profile()
@@ -276,7 +278,7 @@ def test_a_carry_kept_in_one_core_across_calls_takes_each_call_s_inputs_there(de
     profile.add_schedule(Schedule(version=recording.version, calls_per_command=2))
     verdict = fit(profile, [Timed(recording)], device, placements=tuple(BUILT_PLACERS))
     assert not verdict.ok and verdict.stage == "placer"
-    assert "DMA channels" in (verdict.why or "")
+    assert "DMA budget" in (verdict.why or "")
 
 
 def test_a_carry_on_a_step_sharing_its_core_gets_a_verdict(device):
