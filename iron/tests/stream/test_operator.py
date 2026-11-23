@@ -13,6 +13,8 @@ import pytest
 
 pytest.importorskip("stream", reason="stream-dse is not installed")
 pytest.importorskip("onnxscript", reason="onnxscript is not installed")
+pytest.importorskip("xdsl_aie", reason="stream-setup-aie has not been run")
+pytest.importorskip("snaxc", reason="stream-setup-aie has not been run")
 
 from aie import ir  # noqa: E402
 from aie.iron import In, Out  # noqa: E402
@@ -119,15 +121,24 @@ def test_groups_of_one_design_share_its_solve():
     assert pinned.solve_key() != ops[0].solve_key()
 
 
-@pytest.mark.parametrize("missing", ["stream", "torch", "onnxscript"])
-def test_without_the_optional_stack_it_is_unresolvable(monkeypatch, missing):
+@pytest.mark.parametrize(
+    "missing, installer",
+    [
+        ("stream", "requirements_stream.txt"),
+        ("torch", "requirements_stream.txt"),
+        ("onnxscript", "requirements_stream.txt"),
+        ("xdsl_aie", "stream-setup-aie"),
+        ("snaxc", "stream-setup-aie"),
+    ],
+)
+def test_without_the_optional_stack_it_is_unresolvable(monkeypatch, missing, installer):
     from iron.common.stream import operator
 
     find_spec = operator.find_spec
     monkeypatch.setattr(
         operator, "find_spec", lambda name: None if name == missing else find_spec(name)
     )
-    with pytest.raises(Unresolvable, match=f"{missing} not installed"):
+    with pytest.raises(Unresolvable, match=rf"{missing} not installed \({installer}\)"):
         SwiGLUFusedStream(**DIMS).resolved()
 
 

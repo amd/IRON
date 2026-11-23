@@ -8,6 +8,8 @@ from ml_dtypes import bfloat16
 
 pytest.importorskip("stream", reason="stream-dse is not installed")
 pytest.importorskip("onnxscript", reason="onnxscript is not installed")
+pytest.importorskip("xdsl_aie", reason="stream-setup-aie has not been run")
+pytest.importorskip("snaxc", reason="stream-setup-aie has not been run")
 
 from iron.common.testing import time_call  # noqa: E402
 from iron.operators.swiglu_prefill_stream.graph import SwiGLUPrefillStream  # noqa: E402

@@ -20,8 +20,15 @@ if TYPE_CHECKING:
     from .runner import Solution
     from .workload import StreamWorkload
 
-# What requirements_stream.txt installs, by the module each is imported as.
-REQUIREMENTS = ("stream", "torch", "onnxscript")
+# The modules the optional stack is imported as, and what installs each:
+# stream-setup-aie adds the AIE dialects stream-dse's kernels import.
+REQUIREMENTS = {
+    "stream": "requirements_stream.txt",
+    "torch": "requirements_stream.txt",
+    "onnxscript": "requirements_stream.txt",
+    "xdsl_aie": "stream-setup-aie",
+    "snaxc": "stream-setup-aie",
+}
 # Solutions this process has read, by their solve's digest.
 _solutions: dict[str, Solution] = {}
 
@@ -77,9 +84,10 @@ class StreamOperator(Operator):
 
         missing = [name for name in REQUIREMENTS if find_spec(name) is None]
         if missing:
+            installers = dict.fromkeys(REQUIREMENTS[name] for name in missing)
             raise Unresolvable(
                 f"{type(self).__name__}: {', '.join(missing)} not installed "
-                f"(requirements_stream.txt)"
+                f"({', '.join(installers)})"
             )
         accelerator(dev)
         return self.replace()

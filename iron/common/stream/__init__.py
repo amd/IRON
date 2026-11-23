@@ -17,7 +17,7 @@ designs into IRON's:
 - ``runner``: the solve, its options and its cache.
 - ``operator``: ``StreamOperator``, one fused group as an operator.
 
-They need stream-dse, torch and onnxscript (``requirements_stream.txt``),
-so nothing here is imported by ``iron.common``; an operator imports them
-when it builds.
+They need stream-dse, torch and onnxscript (``requirements_stream.txt``)
+and the AIE dialects ``stream-setup-aie`` installs, so nothing here is
+imported by ``iron.common``; an operator imports them when it builds.
 """

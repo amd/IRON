@@ -7,6 +7,8 @@ import pytest
 
 pytest.importorskip("stream", reason="stream-dse is not installed")
 pytest.importorskip("onnxscript", reason="onnxscript is not installed")
+pytest.importorskip("xdsl_aie", reason="stream-setup-aie has not been run")
+pytest.importorskip("snaxc", reason="stream-setup-aie has not been run")
 
 from stream.compiler.kernels.registry import AIE_KERNELS  # noqa: E402
 
