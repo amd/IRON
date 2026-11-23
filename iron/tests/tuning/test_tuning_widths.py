@@ -193,7 +193,7 @@ def test_a_by_shape_entry_claiming_fewer_runs_than_iron_applies_is_refused(devic
     result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert result.stage == "analysis"
-    assert "every run" in (result.why or "") or "shape" in (result.why or "")
+    assert "apply to every run" in (result.why or "")
 
 
 @pytest.mark.skip(

@@ -142,6 +142,7 @@ def test_chained_axis_round_trips_and_is_proposed(tmp_path, device):
         ]
 
 
+@unbuilt
 def test_burst_and_transfer_bytes_round_trip_and_are_proposed(tmp_path, device):
     """``RuntimePlan.burst`` and ``transfer_bytes`` (DDR access shape) round-trip and are candidates, each burst one the device's shim DMA has."""
     lengths = get_target_model(device.resolve()).get_shim_burst_lengths()

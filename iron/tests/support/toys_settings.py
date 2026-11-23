@@ -106,22 +106,27 @@ class RangedPair(iron.Graph):
         return projected, copied
 
 
-def shared_kv_state(size: int = 256, tile: int = 64):
+def shared_kv_state(size: int = 256, tile: int = 64, positions: int = 1):
     """Return a graph whose prefill-sized call writes a persistent ``kv`` and whose decode-sized call reads it.
 
     One real ``iron.state`` buffer, shared by both versions of one graph (as
     ``iron/tests/infrastructure/test_graph_versions.py``'s own function does): the
     prefill-shaped call adds a bias row into ``kv`` and returns it; the decode-shaped
-    call multiplies ``kv`` by its own first ``size`` elements.
+    call multiplies ``kv`` by its own first ``size`` elements. With
+    ``positions`` above one, ``kv`` holds that many positions of ``size //
+    positions`` elements, each step reading or writing all of it flat.
     """
     bias = small_integer_weight((size,), 1)
-    kv = iron.state((size,), name="kv")
+    kv = iron.state(
+        (size,) if positions == 1 else (positions, size // positions), name="kv"
+    )
 
     class SharedKVState(iron.Graph):
         def body(self, x):
+            flat = kv if positions == 1 else kv.reshape(size)
             if x.shape[0] == size:
-                ElementwiseAdd.step(x, bias, kv, tile_size=tile)
-                return ElementwiseAdd.step(kv, bias, tile_size=tile)
-            return ElementwiseMul.step(kv, x[:size], tile_size=tile)
+                ElementwiseAdd.step(x, bias, flat, tile_size=tile)
+                return ElementwiseAdd.step(flat, bias, tile_size=tile)
+            return ElementwiseMul.step(flat, x[:size], tile_size=tile)
 
     return SharedKVState()

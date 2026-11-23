@@ -338,6 +338,18 @@ class Profile:
         """Return the composition entries, in the order they were added."""
         return list(self._compositions)
 
+    def for_part(self, part: str | None) -> Profile:
+        """Return a copy holding only the composition entries that apply on device part ``part``.
+
+        An entry scoped to another part is left out; ``part`` None (no
+        runtime reads one) leaves out every entry scoped to a part.
+        """
+        kept = self.copy()
+        kept._compositions = [
+            e for e in self._compositions if e.scope.device_part in (None, part)
+        ]
+        return kept
+
     def replace_entry(self, old: Entry, new: Entry) -> None:
         """Replace the composition entry ``old`` with ``new``, in its place.
 
@@ -417,14 +429,6 @@ class Profile:
     def state_layouts(self) -> list[StateLayout]:
         """Return the persistent buffers' layouts."""
         return list(self._state_layouts)
-
-    def remove_state_layout(self, layout: StateLayout) -> None:
-        """Remove the state layout ``layout``.
-
-        Raises:
-            ValueError: ``layout`` is not one of its state layouts.
-        """
-        self._state_layouts.remove(layout)
 
     def make(self, cls: type[_Op], **kwargs: Any) -> _Op:
         """Build ``cls(**kwargs)`` with its open tunables filled from this profile.

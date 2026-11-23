@@ -3,6 +3,8 @@
 
 """Transformation tests for scope and variants, which design applies where and when."""
 
+import itertools
+
 import numpy as np
 import pytest
 
@@ -41,6 +43,7 @@ from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Point, Timed
 from iron.tune.fusions import Applied
 from iron.tune.search import (
+    AddEntry,
     AddVariants,
     Switches,
     candidates,
@@ -97,7 +100,44 @@ def test_scope_entries_round_trip_by_version_occurrence_and_device_part(
     loaded = Profile.load(path)
     assert loaded.entries() == profile.entries()
     found = list(candidates([Timed(decode_rec)], loaded, device))
-    assert any(e.apply(Profile()).entries() == [by_version] for e in found)
+    # Each held entry's root is proposed at each other scope, in its place.
+    assert any(
+        isinstance(e, AddEntry)
+        and e.entry == by_version
+        and e.replaces in loaded.entries()
+        and by_version in e.apply(loaded).entries()
+        for e in found
+    )
+
+
+def test_two_revisions_of_one_entry_in_a_round_give_way_to_the_first(device):
+    """Two edits revising one held entry (a scope and another scope, as two widths would) never both apply: the second, applied after the first, gives way.
+
+    The search prices each against the round's base and takes them in turn;
+    one whose entry an earlier take replaced raises, so two revisions of one
+    region are never kept together unpriced.
+    """
+    recording = toys_schedule.Alternating(2).record(x=(2048,))
+    relu, tanh = (member(recording.steps[s].op) for s in (0, 1))
+    held = Entry(
+        root=Region(
+            parts=(relu, tanh), edges=(Edge(0, "y", 1, "x", kind=EdgeKind.STREAM),)
+        )
+    )
+    profile = Profile()
+    profile.add_entry(held)
+    first, second = itertools.islice(
+        (
+            e
+            for e in candidates([Timed(recording)], profile, device)
+            if isinstance(e, AddEntry) and e.replaces == held
+        ),
+        2,
+    )
+    taken = first.apply(profile)
+    assert taken.entries() == [first.entry]
+    with pytest.raises(ValueError):
+        second.apply(taken)
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
@@ -156,6 +196,8 @@ def test_a_binding_names_how_a_per_call_value_reaches_the_design(tmp_path, devic
     compile_bound = Binding(value="rows", how="compile")
     runtime_bound = Binding(value="valid", how="runtime")
     profile = Profile()
+    # A design per range of rows, which a per-range binding selects.
+    profile.add_variants(_split_at_256())
     profile.add_binding(compile_bound)
     profile.add_binding(runtime_bound)
     path = tmp_path / "profile.json"

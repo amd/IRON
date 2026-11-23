@@ -43,7 +43,7 @@ from ..image.callable import (
 )
 from ..image.compose import Packing
 from ..image.link import FullELF, PerStep
-from ..image.packaging import Kind, Plan, plan, require_device
+from ..image.packaging import Kind, Plan, attached_part, plan, require_device
 from ..image.sequence import Image
 from ..image.step import BufferRef, Fusion
 from .carried import CARRY, EmitSite, attach_emit, compose
@@ -615,6 +615,7 @@ class Graph:
         fused: tuple[Fusion, ...] = ()
         packing = Packing()
         if not check and profile is not None:
+            profile = profile.for_part(attached_part())
             recording, fused, packing = apply_profile(
                 recording.ordered(profile), profile, require_device()
             )
@@ -816,8 +817,10 @@ def apply_profile(
     composition entries' tunables and regions (``composed``), which win over
     a tunable entry's, its fusions and their steps' tunables, and its
     packings and configurations (``configured``). A fusion entry's fusion
-    overlapping a composed region gives way to it.
+    overlapping a composed region gives way to it. An entry scoped to a device
+    part applies only on that part (``attached_part``).
     """
+    profile = profile.for_part(attached_part())
     folds = chosen_folds(recording, profile)
     folded = {s for f in folds for s in f.steps}
     folds += tuple(
@@ -867,6 +870,7 @@ def packaged(recording: Recording, profile: Profile) -> tuple[bool | None, bool]
         NotImplementedError: Its configurations differ on teardown: aiecc
             tears down every configuration of an image or none.
     """
+    profile = profile.for_part(attached_part())
     chosen = {
         s.packaging
         for s in profile.schedules()

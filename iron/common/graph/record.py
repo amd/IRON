@@ -25,7 +25,7 @@ from ..declare.composition import Configuration, Entry, Member, Region, Scope
 from ..declare.operand import concrete
 from ..declare.operator import graph_recorder
 from ..declare.profile import Profile, Version
-from ..image.packaging import Kind, Plan, attached_part
+from ..image.packaging import Kind, Plan
 from ..image.step import BufferRef, SequenceStep
 from .coded import CodedWeight, encode_all
 from .handle import (
@@ -1404,8 +1404,8 @@ class Recording:
         the buffer its consumer reads through its input; and each inflow's
         consumer reads the inflow's buffer. Overlapping matches are each
         returned. ``entry.scope`` keeps those of its versions and the runs of
-        its shape it names, and none off its device part (``attached_part``:
-        none where no NPU runtime reads the part).
+        its shape it names; its device part is the build's to apply
+        (``Profile.for_part``).
 
         Raises:
             ValueError: A step's dims name one of its class's tunables, or
@@ -1423,9 +1423,6 @@ class Recording:
         if (
             entry.scope.versions is not None
             and self.version not in entry.scope.versions
-        ) or (
-            entry.scope.device_part is not None
-            and entry.scope.device_part != attached_part()
         ):
             return ()
         wired, fed = entry.root.wiring()

@@ -49,7 +49,6 @@ from ..common.declare.composition import (
     RuntimePlan,
     Schedule,
     Scope,
-    StateLayout,
     Switch,
     Variants,
     Version,
@@ -113,8 +112,7 @@ class AddEntry:
             found in.
         refinement: How the edited build relates to the untuned build.
         replaces: The entry it revises (another scope, another member's
-            width), whose place it takes where the profile holds it; None,
-            or one the profile does not hold, adds it after the rest.
+            width), whose place it takes; None adds it after the rest.
     """
 
     entry: Entry
@@ -123,12 +121,17 @@ class AddEntry:
     replaces: Entry | None = None
 
     def apply(self, profile: Profile) -> Profile:
-        """Return a copy of ``profile`` with ``entry`` added, in ``replaces``' place where it holds it."""
+        """Return a copy of ``profile`` with ``entry`` added, in ``replaces``' place where given.
+
+        Raises:
+            ValueError: ``profile`` does not hold ``replaces``: an earlier
+                edit revised it, so this one gives way.
+        """
         edited = profile.copy()
-        if self.replaces is not None and self.replaces in profile.entries():
-            edited.replace_entry(self.replaces, self.entry)
-        else:
+        if self.replaces is None:
             edited.add_entry(self.entry)
+        else:
+            edited.replace_entry(self.replaces, self.entry)
         return edited
 
 
@@ -346,31 +349,6 @@ class BindValue:
         return edited
 
 
-@dataclass(frozen=True)
-class LayOutState:
-    """An edit choosing one persistent buffer's layout in every version (``StateLayout``), in place of the layout the profile holds for it.
-
-    Attributes:
-        layout: The layout chosen.
-        touches: The steps reading or writing the buffer, by index in the
-            recording it was found in.
-        refinement: How the edited build relates to the untuned build.
-    """
-
-    layout: StateLayout
-    touches: frozenset[int]
-    refinement: Refinement = Refinement.EXACT
-
-    def apply(self, profile: Profile) -> Profile:
-        """Return a copy of ``profile`` with ``layout`` its buffer's one layout."""
-        edited = profile.copy()
-        for held in profile.state_layouts():
-            if held.buffer == self.layout.buffer:
-                edited.remove_state_layout(held)
-        edited.add_state_layout(self.layout)
-        return edited
-
-
 # A chosen depth is an edge's minimum times a power of two up to this many
 # doublings, beside its knee; past what a core or memtile holds, fit refuses.
 DEPTH_DOUBLINGS = 4
@@ -398,6 +376,10 @@ NO_WORSE_QUANTILE = 0.999
 # What candidates does not propose yet, named where it stops.
 _NOT_GENERATED = (
     "inflows",
+    "a runtime plan's transfer sizes",
+    "a configuration's residency and switch",
+    "a value bound at compile time",
+    "state layouts",
     "nested regions",
     "fission",
     "substitution",
@@ -503,8 +485,8 @@ def candidates(
     other value of each field of its schedule (``ScheduleVersion``): its calls a
     command, calls overlapped (fewer than its calls a command), commands in
     flight, calls merged into one (``"merged_<k>x"``), each other version
-    interleaved (its own too, where two calls run it: two sequences), and its
-    packaging; ``fit`` refuses one that breaks a dependence.
+    interleaved, and its packaging; ``fit`` refuses one that breaks a
+    dependence.
 
     Before the schedules, after the configurations, each per-call value a
     call takes and ``profile`` does not vary yet, split in two ranges at each
@@ -516,12 +498,14 @@ def candidates(
     the graph does not record, or that changes no step, is passed over. Then
     each two such values at once, each split at a power of two its own split
     changed a design at: four ranges, each entry the first step any of their
-    capacities changes, as it is at its range's.
+    capacities changes, as it is at its range's: only where the call's timed
+    points lie on both sides of each value's split (a split no point falls
+    below serves none), each capacity recorded once.
 
     Last, the edits of what ``profile`` holds beyond its regions' edges and
-    plans (its entries' scopes, its configurations' choices, its regions'
-    member widths and transfer sizes) and of its choices beside its entries
-    (bindings, state layouts), as ``_chosen`` lists them.
+    plans (its entries' scopes, its configurations' teardown, widths and
+    concurrency, its regions' member widths and burst lengths) and of its
+    values' bindings, as ``_chosen`` lists them.
 
     Before the schedules, after each call's tunables, its configurations,
     each the designs it loads together (``Configuration``): designs that
@@ -975,6 +959,9 @@ def candidates(
         # Each value's span, and the powers of two a split changed a design at.
         spans: dict[str, tuple[int, int]] = {}
         points: dict[str, list[int]] = {}
+        # The call re-recorded at each capacity, by the values bounded below
+        # their tops: each capacity recorded once.
+        sized_at: dict[tuple[tuple[str, int], ...], Recording] = {(): recording}
         for value in recording.values:
             span = recording.value_range(value.name)
             if value.name in varied or span is None:
@@ -1002,6 +989,7 @@ def candidates(
                         small = recording.at_capacity({value.name: b})
                 except (NotImplementedError, NotLegalAtCapacity):
                     continue
+                sized_at[((value.name, b),)] = small
                 changed = [
                     i
                     for i, (a, c) in enumerate(
@@ -1027,12 +1015,25 @@ def candidates(
                 yield AddVariants(
                     Variants(values=(value.name,), ranges=ranges), frozenset(changed)
                 )
-        # Two values at once, each split at a power of two its own split
-        # changed a design at: four boxes, each its capacity's design.
+        # Two values at once, where the call's timed points vary both: each
+        # split at a power of two its own split changed a design at with
+        # timed points on both sides, so each side serves some. Four boxes,
+        # each its capacity's design; a box at a value's top is that value's
+        # split alone (or the call itself), recorded once.
+        timed_at = timed.timed_points()
+        served = {
+            name: [
+                b
+                for b in at
+                if any(v.get(name, spans[name][1]) <= b for _, v in timed_at)
+                and any(v.get(name, spans[name][1]) > b for _, v in timed_at)
+            ]
+            for name, at in points.items()
+        }
         for (first, (lo_a, top_a)), (second, (lo_b, top_b)) in itertools.combinations(
-            [(n, spans[n]) for n in points], 2
+            [(n, spans[n]) for n in served if served[n]], 2
         ):
-            for at_a, at_b in itertools.product(points[first], points[second]):
+            for at_a, at_b in itertools.product(served[first], served[second]):
                 key = (recording.version, (first, second), (at_a, at_b))
                 if key in split:
                     continue
@@ -1042,12 +1043,21 @@ def candidates(
                     for box_a in ((lo_a, at_a), (at_a + 1, top_a))
                     for box_b in ((lo_b, at_b), (at_b + 1, top_b))
                 ]
+                sized = []
                 try:
-                    with set_current_device(device):
-                        sized = [
-                            recording.at_capacity({first: a[1], second: b[1]})
-                            for a, b in boxes
-                        ]
+                    for box_a, box_b in boxes:
+                        bounds = tuple(
+                            (name, hi)
+                            for name, hi, top in (
+                                (first, box_a[1], top_a),
+                                (second, box_b[1], top_b),
+                            )
+                            if hi < top
+                        )
+                        if bounds not in sized_at:
+                            with set_current_device(device):
+                                sized_at[bounds] = recording.at_capacity(dict(bounds))
+                        sized.append(sized_at[bounds])
                 except (NotImplementedError, NotLegalAtCapacity):
                     continue
                 changed = sorted(
@@ -1086,14 +1096,7 @@ def candidates(
             ("size", [None, *(f"merged_{k}x" for k in doublings[1:])]),
             (
                 "interleave_with",
-                [
-                    (),
-                    *(
-                        (v,)
-                        for v in dict.fromkeys(versions)
-                        if v != version or versions.count(v) > 1
-                    ),
-                ],
+                [(), *((v,) for v in dict.fromkeys(versions) if v != version)],
             ),
             (
                 "packaging",
@@ -1124,32 +1127,24 @@ def _chosen(calls: Sequence[Timed], profile: Profile, device: Device) -> Iterato
     (``AddEntry`` in its place): every run, the call's version, the first
     and the last of several runs (a region or configuration of several
     steps: a shape's tunables apply to every run), and the attached part
-    (``attached_part``). A configuration's each other teardown, switch
-    (a reload, only the cores that change, overlapped), partial width (a
-    power of two below the device's columns, or none) and buffer one of its
-    steps reads kept on chip, while what it keeps fits its columns'
-    memtiles (``ConfigureEntries``); and with each later configuration
+    (``attached_part``). A configuration's each other teardown and partial
+    width (a power of two below the device's columns, or none)
+    (``ConfigureEntries``); and with each later configuration
     independent of it, running at once under an id neither uses. A region
     of several steps, each member at each other column count its domain
     holds, the others as they are, each stream edge of it staged where the
     lanes no longer meet as they are (``AddEntry`` in its place), but where
-    the dataflow analysis prices both, one it says runs no faster. Its runtime
+    the dataflow analysis prices both at a call, one it says runs no faster
+    there (a tie too: timed alone, it never gains). Its runtime
     plan's each burst length the target model lists, where it fuses several
-    steps (its longest too, which names what None leaves to mlir-aie), and
-    each transfer size, a power of
-    two from its largest object to below its largest host transfer
+    steps (its longest too, which names what None leaves to mlir-aie)
     (``PlanRegion``).
 
-    Beside the entries, each per-call value bound each other way
-    (``BindValue``): at run time; per range where its range is recorded;
-    at compile time where it takes one value, or the profile's variants
-    over it give each value a design. And each persistent buffer's layout
-    in every version (``LayOutState``): positions then elements, or elements
-    then positions, untiled or its inner axis cut in runs of each object
-    size a step reading or writing it moves, where they divide it.
+    Beside the entries, each per-call value bound each other way it builds
+    (``BindValue``): at run time, and per range where the profile's
+    variants range over it.
     """
     model = get_target_model(device.resolve())
-    memtile = model.get_mem_tile_size()
     part = attached_part()
     # Read once a region is priced: it asks the NPU for its power mode.
     ceiling: Ceiling | None = None
@@ -1190,16 +1185,8 @@ def _chosen(calls: Sequence[Timed], profile: Profile, device: Device) -> Iterato
                 offered.append(("scope", entry, scope))
                 yield AddEntry(Entry(root, scope), touches, replaces=entry)
             if isinstance(root, Configuration):
-                width = root.columns or device.cols
-                read: dict[str, int] = {}
-                for s in found[0]:
-                    for ref, operand in zip(steps[s].refs(), steps[s].op.buffers):
-                        if operand.fills:
-                            read[ref.root] = max(read.get(ref.root, 0), operand.nbytes)
-                kept = sum(read.get(name, 0) for name in root.resident)
                 for name, values in (
                     ("teardown", (None, True, False)),
-                    ("switch", (None, Switch.CHANGED_CORES, Switch.OVERLAPPED)),
                     (
                         "columns",
                         (
@@ -1211,19 +1198,8 @@ def _chosen(calls: Sequence[Timed], profile: Profile, device: Device) -> Iterato
                             ),
                         ),
                     ),
-                    (
-                        "resident",
-                        [
-                            (*root.resident, name)
-                            for name, nbytes in read.items()
-                            if name not in root.resident
-                            and kept + nbytes <= width * memtile
-                        ],
-                    ),
                 ):
                     held = vars(root)[name]
-                    if held is Switch.RELOAD:
-                        held = None
                     for value in values:
                         if value == held or (entry, name, value) in offered:
                             continue
@@ -1354,7 +1330,6 @@ def _chosen(calls: Sequence[Timed], profile: Profile, device: Device) -> Iterato
                             )
                             if ("width", revised) in offered:
                                 continue
-                            offered.append(("width", revised))
                             if period is not None:
                                 try:
                                     faster = (
@@ -1373,97 +1348,30 @@ def _chosen(calls: Sequence[Timed], profile: Profile, device: Device) -> Iterato
                                     faster = True  # not priced: the search times it
                                 except ValueError:
                                     continue  # it cannot run at any depth
+                                # A tie runs no faster alone, which is how the
+                                # search times it: it would never keep one.
                                 if not faster:
                                     continue
+                            offered.append(("width", revised))
                             yield AddEntry(revised, touches, replaces=entry)
-            # Each host transfer of its steps: its bytes, and its objects'.
-            fed = {(c, e.input) for e, _, c in root.wiring()[0]} | {
-                (c, i.input) for i, c in root.wiring()[1]
-            }
-            sent = {(p, e.output) for e, p, _ in root.wiring()[0]}
-            objects, transfers = [0], [0]
-            with set_current_device(device):
-                for i, s in enumerate(match):
-                    op = steps[s].op
-                    op = (op._with_tunables(**given[i]) if given[i] else op).resolved(
-                        device
-                    )
-                    for operand in op.buffers:
-                        if (
-                            not operand.streamed
-                            or (i, operand.name) in fed
-                            or (i, operand.name) in sent
-                        ):
-                            continue
-                        transfers.append(operand.nbytes)
-                        objects.append(
-                            operand.nbytes
-                            * math.prod(operand.obj_shape)
-                            // operand.elements
-                        )
             plan = root.runtime or RuntimePlan()
-            sizes = [
-                1 << j
-                for j in range(max(transfers).bit_length())
-                if max(objects) <= 1 << j < max(transfers)
-            ]
-            for name, values in (
-                (
-                    "burst",
-                    model.get_shim_burst_lengths() if len(match) > 1 else (),
-                ),
-                ("transfer_bytes", sizes),
-            ):
-                for value in values:
-                    if value == vars(plan)[name] or (entry, name, value) in offered:
-                        continue
-                    offered.append((entry, name, value))
-                    yield PlanRegion(entry, name, value, touches)
+            for value in model.get_shim_burst_lengths() if len(match) > 1 else ():
+                if value == plan.burst or (entry, "burst", value) in offered:
+                    continue
+                offered.append((entry, "burst", value))
+                yield PlanRegion(entry, "burst", value, touches)
         for value in recording.values:
             name = value.name
-            span = recording.value_range(name)
             held = held_bindings.get(name)
-            hows: list[Literal["compile", "runtime", "per_range"]] = ["runtime"]
-            if span is not None:
+            hows: list[Literal["runtime", "per_range"]] = ["runtime"]
+            if any(name in v.values for v in profile.variants()):
                 hows.append("per_range")
-            boxes = [
-                box[v.values.index(name)]
-                for v in profile.variants()
-                if name in v.values
-                for box, _ in v.ranges
-            ]
-            if (span is not None and span[0] == span[1]) or (
-                boxes and all(lo == hi for lo, hi in boxes)
-            ):
-                hows.append("compile")
             for how in hows:
                 current = "runtime" if held is None else held.how
                 if how == current or ("binding", name, how) in offered:
                     continue
                 offered.append(("binding", name, how))
                 yield BindValue(Binding(name, how), frozenset(range(len(steps))))
-        for _, h in recording.states.values():
-            touching = sorted(
-                {*readers.get(h.name, []), *writers.get(h.name, [])} - {-1}
-            )
-            tokens: set[int] = set()
-            with set_current_device(device):
-                for s in touching:
-                    op = steps[s].op.resolved(device)
-                    for ref, operand in zip(steps[s].refs(), op.buffers):
-                        if ref.root == h.name and operand.streamed:
-                            tokens.add(math.prod(operand.obj_shape))
-            for order in (("position", "element"), ("element", "position")):
-                for tile in (None, *((t,) for t in sorted(tokens))):
-                    layout = StateLayout(h.name, order, tile)
-                    try:
-                        layout.walk(h.shape)
-                    except ValueError:
-                        continue  # the tile does not divide the axis it cuts
-                    if ("layout", layout) in offered:
-                        continue
-                    offered.append(("layout", layout))
-                    yield LayOutState(layout, frozenset(touching))
 
 
 def fit(
@@ -1565,8 +1473,9 @@ def fit(
 
     An entry scoped to some runs of its shape that sets a shape's tunables
     (one step's region) is refused by the analysis: a shape's tunables apply
-    to every run of it. An entry scoped to another device part than the
-    attached one (``attached_part``) applies to no call here.
+    to every run of it. An entry scoped to a device part is fitted as any
+    other: the part decides only where a build applies it
+    (``Profile.for_part``).
 
     A refusal from any stage of any entry wins over what is not fitted yet;
     only where nothing refuses is the first of those raised.
@@ -1582,8 +1491,9 @@ def fit(
         ValueError: An entry matches none of the calls' steps, a schedule
             none of their versions, a schedule orders a part its entries do
             not name, a region names other than a phase per edge, a
-            binding or a set of variants names a value no call gives, or a
-            state layout a buffer no call holds as state.
+            binding or a set of variants names a value no call gives, a
+            state layout a buffer no call holds as state, or the calls hold
+            one state at two shapes.
         NotImplementedError: What is not fitted yet, where nothing refuses:
             a state laid out other than as recorded,
             a schedule's choices past its packaging, a range's design at a
@@ -1622,9 +1532,14 @@ def fit(
             raise ValueError(
                 f"the profile binds or varies {name!r}, which no call gives"
             )
-    states = {
-        h.name: h.shape for timed in calls for _, h in timed.recording.states.values()
-    }
+    states: dict[str, tuple[int, ...]] = {}
+    for timed in calls:
+        for _, h in timed.recording.states.values():
+            if states.setdefault(h.name, h.shape) != h.shape:
+                raise ValueError(
+                    f"the calls hold state {h.name!r} as {states[h.name]} and "
+                    f"{h.shape}; one buffer has one shape in every version"
+                )
     for layout in profile.state_layouts():
         if layout.buffer not in states:
             raise ValueError(
@@ -2019,13 +1934,9 @@ def fit(
             }
             for s in range(len(recording.steps))
         ]
-        part = attached_part()
         for index, entry in enumerate(profile.entries()):
             region = entry.root
             turns: tuple[tuple[int, int], ...] = ()
-            if entry.scope.device_part not in (None, part):
-                matched.add(index)  # another part's: it applies to no call here
-                continue
             if any(m.part is not None for m in region.steps()):
                 matched.add(index)
                 waiting.append(

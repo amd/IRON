@@ -30,7 +30,7 @@ from iron.tests.support.toys_settings import (
 )
 from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
-from iron.tune.search import AddEntry, candidates, check, fit, measure, search
+from iron.tune.search import candidates, check, fit, measure, search
 
 pytestmark = pytest.mark.usefixtures("device")
 
@@ -298,11 +298,17 @@ def test_lossy_coding_is_never_proposed(device):
     )
     profile = Profile()
     found = list(candidates([Timed(recording)], profile, device))
+    # Every entry an edit leaves in the profile: its compositions and each
+    # range's of its variants.
+    edited = [e.apply(profile) for e in found]
     decode_members = [
         part
-        for e in found
-        if isinstance(e, AddEntry)
-        for part in e.entry.root.steps()
+        for p in edited
+        for entry in (
+            *p.entries(),
+            *(entry for v in p.variants() for _, entry in v.ranges),
+        )
+        for part in entry.root.steps()
         if part.cls is Decode
     ]
     assert all(
