@@ -6,16 +6,18 @@
 import pytest
 from aie.dialects.aie import get_target_model
 
-from iron.common.declare.composition import Edge, Region
+from iron.common.declare.composition import Edge, Entry, Region
 from iron.common.declare.profile import Profile
 from iron.common.graph.record import Recording
 from iron.common.graph.sdf import Derivation, analyze
 from iron.common.image.step import EdgeKind, HandOff
 from iron.operators import MHA
-from iron.tests.support import sequences, toys_composition
+from iron.tests.support import sequences, toys_composition, toys_edges
 from iron.tests.support import toys_dataflow as toys
 from iron.tests.support.llama_model import small
 from iron.tests.support.toys_edges import member
+from iron.tune.autotune import Timed
+from iron.tune.search import fit
 
 pytestmark = pytest.mark.usefixtures("device")
 
@@ -46,6 +48,39 @@ def test_a_bounded_call_fires_the_tiles_its_own_values_cover(n, tiles, device):
     assert analysis.consistent
     assert analysis.repetition == {0: tiles, 1: tiles}
     assert analysis.tokens[region.edges[0]] == ((1,), (1,))
+
+
+def test_a_call_bounded_at_0_moves_nothing_and_its_region_fits(device):
+    """``add -> mul`` over the first ``n`` of 1024 elements, streamed core to core: at ``n = 0`` no core runs and nothing moves, so the edge balances.
+
+    A call bounded at 0 runs, so fit holds the balance there too, and the
+    region fits.
+    """
+    recording = toys.BoundedChain().record(a=(1024,), b=(1024,), c=(1024,))
+    region = toys.bounded_chain_region(recording)
+    assert analyze(region, recording, device, {"n": 0}).why is None
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    result = fit(profile, [Timed(recording, {"n": 1024})], device)
+    assert result.ok, result.why
+
+
+def test_a_reader_bounded_at_0_leaves_what_its_producer_writes_unread(device):
+    """A norm over every row, through a memtile into a multiply over the first ``n``: at ``n = 0`` the multiply reads none of it.
+
+    Its cores run no trip, so the norm's object waits in the memtile into
+    the next call: fit refuses the region, naming the call.
+    """
+    _, recording, region, _ = toys_edges.combination_toy(
+        device, HandOff.EQUAL, "chain", "l1", "min", "same", "smaller"
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    result = fit(profile, [Timed(recording, {"n": 1536})], device)
+    assert not result.ok
+    assert result.stage == "analysis"
+    assert "at n = 0," in (result.why or "")
+    assert "0 read" in (result.why or "")
 
 
 def test_cycle_without_a_carried_value_deadlocks_at_any_depth(device):

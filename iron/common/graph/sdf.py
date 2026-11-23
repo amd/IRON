@@ -19,7 +19,7 @@ import functools
 import itertools
 import math
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Any, get_origin
@@ -894,14 +894,23 @@ class Derivation:
         of_step: Sequence[int],
         channels: Sequence[Channel],
         actors: int,
+        hosted: Collection[int],
+        made_by: Sequence[Sequence[int]],
     ) -> list[int] | None:
-        """Return each actor's phase, its steps' phases ``grouped`` (``_step_phases``), or None where the composer does not group them.
+        """Return each actor's phase, its steps' phases ``grouped`` (``_step_phases``), or None where no one phase holds each actor.
 
-        A core or memtile link is its step's. An actor the analysis adds (a
-        host stream, a memtile restaging an edge) is that of the actors it
-        writes to, or, writing to none, of those it reads from.
+        A core or memtile link is its step's. A host stream the analysis adds
+        (``hosted``) is that of the actors it writes to, or, writing to none,
+        of those it reads from, as its sequence issues it. A memtile restaging
+        an edge is that of the actors it reads from: no sequence issues its
+        links, so it runs once they write. None where the composer does not
+        group the steps, or a core runs steps of two phases in turn
+        (``made_by``, the cores its accesses are).
         """
-        if grouped is None:
+        if grouped is None or any(
+            len({grouped[of_step[m]] for m in made_by[a]}) > 1
+            for a in range(len(of_step))
+        ):
             return None
         phase = {a: grouped[i] for a, i in enumerate(of_step)}
         while len(phase) < actors:
@@ -911,7 +920,10 @@ class Derivation:
                 writers = {c.producer for c in channels if c.consumer == a}
                 if a in known:
                     continue
-                if readers and readers <= known.keys():
+                if a not in hosted:
+                    if writers and writers <= known.keys():
+                        phase[a] = max(known[w] for w in writers)
+                elif readers and readers <= known.keys():
                     phase[a] = min(known[r] for r in readers)
                 elif not readers and writers and writers <= known.keys():
                     phase[a] = max(known[w] for w in writers)
@@ -1368,7 +1380,7 @@ class Derivation:
         sizes: tuple[int, int],
         streams: tuple[list[np.ndarray], list[np.ndarray]],
         lanes: tuple[list[ObjectFifo], list[ObjectFifo]],
-        phase: int,
+        phases: tuple[int, int],
         built: tuple,
         ends: tuple[dict[ObjectFifo, int], dict[ObjectFifo, list[int]]],
     ) -> HandOff:
@@ -1386,8 +1398,14 @@ class Derivation:
         ``Staging`` plans the joins, splits and joins split again among them,
         and whether IRON builds one is a capability of its own. The
         producer's channels into the memtile are the edge's depth.
+
+        ``phases`` are the producer's and the consumer's. The memtile's links
+        run from the start, no sequence issuing them, so it takes what the
+        producer writes in the producer's phase; only its channels into the
+        consumer's cores wait for the consumer's.
         """
         programs, _, writes, reads, _ = built
+        made_in, phase = phases
         writer, readers = ends
         produce, consume = sizes
         produced, consumed = streams
@@ -1417,7 +1435,7 @@ class Derivation:
                 events.append((out, False, False, 1))
                 events += [((edge, lane, j), True, False, 1) for j in gets]
             programs.append(events)
-            e = self._channel(built, edge, writer[out], ingest, phase, True)
+            e = self._channel(built, edge, writer[out], ingest, made_in, True)
             writes.setdefault(out, []).append(e)
             reads[(out, ingest)] = e
         ingests = {lane: len(programs) - len(outs) + lane for lane in range(len(outs))}
@@ -1465,7 +1483,7 @@ class Derivation:
                 events.append(((edge, "emit", j), True, False, 1))
             programs.append(events)
             for lane in taken[j]:
-                e = self._channel(built, edge, ingests[lane], emit, phase, False)
+                e = self._channel(built, edge, ingests[lane], emit, made_in, False)
                 writes.setdefault((edge, lane, j), []).append(e)
                 reads[((edge, lane, j), emit)] = e
             for reader in readers[ins[j]]:
@@ -1549,8 +1567,11 @@ class Derivation:
                 made_by.append([len(programs) - 1] * len(programs[-1]))
         writer: dict[ObjectFifo, int] = {}
         readers: dict[ObjectFifo, list[int]] = {}
+        # Each fifo's step, before steps on one worker share an actor.
+        step_of: dict[ObjectFifo, int] = {}
         for actor, program in enumerate(programs):
             for fifo, producer, _, _ in program:
+                step_of.setdefault(fifo, of_step[actor])
                 if producer:
                     writer[fifo] = actor
                 elif actor not in readers.setdefault(fifo, []):
@@ -1578,6 +1599,12 @@ class Derivation:
                     continue
                 outs = self.lanes[p].get(edge.output, [])
                 ins = self.lanes[c].get(edge.input, [])
+                # A call neither step's cores run (bounded at 0) joins nothing.
+                cores = [a for a, s in enumerate(actor_step) if s in (p, c)]
+                if {actor_step[a] for a in cores} == {p, c} and not any(
+                    programs[a] for a in cores
+                ):
+                    continue
                 if (
                     any(not readers.get(f) for f in ins)
                     or any(actor_step[writer[f]] is None for f in outs)
@@ -1646,6 +1673,17 @@ class Derivation:
                         writer[fifo] = actor
                     elif actor not in readers.setdefault(fifo, []):
                         readers[fifo].append(actor)
+        # A lane no core touches in a call bounded at 0 has an end of no
+        # accesses there, so what the other end moves shows unbalanced.
+        for edge, p, c in self.wired:
+            for fifo in self.lanes[p].get(edge.output, []):
+                if fifo not in writer and self.objects.get(fifo) == 0:
+                    writer[fifo] = len(programs)
+                    programs.append([])
+            for fifo in self.lanes[c].get(edge.input, []):
+                if not readers.get(fifo) and self.objects.get(fifo) == 0:
+                    readers[fifo] = [len(programs)]
+                    programs.append([])
         channels: list[Channel] = []
         fixed: dict[int, int] = {}
         writes: dict[ObjectFifo, list[int]] = {}
@@ -1660,6 +1698,7 @@ class Derivation:
         # else the chosen phases, whose period then waits (Flow.period).
         grouped = self._step_phases()
         phases = self.region.phases
+        chosen = grouped if grouped is not None else self.region.step_phases()
         uncarried = [
             f"{edge} carries {self.refs[p][edge.output].root} into the next call "
             f"through host memory, but the recording carries no such buffer: the "
@@ -1805,7 +1844,7 @@ class Derivation:
                     (sizes[0], sizes[1]),
                     (produced, consumed),
                     (outs, ins),
-                    phase,
+                    (chosen[p] if chosen else 0, phase),
                     (programs, channels, writes, reads, edge_channels),
                     (writer, readers),
                 )
@@ -1859,18 +1898,18 @@ class Derivation:
                             for acquire in (True, False)
                         ]
                     )
-        chosen = grouped if grouped is not None else self.region.step_phases()
         for fifo in writer.keys() & readers.keys():
             if fifo in writes or any((fifo, a) in reads for a in readers[fifo]):
                 continue
             for actor in readers[fifo]:
                 # A step's own fifo, or a host stream into or out of it, runs
                 # in the step's phase, as the region's edges into it do.
-                step = next(
-                    of_step[a] for a in (actor, writer[fifo]) if a < len(of_step)
-                )
                 channels.append(
-                    Channel(writer[fifo], actor, phase=chosen[step] if chosen else 0)
+                    Channel(
+                        writer[fifo],
+                        actor,
+                        phase=chosen[step_of[fifo]] if chosen else 0,
+                    )
                 )
                 e = len(channels) - 1
                 writes.setdefault(fifo, []).append(e)
@@ -1917,7 +1956,9 @@ class Derivation:
         flow = Flow(
             channels,
             events,
-            self._actor_phases(grouped, of_step, channels, len(events)),
+            self._actor_phases(
+                grouped, of_step, channels, len(events), hosted, made_by
+            ),
         )
         why = flow.balance()
         depths, deadlock = flow.minimum_depths(fixed)

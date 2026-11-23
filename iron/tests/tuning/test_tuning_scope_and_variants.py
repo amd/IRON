@@ -360,37 +360,92 @@ class _NormThenNorm(iron.Graph):
         return LayerNorm.step(RMSNorm.step(x[:n], num_aie_columns=1))
 
 
-def test_a_ranges_design_balances_only_at_its_own_values(device):
-    """Split at 8 rows, held in L1: the top design's second norm on two lanes balances only at an even ``n``, and runs at 8 alone.
-
-    Below 8 the one-lane design runs, so nothing refuses the split at 1. What
-    still waits is the analysis of a call bounded at 0.
-    """
+def _norms_split_at(top: int) -> tuple[Recording, Profile]:
+    """Return ``_NormThenNorm`` over 8 rows held in L1 8 deep, its second norm on one lane below ``top`` rows and on two from ``top`` up."""
     recording = _NormThenNorm().record(x=(8, 256))
     region = Region(
         tuple(member(s.op) for s in recording.steps), (Edge(0, "y", 1, "x"),)
     )
     below, full = (
         Profile.dims(LayerNorm, vars(r.steps[1].op))
-        for r in (recording.at_capacity({"n": 7}), recording)
+        for r in (recording.at_capacity({"n": top - 1}), recording)
     )
     profile = Profile()
     profile.add(LayerNorm, num_aie_columns=1)
-    profile.add_entry(Entry(region.held(0, Hold.L1).deepened(0, 2)))
+    profile.add_entry(Entry(region.held(0, Hold.L1).deepened(0, 8)))
     profile.add_variants(
         Variants(
             values=("n",),
             ranges=(
                 (
-                    ((0, 7),),
+                    ((0, top - 1),),
                     Entry(Member(LayerNorm, below, {"num_aie_columns": 1})),
                 ),
-                (((8, 8),), Entry(Member(LayerNorm, full, {"num_aie_columns": 2}))),
+                (((top, 8),), Entry(Member(LayerNorm, full, {"num_aie_columns": 2}))),
             ),
         )
     )
-    with pytest.raises(NotImplementedError, match="at n = 0"):
+    return recording, profile
+
+
+def test_a_ranges_design_balances_only_at_its_own_values(device):
+    """Split at 8 rows: the top design's second norm on two lanes balances only at an even ``n``, and runs at 8 alone.
+
+    Below 8 the one-lane design runs, so nothing refuses the split at 1.
+    Held 8 deep, the whole call one core runs in turn; what still waits is
+    the top design's restage held in L1 under a bound, which ``Staging``
+    does not plan.
+    """
+    recording, profile = _norms_split_at(8)
+    with pytest.raises(NotImplementedError, match="Staging does not plan"):
         fit(profile, [Timed(recording, {"n": 8})], device)
+
+
+def test_a_ranges_design_is_held_at_each_of_its_own_values(device):
+    """Split at 7 rows: the top design runs at 7 and 8, and at 7 one of its two lanes waits on a row its producer never writes."""
+    recording, profile = _norms_split_at(7)
+    result = fit(profile, [Timed(recording, {"n": 8})], device)
+    assert not result.ok
+    assert result.stage == "analysis"
+    assert "its range ((7, 8),): at n = 7," in (result.why or "")
+
+
+class _PairWhole(iron.Graph):
+    """``RangedPair``'s projection and copy with no per-call value."""
+
+    def body(self, x, w, y):
+        projected = GEMM.step(x, w, b_col_maj=True, precision=Precision.MEDIUM)
+        return projected, Copy.step(y.reshape(y.shape[0] // 8, 8))
+
+
+def test_a_ranges_design_takes_an_entry_another_call_names_where_its_capacity_matches(
+    device,
+):
+    """A pack named at 256 rows, another call's own steps, beside a split at 256: the lower design, at 256 rows, takes it too, as its build does.
+
+    Its GEMM reads ``rows`` at run time, a dispatch parameter on an xclbin
+    per step, which a pack does not carry: the split is refused there.
+    """
+    ranged = RangedPair(K=256, N=256).record(x=(2048, 256), w=(256, 256), y=(2048,))
+    whole = _PairWhole().record(x=(256, 256), w=(256, 256), y=(2048,))
+    pack = Region(
+        parts=(
+            Member(cls=GEMM, dims={"M": 256, "K": 256, "N": 256}),
+            Member(
+                cls=Copy, dims={"input_buffer_size": 2048, "output_buffer_size": 2048}
+            ),
+        )
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=pack))
+    profile.add_binding(Binding(value="rows", how="runtime"))
+    profile.add_schedule(Schedule(version=ranged.version, packaging="xclbin"))
+    profile.add_variants(_split_at_256())
+    calls = [Timed(ranged, values={"rows": 256, "valid": 256}), Timed(whole)]
+    result = fit(profile, calls, device)
+    assert not result.ok
+    assert "its range ((0, 256),)" in (result.why or "")
+    assert "which a pack does not carry" in (result.why or "")
 
 
 def _packed(recording) -> Entry:

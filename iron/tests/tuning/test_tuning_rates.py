@@ -15,7 +15,7 @@ from iron.common.graph.fusion import composed
 from iron.common.graph.record import Recording
 from iron.common.graph.sdf import Derivation, analyze
 from iron.common.image.compose import fused_configuration
-from iron.common.image.step import Edge, EdgeKind
+from iron.common.image.step import Edge, EdgeKind, HandOff
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs
@@ -322,6 +322,20 @@ def test_balance_is_held_at_three_of_every_residue_of_the_bounds_period(device):
     result = fit(profile, [Timed(recording)], device)
     assert not result.ok
     assert "at n = 1," in result.why
+
+
+def test_counts_that_settle_past_a_bounds_first_value_are_held_at_four_values(device):
+    """A multiply over the first ``n`` of 1536 elements, one 1536-element tile: what it moves is 0 at ``n = 0`` and one tile past it.
+
+    Its counts settle past their first value into a period of one, so the
+    balance is held at 0 and at three values past it, not at each of the
+    1537 (past ``BALANCED_POINTS``, which waited).
+    """
+    _, recording, region, _ = toys_edges.combination_toy(
+        device, HandOff.EQUAL, "chain", "memtile", "min", "same", "smaller"
+    )
+    derivation = Derivation(region, recording, device)
+    assert _balanced_at(derivation, recording, "n", 0, 1536) == [0, 1, 769, 1536]
 
 
 # GEMM beside another operator waits on npu1 (see ``_GEMM_BESIDE``).
