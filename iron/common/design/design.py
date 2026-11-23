@@ -456,8 +456,9 @@ def configuration(
 ) -> DeviceConfiguration:
     """Build ``arrays`` as one device configuration ``name``.
 
-    One array per identity, and each entry's sequence over it, ``sequence`` if it is
-    alone, else named for its key. Given ``steps`` (keys of ``arrays``), one
+    One array per identity, on the device they are bound to (one array alone,
+    the part of it it takes), and each entry's sequence over it, ``sequence``
+    if it is alone, else named for its key. Given ``steps`` (keys of ``arrays``), one
     ``sequence`` runs theirs in order, back to back (``MergedRuntime.merge``), or,
     ``fuse``, in one task group (``MergedRuntime.fuse``), each step on an array of its
     own; with ``phases`` (``steps`` split, in order), one fused sequence per phase,
@@ -490,9 +491,13 @@ def configuration(
         owners.setdefault(of[key], array)
     # A spliced step builds nothing: it runs on its producer's cores.
     built = [a for a in owners.values() if not isinstance(a, SplicedArray)]
-    kinds = {type(a.op.array_device()).__name__ for a in built}
+    # An array alone takes its own part of the device (npu1's GEMM, on as few
+    # columns as it spans); arrays loaded together take the device they are
+    # bound to, a part of it holding only the one.
+    kinds = {type(a.op.dev).__name__ for a in built}
     if len(kinds) != 1:
         raise ValueError(f"{list(arrays)} are built for different devices {kinds}")
+    device = built[0].op.array_device() if len(built) == 1 else built[0].op.dev
     traced = [owner for owner in owners.values() if owner.traced]
     sizes = set()
     for owner in traced:
@@ -529,7 +534,7 @@ def configuration(
     ]
     configured = DeviceConfiguration(
         name,
-        built[0].op.array_device(),
+        device,
         workers=[w for owner in owners.values() for w in owner.workers],
         runtimes=runtimes,
     )
