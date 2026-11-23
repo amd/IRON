@@ -111,6 +111,14 @@ def test_the_identity_follows_the_solver(monkeypatch):
     assert own[-1][0] == "stream" and op.design_key()[1][-1] != own[-1]
 
 
+def test_the_identity_follows_the_kernel_sources(monkeypatch, tmp_path):
+    """mlir-aie names each object by its source, which a cached design links by name."""
+    op = SwiGLUFusedStream(**DIMS).resolved()
+    _, own = op.design_key()
+    monkeypatch.setenv("MLIR_AIE_KERNEL_SOURCES", str(tmp_path))
+    assert op.design_key()[1][-1] != own[-1]
+
+
 def test_groups_of_one_design_share_its_solve():
     ops = [
         SwiGLUFusedStream(**DIMS).resolved(),

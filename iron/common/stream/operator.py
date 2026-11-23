@@ -136,7 +136,8 @@ class StreamOperator(Operator):
 
         It covers everything the generated design is a function of: the
         workload's graph, the candidates, the solve options, the kernel
-        library and stream-dse's version.
+        library, stream-dse's version and the sources mlir-aie compiles the
+        kernels from.
         """
         cls, own = super().design_key()
         return cls, (*own, ("stream", self._solve_digest()))

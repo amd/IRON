@@ -6,8 +6,9 @@
 Every solve runs here, under the same options, and is cached under
 ``$NPU_CACHE_HOME/stream/``, keyed by what the operator names it by, the
 workload's graph, the candidate mappings, the options (the kernel library
-among them) and the installed stream-dse's version: nothing is solved
-twice, and nothing is written to the working directory. ``STREAM_BACKEND`` names the solver
+among them), the installed stream-dse's version and mlir-aie's with the
+kernel sources it compiles: nothing is solved twice, and nothing is written
+to the working directory. ``STREAM_BACKEND`` names the solver
 (OR-Tools GSCIP by default). stream-dse bounds each allocation solve in
 time (``SolveOptions.time_limit_s``) and takes the best design found by
 then, so a solve that reaches the bound can differ between hosts.
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from aie.utils.compile import NPU_CACHE_HOME
+from aie.utils.config import aie_kernels_dir, aie_runtime_lib_dir
 
 from .hardware import ComputeArray, accelerator
 from .mapping import StreamMapping
@@ -54,6 +56,19 @@ def backend() -> str:
 
 def stream_version() -> str:
     return metadata.version("stream-dse")
+
+
+def kernel_sources() -> tuple[str, str, str]:
+    """Return what mlir-aie names a kernel's object by, beside the kernel.
+
+    Its version and the sources it compiles (``MLIR_AIE_KERNEL_SOURCES``
+    names a checkout's): a generated design links the objects by name.
+    """
+    return (
+        metadata.version("mlir_aie"),
+        str(Path(aie_kernels_dir()).resolve()),
+        str(Path(aie_runtime_lib_dir()).resolve()),
+    )
 
 
 def solve_options(dev, library):
@@ -132,7 +147,8 @@ def solve_digest(
     """Return the digest of everything a design is a function of."""
     graph = hashlib.sha256(workload.structure()).hexdigest()
     mappings = [candidate.to_dict(workload) for candidate in candidates]
-    token = repr((key, graph, mappings, solve_options(dev, library), stream_version()))
+    options = solve_options(dev, library)
+    token = repr((key, graph, mappings, options, kernel_sources(), stream_version()))
     return hashlib.sha256(token.encode()).hexdigest()[:16]
 
 
