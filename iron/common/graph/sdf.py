@@ -1561,8 +1561,11 @@ class Derivation:
                 made_by.append([len(programs) - 1] * len(programs[-1]))
         writer: dict[ObjectFifo, int] = {}
         readers: dict[ObjectFifo, list[int]] = {}
+        # Each fifo's step, before steps on one worker share an actor.
+        step_of: dict[ObjectFifo, int] = {}
         for actor, program in enumerate(programs):
             for fifo, producer, _, _ in program:
+                step_of.setdefault(fifo, of_step[actor])
                 if producer:
                     writer[fifo] = actor
                 elif actor not in readers.setdefault(fifo, []):
@@ -1878,11 +1881,12 @@ class Derivation:
             for actor in readers[fifo]:
                 # A step's own fifo, or a host stream into or out of it, runs
                 # in the step's phase, as the region's edges into it do.
-                step = next(
-                    of_step[a] for a in (actor, writer[fifo]) if a < len(of_step)
-                )
                 channels.append(
-                    Channel(writer[fifo], actor, phase=chosen[step] if chosen else 0)
+                    Channel(
+                        writer[fifo],
+                        actor,
+                        phase=chosen[step_of[fifo]] if chosen else 0,
+                    )
                 )
                 e = len(channels) - 1
                 writes.setdefault(fifo, []).append(e)

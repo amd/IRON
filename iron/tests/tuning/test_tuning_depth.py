@@ -213,14 +213,16 @@ _MEASURED = {2: 4.0, 4: 4.0, 8: 4.0, 16: 3.0}
 
 
 @pytest.mark.parametrize("rate", toys_edges.RATES)
-@pytest.mark.parametrize("held", ["memtile", "ddr"])
+@pytest.mark.parametrize("held", ["memtile", "ddr", "later_phase"])
 @pytest.mark.parametrize("role", ["fan_in", "skip", "diamond"])
 def test_least_depths_do_not_depend_on_measured_ddr_rates(role, held, rate, device):
     """Each role with a step a phase later, through a memtile or host memory: one verdict and least depths, with DDR rates or none.
 
     With them each host stream is an actor in its step's phase. A memtile's
     links run from the start, no phase's sequence issuing them, so it takes
-    what its producer writes in the producer's phase.
+    what its producer writes in the producer's phase. Held a phase later, a
+    core runs steps of two phases, and each step's own streams keep their
+    step's phase.
     """
     _, recording, region, _ = toys_edges.combination_toy(
         device, HandOff.EQUAL, role, held, "min", rate, "recorded"
