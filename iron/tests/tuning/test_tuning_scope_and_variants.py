@@ -7,11 +7,12 @@ import numpy as np
 import pytest
 
 import iron
-from iron import Carried, Precision
+from iron import Carried, Precision, Scratchpad
 from iron.common.declare import Profile
 from iron.common.declare.composition import (
     Binding,
     Entry,
+    Hold,
     Member,
     Refinement,
     Region,
@@ -21,11 +22,13 @@ from iron.common.declare.composition import (
 )
 from iron.common.graph.record import Recording
 from iron.common.image.packaging import SCRATCHPAD_WORDS
-from iron.common.image.step import BufferRef, SequenceStep
+from iron.common.image.step import BufferRef, Edge, SequenceStep
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
+from iron.operators.layer_norm import LayerNorm
+from iron.operators.rms_norm import RMSNorm
 from iron.tests.support.toys_edges import member
 from iron.tests.support.toys_settings import (
     RangedPair,
@@ -324,6 +327,70 @@ def test_a_call_whose_points_span_more_than_one_range_fits(device):
     bare = Timed(recording)
     with pytest.raises(NotImplementedError, match="does not give rows"):
         fit(tuned, [bare], device)
+
+
+def test_a_split_both_versions_take_is_fitted_beside_what_only_one_takes(device):
+    """Two versions split at 256 rows, the narrower one scheduled and its copy packed: each range's design takes what its own version does.
+
+    The narrower version's schedule and pack name none of the wider one's
+    steps, so the wider one's designs are fitted without them; the calls as a
+    whole are still held to matching every entry.
+    """
+    g = RangedPair(K=256, N=256)
+    wide = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    narrow = g.record(x=(2048, 256), w=(256, 256), y=(1024,))
+    calls = [
+        Timed(wide, values={"rows": 256, "valid": 256}),
+        Timed(narrow, values={"rows": 256, "valid": 128}),
+    ]
+    profile = Profile()
+    profile.add_variants(_split_at_256())
+    profile.add_schedule(Schedule(version=narrow.version))
+    profile.add_entry(Entry(Region(parts=(member(narrow.steps[1].op),))))
+    result = fit(profile, calls, device)
+    assert result.ok, result.why
+    with pytest.raises(ValueError, match="matches none of the calls' steps"):
+        fit(profile, calls[:1], device)
+
+
+class _NormThenNorm(iron.Graph):
+    """A norm over the first ``n`` rows of ``x`` on one lane, then a norm of those rows on the lanes its profile gives."""
+
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        return LayerNorm.step(RMSNorm.step(x[:n], num_aie_columns=1))
+
+
+def test_a_ranges_design_balances_only_at_its_own_values(device):
+    """Split at 8 rows, held in L1: the top design's second norm on two lanes balances only at an even ``n``, and runs at 8 alone.
+
+    Below 8 the one-lane design runs, so nothing refuses the split at 1. What
+    still waits is the analysis of a call bounded at 0.
+    """
+    recording = _NormThenNorm().record(x=(8, 256))
+    region = Region(
+        tuple(member(s.op) for s in recording.steps), (Edge(0, "y", 1, "x"),)
+    )
+    below, full = (
+        Profile.dims(LayerNorm, vars(r.steps[1].op))
+        for r in (recording.at_capacity({"n": 7}), recording)
+    )
+    profile = Profile()
+    profile.add(LayerNorm, num_aie_columns=1)
+    profile.add_entry(Entry(region.held(0, Hold.L1).deepened(0, 2)))
+    profile.add_variants(
+        Variants(
+            values=("n",),
+            ranges=(
+                (
+                    ((0, 7),),
+                    Entry(Member(LayerNorm, below, {"num_aie_columns": 1})),
+                ),
+                (((8, 8),), Entry(Member(LayerNorm, full, {"num_aie_columns": 2}))),
+            ),
+        )
+    )
+    with pytest.raises(NotImplementedError, match="at n = 0"):
+        fit(profile, [Timed(recording, {"n": 8})], device)
 
 
 def _packed(recording) -> Entry:

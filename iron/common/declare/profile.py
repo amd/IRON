@@ -346,6 +346,14 @@ class Profile:
         """
         self._compositions[self._compositions.index(old)] = new
 
+    def remove_entry(self, entry: Entry) -> None:
+        """Remove the composition entry ``entry``.
+
+        Raises:
+            ValueError: ``entry`` is not one of its entries.
+        """
+        self._compositions.remove(entry)
+
     def add_schedule(self, schedule: Schedule) -> None:
         """Add a version's schedule."""
         self._schedules.append(schedule)
@@ -361,6 +369,14 @@ class Profile:
             ValueError: ``old`` is not one of its schedules.
         """
         self._schedules[self._schedules.index(old)] = new
+
+    def remove_schedule(self, schedule: Schedule) -> None:
+        """Remove the schedule ``schedule``.
+
+        Raises:
+            ValueError: ``schedule`` is not one of its schedules.
+        """
+        self._schedules.remove(schedule)
 
     def add_variants(self, variants: Variants) -> None:
         """Add a design per range of per-call values."""
