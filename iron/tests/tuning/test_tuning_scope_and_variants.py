@@ -326,6 +326,30 @@ def test_a_call_whose_points_span_more_than_one_range_fits(device):
         fit(tuned, [bare], device)
 
 
+def test_a_split_both_versions_take_is_fitted_beside_what_only_one_takes(device):
+    """Two versions split at 256 rows, the narrower one scheduled and its copy packed: each range's design takes what its own version does.
+
+    The narrower version's schedule and pack name none of the wider one's
+    steps, so the wider one's designs are fitted without them; the calls as a
+    whole are still held to matching every entry.
+    """
+    g = RangedPair(K=256, N=256)
+    wide = g.record(x=(2048, 256), w=(256, 256), y=(2048,))
+    narrow = g.record(x=(2048, 256), w=(256, 256), y=(1024,))
+    calls = [
+        Timed(wide, values={"rows": 256, "valid": 256}),
+        Timed(narrow, values={"rows": 256, "valid": 128}),
+    ]
+    profile = Profile()
+    profile.add_variants(_split_at_256())
+    profile.add_schedule(Schedule(version=narrow.version))
+    profile.add_entry(Entry(Region(parts=(member(narrow.steps[1].op),))))
+    result = fit(profile, calls, device)
+    assert result.ok, result.why
+    with pytest.raises(ValueError, match="matches none of the calls' steps"):
+        fit(profile, calls[:1], device)
+
+
 def _packed(recording) -> Entry:
     """Return RangedPair's GEMM and copy as one pack (a region of no edges), named at the recording's shapes."""
     return Entry(Region(parts=tuple(member(s.op) for s in recording.steps)))

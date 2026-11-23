@@ -1023,10 +1023,11 @@ def fit(
     variants over its values. Then each range's design at its capacity:
     the call re-recorded from its graph where each value takes at most its
     range's top (``Recording.selected``), which the range's entry must
-    match, fitted under that entry and the rest of the profile (its
-    compositions named at that capacity); a design not legal there
-    (``NotLegalAtCapacity``) is refused by the counts, or as its own fit
-    refuses it.
+    match, fitted under that entry and the rest of the profile its version
+    takes (its compositions named at that capacity; an entry or a schedule
+    only another version takes is fitted with that version); a design not
+    legal there (``NotLegalAtCapacity``) is refused by the counts, or as its
+    own fit refuses it.
 
     A refusal from any stage of any entry wins over what is not fitted yet;
     only where nothing refuses is the first of those raised.
@@ -1165,12 +1166,19 @@ def fit(
             for v in recording.values
             if (span := recording.value_range(v.name)) is not None
         }
-        # The profile but its other sets of variants: each range's design is
-        # fitted with what the profile composes, at the range's capacity.
+        # The profile as it applies to this version, but its other sets of
+        # variants: each range's design is fitted with what the profile
+        # composes, at the range's capacity.
         alone = profile.copy()
         for other in profile.variants():
             if other != variants:
                 alone.remove_variants(other)
+        for entry in profile.entries():
+            if not recording.occurrences(entry):
+                alone.remove_entry(entry)
+        for schedule in profile.schedules():
+            if schedule.version != recording.version:
+                alone.remove_schedule(schedule)
         try:
             for _, values in timed.timed_points():
                 recording.ranges_at(alone, values)
