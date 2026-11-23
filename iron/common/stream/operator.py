@@ -151,9 +151,9 @@ class StreamOperator(Operator):
         Raises:
             ValueError: The declared operands are not the group's arguments.
         """
-        from stream.compiler.kernels.binding import (
+        from stream.compiler.kernels.binding import (  # pyright: ignore[reportMissingImports]
             load_bindings,
-        )  # pyright: ignore[reportMissingImports]
+        )
 
         workload = self.workload()
         inputs, outputs = workload.group_arguments(self.layers())

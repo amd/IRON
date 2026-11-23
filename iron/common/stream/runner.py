@@ -77,10 +77,10 @@ def solve_options(dev, library):
     The whole array, the tile sizes searched around each mapping's seed,
     and stream-dse's default constraint families under ``FAMILY_OPTIONS``.
     """
-    from stream.api import (
+    from stream.api import (  # pyright: ignore[reportMissingImports]
         SolveOptions,
         default_families,
-    )  # pyright: ignore[reportMissingImports]
+    )
 
     return SolveOptions(
         backend=backend(),
@@ -178,10 +178,10 @@ def solve(
     Raises:
         RuntimeError: No candidate can be allocated.
     """
-    from stream.api import (
+    from stream.api import (  # pyright: ignore[reportMissingImports]
         generate_code,
         select_mapping,
-    )  # pyright: ignore[reportMissingImports]
+    )
 
     hardware = accelerator(dev)
     options = solve_options(dev, library)

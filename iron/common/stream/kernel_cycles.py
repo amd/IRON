@@ -44,9 +44,9 @@ SCALARS: dict[str, Callable[[dict[str, int]], list[Any]]] = {
 
 
 def _log2e() -> float:
-    from stream.compiler.kernels.flash import (
+    from stream.compiler.kernels.flash import (  # pyright: ignore[reportMissingImports]
         LOG2E,
-    )  # pyright: ignore[reportMissingImports]
+    )
 
     return LOG2E
 
@@ -69,9 +69,9 @@ def _initial(dims: int, dtype, rng) -> np.ndarray:
 
 
 def _design(symbol: str, shape: tuple[tuple[str, int], ...], reps: int):
-    from stream.compiler.kernels.binding import (
+    from stream.compiler.kernels.binding import (  # pyright: ignore[reportMissingImports]
         resolve,
-    )  # pyright: ignore[reportMissingImports]
+    )
 
     dims = dict(shape)
     dev = aie_utils.ensure_current_device()
