@@ -296,7 +296,12 @@ HELD_IN_L1 = {
 # Each device's L1-held shapes the composer builds bit-identical there.
 _BUILT_IN_L1: dict[str, set[str]] = {
     "npu1": set(),
-    "npu2": {"join_rows_into_one", "ratio_two_into_three_rows", "split_into_rows"},
+    "npu2": {
+        "halves_in_one_object",
+        "join_rows_into_one",
+        "ratio_two_into_three_rows",
+        "split_into_rows",
+    },
 }
 
 

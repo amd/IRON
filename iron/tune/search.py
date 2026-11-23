@@ -2364,7 +2364,11 @@ def _held_past(
     """Return why ``edge``, ``depth`` objects deep, is past where it is held: a tile's memory or descriptors, or a lock's count; else None.
 
     A fifo end of ``depth`` objects starts its producer's lock at that many
-    free ones, so a lock's range bounds it as a tile's memory does.
+    free ones, so a lock's range bounds it as a tile's memory does. A staged
+    edge's memtile pools ``Staging``'s rounds, each taking a slot of whole
+    objects from every producer lane it joins: ``depth`` objects a lane are
+    as many rounds as it takes to hold them, a buffer descriptor and a lock
+    count each. A slot of one object is a round an object.
     """
     # Spliced, an edge holds each core's own tile.
     elements = (
@@ -2379,13 +2383,38 @@ def _held_past(
     held = depth * elements * np.dtype(source.dtype).itemsize
     if held > memory:
         return f"{edge} holds {depth} objects, {held} bytes; {tile} holds {memory}"
-    if bds is not None and depth > bds:
-        return (
-            f"{edge} holds {depth} objects, a buffer descriptor each; {tile} has "
-            f"{bds}"
-        )
-    if depth > locks:
-        return f"{edge} holds {depth} objects, more than a lock counts ({locks})"
+    pooled = depth
+    if edge.kind is EdgeKind.STAGED and edge not in derivation.spliced:
+        (consumer,) = [c for e, _, c in derivation.wired if e == edge]
+        (made,) = [
+            b
+            for b in derivation.recorded[producer][0].op.buffers
+            if b.name == edge.output
+        ]
+        (taken,) = [
+            b
+            for b in derivation.recorded[consumer][0].op.buffers
+            if b.name == edge.input
+        ]
+        try:
+            with set_current_device(derivation.device):
+                staging = Staging(made, taken)
+        except ValueError:
+            # Its refusals are fit's Staging counts' and the composer's.
+            staging = None
+        if staging is not None:
+            pooled = max(
+                -(-depth * elements // slot)
+                for _, slots, _, _ in staging.groups
+                for slot in slots
+            )
+    held_as = f"{depth} objects" + (
+        "" if pooled == depth else f" in {pooled} of its memtile's rounds"
+    )
+    if bds is not None and pooled > bds:
+        return f"{edge} holds {held_as}, a buffer descriptor each; {tile} has {bds}"
+    if pooled > locks:
+        return f"{edge} holds {held_as}, more than a lock counts ({locks})"
     return None
 
 
