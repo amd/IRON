@@ -49,10 +49,11 @@ chooses.
 A GEMM block is the `(sequence, embedding, hidden)` block the tile search
 starts from.
 
-`seq_len` must be a multiple of the array's rows and hold a block on each;
-`embedding_dim` and `hidden_dim` multiples of their block times the column
-split. A candidate that does not divide is left out (`design.refusal`), and a
-size no candidate fits is refused by `compatible()`.
+`seq_len` must be a multiple of its block and of the array's rows, and hold
+a block on each row; `embedding_dim` and `hidden_dim` multiples of their
+block times the column split. A candidate that does not divide is left out
+(`design.refusal`), and a size no candidate fits is refused by
+`compatible()`.
 
 ## Installing
 

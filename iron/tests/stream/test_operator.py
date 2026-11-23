@@ -145,3 +145,13 @@ def test_without_the_optional_stack_it_is_unresolvable(monkeypatch, missing, ins
 def test_a_size_no_candidate_fits_is_incompatible():
     with pytest.raises(ValueError, match="hidden_dim"):
         SwiGLUFusedStream(seq_len=256, embedding_dim=512, hidden_dim=2000).resolved()
+
+
+def test_a_sequence_takes_only_the_gemm_blocks_that_divide_it(npu2):
+    """stream-dse tiles the sequence by the block: 288 is whole blocks of 32, 260 of neither."""
+    from iron.operators.swiglu_prefill_stream import design
+
+    [mapping] = design.candidates(288, 512, 2048, npu2, partition=1)
+    assert mapping.kernels[GATE]["m"] == 32
+    with pytest.raises(ValueError, match=r"seq_len \(260\) must be a multiple of 32"):
+        SwiGLUFusedStream(seq_len=260, embedding_dim=512, hidden_dim=2048).resolved()

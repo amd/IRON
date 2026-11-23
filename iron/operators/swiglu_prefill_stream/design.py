@@ -11,6 +11,7 @@ groups.
 """
 
 from functools import cache
+from math import lcm
 
 from iron.common.stream.hardware import ComputeArray
 from iron.common.stream.mapping import FusedGroup, StreamMapping
@@ -143,16 +144,17 @@ def refusal(
 ) -> str | None:
     """Return why ``grid`` cannot run ``partition`` at ``block`` and this size, else None.
 
-    Each row of cores takes a sequence block, and each GEMM splits its
-    embedding and hidden tiles over its columns: all of them where it is
-    the only GEMM of its group.
+    The sequence is whole sequence blocks, at least one on each row of
+    cores, and each GEMM splits its embedding and hidden tiles over its
+    columns: all of them where it is the only GEMM of its group.
     """
     sequence, embedding, hidden = block
     alone = all(len(set(group) & set(GEMMS)) <= 1 for group in PARTITIONS[partition])
     columns = grid.num_columns if alone else SHARED_GEMM_COLUMNS
-    if seq_len % grid.num_rows or seq_len < sequence * grid.num_rows:
+    step = lcm(sequence, grid.num_rows)
+    if seq_len % step or seq_len < sequence * grid.num_rows:
         return (
-            f"seq_len ({seq_len}) must be a multiple of {grid.num_rows} and at "
+            f"seq_len ({seq_len}) must be a multiple of {step} and at "
             f"least {sequence * grid.num_rows}"
         )
     for name, size, tile in (
