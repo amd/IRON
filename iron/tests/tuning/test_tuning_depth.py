@@ -207,6 +207,31 @@ def test_depth_below_minimum_is_refused_before_any_build(role, shape, rate, devi
     assert "deadlock" in (result.why or "")
 
 
+# A device's measured DDR rates (``Ceiling.mixed``), any: given them, the
+# analysis runs each host stream as an actor.
+_MEASURED = {2: 4.0, 4: 4.0, 8: 4.0, 16: 3.0}
+
+
+@pytest.mark.parametrize("rate", toys_edges.RATES)
+@pytest.mark.parametrize("held", ["memtile", "ddr"])
+@pytest.mark.parametrize("role", ["fan_in", "skip", "diamond"])
+def test_least_depths_do_not_depend_on_measured_ddr_rates(role, held, rate, device):
+    """Each role with a step a phase later, through a memtile or host memory: one verdict and least depths, with DDR rates or none.
+
+    With them each host stream is an actor in its step's phase. A memtile's
+    links run from the start, no phase's sequence issuing them, so it takes
+    what its producer writes in the producer's phase.
+    """
+    _, recording, region, _ = toys_edges.combination_toy(
+        device, HandOff.EQUAL, role, held, "min", rate, "recorded"
+    )
+    plain, measured = (
+        analyze(region, recording, device, None, rates) for rates in (None, _MEASURED)
+    )
+    assert measured.why == plain.why
+    assert measured.min_depth == plain.min_depth
+
+
 @pytest.mark.parametrize("role", toys_edges.ROLES)
 def test_depth_over_l1_or_memtile_is_refused(role, device):
     """Every role, at an implausibly deep hold: ``fit`` refuses it at stage ``"counts"``, before any build."""
