@@ -17,6 +17,7 @@ never tiles or channels.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Literal
@@ -512,6 +513,60 @@ class StateLayout:
     buffer: str
     order: tuple[str, ...]
     tile: tuple[int, ...] | None = None
+
+    def walk(self, shape: tuple[int, ...]) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Return how memory walks a buffer of ``shape``: each dimension's size, outermost first, and its stride as recorded.
+
+        A buffer is its ``"position"``s (its leading axis, where it has two
+        or more; one position otherwise) of ``"element"``s each (the rest).
+        ``order`` puts one of the two outermost; ``tile`` cuts the inner one
+        in runs of its one size, each run's elements together and the runs
+        outermost: positions then elements in runs of ``t`` elements walk
+        ``[e // t][p][e % t]``, and elements then positions in runs of ``t``
+        positions (keys transposed a block at a time) ``[p // t][e][p % t]``.
+
+        Raises:
+            ValueError: ``order`` is not position and element in some order,
+                or ``tile`` is not one size dividing the axis it cuts.
+        """
+        if sorted(self.order) != ["element", "position"]:
+            raise ValueError(
+                f"{self.buffer!r} is laid out by {self.order}; a layout orders "
+                f"'position' and 'element'"
+            )
+        positions = shape[0] if len(shape) > 1 else 1
+        elements = math.prod(shape) // positions
+        size = {"position": positions, "element": elements}
+        stride = {"position": elements, "element": 1}
+        outer, inner = self.order
+        if self.tile is None:
+            return (size[outer], size[inner]), (stride[outer], stride[inner])
+        if len(self.tile) != 1 or self.tile[0] < 1 or size[inner] % self.tile[0]:
+            raise ValueError(
+                f"{self.buffer!r}'s tile {self.tile} does not cut its "
+                f"{size[inner]} {inner}s in whole runs"
+            )
+        (t,) = self.tile
+        return (
+            (size[inner] // t, size[outer], t),
+            (t * stride[inner], stride[outer], stride[inner]),
+        )
+
+    def kept(self, shape: tuple[int, ...]) -> bool:
+        """Return whether it lays a buffer of ``shape`` out as recorded: memory walks its elements in order.
+
+        Raises:
+            ValueError: As ``walk``.
+        """
+        sizes, strides = self.walk(shape)
+        run = 1
+        for size, stride in reversed(list(zip(sizes, strides))):
+            if size == 1:
+                continue
+            if stride != run:
+                return False
+            run *= size
+        return True
 
 
 def refinement(cls: type, tunable: str) -> Refinement:

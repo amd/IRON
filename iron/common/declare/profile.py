@@ -386,6 +386,14 @@ class Profile:
         """Return the per-call value bindings."""
         return list(self._bindings)
 
+    def remove_binding(self, binding: Binding) -> None:
+        """Remove the binding ``binding``.
+
+        Raises:
+            ValueError: ``binding`` is not one of its bindings.
+        """
+        self._bindings.remove(binding)
+
     def add_state_layout(self, layout: StateLayout) -> None:
         """Add the one layout a persistent buffer has in every version."""
         self._state_layouts.append(layout)
@@ -393,6 +401,14 @@ class Profile:
     def state_layouts(self) -> list[StateLayout]:
         """Return the persistent buffers' layouts."""
         return list(self._state_layouts)
+
+    def remove_state_layout(self, layout: StateLayout) -> None:
+        """Remove the state layout ``layout``.
+
+        Raises:
+            ValueError: ``layout`` is not one of its state layouts.
+        """
+        self._state_layouts.remove(layout)
 
     def make(self, cls: type[_Op], **kwargs: Any) -> _Op:
         """Build ``cls(**kwargs)`` with its open tunables filled from this profile.
