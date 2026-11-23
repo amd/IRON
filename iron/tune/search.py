@@ -2273,15 +2273,17 @@ def _balanced_at(
 
     What a call moves varies with ``name`` only through its steps' per-call
     words and the objects each lane a word sizes moves, each a step function
-    of it: past its first values, ``f(n + p) - f(n)`` is constant for some
-    least ``p``, read off the function's own values (the period of its
-    differences). With ``L`` the least common multiple of every such ``p``,
-    a count an edge's two ends move differs by a polynomial in ``k`` on
-    each class ``r + kL``, of degree two at most where two of a call's
+    of it: past its first ``s`` values, ``f(n + p) - f(n)`` is constant for
+    some ``p``, both read off the function's own values (where its
+    differences settle into repeating, and their period), the pair taking
+    the fewest analyses. With ``S`` the most values any takes to settle and
+    ``L`` the least common multiple of every such ``p``, past the first
+    ``S`` a count an edge's two ends move differs by a polynomial in ``k``
+    on each class ``r + kL``, of degree two at most where two of a call's
     varying counts multiply (a loop's trips by the objects in it): the
-    analysis at three of each class's values, ``L`` at each end of the
-    range and ``L`` from its middle, holds every value. The whole range
-    where that is no fewer.
+    analysis at the first ``S`` values, then at three of each class's, ``L``
+    at each end of what is left and ``L`` from its middle, holds every
+    value. The whole range where that is no fewer.
 
     Returns:
         The values, in order; None where more than ``BALANCED_POINTS``.
@@ -2326,31 +2328,31 @@ def _balanced_at(
                         )
             rows.append(row)
         series += [list(column) for column in zip(*rows)]
-    period = 1
+    settled, period = 0, 1
     for values in series:
-        steps = [b - a for a, b in zip(values, values[1:])]
-        # The least p with steps[i] == steps[i + p] throughout: a border's
-        # complement (the prefix function's last value).
-        border = [0] * len(steps)
-        for i in range(1, len(steps)):
-            k = border[i - 1]
-            while k and steps[i] != steps[k]:
-                k = border[k - 1]
-            border[i] = k + (steps[i] == steps[k])
-        period = math.lcm(period, len(steps) - border[-1] if steps else 1)
-    size = hi - lo + 1
+        steps = np.diff(values)
+        # Per p, the s past which steps[i] == steps[i + p]: one past their
+        # last difference. p = len(steps) always holds, from s = 0.
+        found = [(0, max(len(steps), 1))]
+        for p in range(1, min(len(steps), BALANCED_POINTS // 3) + 1):
+            differ = np.flatnonzero(steps[:-p] != steps[p:])
+            found.append((int(differ[-1]) + 1 if len(differ) else 0, p))
+        s, p = min(found, key=lambda sp: sp[0] + 3 * sp[1])
+        settled, period = max(settled, s), math.lcm(period, p)
+    start = lo + settled
+    size = hi - start + 1
     if 3 * period >= size:
-        return list(range(lo, hi + 1)) if size <= BALANCED_POINTS else None
-    if 3 * period > BALANCED_POINTS:
-        return None
-    middle = lo + (size // 2 // period) * period
-    return sorted(
-        {
-            *range(lo, lo + period),
-            *range(middle, middle + period),
-            *range(hi - period + 1, hi + 1),
-        }
-    )
+        points = list(range(lo, hi + 1))
+    else:
+        middle = start + (size // 2 // period) * period
+        points = sorted(
+            {
+                *range(lo, start + period),
+                *range(middle, middle + period),
+                *range(hi - period + 1, hi + 1),
+            }
+        )
+    return points if len(points) <= BALANCED_POINTS else None
 
 
 def _held_past(
