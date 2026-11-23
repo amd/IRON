@@ -24,6 +24,7 @@ import time
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from fractions import Fraction
 from typing import Literal, Protocol
 
 import numpy as np
@@ -1132,7 +1133,8 @@ def _chosen(calls: Sequence[Timed], profile: Profile, device: Device) -> Iterato
     independent of it, running at once under an id neither uses. A region
     of several steps, each member at each other column count its domain
     holds, the others as they are, each stream edge of it staged where the
-    lanes no longer meet as they are (``AddEntry`` in its place). Its runtime
+    lanes no longer meet as they are (``AddEntry`` in its place), but where
+    the dataflow analysis prices both, one it says runs no faster. Its runtime
     plan's each transfer size, a power of two from its largest object to
     below its largest host transfer (``PlanRegion``).
 
@@ -1147,6 +1149,9 @@ def _chosen(calls: Sequence[Timed], profile: Profile, device: Device) -> Iterato
     model = get_target_model(device.resolve())
     memtile = model.get_mem_tile_size()
     part = attached_part()
+    # Read once a region is priced: it asks the NPU for its power mode.
+    ceiling: Ceiling | None = None
+    looked = False
     held_bindings = {b.value: b for b in profile.bindings()}
     entries = profile.entries()
     offered: list[tuple] = []
@@ -1255,6 +1260,18 @@ def _chosen(calls: Sequence[Timed], profile: Profile, device: Device) -> Iterato
             given = root.step_tunables()
             members = [p for p in root.parts if isinstance(p, Member)]
             if len(members) == len(root.parts) > 1:
+                if not looked:
+                    ceiling, looked = Ceiling.stored(device.name), True
+                mixed = None if ceiling is None else ceiling.mixed
+                # Where the analysis prices the region, a width it says runs
+                # no faster never pays alone.
+                try:
+                    held = Derivation(
+                        root, recording, device, timed.values, mixed
+                    ).analysis()
+                    period: Fraction | None = held.period
+                except (NotImplementedError, ValueError):
+                    period = None
                 for i in range(len(members)):
                     op = steps[match[i]].op
                     with set_current_device(device):
@@ -1336,6 +1353,26 @@ def _chosen(calls: Sequence[Timed], profile: Profile, device: Device) -> Iterato
                             if ("width", revised) in offered:
                                 continue
                             offered.append(("width", revised))
+                            if period is not None:
+                                try:
+                                    faster = (
+                                        Derivation(
+                                            revised.root,
+                                            recording,
+                                            device,
+                                            timed.values,
+                                            mixed,
+                                        )
+                                        .analysis()
+                                        .period
+                                        < period
+                                    )
+                                except NotImplementedError:
+                                    faster = True  # not priced: the search times it
+                                except ValueError:
+                                    continue  # it cannot run at any depth
+                                if not faster:
+                                    continue
                             yield AddEntry(revised, touches, replaces=entry)
             # Each host transfer of its steps: its bytes, and its objects'.
             fed = {(c, e.input) for e, _, c in root.wiring()[0]} | {
