@@ -1593,6 +1593,11 @@ class Derivation:
                     continue
                 outs = self.lanes[p].get(edge.output, [])
                 ins = self.lanes[c].get(edge.input, [])
+                # A call neither step's cores run (bounded at 0) joins nothing.
+                if not any(
+                    programs[a] for a, s in enumerate(actor_step) if s in (p, c)
+                ):
+                    continue
                 if (
                     any(not readers.get(f) for f in ins)
                     or any(actor_step[writer[f]] is None for f in outs)
@@ -1661,6 +1666,17 @@ class Derivation:
                         writer[fifo] = actor
                     elif actor not in readers.setdefault(fifo, []):
                         readers[fifo].append(actor)
+        # A lane no core touches in a call bounded at 0 has an end of no
+        # accesses there, so what the other end moves shows unbalanced.
+        for edge, p, c in self.wired:
+            for fifo in self.lanes[p].get(edge.output, []):
+                if fifo not in writer and self.objects.get(fifo) == 0:
+                    writer[fifo] = len(programs)
+                    programs.append([])
+            for fifo in self.lanes[c].get(edge.input, []):
+                if not readers.get(fifo) and self.objects.get(fifo) == 0:
+                    readers[fifo] = [len(programs)]
+                    programs.append([])
         channels: list[Channel] = []
         fixed: dict[int, int] = {}
         writes: dict[ObjectFifo, list[int]] = {}

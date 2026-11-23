@@ -363,8 +363,10 @@ class _NormThenNorm(iron.Graph):
 def test_a_ranges_design_balances_only_at_its_own_values(device):
     """Split at 8 rows, held in L1: the top design's second norm on two lanes balances only at an even ``n``, and runs at 8 alone.
 
-    Below 8 the one-lane design runs, so nothing refuses the split at 1. What
-    still waits is the analysis of a call bounded at 0.
+    Below 8 the one-lane design runs, so nothing refuses the split at 1.
+    Held 8 deep, the whole call one core runs in turn; what still waits is
+    the top design's restage held in L1 under a bound, which ``Staging``
+    does not plan.
     """
     recording = _NormThenNorm().record(x=(8, 256))
     region = Region(
@@ -376,7 +378,7 @@ def test_a_ranges_design_balances_only_at_its_own_values(device):
     )
     profile = Profile()
     profile.add(LayerNorm, num_aie_columns=1)
-    profile.add_entry(Entry(region.held(0, Hold.L1).deepened(0, 2)))
+    profile.add_entry(Entry(region.held(0, Hold.L1).deepened(0, 8)))
     profile.add_variants(
         Variants(
             values=("n",),
@@ -389,7 +391,7 @@ def test_a_ranges_design_balances_only_at_its_own_values(device):
             ),
         )
     )
-    with pytest.raises(NotImplementedError, match="at n = 0"):
+    with pytest.raises(NotImplementedError, match="Staging does not plan"):
         fit(profile, [Timed(recording, {"n": 8})], device)
 
 
