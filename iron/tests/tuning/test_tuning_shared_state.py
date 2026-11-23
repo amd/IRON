@@ -35,7 +35,6 @@ def test_a_state_layout_round_trips_and_applies_to_every_version(tmp_path, devic
     assert any(layout in e.apply(Profile()).state_layouts() for e in found_decode)
 
 
-@unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_the_layout_holds_end_to_end_over_prefill_then_decode(device):
     """The chosen layout is bit-identical to the untuned build over one real prefill-then-decode call sequence, state carried between them.
