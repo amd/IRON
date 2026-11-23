@@ -140,10 +140,14 @@ def test_chained_axis_round_trips_and_is_proposed(tmp_path, device):
         ]
 
 
-@unbuilt
 def test_burst_and_transfer_bytes_round_trip_and_are_proposed(tmp_path, device):
-    """``RuntimePlan.burst`` and ``transfer_bytes`` (DDR access shape) round-trip and are candidates."""
-    for burst, transfer_bytes in ((None, None), (256, 4096), (512, 8192)):
+    """``RuntimePlan.burst`` and ``transfer_bytes`` (DDR access shape) round-trip and are candidates, each burst one the device's shim DMA has."""
+    lengths = get_target_model(device.resolve()).get_shim_burst_lengths()
+    for burst, transfer_bytes in (
+        (None, None),
+        (lengths[-2], 4096),
+        (lengths[-1], 8192),
+    ):
         gemv, silu, mul = gemv_silu_mul(M=256, cols=4, tile=64)
         runtime = RuntimePlan(burst=burst, transfer_bytes=transfer_bytes)
         members = (member(gemv), member(silu), member(mul))

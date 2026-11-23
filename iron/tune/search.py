@@ -398,7 +398,6 @@ NO_WORSE_QUANTILE = 0.999
 # What candidates does not propose yet, named where it stops.
 _NOT_GENERATED = (
     "inflows",
-    "a runtime plan's DDR burst lengths",
     "nested regions",
     "fission",
     "substitution",
@@ -1135,8 +1134,10 @@ def _chosen(calls: Sequence[Timed], profile: Profile, device: Device) -> Iterato
     holds, the others as they are, each stream edge of it staged where the
     lanes no longer meet as they are (``AddEntry`` in its place), but where
     the dataflow analysis prices both, one it says runs no faster. Its runtime
-    plan's each transfer size, a power of two from its largest object to
-    below its largest host transfer (``PlanRegion``).
+    plan's each burst length the target model lists (its longest too, which
+    names what None leaves to mlir-aie), and each transfer size, a power of
+    two from its largest object to below its largest host transfer
+    (``PlanRegion``).
 
     Beside the entries, each per-call value bound each other way
     (``BindValue``): at run time; per range where its range is recorded;
@@ -1405,14 +1406,15 @@ def _chosen(calls: Sequence[Timed], profile: Profile, device: Device) -> Iterato
                 for j in range(max(transfers).bit_length())
                 if max(objects) <= 1 << j < max(transfers)
             ]
-            for value in sizes:
-                if (
-                    value == plan.transfer_bytes
-                    or (entry, "transfer_bytes", value) in offered
-                ):
-                    continue
-                offered.append((entry, "transfer_bytes", value))
-                yield PlanRegion(entry, "transfer_bytes", value, touches)
+            for name, values in (
+                ("burst", model.get_shim_burst_lengths()),
+                ("transfer_bytes", sizes),
+            ):
+                for value in values:
+                    if value == vars(plan)[name] or (entry, name, value) in offered:
+                        continue
+                    offered.append((entry, name, value))
+                    yield PlanRegion(entry, name, value, touches)
         for value in recording.values:
             name = value.name
             span = recording.value_range(name)
