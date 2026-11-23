@@ -1023,11 +1023,12 @@ def fit(
     variants over its values. Then each range's design at its capacity:
     the call re-recorded from its graph where each value takes at most its
     range's top (``Recording.selected``), which the range's entry must
-    match, fitted under that entry and the rest of the profile its version
-    takes (its compositions named at that capacity; an entry or a schedule
-    only another version takes is fitted with that version), at its range's
-    values alone; a design not legal there (``NotLegalAtCapacity``) is
-    refused by the counts, or as its own fit refuses it.
+    match, fitted under that entry and the rest of the profile as its build
+    applies it (its compositions named at that capacity, each its capacity
+    matches; another version's schedules and values' bindings left to that
+    version), at its range's values alone; a design not legal there
+    (``NotLegalAtCapacity``) is refused by the counts, or as its own fit
+    refuses it.
 
     A refusal from any stage of any entry wins over what is not fitted yet;
     only where nothing refuses is the first of those raised.
@@ -1166,16 +1167,13 @@ def fit(
             for v in recording.values
             if (span := recording.value_range(v.name)) is not None
         }
-        # The profile as it applies to this version, but its other sets of
-        # variants: each range's design is fitted with what the profile
+        # The profile but its other sets of variants and another version's
+        # schedules: each range's design is fitted with what the profile
         # composes, at the range's capacity.
         alone = profile.copy()
         for other in profile.variants():
             if other != variants:
                 alone.remove_variants(other)
-        for entry in profile.entries():
-            if not recording.occurrences(entry):
-                alone.remove_entry(entry)
         for schedule in profile.schedules():
             if schedule.version != recording.version:
                 alone.remove_schedule(schedule)
@@ -1189,7 +1187,15 @@ def fit(
             try:
                 with set_current_device(device):
                     variant, chosen = recording.selected(alone, at)
+                # As its build applies the profile: the entries its capacity
+                # matches, and bindings of the values it takes.
+                for entry in chosen.entries():
+                    if not variant.occurrences(entry):
+                        chosen.remove_entry(entry)
                 per_call = {v.name: v for v in variant.values}
+                for binding in chosen.bindings():
+                    if binding.value not in per_call:
+                        chosen.remove_binding(binding)
                 # Its design runs only at its range's values.
                 within = dataclasses.replace(
                     variant,

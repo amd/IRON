@@ -402,6 +402,14 @@ class Profile:
         """Return the per-call value bindings."""
         return list(self._bindings)
 
+    def remove_binding(self, binding: Binding) -> None:
+        """Remove the binding ``binding``.
+
+        Raises:
+            ValueError: ``binding`` is not one of its bindings.
+        """
+        self._bindings.remove(binding)
+
     def add_state_layout(self, layout: StateLayout) -> None:
         """Add the one layout a persistent buffer has in every version."""
         self._state_layouts.append(layout)

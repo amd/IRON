@@ -410,6 +410,44 @@ def test_a_ranges_design_is_held_at_each_of_its_own_values(device):
     assert "its range ((7, 8),): at n = 7," in (result.why or "")
 
 
+class _PairWhole(iron.Graph):
+    """``RangedPair``'s projection and copy with no per-call value."""
+
+    def body(self, x, w, y):
+        projected = GEMM.step(x, w, b_col_maj=True, precision=Precision.MEDIUM)
+        return projected, Copy.step(y.reshape(y.shape[0] // 8, 8))
+
+
+def test_a_ranges_design_takes_an_entry_another_call_names_where_its_capacity_matches(
+    device,
+):
+    """A pack named at 256 rows, another call's own steps, beside a split at 256: the lower design, at 256 rows, takes it too, as its build does.
+
+    Its GEMM reads ``rows`` at run time, a dispatch parameter on an xclbin
+    per step, which a pack does not carry: the split is refused there.
+    """
+    ranged = RangedPair(K=256, N=256).record(x=(2048, 256), w=(256, 256), y=(2048,))
+    whole = _PairWhole().record(x=(256, 256), w=(256, 256), y=(2048,))
+    pack = Region(
+        parts=(
+            Member(cls=GEMM, dims={"M": 256, "K": 256, "N": 256}),
+            Member(
+                cls=Copy, dims={"input_buffer_size": 2048, "output_buffer_size": 2048}
+            ),
+        )
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=pack))
+    profile.add_binding(Binding(value="rows", how="runtime"))
+    profile.add_schedule(Schedule(version=ranged.version, packaging="xclbin"))
+    profile.add_variants(_split_at_256())
+    calls = [Timed(ranged, values={"rows": 256, "valid": 256}), Timed(whole)]
+    result = fit(profile, calls, device)
+    assert not result.ok
+    assert "its range ((0, 256),)" in (result.why or "")
+    assert "which a pack does not carry" in (result.why or "")
+
+
 def _packed(recording) -> Entry:
     """Return RangedPair's GEMM and copy as one pack (a region of no edges), named at the recording's shapes."""
     return Entry(Region(parts=tuple(member(s.op) for s in recording.steps)))
