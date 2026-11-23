@@ -71,7 +71,6 @@ def test_calls_overlapped_round_trips_and_is_proposed(tmp_path, device):
     ).schedules() == [schedule]
 
 
-@unbuilt
 def test_interleave_with_decode_and_prefill_round_trips_and_is_proposed(
     tmp_path, device
 ):

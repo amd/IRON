@@ -31,7 +31,6 @@ from iron.tests.support import toys_dataflow as toys
 from iron.tests.support import toys_schedule
 from iron.tests.support.fusable import gemv_silu_mul_recording
 from iron.tests.support.toys_edges import member
-from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.fusions import Applied
 from iron.tune.search import PLACEMENTS, candidates, check, fit, search
@@ -182,7 +181,6 @@ def test_a_width_over_the_shims_sending_channels_builds_by_packets(device):
     assert result.ok, result.why
 
 
-@unbuilt
 def test_a_by_shape_entry_claiming_fewer_runs_than_iron_applies_is_refused(device):
     """A width entry naming only some runs of a shape two steps of the recording share is refused: one width set must fit every run."""
     gemv, add = toys_schedule.decode_step()

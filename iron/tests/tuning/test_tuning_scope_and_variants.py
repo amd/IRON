@@ -11,6 +11,7 @@ from iron import Carried, Precision
 from iron.common.declare import Profile
 from iron.common.declare.composition import (
     Binding,
+    Edge,
     Entry,
     Member,
     Refinement,
@@ -19,13 +20,15 @@ from iron.common.declare.composition import (
     Scope,
     Variants,
 )
+from iron.common.graph.fusion import composed
 from iron.common.graph.record import Recording
 from iron.common.image.packaging import SCRATCHPAD_WORDS
-from iron.common.image.step import BufferRef, SequenceStep
+from iron.common.image.step import BufferRef, EdgeKind, SequenceStep
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
+from iron.tests.support import toys_schedule
 from iron.tests.support.toys_edges import member
 from iron.tests.support.toys_settings import (
     RangedPair,
@@ -95,6 +98,21 @@ def test_scope_entries_round_trip_by_version_occurrence_and_device_part(
     assert any(e.apply(Profile()).entries() == [by_version] for e in found)
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_an_entry_scoped_to_one_run_composes_that_run_alone(device):
+    """A region scoped to the last of its four runs (``Scope.occurrences``) fuses that run alone, the others as recorded, bit-identical to the untuned build."""
+    recording = toys_schedule.Alternating(2).record(x=(2048,))
+    relu, tanh = (member(recording.steps[s].op) for s in (0, 1))
+    region = Region(
+        parts=(relu, tanh), edges=(Edge(0, "y", 1, "x", kind=EdgeKind.STREAM),)
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=region, scope=Scope(occurrences=(3,))))
+    assert [f.steps for f in composed(recording, profile)[1]] == [(6, 7)]
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
 @unbuilt
 def test_a_design_per_range_round_trips_as_variants(tmp_path, device):
     """A design per range of a per-call value (``Variants``), boundaries from a grid, round-trips and is proposed."""
@@ -115,8 +133,17 @@ def test_a_design_per_range_round_trips_as_variants(tmp_path, device):
     profile.save(path)
     loaded = Profile.load(path)
     assert loaded.variants() == [variants]
-    found = list(candidates([Timed(recording)], loaded, device))
-    assert any(e.apply(Profile()).variants() == [variants] for e in found)
+    # Proposed from a profile varying nothing yet, each range's entry the GEMM
+    # at its capacity, as candidates names a step (all of its dims).
+    found = list(candidates([Timed(recording)], Profile(), device))
+    assert any(
+        isinstance(e, AddVariants)
+        and e.variants.values == variants.values
+        and [box for box, _ in e.variants.ranges] == [box for box, _ in variants.ranges]
+        and [(r.root.cls, r.root.dims["M"]) for _, r in e.variants.ranges]
+        == [(r.root.cls, r.root.dims["M"]) for _, r in variants.ranges]
+        for e in found
+    )
 
 
 @unbuilt
