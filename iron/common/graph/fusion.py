@@ -628,7 +628,10 @@ def composed(
                 (f"{plan.chunks} chunks", plan.chunks != 1),
                 ("a chosen count of tasks in flight", plan.in_flight is not None),
                 ("chained buffer descriptors", plan.chained),
-                ("a chosen burst length", plan.burst is not None),
+                (
+                    "a chosen burst length on one step",
+                    plan.burst is not None and len(root.steps()) == 1,
+                ),
                 ("a chosen transfer size", plan.transfer_bytes is not None),
             )
             if kept
@@ -851,6 +854,7 @@ def composed(
                         ),
                         phases=chosen,
                         slices=tuple(slices),
+                        burst=plan.burst,
                     )
                 )
                 taken.update(match)

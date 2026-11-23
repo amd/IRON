@@ -617,6 +617,7 @@ def fused_configuration(
         # group; run them back to back, each fully awaited.
         fuse=fusion.kind is not FusionKind.MERGE,
         phases=[grouped[p] for p in sorted(grouped)],
+        burst=fusion.burst,
     )
     return configured, [arrays[j] for j in fusion.steps]
 

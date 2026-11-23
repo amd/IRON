@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from aie.dialects.aie import get_target_model
 
@@ -196,6 +198,39 @@ def test_window_schedule_is_bit_identical_with_no_hang(device):
             profile, base_profile, [Timed(recording)], device, Refinement.EXACT
         )
         assert result.ok, result.why
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_each_burst_length_is_bit_identical_with_no_hang(device):
+    """The window at each burst length its device's shim DMA has (``RuntimePlan.burst``) is bit-identical to the window at mlir-aie's own, and does not hang."""
+    base_region, recording = _window_region()
+    base_profile = Profile()
+    base_profile.add_entry(Entry(root=base_region))
+    for burst in get_target_model(device.resolve()).get_shim_burst_lengths():
+        profile = Profile()
+        profile.add_entry(
+            Entry(
+                root=dataclasses.replace(base_region, runtime=RuntimePlan(burst=burst))
+            )
+        )
+        result = check(
+            profile, base_profile, [Timed(recording)], device, Refinement.EXACT
+        )
+        assert result.ok, f"burst {burst}: {result.why}"
+
+
+def test_a_burst_length_the_shim_dma_does_not_have_is_refused(device):
+    """A burst length past the longest its device's shim DMA has is refused by the counts, before any build."""
+    region, recording = _window_region()
+    longest = get_target_model(device.resolve()).get_shim_burst_lengths()[-1]
+    profile = Profile()
+    profile.add_entry(
+        Entry(root=dataclasses.replace(region, runtime=RuntimePlan(burst=2 * longest)))
+    )
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "counts"
+    assert "bursts" in (result.why or "")
 
 
 @unbuilt

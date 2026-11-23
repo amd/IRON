@@ -453,6 +453,7 @@ def configuration(
     steps: Sequence[str] = (),
     fuse: bool = False,
     phases: Sequence[Sequence[str]] = (),
+    burst: int | None = None,
 ) -> DeviceConfiguration:
     """Build ``arrays`` as one device configuration ``name``.
 
@@ -466,6 +467,8 @@ def configuration(
     flight in two of them, so the phases take the shim's channels in turn. A key of
     ``arrays`` outside ``steps`` takes its own sequence beside them, named for its key,
     identity-shared with another such key the same way as when no ``steps`` are given.
+    ``burst`` is the shim DMA burst length, in bytes, the fused steps' host
+    transfers take; None leaves it to mlir-aie (the longest).
 
     Raises:
         ValueError: The arrays are built for different devices, traced with
@@ -476,6 +479,8 @@ def configuration(
         raise ValueError("fuse needs steps to fuse")
     if phases and (not fuse or [k for phase in phases for k in phase] != list(steps)):
         raise ValueError(f"phases {phases} are not the fused steps {steps} in order")
+    if burst is not None and not fuse:
+        raise ValueError("a burst length is chosen for fused steps")
     independent = [key for key in arrays if key not in steps]
     # Fused steps issue at once, so each keeps its own array: on one, a later
     # step's preamble would rewrite words an earlier step's core has not read yet.
@@ -511,7 +516,11 @@ def configuration(
             f"configuration has one trace buffer, so give them one size"
         )
     merge = (
-        functools.partial(MergedRuntime.fuse, await_fills=bool(phases))
+        functools.partial(
+            MergedRuntime.fuse,
+            await_fills=bool(phases),
+            burst_length=0 if burst is None else burst,
+        )
         if fuse
         else MergedRuntime.merge
     )

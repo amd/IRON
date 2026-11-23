@@ -1134,8 +1134,9 @@ def _chosen(calls: Sequence[Timed], profile: Profile, device: Device) -> Iterato
     holds, the others as they are, each stream edge of it staged where the
     lanes no longer meet as they are (``AddEntry`` in its place), but where
     the dataflow analysis prices both, one it says runs no faster. Its runtime
-    plan's each burst length the target model lists (its longest too, which
-    names what None leaves to mlir-aie), and each transfer size, a power of
+    plan's each burst length the target model lists, where it fuses several
+    steps (its longest too, which names what None leaves to mlir-aie), and
+    each transfer size, a power of
     two from its largest object to below its largest host transfer
     (``PlanRegion``).
 
@@ -1407,7 +1408,10 @@ def _chosen(calls: Sequence[Timed], profile: Profile, device: Device) -> Iterato
                 if max(objects) <= 1 << j < max(transfers)
             ]
             for name, values in (
-                ("burst", model.get_shim_burst_lengths()),
+                (
+                    "burst",
+                    model.get_shim_burst_lengths() if len(match) > 1 else (),
+                ),
                 ("transfer_bytes", sizes),
             ):
                 for value in values:
@@ -1501,7 +1505,9 @@ def fit(
     each of ``placements`` the build takes in turn (``BUILT_PLACERS``), the
     sequential placer, then the annealing one where it refuses.
 
-    Before any call, each state layout (``StateLayout``): one whose tile does
+    Before any call, a runtime plan's burst length must be one the target
+    model lists for a shim DMA (counts). Each state layout
+    (``StateLayout``): one whose tile does
     not divide the axis it cuts is refused by the counts, and one laying its
     buffer out other than as recorded waits. Then each entry's own choices:
     a configuration resident into
@@ -1828,6 +1834,18 @@ def fit(
             if not isinstance(part, Region):
                 continue
             plan = part.runtime
+            if (
+                plan is not None
+                and plan.burst is not None
+                and plan.burst not in model.get_shim_burst_lengths()
+            ):
+                return Fit(
+                    False,
+                    "counts",
+                    f"its runtime plan bursts {plan.burst} bytes; a shim DMA on "
+                    f"{device.resolve()} bursts "
+                    f"{', '.join(map(str, model.get_shim_burst_lengths()))}",
+                )
             if plan is not None and (plan.in_flight or 0) > queue:
                 return Fit(
                     False,

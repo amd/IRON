@@ -65,6 +65,8 @@ class OperatorRuntime(Runtime):
         # A phased fusion's phase awaits its fills too: its descriptors and shim
         # channels are reused by the next phase's sequence only once they complete.
         self.await_fills = False
+        # A fused region's chosen shim burst length, in bytes; 0 for the longest.
+        self.burst_length = 0
         # Raises if any stream of a built array is unbound. A stream kept
         # on-chip has no host end.
         lanes = [
@@ -312,6 +314,7 @@ class OperatorRuntime(Runtime):
             if group is not None:
                 raise ValueError("an unmanaged transfer joins no group")
             common = dict(wait=wait, managed=False)
+        common["burst_length"] = self.burst_length
         # A per-call size lands in one descriptor's length, a repeat count in
         # its push; an offset patches every split piece.
         per_call = length_parameter is not None or repeat_parameter is not None
@@ -479,7 +482,13 @@ class MergedRuntime(Runtime):
         return merged
 
     @classmethod
-    def fuse(cls, runtimes, name=None, await_fills: bool = False) -> MergedRuntime:
+    def fuse(
+        cls,
+        runtimes,
+        name=None,
+        await_fills: bool = False,
+        burst_length: int = 0,
+    ) -> MergedRuntime:
         """Operator runtimes whose streams meet on-chip, as one sequence.
 
         Each runs its preamble, then all their transfers go in one task group that
@@ -487,6 +496,7 @@ class MergedRuntime(Runtime):
         later operator drains. With ``await_fills`` (a phase of a phased fusion) the
         group awaits the fills as well as the drains, so the next phase's sequence,
         which may take the same shim channels and descriptors, runs once they are done.
+        Every transfer takes ``burst_length`` bytes a burst (0: the longest).
         An unmanaged fill (a sequence an operator writes itself, GEMV's) is never freed,
         so its descriptors are never reused; its channel's next tasks queue behind it,
         and ``compose.phases`` keeps every member a phase feeds able to finish without
@@ -507,11 +517,13 @@ class MergedRuntime(Runtime):
                 token = active_runtime.set(runtime)
                 runtime.group = tg
                 runtime.await_fills = await_fills
+                runtime.burst_length = burst_length
                 try:
                     runtime.run()
                 finally:
                     runtime.group = None
                     runtime.await_fills = False
+                    runtime.burst_length = 0
                     active_runtime.reset(token)
             tg.finish()
             for runtime, _ in calls:
