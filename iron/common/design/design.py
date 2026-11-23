@@ -28,6 +28,7 @@ from aie.iron import (
     ScratchpadParameter,
     Worker,
 )
+from aie.iron.device import Device
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from ..declare import Built, Operator
@@ -454,12 +455,13 @@ def configuration(
     fuse: bool = False,
     phases: Sequence[Sequence[str]] = (),
     burst: int | None = None,
+    device: Device | None = None,
 ) -> DeviceConfiguration:
     """Build ``arrays`` as one device configuration ``name``.
 
-    One array per identity, on the device they are bound to (one array alone,
-    the part of it it takes), and each entry's sequence over it, ``sequence``
-    if it is alone, else named for its key. Given ``steps`` (keys of ``arrays``), one
+    One array per identity, on ``device`` (where None, the device they are
+    bound to; one array alone, the part of it it takes), and each entry's
+    sequence over it, ``sequence`` if it is alone, else named for its key. Given ``steps`` (keys of ``arrays``), one
     ``sequence`` runs theirs in order, back to back (``MergedRuntime.merge``), or,
     ``fuse``, in one task group (``MergedRuntime.fuse``), each step on an array of its
     own; with ``phases`` (``steps`` split, in order), one fused sequence per phase,
@@ -502,7 +504,8 @@ def configuration(
     kinds = {type(a.op.dev).__name__ for a in built}
     if len(kinds) != 1:
         raise ValueError(f"{list(arrays)} are built for different devices {kinds}")
-    device = built[0].op.array_device() if len(built) == 1 else built[0].op.dev
+    if device is None:
+        device = built[0].op.array_device() if len(built) == 1 else built[0].op.dev
     traced = [owner for owner in owners.values() if owner.traced]
     sizes = set()
     for owner in traced:

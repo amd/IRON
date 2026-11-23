@@ -32,6 +32,7 @@ from aie.iron.kernels.sample import draw_row
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
+from iron.common.declare import Precision
 from iron.common.graph.compiled import unbuilt_image
 from iron.common.graph.record import Recording
 from iron.common.image.compose import Composition
@@ -40,6 +41,7 @@ from iron.common.image.packaging import Kind, plan
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.gemm import GEMM
 from iron.operators.magnitude import Magnitude
 from iron.operators.relu import ReLU
 from iron.operators.sample import Sample
@@ -149,6 +151,30 @@ def test_auto_dispatch_selects_platform_default(size):
 # ---------------------------------------------------------------------------
 # 2. Compilation-only: the composed single-ELF MLIR is well formed.
 # ---------------------------------------------------------------------------
+
+
+def test_a_full_elf_whose_first_design_takes_part_of_the_device_composes_on_the_bound_one(
+    npu1,
+):
+    """An npu1 full ELF led by a one-column GEMM (alone, built for ``npu1_1col``) composes each configuration, its main one too, on the bound ``npu1``.
+
+    A full ELF configures each design from its main device, whose type theirs
+    must share; only a design alone keeps the part of the device it takes.
+    """
+    gemm = GEMM(
+        M=64, K=64, N=64, precision=Precision.MEDIUM, num_aie_columns=1
+    ).resolved(npu1)
+    add = ElementwiseAdd(size=64 * 64, num_aie_columns=4, tile_size=256).resolved(npu1)
+    assert gemm.array_device().resolve() != npu1.resolve()
+    recording = Recording.of_steps(
+        "infra_narrow_first",
+        sequences.steps((gemm, "A", "B", "mid"), (add, "mid", "r", "out")),
+        ["A", "B", "r"],
+        ["out"],
+    )
+    text = Composition(Image(recording, FullELF()).prepare()).text()
+    kinds = re.findall(r"aie\.device\((\w+)\)", text)
+    assert kinds == [str(npu1.resolve())] * 3
 
 
 @pytest.mark.parametrize("sequence", ["add_relu"])

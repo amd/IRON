@@ -35,6 +35,7 @@ from aie.iron import (
 )
 from aie.iron.controlflow import range_
 from aie.iron.dataflow.objectfifo import ObjectFifoHandle
+from aie.iron.device import Device
 from aie.passmanager import PassManager
 from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
@@ -254,6 +255,7 @@ def fused_configuration(
     words: Mapping[str, str] | None = None,
     dispatch: Sequence[Mapping[str, object]] | None = None,
     independent: Mapping[str, BuiltArray] | None = None,
+    device: Device | None = None,
 ) -> tuple[DeviceConfiguration, list[BuiltArray]]:
     """Return ``fusion``'s members, ``designs`` in its step order, as one device configuration ``name`` and their arrays.
 
@@ -265,7 +267,8 @@ def fused_configuration(
     xclbin, ``dispatch`` is each member's dispatch-time scalars. Given ``independent``,
     each of its arrays takes its own sequence beside the fusion's, in the same
     configuration: a packing group's other members, where one of its members is a
-    fusion (``Composition``, ``common.graph.packing``).
+    fusion (``Composition``, ``common.graph.packing``). ``device`` is the one it is
+    built for, as ``configuration`` takes it.
     """
     incoming: dict[int, list[Edge]] = {}
     for e in fusion.edges:
@@ -618,6 +621,7 @@ def fused_configuration(
         fuse=fusion.kind is not FusionKind.MERGE,
         phases=[grouped[p] for p in sorted(grouped)],
         burst=fusion.burst,
+        device=device,
     )
     return configured, [arrays[j] for j in fusion.steps]
 
@@ -1407,7 +1411,14 @@ class Composition:
         sample = next(iter(self.designs.values()), None)
         if sample is None:
             sample = next(iter(self.fusions.values()))[0][0]
-        device = sample.op.array_device()
+        # One design alone takes its own part of the device; several, and every
+        # configuration they load, the device they are bound to: a full ELF's
+        # configurations are of its main device's type.
+        device = (
+            sample.op.array_device()
+            if len(self.designs) == 1 and not self.fusions
+            else sample.op.dev
+        )
         configurations: dict[str, DeviceConfiguration] = {}
         runtimes: dict[str, Runtime] = {}
         types: dict[str, list] = {}
@@ -1443,6 +1454,7 @@ class Composition:
                     member_designs,
                     words,
                     independent={m: arrays[m] for m in plain},
+                    device=device,
                 )
                 configurations[symbol] = configured
                 n_phases = len(configured.runtimes) - len(plain)
@@ -1472,7 +1484,9 @@ class Composition:
                     )
                 packed.add(window)
             else:
-                configured = configuration(symbol, {m: arrays[m] for m in members})
+                configured = configuration(
+                    symbol, {m: arrays[m] for m in members}, device=device
+                )
                 for m in members:
                     types[m] = [
                         b.flat_type for b in arrays[m].op.buffers if not b.on_chip
@@ -1484,7 +1498,11 @@ class Composition:
             if symbol in packed:
                 continue
             configured, members = fused_configuration(
-                symbol, transported(fusion, designs, words), designs, words
+                symbol,
+                transported(fusion, designs, words),
+                designs,
+                words,
+                device=device,
             )
             configurations[symbol] = configured
             runtimes[symbol] = configured.runtimes[0]
