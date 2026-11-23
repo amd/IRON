@@ -1594,8 +1594,9 @@ class Derivation:
                 outs = self.lanes[p].get(edge.output, [])
                 ins = self.lanes[c].get(edge.input, [])
                 # A call neither step's cores run (bounded at 0) joins nothing.
-                if not any(
-                    programs[a] for a, s in enumerate(actor_step) if s in (p, c)
+                cores = [a for a, s in enumerate(actor_step) if s in (p, c)]
+                if {actor_step[a] for a in cores} == {p, c} and not any(
+                    programs[a] for a in cores
                 ):
                     continue
                 if (
