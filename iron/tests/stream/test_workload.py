@@ -50,6 +50,13 @@ def _seeds(mappings):
     ]
 
 
+def test_the_structure_leaves_out_where_the_module_was_traced(workload):
+    assert any(node.metadata_props for node in workload.graph.node)
+    structure = workload.structure()
+    assert b"stack_trace" not in structure and b"gate" in structure
+    assert any(node.metadata_props for node in workload.graph.node)
+
+
 def test_the_nodes_are_the_operators_layers(workload):
     assert [name for name, _ in workload.nodes] == list(LAYERS)
     assert workload.buffers == ("input", "w_gate", "w_up", "w_down", "output")

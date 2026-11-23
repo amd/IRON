@@ -135,8 +135,8 @@ class StreamOperator(Operator):
         """Add the solve's digest to the identity.
 
         It covers everything the generated design is a function of: the
-        candidates, the solve options, the kernel library and stream-dse's
-        version.
+        workload's graph, the candidates, the solve options, the kernel
+        library and stream-dse's version.
         """
         cls, own = super().design_key()
         return cls, (*own, ("stream", self._solve_digest()))

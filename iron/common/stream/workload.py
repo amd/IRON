@@ -90,6 +90,19 @@ class StreamWorkload:
                     outputs.append(tensor)
         return tuple(inputs), tuple(outputs)
 
+    def structure(self) -> bytes:
+        """Return the model's nodes, edges, attributes and tensor types, serialized.
+
+        It is the model without what the exporter records of where it traced
+        each node, so it is the same wherever the module is defined.
+        """
+        model = type(self.model)()
+        model.CopyFrom(self.model)
+        del model.graph.metadata_props[:]
+        for node in model.graph.node:
+            del node.metadata_props[:]
+        return model.SerializeToString(deterministic=True)
+
     def write(self, path) -> str:
         """Write the ONNX model to ``path`` and return the path."""
         import onnx  # pyright: ignore[reportMissingImports]

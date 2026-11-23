@@ -85,3 +85,31 @@ def test_one_candidate_is_built_unpriced(solver, npu2):
     )
     assert runner.solve("swiglu", (), workload, [mapping], npu2, None).candidate == 0
     assert (solver.select, solver.generate) == (0, 1)
+
+
+def test_a_design_follows_the_workloads_graph(npu2):
+    """The same sizes, layer names and mappings over other edges are another design."""
+    import torch
+
+    from iron.common.stream.workload import export_workload
+
+    class SiluOfUp(type(design.swiglu_module(512, 2048))):
+        def forward(self, input):
+            linear = torch.nn.functional.linear
+            gate, up = linear(input, self.w_gate), linear(input, self.w_up)
+            return linear(gate * torch.nn.functional.silu(up), self.w_down)
+
+    workload = design.workload(256, 512, 2048)
+    other = export_workload(
+        SiluOfUp().eval(),
+        (torch.zeros(256, 512, dtype=torch.bfloat16),),
+        node_names=design.LAYERS,
+    )
+    candidates = design.candidates(256, 512, 2048, npu2)
+    assert [c.to_dict(other) for c in candidates] == [
+        c.to_dict(workload) for c in candidates
+    ]
+    digest = runner.solve_digest((), workload, candidates, npu2, None)
+    again = design.workload(256, 512, 2048)
+    assert runner.solve_digest((), again, candidates, npu2, None) == digest
+    assert runner.solve_digest((), other, candidates, npu2, None) != digest

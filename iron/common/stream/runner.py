@@ -5,9 +5,9 @@
 
 Every solve runs here, under the same options, and is cached under
 ``$NPU_CACHE_HOME/stream/``, keyed by what the operator names it by, the
-candidate mappings, the options (the kernel library among them) and the
-installed stream-dse's version: nothing is solved twice, and nothing is
-written to the working directory. ``STREAM_BACKEND`` names the solver
+workload's graph, the candidate mappings, the options (the kernel library
+among them) and the installed stream-dse's version: nothing is solved
+twice, and nothing is written to the working directory. ``STREAM_BACKEND`` names the solver
 (OR-Tools GSCIP by default). stream-dse bounds each allocation solve in
 time (``SolveOptions.time_limit_s``) and takes the best design found by
 then, so a solve that reaches the bound can differ between hosts.
@@ -130,8 +130,9 @@ def solve_digest(
     library,
 ) -> str:
     """Return the digest of everything a design is a function of."""
+    graph = hashlib.sha256(workload.structure()).hexdigest()
     mappings = [candidate.to_dict(workload) for candidate in candidates]
-    token = repr((key, mappings, solve_options(dev, library), stream_version()))
+    token = repr((key, graph, mappings, solve_options(dev, library), stream_version()))
     return hashlib.sha256(token.encode()).hexdigest()[:16]
 
 
