@@ -360,21 +360,15 @@ class _NormThenNorm(iron.Graph):
         return LayerNorm.step(RMSNorm.step(x[:n], num_aie_columns=1))
 
 
-def test_a_ranges_design_balances_only_at_its_own_values(device):
-    """Split at 8 rows, held in L1: the top design's second norm on two lanes balances only at an even ``n``, and runs at 8 alone.
-
-    Below 8 the one-lane design runs, so nothing refuses the split at 1.
-    Held 8 deep, the whole call one core runs in turn; what still waits is
-    the top design's restage held in L1 under a bound, which ``Staging``
-    does not plan.
-    """
+def _norms_split_at(top: int) -> tuple[Recording, Profile]:
+    """Return ``_NormThenNorm`` over 8 rows held in L1 8 deep, its second norm on one lane below ``top`` rows and on two from ``top`` up."""
     recording = _NormThenNorm().record(x=(8, 256))
     region = Region(
         tuple(member(s.op) for s in recording.steps), (Edge(0, "y", 1, "x"),)
     )
     below, full = (
         Profile.dims(LayerNorm, vars(r.steps[1].op))
-        for r in (recording.at_capacity({"n": 7}), recording)
+        for r in (recording.at_capacity({"n": top - 1}), recording)
     )
     profile = Profile()
     profile.add(LayerNorm, num_aie_columns=1)
@@ -384,15 +378,36 @@ def test_a_ranges_design_balances_only_at_its_own_values(device):
             values=("n",),
             ranges=(
                 (
-                    ((0, 7),),
+                    ((0, top - 1),),
                     Entry(Member(LayerNorm, below, {"num_aie_columns": 1})),
                 ),
-                (((8, 8),), Entry(Member(LayerNorm, full, {"num_aie_columns": 2}))),
+                (((top, 8),), Entry(Member(LayerNorm, full, {"num_aie_columns": 2}))),
             ),
         )
     )
+    return recording, profile
+
+
+def test_a_ranges_design_balances_only_at_its_own_values(device):
+    """Split at 8 rows: the top design's second norm on two lanes balances only at an even ``n``, and runs at 8 alone.
+
+    Below 8 the one-lane design runs, so nothing refuses the split at 1.
+    Held 8 deep, the whole call one core runs in turn; what still waits is
+    the top design's restage held in L1 under a bound, which ``Staging``
+    does not plan.
+    """
+    recording, profile = _norms_split_at(8)
     with pytest.raises(NotImplementedError, match="Staging does not plan"):
         fit(profile, [Timed(recording, {"n": 8})], device)
+
+
+def test_a_ranges_design_is_held_at_each_of_its_own_values(device):
+    """Split at 7 rows: the top design runs at 7 and 8, and at 7 one of its two lanes waits on a row its producer never writes."""
+    recording, profile = _norms_split_at(7)
+    result = fit(profile, [Timed(recording, {"n": 8})], device)
+    assert not result.ok
+    assert result.stage == "analysis"
+    assert "its range ((7, 8),): at n = 7," in (result.why or "")
 
 
 def _packed(recording) -> Entry:
