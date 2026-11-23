@@ -63,14 +63,6 @@ _BUILT_COMBOS = {
         (HandOff.JOIN, "fan_out", "l1", "min_minus_one", "same", "recorded"),
         (HandOff.SLICES, "fan_out", "l1", "more", "same", "recorded"),
         *(
-            (shape, role, "later_phase", depth, rate, "recorded")
-            for shape, role, depth, rate in (
-                (HandOff.JOIN, "skip", "more", "different"),
-                (HandOff.EQUAL, "diamond", "knee", "same"),
-                (HandOff.SLICES, "fan_in", "min", "same"),
-            )
-        ),
-        *(
             (shape, role, "l1", "min_minus_one", "same", "recorded")
             for shape, role in (
                 (HandOff.JOIN, "chain"),
@@ -98,13 +90,27 @@ _REFUSED_COMBOS = {
 }
 
 
-# Each device's combos fit refuses at the analysis for a call bounded at 0:
-# their tail reads none of what its producer writes it through a memtile.
-_UNBALANCED_COMBOS = {
-    "npu1": set(),
+# Each device's combos fit refuses at the analysis whatever their depth, and
+# what the refusal names: a tail bounded at 0 that reads none of what its
+# producer writes it through a memtile, or a stream across a phase boundary.
+_REFUSED_AT_ANALYSIS = {
+    "npu1": {},
     "npu2": {
-        (HandOff.SPLIT, "diamond", "l1", "min_minus_one", "different", "smaller"),
-        (HandOff.RATIO, "skip", "l1", "min", "same", "smaller"),
+        (HandOff.SPLIT, "diamond", "l1", "min_minus_one", "different", "smaller"): (
+            "at n = 0,"
+        ),
+        (HandOff.RATIO, "skip", "l1", "min", "same", "smaller"): "at n = 0,",
+        **dict.fromkeys(
+            (
+                (shape, role, "later_phase", depth, rate, "recorded")
+                for shape, role, depth, rate in (
+                    (HandOff.JOIN, "skip", "more", "different"),
+                    (HandOff.EQUAL, "diamond", "knee", "same"),
+                    (HandOff.SLICES, "fan_in", "min", "same"),
+                )
+            ),
+            "a stream from phase",
+        ),
     },
 }
 
@@ -208,20 +214,20 @@ def test_each_toy_round_trips_and_is_reached_by_candidate_edits(
 
 
 @pytest.mark.parametrize(
-    ("device", "combo", "refused", "unbalanced"),
+    ("device", "combo", "refused", "refusal"),
     [
         pytest.param(
             name,
             combo,
             combo in _REFUSED_COMBOS[name],
-            combo in _UNBALANCED_COMBOS[name],
+            _REFUSED_AT_ANALYSIS[name].get(combo),
             id=f"device_{name}-{_combo_id(combo)}",
             marks=(
                 ()
                 if combo
                 in _BUILT_COMBOS[name]
                 | _REFUSED_COMBOS[name]
-                | _UNBALANCED_COMBOS[name]
+                | _REFUSED_AT_ANALYSIS[name].keys()
                 else unbuilt
             ),
         )
@@ -232,14 +238,14 @@ def test_each_toy_round_trips_and_is_reached_by_candidate_edits(
 )
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(
-    combo, refused, unbalanced, device
+    combo, refused, refusal, device
 ):
     """Each toy, at its depth resolved from the analysis, is bit-identical to the steps run apart; below the minimum it is refused.
 
     A toy past a core's channels (``refused``) is refused at every depth, as
     is one the analysis finds no depth for (an L1 hold across a phase, say).
-    One whose tail, bounded at 0, reads none of what its producer writes it
-    (``unbalanced``) is refused at the analysis, naming that call.
+    One fit refuses at the analysis whatever its depth (``refusal``, a phrase
+    the refusal names) is refused so before any depth is read.
 
     The depth is resolved from ``analyze`` inside this test body, never at
     collection or in the toy builder: a hard-coded depth is not the minimum
@@ -257,6 +263,14 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(
             v.name: limit.hi - 1 for v, limit in zip(recording.values, recording.limits)
         },
     )
+    if refusal is not None:
+        profile = Profile()
+        profile.add_entry(Entry(region))
+        verdict = fit(profile, [call], device)
+        assert not verdict.ok
+        assert verdict.stage == "analysis"
+        assert refusal in (verdict.why or "")
+        return
     ceiling = Ceiling.stored(device.name)
     analysis = analyze(
         region,
@@ -280,11 +294,6 @@ def test_each_toy_is_bit_identical_or_refused_below_the_minimum_depth(
     profile = Profile()
     profile.add_entry(Entry(resolved))
     verdict = fit(profile, [call], device)
-    if unbalanced:
-        assert not verdict.ok
-        assert verdict.stage == "analysis"
-        assert "at n = 0," in (verdict.why or "")
-        return
     if depth == "min_minus_one":
         assert not verdict.ok
         assert verdict.stage == "analysis"

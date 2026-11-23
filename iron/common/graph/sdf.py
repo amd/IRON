@@ -895,16 +895,22 @@ class Derivation:
         channels: Sequence[Channel],
         actors: int,
         hosted: Collection[int],
+        made_by: Sequence[Sequence[int]],
     ) -> list[int] | None:
-        """Return each actor's phase, its steps' phases ``grouped`` (``_step_phases``), or None where the composer does not group them.
+        """Return each actor's phase, its steps' phases ``grouped`` (``_step_phases``), or None where no one phase holds each actor.
 
         A core or memtile link is its step's. A host stream the analysis adds
         (``hosted``) is that of the actors it writes to, or, writing to none,
         of those it reads from, as its sequence issues it. A memtile restaging
         an edge is that of the actors it reads from: no sequence issues its
-        links, so it runs once they write.
+        links, so it runs once they write. None where the composer does not
+        group the steps, or a core runs steps of two phases in turn
+        (``made_by``, the cores its accesses are).
         """
-        if grouped is None:
+        if grouped is None or any(
+            len({grouped[of_step[m]] for m in made_by[a]}) > 1
+            for a in range(len(of_step))
+        ):
             return None
         phase = {a: grouped[i] for a, i in enumerate(of_step)}
         while len(phase) < actors:
@@ -1950,7 +1956,9 @@ class Derivation:
         flow = Flow(
             channels,
             events,
-            self._actor_phases(grouped, of_step, channels, len(events), hosted),
+            self._actor_phases(
+                grouped, of_step, channels, len(events), hosted, made_by
+            ),
         )
         why = flow.balance()
         depths, deadlock = flow.minimum_depths(fixed)
