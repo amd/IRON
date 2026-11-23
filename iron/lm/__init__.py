@@ -38,12 +38,15 @@ from .config import Config, DecoderConfig, not_json, rope_angles
 from .encoder import Encoder, Tower
 from .generation import Sampler, accuracy, determinism, generate_on_host
 from .golden import Golden, HuggingFace
+from .mha_prefill_lxl import AttentionPrefillFused, AttentionPrefillProjectedFused
 from .model import Model, OnHost, Tokenizer
 from .multimodal import Multimodal
 from .session import Session
 
 __all__ = [
     "Attention",
+    "AttentionPrefillFused",
+    "AttentionPrefillProjectedFused",
     "Call",
     "CausalConv1d",
     "CausalLM",
