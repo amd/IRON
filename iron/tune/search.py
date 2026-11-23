@@ -58,7 +58,7 @@ from ..common.graph.coded import CodedWeight, encode_all
 from ..common.graph.compiled import CompiledGraph, _words
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
 from ..common.graph.fusion import composed, in_turn, memory_waits, narrowed
-from ..common.graph.record import NotLegalAtCapacity, Recording
+from ..common.graph.record import Limit, NotLegalAtCapacity, Recording
 from ..common.graph.sdf import Derivation
 from ..common.image.compose import ANNEALED, SEQUENTIAL
 from ..common.image.packaging import SCRATCHPAD_WORDS
@@ -1025,9 +1025,9 @@ def fit(
     range's top (``Recording.selected``), which the range's entry must
     match, fitted under that entry and the rest of the profile its version
     takes (its compositions named at that capacity; an entry or a schedule
-    only another version takes is fitted with that version); a design not
-    legal there (``NotLegalAtCapacity``) is refused by the counts, or as its
-    own fit refuses it.
+    only another version takes is fitted with that version), at its range's
+    values alone; a design not legal there (``NotLegalAtCapacity``) is
+    refused by the counts, or as its own fit refuses it.
 
     A refusal from any stage of any entry wins over what is not fitted yet;
     only where nothing refuses is the first of those raised.
@@ -1189,9 +1189,21 @@ def fit(
             try:
                 with set_current_device(device):
                     variant, chosen = recording.selected(alone, at)
+                per_call = {v.name: v for v in variant.values}
+                # Its design runs only at its range's values.
+                within = dataclasses.replace(
+                    variant,
+                    limits=[
+                        *variant.limits,
+                        *(
+                            Limit(Affine(per_call[n]), lo, hi + 1, f"its range {box}")
+                            for n, (lo, hi) in zip(variants.values, box)
+                        ),
+                    ],
+                )
                 fitted = fit(
                     chosen,
-                    [dataclasses.replace(timed, recording=variant, values=at)],
+                    [dataclasses.replace(timed, recording=within, values=at)],
                     device,
                     placements,
                 )
