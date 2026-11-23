@@ -500,8 +500,11 @@ def composed(
             profile's schedules beyond their packaging, calls a command
             (``Recording.repeated``), merged calls (``Recording.merged``) and
             commands in flight (the host's, ``CarriedLoop``), variants,
-            bindings or
-            state layouts, steps run at once that are not consecutive, a
+            values bound at compile time (one bound at run time or per range
+            builds as recorded, the variants choosing the design per range),
+            a state laid out other than as recorded (``StateLayout.kept``;
+            one so laid out builds as recorded), steps run at once that are
+            not consecutive, a
             configuration keeping buffers resident, switched other than by a
             reload, holding regions or at a partial width over a step that
             declares no column count (``narrowed``), a runtime plan other than one task
@@ -535,11 +538,21 @@ def composed(
             ],
         ),
         ("variants", profile.variants()),
-        ("bindings", profile.bindings()),
-        ("state layouts", profile.state_layouts()),
+        (
+            "values bound at compile time",
+            [b for b in profile.bindings() if b.how == "compile"],
+        ),
     ):
         if kept:
             raise NotImplementedError(f"building a profile's {kind} is not built yet")
+    shapes = {h.name: h.shape for _, h in recording.states.values()}
+    for layout in profile.state_layouts():
+        if layout.buffer in shapes and not layout.kept(shapes[layout.buffer]):
+            raise NotImplementedError(
+                f"building {layout} is not built yet: a state laid out other than "
+                f"as recorded is read and written through strided views, which "
+                f"only a copy takes"
+            )
     tunables: dict[int, dict[str, Any]] = {}
     fused: list[Fusion] = []
     taken: set[int] = set()
