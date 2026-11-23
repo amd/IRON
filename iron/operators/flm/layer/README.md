@@ -7,15 +7,14 @@ SPDX-License-Identifier: Apache-2.0
 
 Ported from the `layer` overlay of [FastFlowLM](https://github.com/ROCm/FastFlowLM)'s Gemma 4 engine.
 
-> Note: This operator uses hand-written DMA programs, packet routes and lock handshakes.
-> As a result it is less portable and less idiomatic than most of the other operators
-> in this repository. If your goal is to learn IRON operator programming,
-> other operators are likely better examples.
+The design uses Workers and ObjectFifos for scheduling, weight distribution,
+projection-input merging and shared-memory handoffs. Kernels contain only
+compute steps. The projection-output gather still uses manual DMA chains and
+packet routes, with ObjectFifoPool handles at the cores.
 
 The operator runs one Gemma 4 decoder layer for one token on the whole NPU2
 array. It reproduces FastFlowLM's fused decode layer and its runtime sequence.
-The kernels come from mlir-aie's `flm_gemma4_decode_*` factories. Each core's
-body calls their compute steps and takes the locks of its DMA channels.
+The kernels come from mlir-aie's `flm_gemma4_decode_*` factories.
 
 ```python
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
@@ -101,7 +100,7 @@ The design expects these buffers, in this order. The operator's buffer sizes
 
 `reference.py` computes the same output in numpy from the five buffers. It
 models the kernels' rounding, accumulation order and lookup tables with
-`aie2p_math_emulation.py`. It returns x and the kv cache as the device leaves
+`aie.utils.aie2p_emulation`. It returns x and the kv cache as the device leaves
 them.
 
 ## Tests

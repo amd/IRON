@@ -9,17 +9,16 @@ codes. A weight is ``min + scale * code``.
 """
 
 import numpy as np
-from ml_dtypes import bfloat16
-
-M_TILE, K_TILE, GROUP = 32, 256, 32
-
-BITS_PER_WEIGHT = 4 + 2 * 16 // GROUP
-BLOCK_BYTES = M_TILE * K_TILE * BITS_PER_WEIGHT // 8
+from aie.iron.kernels.quant import Q4NX_BLOCK_BYTES as BLOCK_BYTES
+from aie.iron.kernels.quant import Q4NX_GROUP as GROUP
+from aie.iron.kernels.quant import Q4NX_K_TILE as K_TILE
+from aie.iron.kernels.quant import Q4NX_M_TILE as M_TILE
+from aie.iron.kernels.quant import q4nx_unpack
 
 
 def packed_bytes(n_weights: int) -> int:
     """Bytes holding n_weights in q4nx packing."""
-    return n_weights * BITS_PER_WEIGHT // 8
+    return n_weights * BLOCK_BYTES // (M_TILE * K_TILE)
 
 
 def unpack(grid):
@@ -30,20 +29,10 @@ def unpack(grid):
     at ``[m // 16, k, m % 16]``, the lower index in a byte's low nibble.
     """
     grid = np.asarray(grid, np.uint8)
-    nb_r, nb_c = grid.shape[:2]
-    b = grid.reshape(-1, BLOCK_BYTES)
-    groups = K_TILE // GROUP
-    params = b[:, : 4 * groups * M_TILE].copy().view(bfloat16).astype(np.float32)
-    scales, mins = params.reshape(-1, 2, groups, M_TILE).transpose(1, 0, 3, 2)
-    packed = b[:, 4 * groups * M_TILE :]
-    codes = np.empty((len(b), M_TILE * K_TILE), np.uint8)
-    codes[:, 0::2], codes[:, 1::2] = packed & 15, packed >> 4
-    codes = codes.reshape(-1, M_TILE // 16, K_TILE, 16).transpose(0, 1, 3, 2)
+    nb_r = grid.shape[0]
     codes, scales, mins = (
-        part.reshape(nb_r, nb_c, M_TILE, -1)
-        .transpose(0, 2, 1, 3)
-        .reshape(nb_r * M_TILE, -1)
-        for part in (codes, scales, mins)
+        part.transpose(0, 3, 1, 2).reshape(nb_r * M_TILE, -1)
+        for part in q4nx_unpack(grid)
     )
     return codes, scales, mins
 

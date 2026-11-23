@@ -33,9 +33,8 @@ jobs:
         include:
           - {runner: phoenix, name: Phoenix}
           - {runner: krackan, name: Krackan}
-    # A fork's pull request never reaches the NPU runners, which hold /srv's
-    # weights and the device, as in mlir-aie's self-hosted jobs.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # A fork's pull request reaches these runners only once a maintainer approves
+    # the run (Settings > Actions: approval for all external contributors).
     runs-on: [self-hosted, "${{ matrix.runner }}"]
     steps:
       - name: Checkout

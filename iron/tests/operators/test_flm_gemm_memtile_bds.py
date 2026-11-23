@@ -19,13 +19,13 @@ from iron.operators.flm.gemm.op import ProjectionGEMM
 
 # Through runtime BD assignment as aiecc runs it, reclaiming as ProjectionGEMM asks.
 PIPELINE = (
-    "builtin.module(aie.device(aie-place-tiles{placer=sequential_placer}),"
+    "builtin.module(aie-place-tiles{placer=sequential_placer},"
     "aie-lower-scratchpad-parameters,"
     "aie.device(aie-objectFifo-stateful-transform,aie-assign-lock-ids,"
     "aie-reserve-runtime-bd-ids,aie-assign-bd-ids,aie-prepare-buffers,"
     "aie-assign-buffer-addresses,aie-create-pathfinder-flows,"
-    "aie-materialize-bd-chains,aie-substitute-shim-dma-allocations,"
-    "aie-assign-runtime-sequence-bd-ids{reclaim-bds=true}))"
+    "aie-materialize-bd-chains,aie-substitute-shim-dma-allocations),"
+    "aie-assign-runtime-sequence-bd-ids{reclaim-bds=true})"
 )
 
 

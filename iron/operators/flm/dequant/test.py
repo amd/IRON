@@ -5,12 +5,12 @@ import os
 from typing import Any
 
 import pytest
+from aie.utils.aie2p_emulation import round_bf16 as rb
 from aie.utils.verify import Tolerance
 
 from iron import Precision
 from iron.common.testing import run_test, vectors
 from iron.operators.flm import q4nx
-from iron.operators.flm.aie2p_math_emulation import rb
 from iron.operators.flm.dequant.op import DequantBFP
 from iron.operators.flm.gemm.op import ProjectionGEMM
 

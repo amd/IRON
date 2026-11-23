@@ -68,8 +68,8 @@ jobs:
           pip install --index-url https://download.pytorch.org/whl/cpu torch==2.15.0
           pip install transformers==5.22.0
           # The pin and the page it is on (a release's or the nightlies'), as requirements.txt names them.
-          grep -E '^(--find-links|mlir_aie==)' requirements.txt > mlir-aie-pin.txt
-          pip install --no-deps -r mlir-aie-pin.txt
+          grep -E '^(--find-links |mlir_aie==)' requirements.txt > /tmp/mlir-aie-requirements.txt
+          pip install --no-deps -r /tmp/mlir-aie-requirements.txt
 
       - name: Check types
         run: pyright
