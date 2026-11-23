@@ -62,7 +62,7 @@ from ..common.graph.coded import CodedWeight, encode_all
 from ..common.graph.compiled import CompiledGraph, _words
 from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
 from ..common.graph.fusion import composed, in_turn, memory_waits, narrowed
-from ..common.graph.record import NotLegalAtCapacity, Recording
+from ..common.graph.record import Limit, NotLegalAtCapacity, Recording
 from ..common.graph.sdf import Derivation
 from ..common.image.compose import ANNEALED, SEQUENTIAL
 from ..common.image.packaging import SCRATCHPAD_WORDS, attached_part
@@ -1549,10 +1549,11 @@ def fit(
     variants over its values. Then each range's design at its capacity:
     the call re-recorded from its graph where each value takes at most its
     range's top (``Recording.selected``), which the range's entry must
-    match, fitted under that entry and the rest of the profile (its
-    compositions named at that capacity); a design not legal there
-    (``NotLegalAtCapacity``) is refused by the counts, or as its own fit
-    refuses it.
+    match, fitted under that entry and the rest of the profile its version
+    takes (its compositions named at that capacity; an entry or a schedule
+    only another version takes is fitted with that version), at its range's
+    values alone; a design not legal there (``NotLegalAtCapacity``) is
+    refused by the counts, or as its own fit refuses it.
 
     An entry scoped to some runs of its shape that sets a shape's tunables
     (one step's region) is refused by the analysis: a shape's tunables apply
@@ -1724,12 +1725,19 @@ def fit(
             for v in recording.values
             if (span := recording.value_range(v.name)) is not None
         }
-        # The profile but its other sets of variants: each range's design is
-        # fitted with what the profile composes, at the range's capacity.
+        # The profile as it applies to this version, but its other sets of
+        # variants: each range's design is fitted with what the profile
+        # composes, at the range's capacity.
         alone = profile.copy()
         for other in profile.variants():
             if other != variants:
                 alone.remove_variants(other)
+        for entry in profile.entries():
+            if not recording.occurrences(entry):
+                alone.remove_entry(entry)
+        for schedule in profile.schedules():
+            if schedule.version != recording.version:
+                alone.remove_schedule(schedule)
         try:
             for _, values in timed.timed_points():
                 recording.ranges_at(alone, values)
@@ -1740,9 +1748,21 @@ def fit(
             try:
                 with set_current_device(device):
                     variant, chosen = recording.selected(alone, at)
+                per_call = {v.name: v for v in variant.values}
+                # Its design runs only at its range's values.
+                within = dataclasses.replace(
+                    variant,
+                    limits=[
+                        *variant.limits,
+                        *(
+                            Limit(Affine(per_call[n]), lo, hi + 1, f"its range {box}")
+                            for n, (lo, hi) in zip(variants.values, box)
+                        ),
+                    ],
+                )
                 fitted = fit(
                     chosen,
-                    [dataclasses.replace(timed, recording=variant, values=at)],
+                    [dataclasses.replace(timed, recording=within, values=at)],
                     device,
                     placements,
                 )
@@ -2334,6 +2354,7 @@ def fit(
                                     recording,
                                     device,
                                     {**timed.values, name: at},
+                                    derivation.rates,
                                 )
                                 .analysis()
                                 .why
@@ -2913,7 +2934,11 @@ def _held_past(
     """Return why ``edge``, ``depth`` objects deep, is past where it is held: a tile's memory or descriptors, or a lock's count; else None.
 
     A fifo end of ``depth`` objects starts its producer's lock at that many
-    free ones, so a lock's range bounds it as a tile's memory does.
+    free ones, so a lock's range bounds it as a tile's memory does. A staged
+    edge's memtile pools ``Staging``'s rounds, each taking a slot of whole
+    objects from every producer lane it joins: ``depth`` objects a lane are
+    as many rounds as it takes to hold them, a buffer descriptor and a lock
+    count each. A slot of one object is a round an object.
     """
     # Spliced, an edge holds each core's own tile.
     elements = (
@@ -2928,13 +2953,38 @@ def _held_past(
     held = depth * elements * np.dtype(source.dtype).itemsize
     if held > memory:
         return f"{edge} holds {depth} objects, {held} bytes; {tile} holds {memory}"
-    if bds is not None and depth > bds:
-        return (
-            f"{edge} holds {depth} objects, a buffer descriptor each; {tile} has "
-            f"{bds}"
-        )
-    if depth > locks:
-        return f"{edge} holds {depth} objects, more than a lock counts ({locks})"
+    pooled = depth
+    if edge.kind is EdgeKind.STAGED and edge not in derivation.spliced:
+        (consumer,) = [c for e, _, c in derivation.wired if e == edge]
+        (made,) = [
+            b
+            for b in derivation.recorded[producer][0].op.buffers
+            if b.name == edge.output
+        ]
+        (taken,) = [
+            b
+            for b in derivation.recorded[consumer][0].op.buffers
+            if b.name == edge.input
+        ]
+        try:
+            with set_current_device(derivation.device):
+                staging = Staging(made, taken)
+        except ValueError:
+            # Its refusals are fit's Staging counts' and the composer's.
+            staging = None
+        if staging is not None:
+            pooled = max(
+                -(-depth * elements // slot)
+                for _, slots, _, _ in staging.groups
+                for slot in slots
+            )
+    held_as = f"{depth} objects" + (
+        "" if pooled == depth else f" in {pooled} of its memtile's rounds"
+    )
+    if bds is not None and pooled > bds:
+        return f"{edge} holds {held_as}, a buffer descriptor each; {tile} has {bds}"
+    if pooled > locks:
+        return f"{edge} holds {held_as}, more than a lock counts ({locks})"
     return None
 
 

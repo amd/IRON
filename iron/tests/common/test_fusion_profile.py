@@ -405,27 +405,34 @@ def test_candidates_finds_silu_mul_and_decodes_gemv_add_residuals(llama_recordin
 
 
 def test_mismatched_tile_sizes_stage_the_edge():
-    """A stream edge refuses SiLU's 512-element tiles into ElementwiseMul's 1024; a staged one forwards them through a memtile."""
+    """A stream edge refuses SiLU's 768-element tiles into ElementwiseMul's 1024; a staged one forwards them through a memtile.
+
+    Neither is a whole number of the other, so no one fifo delivers them.
+    """
+    up = np.zeros(3072, bfloat16)
 
     class Mismatched(iron.Graph):
         def body(self, x):
-            gate = SiLU.step(x, tile_size=512, num_aie_columns=1)
-            return ElementwiseMul.step(gate, W, tile_size=1024, num_aie_columns=1)
+            gate = SiLU.step(x, tile_size=768, num_aie_columns=1)
+            return ElementwiseMul.step(gate, up, tile_size=1024, num_aie_columns=1)
 
-    recording = Mismatched().record(x=(2048,))
+    recording = Mismatched().record(x=(3072,))
     assert candidates(recording, (FusionKind.STREAM,)) == ()
     assert candidates(recording) == (
         Fusion(FusionKind.STAGED, (0, 1), (Edge(0, "y", 1, "a"),)),
     )
 
 
-def test_tiles_a_whole_number_of_the_readers_stream_the_edge():
-    """SiLU's 1024-element tiles into ElementwiseMul's 512 stream on one fifo, each delivered as two of the reader's."""
+@pytest.mark.parametrize(
+    "made, taken", [(1024, 512), (512, 1024)], ids=["reader_smaller", "reader_larger"]
+)
+def test_tiles_a_whole_number_of_the_other_s_stream_the_edge(made, taken):
+    """SiLU's tiles into ElementwiseMul's, either a whole number of the other's, stream on one fifo, each end at its own object size."""
 
     class Delivered(iron.Graph):
         def body(self, x):
-            gate = SiLU.step(x, tile_size=1024, num_aie_columns=1)
-            return ElementwiseMul.step(gate, W, tile_size=512, num_aie_columns=1)
+            gate = SiLU.step(x, tile_size=made, num_aie_columns=1)
+            return ElementwiseMul.step(gate, W, tile_size=taken, num_aie_columns=1)
 
     recording = Delivered().record(x=(2048,))
     assert candidates(recording) == (fusable.stream(0, "y", "a"),)
