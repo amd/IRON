@@ -1784,6 +1784,7 @@ def fit(
                                     recording,
                                     device,
                                     {**timed.values, name: at},
+                                    derivation.rates,
                                 )
                                 .analysis()
                                 .why
