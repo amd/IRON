@@ -75,16 +75,28 @@ void test_plugin()
     emb.struct_size = sizeof(emb);
     TEST_REQUIRE(embedding(nullptr, nullptr, &emb, nullptr) == 0);
     const auto metadata = Span("{\"iron_model\":\"embedding_gemma2\"}");
-    TEST_REQUIRE(emb.load(emb.object, Span("/unused"), metadata, 1, nullptr) != 0);
-    TEST_REQUIRE(emb.load(emb.object, Span("/unused"), metadata, 0, nullptr) == 0);
+    flm_embedding_load_context_v1 load{sizeof(load), Span("/unused"), metadata, 1};
+    TEST_REQUIRE(emb.load(emb.object, &load, nullptr) != 0);
+    load.enable_preemption = 0;
+    load.struct_size = FLM_EMBEDDING_LOAD_CONTEXT_V1_MIN_SIZE - 1;
+    TEST_REQUIRE(emb.load(emb.object, &load, nullptr) != 0);
+    load.struct_size = sizeof(load);
+    TEST_REQUIRE(emb.load(emb.object, &load, nullptr) == 0);
+    struct {
+        flm_embedding_load_context_v1 context;
+        uint64_t future_field;
+    } extended{load, 0};
+    extended.context.struct_size = sizeof(extended);
+    TEST_REQUIRE(emb.load(emb.object, &extended.context, nullptr) == 0);
     flm_embedding_result_v1 vector{};
     vector.struct_size = sizeof(vector);
-    TEST_REQUIRE(emb.embed(emb.object, Span(R"({"input":"hello","task":"unknown"})"), nullptr, &vector, nullptr) ==
-                 FLM_MODEL_EXTENSION_STATUS_INVALID_ARGUMENT);
+    TEST_REQUIRE(
+        emb.embed(emb.object, Span(R"({"input":{"text":"hello","task":"unknown"}})"), nullptr, &vector, nullptr) ==
+        FLM_MODEL_EXTENSION_STATUS_INVALID_ARGUMENT);
     TEST_REQUIRE(emb.embed(emb.object, Span(R"({"input":"hello"})"), nullptr, &vector, nullptr) == 0);
     TEST_REQUIRE(vector.size == 2 && vector.data[0] == 5 && vector.data[1] == 768);
     TEST_REQUIRE(emb.embed(emb.object,
-                           Span(R"({"input":"hello","task":"document","title":"France","dimensions":128})"),
+                           Span(R"({"input":{"text":"hello","title":"France","task":"document"},"dimensions":128})"),
                            nullptr,
                            &vector,
                            nullptr) == 0);

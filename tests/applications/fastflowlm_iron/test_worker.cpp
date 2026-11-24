@@ -94,12 +94,14 @@ int ServeFake()
             std::string text(command.at("size").get<std::size_t>(), '\0');
             read(text.data(), text.size());
             const auto options = nlohmann::json::parse(text);
-            if (options.value("task", "") == "unknown") {
+            const auto &input = options.at("input");
+            if (input.is_object() && input.value("task", "") == "unknown") {
                 send({{"ok", false}, {"error", "Unsupported task"}, {"invalid_argument", true}});
                 continue;
             }
-            const float values[] = {static_cast<float>(options.at("input").get<std::string>().size()),
-                                    options.value("dimensions", 768.0f)};
+            const float values[] = {
+                static_cast<float>((input.is_object() ? input.at("text") : input).get<std::string>().size()),
+                options.value("dimensions", 768.0f)};
             send({{"ok", true}, {"count", 2}, {"prompt_tokens", 9}}, values, sizeof(values));
         } else {
             TEST_REQUIRE(name == "reset" || name == "close");
@@ -128,12 +130,13 @@ int main(int argc, char **argv)
 
     uint64_t prompt_tokens = 0;
     flm::iron::Worker embedding("/unused", "embedding_gemma2");
-    RequireContains(
-        RequireThrows([&] { embedding.embed_request({{"input", "hello"}, {"task", "unknown"}}, prompt_tokens); }),
-        "Unsupported task");
+    RequireContains(RequireThrows([&] {
+                        embedding.embed_request({{"input", {{"text", "hello"}, {"task", "unknown"}}}}, prompt_tokens);
+                    }),
+                    "Unsupported task");
     TEST_REQUIRE(!embedding.poisoned());
-    const auto result =
-        embedding.embed_request({{"input", "hello"}, {"task", "query"}, {"dimensions", 128}}, prompt_tokens);
+    const auto result = embedding.embed_request(
+        {{"input", {{"text", "hello"}, {"task", "query"}}}, {"dimensions", 128}}, prompt_tokens);
     TEST_REQUIRE(result == std::vector<float>({5.0f, 128.0f}));
     TEST_REQUIRE(prompt_tokens == 9);
 
@@ -153,7 +156,7 @@ int main(int argc, char **argv)
     RequireContains(RequireThrows([&] { embedding_only.logits({1}); }), "support");
     RequireContains(RequireThrows([&] { embedding_only.reset(); }), "support");
     TEST_REQUIRE(!embedding_only.poisoned());
-    TEST_REQUIRE(embedding_only.embed_request({{"input", "hello"}, {"task", "query"}, {"dimensions", 128}},
+    TEST_REQUIRE(embedding_only.embed_request({{"input", {{"text", "hello"}, {"task", "query"}}}, {"dimensions", 128}},
                                               prompt_tokens) == result);
 
     flm::iron::Worker causal_only("/unused", "causal_only");

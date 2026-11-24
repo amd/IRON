@@ -252,8 +252,7 @@ def test_model(tmp_path, installation, tag, name):
                         "/v1/embeddings",
                         {
                             "model": tag,
-                            "input": texts[0],
-                            "task": "unknown" * (1 << 18),
+                            "input": {"text": texts[0], "task": "unknown" * (1 << 18)},
                         },
                     )
                 with error.value as response:
@@ -265,16 +264,28 @@ def test_model(tmp_path, installation, tag, name):
                 again = post(
                     url,
                     "/v1/embeddings",
-                    {"model": "Ollama/" + tag, "input": texts[0], "task": "query"},
+                    {
+                        "model": "Ollama/" + tag,
+                        "input": {"text": texts[0], "task": "query"},
+                    },
                 )
                 np.testing.assert_allclose(
                     again["data"][0]["embedding"], vectors[0], atol=1e-5
                 )
-                custom = post(
+                tasks = post(
                     url,
                     "/v1/embeddings",
-                    {"model": tag, "input": texts[0], "task": "QuestionAnswering"},
-                )["data"][0]["embedding"]
+                    {
+                        "model": tag,
+                        "input": [
+                            {"text": texts[0], "task": "query"},
+                            {"text": texts[0], "task": "QuestionAnswering"},
+                        ],
+                    },
+                )["data"]
+                np.testing.assert_allclose(tasks[0]["embedding"], vectors[0], atol=1e-5)
+                custom = tasks[1]["embedding"]
+                assert not np.allclose(custom, vectors[0])
                 assert len(custom) == 768
                 np.testing.assert_allclose(np.linalg.norm(custom), 1, atol=0.02)
                 short = post(
@@ -315,12 +326,11 @@ def test_model(tmp_path, installation, tag, name):
                 # Exercise the embedding engine between two turns of the same chat.
                 document = {
                     "model": "embeddinggemma-2:740m",
-                    "input": "Paris is in France.",
-                    "task": "document",
+                    "input": {"text": "Paris is in France.", "task": "document"},
                     "dimensions": 128,
                 }
                 plain = post(url, "/v1/embeddings", document)
-                document["title"] = "Cities of Europe"
+                document["input"]["title"] = "Cities of Europe"
                 titled = post(url, "/v1/embeddings", document)
                 vector = np.asarray(titled["data"][0]["embedding"])
                 assert vector.shape == (128,) and np.isfinite(vector).all()

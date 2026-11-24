@@ -163,19 +163,17 @@ int CreateCausal(void *,
         *instance = {sizeof(*instance), m.release(), Destroy, &api, {"IRON server", 11}, Capability};
     });
 }
-int LoadEmbedding(void *object,
-                  flm_span_v1 path,
-                  flm_span_v1 metadata,
-                  uint32_t preemption,
-                  const flm_error_sink_v1 *error)
+int LoadEmbedding(void *object, const flm_embedding_load_context_v1 *context, const flm_error_sink_v1 *error)
 {
     return Guard(error, [&] {
-        if (preemption)
+        if (!context || context->struct_size < FLM_EMBEDDING_LOAD_CONTEXT_V1_MIN_SIZE)
+            throw std::invalid_argument("IRON embedding load context is incomplete");
+        if (context->enable_preemption)
             throw std::invalid_argument("IRON embeddings do not support preemption");
         auto &m = Get(object);
-        const auto info = nlohmann::json::parse(Text(metadata));
+        const auto info = nlohmann::json::parse(Text(context->model_info_json));
         m.worker.reset();
-        m.worker = std::make_unique<Worker>(Text(path), info.at("iron_model").get<std::string>());
+        m.worker = std::make_unique<Worker>(Text(context->model_path), info.at("iron_model").get<std::string>());
         if (!m.worker->supports(flm::iron::Capability::EmbeddingRequests))
             throw std::runtime_error("IRON server lacks JSON embedding requests; update IRON");
     });

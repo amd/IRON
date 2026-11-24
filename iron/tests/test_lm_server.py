@@ -255,11 +255,10 @@ def test_embedding_task_passthrough_and_recovery(monkeypatch, task, invalid_task
 def test_json_embedding_request(monkeypatch):
     class Model:
         def embed_request(self, options):
-            if options["task"] == "unknown":
+            if options["input"]["task"] == "unknown":
                 raise ValueError("Unsupported task")
             assert options == {
-                "input": {"text": "hello", "title": "World"},
-                "task": "model-specific",
+                "input": {"text": "hello", "title": "World", "task": "model-specific"},
                 "dimensions": 2,
             }
             return np.asarray([1, 2], np.float32), 7
@@ -269,8 +268,7 @@ def test_json_embedding_request(monkeypatch):
     for task in ("unknown", "model-specific"):
         payload = json.dumps(
             {
-                "input": {"text": "hello", "title": "World"},
-                "task": task,
+                "input": {"text": "hello", "title": "World", "task": task},
                 "dimensions": 2,
             }
         ).encode()

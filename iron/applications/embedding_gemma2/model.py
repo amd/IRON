@@ -411,19 +411,29 @@ class EmbeddingGemma(Encoder):
     def embed_request(self, request: dict) -> tuple[np.ndarray, int]:
         """Embed one text request with optional task, document title and dimensions.
 
-        Task names are ``TextProcessor.TASKS``; omitted tasks select query.
+        Input is a string or an object with ``text``, optional ``task`` and ``title``.
+        Task names are ``TextProcessor.TASKS``; omitted or null tasks select query.
         Return the vector and number of processed tokens, including the prompt.
         """
         if not isinstance(request, dict):
             raise ValueError("Embedding request must be an object")
-        unknown = request.keys() - {"model", "input", "task", "title", "dimensions"}
+        unknown = request.keys() - {"input", "dimensions"}
         if unknown:
             raise ValueError(f"Unsupported embedding options: {sorted(unknown)}")
-        text, task = request.get("input"), request.get("task", "")
-        title, dims = request.get("title"), request.get("dimensions", 768)
+        content, task = request.get("input"), ""
+        title, dims = None, request.get("dimensions", 768)
+        if isinstance(content, dict):
+            if content.keys() - {"text", "task", "title"}:
+                raise ValueError("Input supports only text, task and title")
+            text, title = content.get("text"), content.get("title")
+            task = content.get("task")
+            if task is None:
+                task = ""
+        else:
+            text = content
         if not isinstance(text, str) or not isinstance(task, str):
-            raise ValueError("input and task must be strings")
-        if "title" in request and not isinstance(title, str):
+            raise ValueError("text and task must be strings")
+        if title is not None and not isinstance(title, str):
             raise ValueError("title must be a string")
         if type(dims) is not int or dims not in self.config.mrl_dims:
             raise ValueError(f"dimensions must be one of {self.config.mrl_dims}")

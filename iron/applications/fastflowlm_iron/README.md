@@ -52,12 +52,14 @@ are already present.
 
 ## Embedding requests
 
-`embeddinggemma-2:740m` accepts a string `input` (or a batch of strings), an
-optional `task`, document `title`, and `dimensions` (768, 512, 256, or 128;
-default 768). Each output is normalized. Options stay in the request JSON;
-IRON formats and tokenizes the text, and reports processed tokens including
-prefixes and special tokens. Unknown options or unsupported values return 400.
-A title is accepted only for document tasks and defaults to `none`.
+`embeddinggemma-2:740m` accepts a string `input` or an object with `text` and
+optional `task` and `title`, or a batch of either. A string input, or an omitted,
+null or empty `input.task`, selects query. An object can supply a title for
+document tasks; an omitted or null title uses `none`.
+`dimensions` is outside `input` and accepts 768 (default), 512, 256, or 128;
+each output is normalized. IRON formats and tokenizes the input, and reports
+processed tokens including prefixes and special tokens. Unsupported input
+fields, tasks or dimensions return 400.
 
 Task names are case-sensitive and specific to this model:
 
@@ -77,7 +79,7 @@ For example, `Reranking` uses the query prompt; embed candidate documents with
 `document`. Other models can define different tasks and options.
 
 ```json
-{"model":"embeddinggemma-2:740m","input":"Paris is in France.","task":"document","title":"France","dimensions":128}
+{"model":"embeddinggemma-2:740m","input":{"text":"Paris is in France.","title":"France","task":"document"},"dimensions":128}
 ```
 
 To keep chat and embedding engines loaded in the same server:
