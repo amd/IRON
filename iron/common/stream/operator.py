@@ -111,9 +111,12 @@ class StreamOperator(Operator):
         digest = self._solve_digest()
         if digest not in _solutions:
             name, key = self.solve_key()
-            _solutions[digest] = solve(
-                name, key, self.workload(), self.candidates(), self.dev, self.library()
-            )
+            dev = self.dev
+            # stream-dse's factories bind the device they build for.
+            with aie_utils.set_current_device(dev):
+                _solutions[digest] = solve(
+                    name, key, self.workload(), self.candidates(), dev, self.library()
+                )
         return _solutions[digest]
 
     def group(self) -> int:

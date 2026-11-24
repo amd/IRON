@@ -16,6 +16,7 @@ pytest.importorskip("onnxscript", reason="onnxscript is not installed")
 pytest.importorskip("xdsl_aie", reason="stream-setup-aie has not been run")
 pytest.importorskip("snaxc", reason="stream-setup-aie has not been run")
 
+import aie.utils as aie_utils  # noqa: E402
 from aie import ir  # noqa: E402
 from aie.iron import In, Out  # noqa: E402
 from aie.utils.compile.jit.operator import Unresolvable  # noqa: E402
@@ -117,6 +118,24 @@ def test_the_identity_follows_the_kernel_sources(monkeypatch, tmp_path):
     _, own = op.design_key()
     monkeypatch.setenv("MLIR_AIE_KERNEL_SOURCES", str(tmp_path))
     assert op.design_key()[1][-1] != own[-1]
+
+
+def test_a_solve_leaves_the_bound_device_bound(monkeypatch, tmp_path):
+    """stream-dse's kernel factories bind the device they build for."""
+    from aie.iron.device import from_name
+
+    from iron.common.stream import operator, runner
+
+    def solve(*args):
+        aie_utils.set_current_device(from_name("npu2", n_cols=None))
+        return _solved(tmp_path, PARTITIONS[1])
+
+    monkeypatch.setattr(runner, "solve", solve)
+    monkeypatch.setattr(operator, "_solutions", {})
+    op = SwiGLUFusedStream(**DIMS).resolved()
+    dev = op.dev
+    op.solution()
+    assert op.dev is dev
 
 
 def test_groups_of_one_design_share_its_solve():
