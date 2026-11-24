@@ -10,6 +10,7 @@ inputs and capped logits.
 """
 
 import dataclasses
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -140,6 +141,11 @@ def test_bidirectional_attention_for_images_alone_is_text_s_causal():
     data = TOY.to_json()
     data["text_config"]["use_bidirectional_attention"] = "vision"
     assert Gemma4Config.from_json(data).layer_types == TOY.layer_types
+
+
+@pytest.mark.parametrize("device", ["npu1", "npu2"])
+def test_its_profile_serves_each_device(device):
+    assert (Path(Gemma4.profile) / f"{device}.json").exists()
 
 
 def test_a_shared_layer_with_no_earlier_layer_of_its_kind_is_refused():

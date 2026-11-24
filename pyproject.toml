@@ -28,6 +28,8 @@ exclude = ["iron.tests*"]
 
 [tool.setuptools.package-data]
 "iron.lm" = ["prompt.txt"]
+# The cost model a tune on each device starts from (iron.tune.costmodel).
+"iron.tune" = ["costs/*.json"]
 # In every package: what an application reads beside its code at run time.
 "*" = [
     "profiles/*.json",

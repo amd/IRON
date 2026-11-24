@@ -15,13 +15,14 @@ from typing import TYPE_CHECKING
 import aie.utils as aie_utils
 import ml_dtypes
 import numpy as np
+from aie.utils.benchmark import CPU_WAIT_US
 from aie.utils.npukernel import NPUKernel
 from aie.utils.trace import get_trace_buffer
 
 from ..declare import Operator
 from .allocator import ALIGNMENT, BANK, ArenaPlan, Pool
 from .compose import Composition
-from .step import BufferRef
+from .step import BufferRef, Fusion
 
 if TYPE_CHECKING:
     import pyxrt  # pyright: ignore[reportMissingImports]
@@ -146,6 +147,8 @@ class FullELFRun:
         self._params: list[ParameterScratchpad] | None = None
         # Bound to or from another run's scratchpad: a loop holds it.
         self.wired = False
+        # The argument kinds this run holds a buffer of its own for.
+        self.owned: dict[str, XRTTensor] = {}
 
     def bind(self, index: int, bo: pyxrt.bo | None) -> None:
         """Run with ``bo`` as argument ``index``, refusing a released tensor's None."""
@@ -247,6 +250,9 @@ def _line_view(parent: XRTTensor, offset: int, length: int, dtype) -> XRTTensor:
     return parent.subview(offset, ((stop - offset) // dtype.itemsize,), dtype)
 
 
+WAIT_PER_DISPATCH_US = 2.0
+
+
 class ImageCallable:
     """What a caller invokes once a sequence ``op`` has an image.
 
@@ -281,6 +287,16 @@ class ImageCallable:
         (``aie.utils.benchmark``), or None, and the call's result.
         """
         raise NotImplementedError
+
+    @property
+    def dispatches(self) -> int:
+        """Return the commands a call issues from the host: one for a full ELF."""
+        return 1
+
+    def cpu_wait_cap_us(self) -> float:
+        """Return the most CPU wait a call's timing may show before it is refused as host contention."""
+        # An idle host still wakes about 1 us a dispatch (Phoenix, ~1100-dispatch steps).
+        return CPU_WAIT_US + WAIT_PER_DISPATCH_US * self.dispatches
 
     def _arena_grew(self) -> bool:
         """Whether the arena grew since the views were made, now made again."""
@@ -386,9 +402,22 @@ class FullELFCallable(ImageCallable):
         FullELFCallable._holding[id(self)] = self
         return self._run
 
-    def new_run(self) -> FullELFRun:
-        """Another run over this callable's buffers; each holds a copy of the ctrlcode."""
-        return self._make_run()
+    def new_run(self, owned: Collection[str] = ()) -> FullELFRun:
+        """Another run over this callable's buffers; each holds a copy of the ctrlcode.
+
+        Args:
+            owned: The argument kinds (``"input"``, ``"output"``) the run takes
+                a buffer of its own for, so runs in flight do not share the
+                host's; the scratch banks stay shared, as commands on one
+                context run in turn.
+        """
+        made = self._make_run()
+        shared = self._arguments()
+        for kind in owned:
+            tensor = XRTTensor(tuple(shared[kind].shape), dtype=shared[kind].dtype)
+            made.owned[kind] = tensor
+            made.bind(self._argument_index[kind], tensor.buffer_object())
+        return made
 
     def release(self, *, force: bool = False) -> bool:
         """Free ``run`` and unload the image, returning True unless it is in use.
@@ -483,34 +512,42 @@ class FullELFCallable(ImageCallable):
             )
         return path
 
-    def get_buffer(self, ref: BufferRef):
+    def get_buffer(self, ref: BufferRef, run: FullELFRun | None = None):
         """Return the bytes ``ref`` names, and the rest of their last coherence line.
 
+        In ``run``'s own buffer where it holds one for their argument (``new_run``).
         See ``_line_view``.
         """
         self._follow_arena()
-        if ref not in self._buffer_cache:
+        key = (ref, None if run is None else id(run))
+        if key not in self._buffer_cache:
             kind, offset, length = ref.place(self.op.layout)
             if kind == "scratch":
                 kind, offset = self.op.buffer_sizes.scratch_argument(offset, length)
             dtype = self.op.buffer_dtype(ref)
-            self._buffer_cache[ref] = _line_view(
-                self._arguments()[kind], offset, length, dtype
+            owned = {} if run is None else run.owned
+            self._buffer_cache[key] = _line_view(
+                owned.get(kind, self._arguments()[kind]), offset, length, dtype
             )
-        return self._buffer_cache[ref]
+        return self._buffer_cache[key]
 
-    def get_storage(self, root: str):
-        """Return the buffer and the rest of its last coherence line (``_line_view``)."""
+    def get_storage(self, root: str, run: FullELFRun | None = None):
+        """Return the buffer and the rest of its last coherence line (``_line_view``).
+
+        In ``run``'s own buffer where it holds one for its argument (``new_run``).
+        """
         self._follow_arena()
-        if root not in self._storage_cache:
+        key = (root, None if run is None else id(run))
+        if key not in self._storage_cache:
             kind, offset, length = self.op.layout[root]
             if kind == "scratch":
                 kind, offset = self.op.buffer_sizes.scratch_argument(offset, length)
             dtype = self.op.buffer_dtype(BufferRef(root))
-            self._storage_cache[root] = _line_view(
-                self._arguments()[kind], offset, length, dtype
+            owned = {} if run is None else run.owned
+            self._storage_cache[key] = _line_view(
+                owned.get(kind, self._arguments()[kind]), offset, length, dtype
             )
-        return self._storage_cache[root]
+        return self._storage_cache[key]
 
     def _follow_arena(self) -> None:
         if not self._arena_grew():
@@ -539,6 +576,8 @@ class FullELFCallable(ImageCallable):
         """
         self._sync_inputs()
         for run in runs:
+            for tensor in run.owned.values():
+                tensor.to("npu")
             run.start(idle)
 
     def wait(self, *runs: FullELFRun) -> None:
@@ -591,18 +630,20 @@ class PerStepCallable(ImageCallable):
     transients share one bank-split pool.
     """
 
+    @property
+    def dispatches(self) -> int:
+        """Return the commands a call issues from the host: one a step, a fusion's steps one."""
+        return len(self._steps)
+
     def __init__(self, seq, check: bool = False, arena: ScratchArena | None = None):
         super().__init__(seq, arena)
         self.check = check
         self.dispatch_values: dict[str, np.generic] = {}
         self._buffers: dict[BufferRef, XRTTensor] = {}
         self._storage: dict[str, XRTTensor] = {}
-        own_scratch: dict[str, tuple[int, int]] = {}
+        own_scratch = seq.own_scratch()
         for root, (kind, offset, length) in seq.layout.items():
-            if self.arena is not None and root in seq.residents:
-                continue
-            if kind == "scratch":
-                own_scratch[root] = (offset, length)
+            if kind == "scratch" or (self.arena is not None and root in seq.residents):
                 continue
             ref = BufferRef(root)
             dtype = seq.buffer_dtype(ref)
@@ -623,14 +664,19 @@ class PerStepCallable(ImageCallable):
             view = _line_view(self._scratch_banks[bank], offset, length, dtype)
             self._storage[root] = view
             self._buffers[BufferRef(root)] = view
-        # Each step is its own dispatch, over its own buffers.
+        # Each step is its own dispatch, over its own buffers; a fusion's
+        # steps are one dispatch, over its host-visible buffers.
         self._steps = []
-        # The step each dispatch starts at.
+        # The step each dispatch starts at, and its link.
         self._starts: list[int] = []
-        for i, step in enumerate(seq.steps):
-            link = seq.packaging.links[id(step.op)]
-            self._steps.append((step.op, link.kernel, step.buffers, []))
+        self._links = []
+        for i, fusion in Fusion.dispatches(seq.fusions, len(seq.steps)):
+            step = seq.steps[i]
+            link = seq.packaging.step_links[i]
+            refs = step.buffers if fusion is None else fusion.host_refs(seq.steps)
+            self._steps.append((step.op, link.kernel, refs, []))
             self._starts.append(i)
+            self._links.append(link)
         self._follow_arena()
         self._bind_steps()
 
@@ -699,17 +745,17 @@ class PerStepCallable(ImageCallable):
     def __call__(
         self, between: Mapping[int, Callable[[], None]] | None = None
     ) -> tuple[None, XRTKernelResult]:
-        """Dispatch each step.
+        """Dispatch each step, ``between[i]()`` running on the host before step ``i``.
 
-        ``between[i]()`` runs on the host before step ``i``, never inside
-        a pack's run; the handle is None, no one dispatch timed.
+        Never inside a pack's or a fusion's run; the handle is None, no one dispatch
+        timed.
         """
         between = dict(between or {})
         inside = set(between) - {*self._starts, len(self.op.steps)}
         if inside:
             raise ValueError(
                 f"{self.op.name}: host steps at {sorted(inside)} fall inside a "
-                f"run of a pack, one dispatch"
+                f"run of a pack or a fusion, one dispatch"
             )
         self._follow_arena()
         for root in self.op.inputs:
@@ -729,9 +775,13 @@ class PerStepCallable(ImageCallable):
                 )
             if checked:
                 inputs, expected = self._reference(step_op, args)
+            symbols = self._links[index].symbols
             kernel(
                 *args,
-                **{name: self.dispatch_values[name] for name in kernel.dispatch_params},
+                **{
+                    name: self.dispatch_values[symbols.get(name, name)]
+                    for name in kernel.dispatch_params
+                },
             )
             if checked:
                 written = {
@@ -759,13 +809,13 @@ class PerStepCallable(ImageCallable):
     ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
         """Return ``step_op``'s inputs and its reference on them, by buffer name.
 
-        Inputs are read as its buffers hold them.
+        Inputs are read as its buffers hold them, a coded one decoded.
         """
         held = {
             spec.name: buf.numpy()[: spec.elements].reshape(spec.shape).copy()
             for buf, spec in zip(args, step_op.buffers)
         }
-        inputs = {b.name: held[b.name] for b in step_op.inputs}
+        inputs = {b.name: b.logical_form(held[b.name]) for b in step_op.inputs}
         # A reference that takes its outputs writes them in place, keeping
         # what it does not touch (a cache a Copy scatters into).
         outputs = {b.name: held[b.name] for b in step_op.outputs if not b.fills}

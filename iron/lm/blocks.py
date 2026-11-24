@@ -434,6 +434,8 @@ class Rope(iron.Graph):
 class KVCache(iron.Graph):
     """A layer's keys and values and causal attention over them (``attend``).
 
+    ``kv`` holds a position's keys and values side by side, ``(rows, groups,
+    2, head_dim)``, so one block of a KV head's K and V is one DMA run apart.
     A prompt chunk writes a run of rows; a decode step attends with ``MHA``
     over one query, which costs the context, not the cache.
 
@@ -453,11 +455,11 @@ class KVCache(iron.Graph):
         if self.ring is not None and 3 * self.ring < rows:
             if C & (C - 1):
                 raise ValueError(f"KVCache: a {C}-position chunk is no power of two")
-            self.staged = iron.state((self.ring, G, D)), iron.state((self.ring, G, D))
+            self.staged = iron.state((self.ring, G, 2, D))
             rows = 2 * self.ring
         else:
             self.ring = None
-        self.keys, self.values = iron.state((rows, G, D)), iron.state((rows, G, D))
+        self.kv = iron.state((rows, G, 2, D))
 
     def restart(self, held: int, ran: int) -> int:
         """Return where a call may start to change the positions from ``held`` on.
@@ -475,25 +477,21 @@ class KVCache(iron.Graph):
         None for a layer reading another's cache. Attends ``q`` ``(rows,
         heads, head_dim)`` over them; ``(rows, heads * head_dim)``.
         """
-        C, (_, G, D), (n, H, _) = self.chunk, self.keys.shape, q.shape
+        C, (_, G, _, D), (n, H, _) = self.chunk, self.kv.shape, q.shape
         if self.ring is None:
-            for x, cache in ((k, self.keys), (v, self.values)):
-                if x is None:
-                    continue
+            for i, x in enumerate((k, v) if k is not None else ()):
                 if call.prompt:
-                    cache[call.start : call.start + C][: call.rows] = x
+                    self.kv[call.start : call.start + C, :, i][: call.rows] = x
                 else:
-                    cache[call.position] = x.reshape(G, D)
-            keys, values = (x[: call.position + 1] for x in (self.keys, self.values))
+                    self.kv[call.position, :, i] = x.reshape(G, D)
+            kv = self.kv[: call.position + 1]
         else:
             assert self.window is not None, "a ring has a window"
-            keys, values, q = self._ring(call, self.ring, self.window, q, k, v)
+            kv, q = self._ring(call, self.ring, self.window, q, k, v)
         o = MHA.step(
             q,
-            keys,
-            values,
+            KV=kv,
             heads_interleaved=True,
-            kv_interleaved=True,
             window=self.window,
             scale=scale,
         )
@@ -502,12 +500,12 @@ class KVCache(iron.Graph):
         return o.reshape(n, H * D)
 
     def _ring(self, call, R: int, W: int, q, k, v):
-        """Return ``attend``'s keys, values and queries within the window ``W``.
+        """Return ``attend``'s keys and values, and queries, within the window ``W``.
 
         Staged from the ``R``-position ring for the call's chunk or decode
         step.
         """
-        C = self.chunk
+        C, (_, G, _, D) = self.chunk, self.kv.shape
         if call.prompt:
             at, width = call.start % R, C
             first, read = iron.clamp(call.start + C - R, lo=0) % R, R
@@ -517,16 +515,15 @@ class KVCache(iron.Graph):
             at, width = call.position % R, None
             first, read = iron.clamp(call.position - W, lo=0) % R, W + 1
             n = iron.clamp(call.position + 1, hi=W + 1)
-        for x, ring, staged in zip((k, v), (self.keys, self.values), self.staged):
-            if x is None:
-                continue
-            for row in (at, at + R):
-                if width is None:
-                    ring[row] = x.reshape(ring.shape[1:])
-                else:
-                    ring[row : row + width][: call.rows] = x
-            Copy.step(ring[first : first + read][:n], staged[:read])
-        return (*(staged[:n] for staged in self.staged), q)
+        if k is not None:
+            for i, x in enumerate((k, v)):
+                for row in (at, at + R):
+                    if width is None:
+                        self.kv[row, :, i] = x.reshape(G, D)
+                    else:
+                        self.kv[row : row + width, :, i][: call.rows] = x
+            Copy.step(self.kv[first : first + read][:n], self.staged[:read])
+        return self.staged[:n], q
 
 
 class NoCache(iron.Graph):
@@ -549,8 +546,8 @@ class NoCache(iron.Graph):
         n, H, D = q.shape
         o = MHA.step(
             q,
-            k,
-            v,
+            K=k,
+            V=v,
             heads_interleaved=True,
             kv_interleaved=True,
             causal=self.causal,
@@ -645,14 +642,20 @@ class Attention(iron.Graph):
         if k is not None:
             k, v = k.reshape(n, G, D), v.reshape(n, G, D)
         o = cache.attend(call, q.reshape(n, H, D), k, v, scale=self.scaling)
-        return self.output(o, x)
+        # Given q's tiles where its shape is o's, the two share one array.
+        shared = isinstance(self.o_proj, Linear) and self.o_proj.out_features == H * D
+        return self.output(o, x, **(tiles if shared else {}))
 
-    def output(self, o: Handle, x: Handle) -> Handle:
-        """Return the block's output from the heads ``o`` ``(rows, heads * head_dim)``.
+    def output(self, o: Handle, x: Handle, **gemv) -> Handle:
+        """Return the block's output from the heads ``o`` of the input ``x``.
 
-        Of the input ``x``.
+        ``o`` is ``(rows, heads * head_dim)``; ``gemv``, where given, is its one-row
+        GEMV's tunables.
         """
-        return self.o_proj(o)
+        if not gemv:
+            return self.o_proj(o)
+        p = self.o_proj
+        return F.linear(o, p.weight, p.bias, precision=p.precision, **gemv)
 
 
 class MLP(iron.Graph):

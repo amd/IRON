@@ -311,11 +311,14 @@ def check_chat_turn(model, chars: int, turn: int, num_tokens: int = 2, *, record
     assert not steps, f"the turn's logits differ from scratch's at steps {steps}"
 
 
-def check_deep_decode(model, position: int, bound: float, chars: int = 1024, *, record):
+def check_deep_decode(
+    model, position: int, bound: float, chars: int = 1024, timed: int = 5, *, record
+):
     """Check a decode step at ``position``, deep in the caches, against the graph's own reference.
 
     ``Graph.reference``, for a context transformers would take too long
-    over, within ``bound`` of its KL.
+    over, within ``bound`` of its KL; then the step's speed there, the median
+    of ``timed`` more runs of it.
     """
     tokens = prompt(model, chars, 1)
     token = greedy(model.logits(tokens))
@@ -323,11 +326,18 @@ def check_deep_decode(model, position: int, bound: float, chars: int = 1024, *, 
     values = dict(token=token, position=position)
     with _fill_caches(model, len(tokens), position):
         got, _ = model(**values)
-        got = got.numpy()
         expected, _ = model.reference(**values)
-    kl, top1 = divergence(expected, got)
+        # Before the step runs again: its output is read in place, and a
+        # recurrent layer's state moves on with every run.
+        kl, top1 = divergence(expected, got.numpy())
+        seconds = []
+        for _ in range(timed):
+            start = time.perf_counter()
+            model(**values)
+            seconds.append(time.perf_counter() - start)
     record("DeepKL", kl)
     record("DeepTop1", top1)
+    record("DeepTPS", 1 / float(np.median(seconds)))
     assert kl <= bound, f"at {position}: KL {kl} > {bound}"
 
 

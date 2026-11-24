@@ -59,9 +59,9 @@ checkpoint by `pytest <test> --record-goldens -p no:xdist`; a test whose golden 
 fails.
 
 On NPU1 an image wider than Resample's per-core budget is refused
-(`test_image_processor_refuses_on_npu1`), and
-`TestAudio::test_audio_accuracy[passage]` is known to land just under
-`AUDIO_MIN_COSINE`, a bound set from NPU2. The tower tracks its operators'
+(`test_image_processor_refuses_on_npu1`). The tower tracks its operators'
 references through its first 11 layers; the last layer is ill-conditioned
-at a few of passage's tokens (`AUDIO_MIN_COSINE`'s comment), which NPU1's
-rounding tips under the bound.
+at a few tokens (`AUDIO_MIN_COSINE`'s comment), and NPU1's rounding lands
+on a different unlucky token of `passage`'s than NPU2's, measured there at
+0.9901 against NPU2's worst of 0.9946; `AUDIO_MIN_COSINE` now covers both,
+measured on Phoenix.

@@ -10,7 +10,8 @@ import functools
 import hashlib
 import inspect
 import re
-from collections.abc import Hashable, Mapping, Sequence
+from collections.abc import Collection, Hashable, Mapping, Sequence
+from typing import Any
 
 import aie.utils as aie_utils
 from aie import ir
@@ -21,15 +22,18 @@ from aie.iron import (
     DispatchTime,
     Flow,
     Lock,
+    ObjectFifo,
     PacketFlow,
     Program,
     ScratchpadParameter,
     Worker,
 )
+from aie.iron.device import Device
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
-from ..declare import Operator
-from .runtime import MergedRuntime, OperatorRuntime
+from ..declare import Built, Operator
+from ..declare.operand import Operand
+from .runtime import MergedRuntime, OperatorRuntime, SplicedRuntime
 
 
 class OperatorDesign:
@@ -154,11 +158,32 @@ class BuiltArray:
             with others that always hold the same number.
         dispatch: On an xclbin, each per-call value's dispatch-time scalar,
             by device symbol.
+        fed: Input name -> the built output, or a fifo, it is fed on-chip
+            (``Operand.feed``).
+        staged: A fed input whose lanes do not meet its source's is staged
+            through memtiles rather than refused.
+        held: Fed inputs whose restage is held in L1 (``Operand.feed``).
+        depths: Operand name -> the depth a composition chose for an edge's
+            reading end (``Operand.chosen_depth``): a fed input's own end,
+            the end an output's lanes bind for their first on-chip reader, or
+            an unfed input's fifos (the cascade fills it).
+        packeted: Operand names whose host fills, or a held restage's
+            pieces, ride packet flows (``Operand.packeted``).
+        splices: Output names a composition splices a stage into, where
+            their build joins their cores' fifos (``Operand.splices``).
+        joined_drains: Output name -> the lanes each host lane joins in a
+            memtile (``Operand.drain_join``).
+        delivers: Output name -> the object type its first on-chip reader
+            takes, either a whole number of the other (``Operand.delivers``).
 
     Raises:
         ValueError: A full ELF is asked to carry a ``DispatchTime`` value, an
-            xclbin is given no scalar for a value, or a trace would reuse
-            an output a full ELF consolidates.
+            xclbin is given no scalar for a value, a trace would reuse an
+            output a full ELF consolidates, or ``Operand.feed`` refuses.
+        NotImplementedError: A chosen depth names an output, or an unfed
+            input, whose build binds its lanes itself, not through
+            ``Operand.fifos``, or ``Operand.feed`` does not build a restage
+            held in L1.
     """
 
     def __init__(
@@ -166,9 +191,18 @@ class BuiltArray:
         design: OperatorDesign,
         words: Mapping[str, str] | None = None,
         dispatch: Mapping[str, object] | None = None,
+        fed: Mapping[str, Operand | ObjectFifo] | None = None,
+        staged: bool = False,
+        held: Collection[str] = (),
+        depths: Mapping[str, int] | None = None,
+        packeted: Collection[str] = (),
+        splices: Collection[str] = (),
+        joined_drains: Mapping[str, int] | None = None,
+        delivers: Mapping[str, Any] | None = None,
     ):
         words = words or {}
         dispatch = dispatch or {}
+        fed = fed or {}
         self._words, self._dispatch = words, dispatch
         op = design.op.copy()  # a build binds streams
         # Before build(), which may hand a core-read value to a worker.
@@ -192,9 +226,68 @@ class BuiltArray:
             else:
                 value.param = dispatch[value.symbol]
         view = op.layout()
+        # feed() reads host shapes, which the layout view does not carry.
+        operands = {b.name: b for b in op.buffers}
+        for name, source in fed.items():
+            # A restage held in L1 holds its rounds at the edge's chosen depth.
+            operands[name].chosen_depth = (depths or {}).get(name)
+            operands[name].packeted = name in packeted
+            operands[name].feed(source, staged=staged, held=name in held)
+        for mine, built in zip(op.buffers, view.buffers):
+            built.fed_from, built.staged = mine.fed_from, mine.staged
+            built.chosen_depth = (depths or {}).get(mine.name)
+            built.packeted = mine.name in packeted
+            built.splices = mine.name in splices
+            mine.drain_join = built.drain_join = (joined_drains or {}).get(mine.name, 1)
+            mine.delivers = built.delivers = (delivers or {}).get(mine.name)
         self.built = view.build()
         for mine, built in zip(op.buffers, view.buffers):
+            chosen = built.chosen_depth
+            if (
+                built.drains
+                and chosen is not None
+                and (
+                    not built.lane_fifos
+                    or (
+                        any(
+                            (f.depth or 0) < chosen
+                            for fifos in built.core_fifos
+                            for f in fifos
+                        )
+                        if built.splices and built.join is not None
+                        # A delivered stream's depth is its producer's end's.
+                        else (
+                            any(f.depth != chosen for f in built.lane_fifos)
+                            if built.delivers is not None
+                            else any(h.depth != chosen for h in built.lane_handles)
+                        )
+                    )
+                )
+            ):
+                raise NotImplementedError(
+                    f"{type(op).__name__}.{mine.name} read at a chosen depth of "
+                    f"{built.chosen_depth} is not built yet: its build makes its "
+                    f"fifos itself"
+                )
+            if (
+                built.fills
+                and built.fed_from is None
+                and built.chosen_depth is not None
+                and (
+                    not built.lane_fifos
+                    or any(f.depth != built.chosen_depth for f in built.lane_fifos)
+                )
+            ):
+                raise NotImplementedError(
+                    f"{type(op).__name__}.{mine.name} filled at a chosen depth of "
+                    f"{built.chosen_depth} is not built yet: its build makes its "
+                    f"fifos itself"
+                )
+        for mine, built in zip(op.buffers, view.buffers):
             mine.lane_handles = built.lane_handles
+            mine.lane_fifos = built.lane_fifos
+            mine.splices, mine.join = built.splices, built.join
+            mine.core_fifos = built.core_fifos
         self.design = design
         self.op = op
         self.workers = [w for w in self.built.objects if isinstance(w, Worker)]
@@ -221,10 +314,13 @@ class BuiltArray:
     def reads(self) -> frozenset[str]:
         """Return the scratchpad words this design's cores read.
 
-        Beside its ``array_key``, all its array depends on. Read off the
-        design built anew and resolved alone, since a core reads a word
-        through the parameter its function closes over.
+        Beside its ``array_key``, all its array depends on. Read off the design built
+        anew and resolved alone, since a core reads a word through the parameter its
+        function closes over. An xclbin has no scratchpad: its values are dispatch-time
+        scalars, which resolving it alone would bind, leaving none for its own sequence.
         """
+        if not self.design.full_elf:
+            return frozenset()
         alone = BuiltArray(self.design, self._words, self._dispatch)
         module = alone.program().resolve_program()
         words: set[str] = set()
@@ -276,6 +372,69 @@ class BuiltArray:
         )
 
 
+class SplicedArray(BuiltArray):
+    """A step whose kernel a composition splices into another's cores, as the array its sequence runs over.
+
+    It builds nothing of its own: its stage runs on the producer's cores,
+    and each of its host operands moves along the producer's output's lanes
+    (``Operand.along``), the input the producer feeds on-chip, and any other
+    on the cascade, core to core.
+
+    Args:
+        design: The step's design.
+        source: The producer's output, spliced (``Operand.splices``).
+        input: The step's input ``source`` feeds.
+        hosts: Each host operand's lane ends, by name: the fifos the stage's
+            other inputs read, or ``source``'s own, which carry its output;
+            an operand it does not name is on the cascade.
+        stages: Each core's stage, whose runtime parameters its sequence
+            writes.
+    """
+
+    def __init__(
+        self,
+        design: OperatorDesign,
+        source: Operand,
+        input: str,
+        hosts: Mapping[str, list],
+        stages: Sequence[BuiltArray],
+    ):
+        self._words, self._dispatch = {}, {}
+        op = design.op.copy()
+        for b in op.buffers:
+            if b.name == input:
+                b.fed_from = source
+            elif b.name in hosts:
+                b.along = source
+                b.lane_handles = list(hosts[b.name])
+            else:
+                b.cascade = source
+        self.built = Built([])
+        self.design = design
+        self.op = op
+        self.workers = []
+        self.traced = []
+        self.stages = list(stages)
+
+    def runtime(self, other: BuiltArray, name: str | None) -> OperatorRuntime:
+        """Its own sequence, named ``name``: each stage's parameters, then its host transfers.
+
+        Raises:
+            ValueError: ``other`` is another array.
+        """
+        if other is not self:
+            raise ValueError(
+                f"{type(other.op).__name__}'s sequence cannot run over a spliced "
+                f"{type(self.op).__name__}'s array"
+            )
+        return SplicedRuntime(
+            self.op,
+            self.built,
+            [OperatorRuntime(s.op, s.built) for s in self.stages],
+            name=name,
+        )
+
+
 def identities(arrays: Mapping[str, BuiltArray]) -> dict[str, Hashable]:
     """Return what each of ``arrays`` is, equal where two are one array.
 
@@ -290,25 +449,63 @@ def identities(arrays: Mapping[str, BuiltArray]) -> dict[str, Hashable]:
 
 
 def configuration(
-    name: str, arrays: Mapping[str, BuiltArray], steps: Sequence[str] = ()
+    name: str,
+    arrays: Mapping[str, BuiltArray],
+    steps: Sequence[str] = (),
+    fuse: bool = False,
+    phases: Sequence[Sequence[str]] = (),
+    burst: int | None = None,
+    device: Device | None = None,
 ) -> DeviceConfiguration:
     """Build ``arrays`` as one device configuration ``name``.
 
-    One array per identity, and each entry's sequence over it, ``sequence``
-    if it is alone, else named for its key. Given ``steps`` (keys of
-    ``arrays``), one ``sequence`` runs theirs in order.
+    One array per identity, on ``device`` (where None, the device they are
+    bound to; one array alone, the part of it it takes), and each entry's
+    sequence over it, ``sequence`` if it is alone, else named for its key. Given ``steps`` (keys of ``arrays``), one
+    ``sequence`` runs theirs in order, back to back (``MergedRuntime.merge``), or,
+    ``fuse``, in one task group (``MergedRuntime.fuse``), each step on an array of its
+    own; with ``phases`` (``steps`` split, in order), one fused sequence per phase,
+    ``sequence`` then ``sequence_<k>``, which a caller runs in turn: no shim end is in
+    flight in two of them, so the phases take the shim's channels in turn. A key of
+    ``arrays`` outside ``steps`` takes its own sequence beside them, named for its key,
+    identity-shared with another such key the same way as when no ``steps`` are given.
+    ``burst`` is the shim DMA burst length, in bytes, the fused steps' host
+    transfers take; None leaves it to mlir-aie (the longest).
 
     Raises:
-        ValueError: The arrays are built for different devices, or traced
-            with different trace sizes.
+        ValueError: The arrays are built for different devices, traced with
+            different trace sizes, ``fuse`` is given no ``steps``, or ``phases``
+            are not ``steps`` in order or are given without ``fuse``.
     """
-    of = identities(arrays)
+    if fuse and not steps:
+        raise ValueError("fuse needs steps to fuse")
+    if phases and (not fuse or [k for phase in phases for k in phase] != list(steps)):
+        raise ValueError(f"phases {phases} are not the fused steps {steps} in order")
+    if burst is not None and not fuse:
+        raise ValueError("a burst length is chosen for fused steps")
+    independent = [key for key in arrays if key not in steps]
+    # Fused steps issue at once, so each keeps its own array: on one, a later
+    # step's preamble would rewrite words an earlier step's core has not read yet.
+    # A key outside them shares identity with another such key, as if alone.
+    of = (
+        {key: id(arrays[key]) for key in steps}
+        | identities({key: arrays[key] for key in independent})
+        if fuse
+        else identities(arrays)
+    )
     owners: dict[Hashable, BuiltArray] = {}
     for key, array in arrays.items():
         owners.setdefault(of[key], array)
-    kinds = {type(a.op.array_device()).__name__ for a in owners.values()}
+    # A spliced step builds nothing: it runs on its producer's cores.
+    built = [a for a in owners.values() if not isinstance(a, SplicedArray)]
+    # An array alone takes its own part of the device (npu1's GEMM, on as few
+    # columns as it spans); arrays loaded together take the device they are
+    # bound to, a part of it holding only the one.
+    kinds = {type(a.op.dev).__name__ for a in built}
     if len(kinds) != 1:
         raise ValueError(f"{list(arrays)} are built for different devices {kinds}")
+    if device is None:
+        device = built[0].op.array_device() if len(built) == 1 else built[0].op.dev
     traced = [owner for owner in owners.values() if owner.traced]
     sizes = set()
     for owner in traced:
@@ -321,22 +518,35 @@ def configuration(
             f"{name}: its traced arrays ask for trace sizes {sorted(sizes)}; one "
             f"configuration has one trace buffer, so give them one size"
         )
+    merge = (
+        functools.partial(
+            MergedRuntime.fuse,
+            await_fills=bool(phases),
+            burst_length=0 if burst is None else burst,
+        )
+        if fuse
+        else MergedRuntime.merge
+    )
     runtimes = (
         [
-            MergedRuntime.merge(
-                [owners[of[k]].runtime(arrays[k], None) for k in steps], "sequence"
+            merge(
+                [owners[of[k]].runtime(arrays[k], None) for k in phase],
+                "sequence" if p == 0 else f"sequence_{p}",
             )
+            for p, phase in enumerate(phases or (steps,))
         ]
         if steps
-        else [
-            owners[of[key]].runtime(array, "sequence" if len(arrays) == 1 else key)
-            for key, array in arrays.items()
-        ]
+        else []
     )
-    first = next(iter(owners.values()))
+    runtimes += [
+        owners[of[key]].runtime(
+            arrays[key], "sequence" if not steps and len(arrays) == 1 else key
+        )
+        for key in independent
+    ]
     configured = DeviceConfiguration(
         name,
-        first.op.array_device(),
+        device,
         workers=[w for owner in owners.values() for w in owner.workers],
         runtimes=runtimes,
     )

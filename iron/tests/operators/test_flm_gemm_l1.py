@@ -130,3 +130,14 @@ def test_aie2_tile_validation_includes_the_frame(tile_n, tile_ma, ct_k, m_chunk)
     else:
         with pytest.raises(ValueError, match="does not fit L1"):
             l1_tiles(tile_n, 2, L1, lambda h, c: frame, m_chunk, **fixed)
+
+
+def test_resolving_for_another_device_sizes_b_for_that_device(npu2):
+    shape = dict(M=512, K=1024, N=1024, tile_n=64, k_tile=512)
+    op = ProjectionGEMM(**shape, precision=Precision.MEDIUM).resolved(NPU1)
+    assert not op.bfp16_b
+    assert op.b_l2 == op.k_tile * op.tile_n
+    with pytest.raises(ValueError, match="pass bfp16_b=False"):
+        ProjectionGEMM(**shape, precision=Precision.MEDIUM, bfp16_b=True).resolved(NPU1)
+    with pytest.raises(ValueError, match="pass bfp16_b=True"):
+        ProjectionGEMM(**shape, precision=Precision.MEDIUM).resolved(npu2)

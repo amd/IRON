@@ -12,4 +12,22 @@ profile. Nothing in the graph core imports it.
 
 ::: iron.tune.autotune
 
+::: iron.tune.survey
+
+::: iron.tune.plan
+
+::: iron.tune.fusions
+
+::: iron.tune.fold
+
+::: iron.tune.packings
+
+::: iron.tune.costmodel
+
+::: iron.tune.verify
+
+::: iron.tune.failures
+
 ::: iron.lm.tune
+
+::: iron.lm.validate

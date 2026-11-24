@@ -21,10 +21,11 @@ from iron.lm.causal import CausalConv1d
 from iron.lm.checkpoint import leaves, nest
 from iron.lm.golden import HuggingFace
 from iron.lm.testing import assert_close, check_generation
+from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.rope import RoPE
 from iron.operators.sample import Sample
-from iron.tests.support.llama_model import SMALL, checkpoint, small
+from iron.tests.support.llama_model import SMALL, checkpoint, llama_1b, small
 from iron.tests.support.llama_reference import OnHost
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -266,7 +267,7 @@ def test_a_window_keeps_every_position_where_a_ring_takes_as_many_rows():
     for L, C in ((384, 64), (200, 200)):
         config = dataclasses.replace(SMALL, prefill_chunk=C, max_seq_len=L)
         cache = KVCache(config, 7)
-        assert cache.ring is None and cache.keys.shape[0] == L
+        assert cache.ring is None and cache.kv.shape[0] == L
 
 
 def test_a_ring_s_chunk_attends_from_its_valid_rows_alone():
@@ -426,3 +427,30 @@ def test_a_random_tree_draws_a_scalar_as_an_array():
     tree = checkpoint(SMALL, {"linear.input_min": (), "norm.weight": (8,)})
     bound = tree.tree("random").linear.input_min
     assert isinstance(bound, np.ndarray) and bound.shape == ()
+
+
+def test_a_decode_steps_q_and_o_share_one_array(npu2):
+    """Where heads * head_dim is the width, o takes q's one-row tiles.
+
+    So a decode step runs the two on one array, and a full ELF switches to it once.
+    """
+    model = llama_1b(num_hidden_layers=1)
+    decode_shapes, _ = model.shapes()
+    steps = model.record(**decode_shapes).steps
+    gemvs = [s.op.resolved(npu2) for s in steps if isinstance(s.op, GEMV)]
+    q, o = (g for g in gemvs if (g.M, g.K) == (2048, 2048))
+    assert q.array_key() == o.array_key()
+
+
+@pytest.mark.parametrize("context,expected", [(1024, 512), (2048, 4096)])
+def test_a_sibling_context_keeps_the_kv_cache_layout(context, expected):
+    """A 64-position window rings past 1536 rows: 2048's half would drop the ring and record other steps, so its sibling doubles."""
+    model = small(max_seq_len=context, sliding_window=65)
+    twin = model.sibling(checkpoint(model.config).tree("random", 0))
+    assert twin.config.max_seq_len == expected
+    steps = len(model.record(**model.shapes()[0]).steps)
+    assert len(twin.record(**twin.shapes()[0]).steps) == steps
+    halved = small(max_seq_len=context // 2, sliding_window=65)
+    assert (len(halved.record(**halved.shapes()[0]).steps) == steps) is (
+        expected < context
+    )

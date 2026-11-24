@@ -16,8 +16,10 @@ import time
 
 import numpy as np
 import pytest
+from ml_dtypes import bfloat16
 
 import iron
+from iron.operators.relu import ReLU
 from iron.tests.support.graphs import Trail
 
 N = 64
@@ -65,3 +67,30 @@ def test_a_carried_loop_walks_a_linked_list_on_the_device(depth):
     nxt = body(node=int(want[-1]), steps=7, skip=0)
     assert dict(nxt) == {"node": successor[want[-1]], "steps": 8}
     assert body.read(walk.trail)[7] == successor[want[-1]]
+
+
+class _Rectified(iron.Graph):
+    """ReLU on a vector, a version taking a tensor each call and keeping nothing."""
+
+    def body(self, x):
+        return ReLU.step(x, num_aie_columns=1)
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("depth", [1, 2, 3])
+def test_a_batch_of_calls_in_flight_each_reads_and_returns_its_own(depth):
+    """Calls of a version taking a tensor, ``depth`` in flight, each return ReLU of their own input.
+
+    Each runs in its run's own input and output buffers, so none reads or
+    returns a neighbour's.
+    """
+    version = _Rectified().compile(x=((2048,), bfloat16))
+    rng = np.random.default_rng(depth)
+    inputs = [rng.standard_normal(2048).astype(bfloat16) for _ in range(2 * depth + 1)]
+    loop = iron.CarriedLoop(version, version, depth=depth)
+    results = loop.calls([((x,), {}) for x in inputs])
+    assert len(results) == len(inputs)
+    for k, (x, got) in enumerate(zip(inputs, results, strict=True)):
+        (out,) = got.values()
+        want = np.maximum(x, bfloat16(0))
+        assert np.array_equal(out.view(np.uint16), want.view(np.uint16)), k

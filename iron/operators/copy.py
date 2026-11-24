@@ -19,10 +19,8 @@ from aie.iron import (
     Flow,
     FlowEndpoint,
     In,
-    ObjectFifo,
     Out,
     PacketFlow,
-    TaskGroup,
     Worker,
 )
 from aie.iron.device import Tile
@@ -276,8 +274,28 @@ class Gather(Operator):
                 pushes[k].sync()
             for task in pending[k]:
                 task.free()
-        for task in drained:
-            task.await_()
+        rt.await_tasks(drained)
+
+    def lane_transfers(self, operand):
+        """Return ``y``'s lanes, a feed's own run of batches, as ``sequence`` moves them.
+
+        The bound shortens the drain's length (``drainedN``, in 16-byte units), not
+        which elements a lane starts from.
+        """
+        if operand is not self.y:
+            return None
+        bounded = "valid_rows" in self.bound_extents
+        unit = 16 // np.dtype(self.dtype).itemsize
+        out = []
+        for k, run in enumerate(self.runs):
+            first = run.start * self.chain * self.row
+            size = min(run.stop * self.chain, self.rows) * self.row - first
+            tap = TensorAccessPattern(
+                (self.rows * self.row,), first, [1, 1, 1, size], [0, 0, 0, 1]
+            )
+            length_parameter = self.value(f"drained{k}") if bounded else None
+            out.append((k, tap, length_parameter, unit if bounded else None))
+        return out
 
     def word_source(self) -> "GatherWords":
         """Return the step writing row addresses into the template.
@@ -368,10 +386,17 @@ class Gather(Operator):
         return words
 
     def addressed_inputs(
-        self, addresses: Mapping[str, int], rng: np.random.Generator
+        self,
+        addresses: Mapping[str, int],
+        rng: np.random.Generator,
+        values: Mapping[str, int],
     ) -> dict[str, np.ndarray]:
         ids = rng.integers(0, self.table_rows, self.rows)
-        return {"control": self.control_words(ids, addresses["table"])}
+        return {
+            "control": self.control_words(
+                ids, addresses["table"], values.get("valid_rows")
+            )
+        }
 
     def tolerance(self) -> Tolerance:
         return Tolerance.exact()
@@ -423,8 +448,7 @@ class GatherWords(Operator):
             low_bits=GatherWords.low_bits,
             aperture=APERTURE,
         )
-        ids = ObjectFifo(self.ids.obj_type, depth=self.ids.depth)
-        self.ids.bind(ids.prod())
+        (ids,) = self.ids.fifos(self.ids.depth)
         lengths = lengths_kernel = None
         if self.bounded:
             lengths_ty = np.ndarray[(self.rows,), np.dtype[np.uint32]]
@@ -443,8 +467,8 @@ class GatherWords(Operator):
                 ),
             )
             # A core has two output channels: a memtile joins its two records.
-            control = ObjectFifo(self.control.obj_type, depth=self.control.depth)
-            addresses, lengths = control.prod().join(
+            (control_prod,) = self.control.fifos(self.control.depth)
+            addresses, lengths = control_prod.join(
                 [0, self.pairs],
                 obj_types=[
                     np.ndarray[(self.pairs,), np.dtype[np.uint32]],
@@ -452,10 +476,9 @@ class GatherWords(Operator):
                 ],
                 depths=[1, 1],
             )
-            self.control.bind(control.cons())
+            addresses = addresses.prod()
         else:
-            addresses = ObjectFifo(self.control.obj_type, depth=self.control.depth)
-            self.control.bind(addresses.cons())
+            (addresses,) = self.control.fifos(self.control.depth)
         read = [self.base_lo, self.base_hi]
         rtp = Rtp(read + ([self.valid] if self.bounded else []))
 
@@ -472,8 +495,8 @@ class GatherWords(Operator):
         worker = Worker(
             core,
             [
-                ids.cons(),
-                addresses.prod(),
+                ids,
+                addresses,
                 kernel,
                 rtp,
                 None if lengths is None else lengths.prod(),
@@ -483,11 +506,11 @@ class GatherWords(Operator):
         return Built([worker], [rtp])
 
     def sequence(self, rt) -> None:
-        tg = TaskGroup()
+        tg = rt.task_group()
         self.ids.fill(group=tg)
         for tap in self.taps():
             self.control.drain(tap, group=tg, wait=True)
-        tg.finish()
+        rt.finish(tg)
 
     def taps(self) -> list[TensorAccessPattern]:
         """Return where the rows' address words go in ``control``, in row order.
@@ -706,14 +729,9 @@ class Copy(Operator):
         return gcd(*pieces, *self._row_shares())
 
     def build(self) -> Built:
-        ins, outs = [], []
-        for c in range(self.num_channels):
-            fifo_in = ObjectFifo(self.x.obj_type, depth=self.x.depth)
-            fifo_out = fifo_in.cons().forward(depth=self.y.depth)
-            ins.append(fifo_in.prod())
-            outs.append(fifo_out.cons())
-        self.x.bind(ins)
-        self.y.bind(outs)
+        self.y.bind(
+            [cons.forward(depth=self.y.depth) for cons in self.x.fifos(self.x.depth)]
+        )
         return Built([])
 
     def compatible(self) -> None:
@@ -736,12 +754,19 @@ class Copy(Operator):
                         f"transfer {per_channel} (= {prod(sizes)} / {channels} "
                         f"channels)"
                     )
+        item = np.dtype(self.dtype).itemsize
         for row in self._row_shares():
             if row % self.tile_size:
                 raise ValueError(
                     f"Copy: tile_size ({self.tile_size}) must divide the {row} elements "
                     f"per channel one row of the bounded axis moves: a call "
                     f"moves any number of rows"
+                )
+            if row * item % 16:
+                raise ValueError(
+                    f"Copy: one row of the bounded axis moves {row * item} bytes per "
+                    f"channel over {self.num_channels} channels; a per-call length "
+                    f"counts whole 16-byte units"
                 )
 
     def _row_shares(self) -> list[int]:
@@ -788,15 +813,26 @@ class Copy(Operator):
                 f"Copy: {tap} is bounded on the axis the {self.num_channels} channels "
                 f"split; bound another axis or copy on one channel"
             )
-        rank = shares[0].rank
-        dim = 4 - rank + bound
-        on_d2 = bound <= 1 and 1 <= rank - bound - 1 <= 2
         out = []
         for share in shares:
             ns, ss = zip(*share.transformation_dims)
             dims: list[tuple[int, int]] = list(
                 zip(concrete(ns, share), concrete(ss, share))
             )
+            # Below the bounded axis a unit dimension drops and a contiguous
+            # one merges, so a view's share fits however many axes it kept.
+            inner: list[tuple[int, int]] = []
+            for n, s in dims[bound + 1 :]:
+                if n == 1:
+                    continue
+                if inner and inner[-1][1] == n * s:
+                    inner[-1] = (inner[-1][0] * n, s)
+                else:
+                    inner.append((n, s))
+            dims = dims[: bound + 1] + inner
+            rank = len(dims)
+            dim = 4 - rank + bound
+            on_d2 = bound <= 1 and 1 <= rank - bound - 1 <= 2
             if on_d2:
                 lead, inner = dims[:bound], dims[bound + 1 :]
                 dims = (
@@ -860,6 +896,9 @@ class Copy(Operator):
         def at(tap, bound, valid):
             if valid is None:
                 return tap
+            # A call bounded at 0 moves nothing, which no access pattern spells.
+            if int(valid) == 0:
+                return None
             return tap[(*[slice(None)] * bound, slice(int(valid)))]
 
         src, dst = self.walks()
@@ -875,11 +914,20 @@ class Copy(Operator):
                 src_repeats7,
             )
             src = [w if r is None else w[: int(r) + 1] for w, r in zip(src, repeats)]
-        src = tuple(at(tap, self.src_bound, src_valid) for tap in src)
-        dst = tuple(at(tap, self.dst_bound, dst_valid) for tap in dst)
+        src = tuple(
+            p
+            for p in (at(tap, self.src_bound, src_valid) for tap in src)
+            if p is not None
+        )
+        dst = tuple(
+            p
+            for p in (at(tap, self.dst_bound, dst_valid) for tap in dst)
+            if p is not None
+        )
         gather, scatter = (
             np.concatenate(
                 [p.gather(np.arange(prod(concrete(p.tensor_dims, p)))) for p in tap]
+                + [np.empty(0, dtype=np.int64)]
             )
             + int(offset)
             for tap, offset in ((src, in_offset), (dst, out_offset))
@@ -955,7 +1003,7 @@ class Copy(Operator):
         out_off = self.out_offset if self.out_offset.per_call else None
         if self.src_repeat:
             # The drain first, so the walks' fills queue behind a consumer.
-            tg = TaskGroup()
+            tg = rt.task_group()
             # validate() refuses src_repeat with a tuple dst.
             assert not isinstance(self.dst, tuple)
             ((tap, unit),) = self._taps(self.dst, self.dst_bound, self.y)
@@ -977,7 +1025,7 @@ class Copy(Operator):
                     length_unit=unit,
                     repeat_parameter=self.value(f"src_repeats{k}"),
                 )
-            tg.finish()
+            rt.finish(tg)
             return
         if isinstance(self.src, tuple) or isinstance(self.dst, tuple):
             # A drain goes out before the fills that feed it.
@@ -1007,13 +1055,12 @@ class Copy(Operator):
                 )
                 if last[c] == i:
                     tokens.append(task)
-            for task in tokens:
-                task.await_()
+            rt.await_tasks(tokens)
             return
 
         ins = self._taps(self.src, self.src_bound, self.x)
         outs = self._taps(self.dst, self.dst_bound, self.y)
-        tg = TaskGroup()
+        tg = rt.task_group()
         for c in range(self.num_channels):
             tap, unit = ins[c]
             self.x.fill(
@@ -1034,4 +1081,35 @@ class Copy(Operator):
                 length_parameter=None if unit is None else self.dst_valid,
                 length_unit=unit,
             )
-        tg.finish()
+        rt.finish(tg)
+
+    def lane_transfers(self, operand):
+        """Return each channel's share of ``src``/``dst``, as ``sequence`` moves it.
+
+        None where a per-call view offset (``accept_views``) or a repeated or
+        multi-walk source is not describable here.
+        """
+        if operand not in (self.x, self.y):
+            return None
+        if (
+            self.src_repeat
+            or isinstance(self.src, tuple)
+            or isinstance(self.dst, tuple)
+        ):
+            return None
+        if self.in_offset.per_call or self.out_offset.per_call:
+            return None
+        if operand is self.x:
+            taps, length_parameter = (
+                self._taps(self.src, self.src_bound, self.x),
+                self.src_valid,
+            )
+        else:
+            taps, length_parameter = (
+                self._taps(self.dst, self.dst_bound, self.y),
+                self.dst_valid,
+            )
+        return [
+            (c, tap, None if unit is None else length_parameter, unit)
+            for c, (tap, unit) in enumerate(taps)
+        ]

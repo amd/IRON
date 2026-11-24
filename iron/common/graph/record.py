@@ -5,24 +5,31 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
+import heapq
 import itertools
+import logging
 import math
-from collections.abc import Callable, Hashable, Iterable, Mapping
-from typing import Any
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from aie.helpers.taplib import Affine, PerCall, TensorAccessPattern
 from aie.iron import In, InOut, Out
 from aie.utils import bfp
+from aie.utils.compile.jit.params import OperatorParam
 
 from ..declare import Operator, Value
+from ..declare.composition import Configuration, Entry, Member, Region, Scope
 from ..declare.operand import concrete
 from ..declare.operator import graph_recorder
-from ..declare.profile import Profile
-from ..image.packaging import Kind
+from ..declare.profile import Profile, Version
+from ..image.packaging import Kind, Plan
 from ..image.step import BufferRef, SequenceStep
+from .coded import CodedWeight, encode_all
 from .handle import (
+    Buffer,
     Dense,
     Gather,
     Handle,
@@ -30,9 +37,16 @@ from .handle import (
     Strided,
     Weight,
     _count,
+    _Param,
     _rescale_bounds,
     is_operand,
 )
+
+if TYPE_CHECKING:
+    # compiled imports this module.
+    from .compiled import Graph
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -49,6 +63,10 @@ class Step:
     def refs(self) -> tuple[BufferRef, ...]:
         """Where each declared buffer of the step is."""
         return tuple(h.ref() for h in self.slots)
+
+    def roots(self) -> tuple[list[str], list[str]]:
+        """Return the buffer roots this step fills and those it drains, a root once per buffer naming it."""
+        return SequenceStep(self.op, self.refs()).roots()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -158,6 +176,16 @@ def _take_views(cls, operands, kwargs, values):
             continue
         param, offset_member = cls.accept_views[i]
         tap = TensorAccessPattern.full(h.shape or (1,)) if view is None else view.tap
+        offset = None if view is None else view.offset
+        if (
+            offset is not None
+            and isinstance(tap, TensorAccessPattern)
+            and isinstance(tap.offset, (int, np.integer))
+            and tap.offset
+        ):
+            # Moved per call, so views a fixed offset apart share one design.
+            offset = offset + int(tap.offset)
+            tap = TensorAccessPattern(tap.tensor_dims, 0, tap.sizes, tap.strides)
         kwargs.setdefault(param, tap)
         if view is not None and (view.repeat is not None or view.length is not None):
             if i:
@@ -178,12 +206,250 @@ def _take_views(cls, operands, kwargs, values):
         if view is None:
             out.append(dataclasses.replace(h, valid={}))
             continue
-        if view.offset is not None:
-            values[offset_member] = view.offset
+        if offset is not None:
+            values[offset_member] = offset
         # What the pattern walks: the whole buffer, in the pattern's shape.
         walked = view.tap[0] if isinstance(view.tap, tuple) else view.tap
         out.append(Handle(h.buffer, concrete(walked.tensor_dims, walked), h.dtype))
     return out
+
+
+# Call ``j``'s inputs, outputs and per-call values in a version running several
+# calls in one command (``Recording.repeated``).
+CALL_SUFFIX = "__call{}"
+# What call ``j`` of such a version carries into call ``j + 1``.
+CARRY_SUFFIX = "__carry{}"
+
+
+@dataclasses.dataclass(frozen=True)
+class _CallNames:
+    """What one call of a repeated version names its own (``Recording.repeated``).
+
+    Attributes:
+        buffers: Its own buffer for each of the version's own, by name.
+        values: Its own per-call value for each of the version's, by name.
+    """
+
+    buffers: dict[str, Buffer]
+    values: dict[str, PerCall]
+
+    def expression(self, e: Affine | None) -> Affine | None:
+        """Return ``e`` over this call's own value; None for None."""
+        return (
+            None
+            if e is None
+            else dataclasses.replace(e, value=self.values[e.value.name])
+        )
+
+    def handle(self, h: Handle) -> Handle:
+        """Return ``h`` on this call's own buffer, where it has one, its bounds over its own values."""
+        return dataclasses.replace(
+            h,
+            buffer=self.buffers.get(h.buffer.name, h.buffer),
+            valid={axis: self.expression(n) for axis, n in h.valid.items()},
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class _Stacking:
+    """What a merged version stacks along the leading axis, ``calls`` calls' at once (``Recording.merged``).
+
+    Attributes:
+        buffers: Each stacked buffer, by name, at its stacked shape.
+        calls: The calls stacked.
+    """
+
+    buffers: dict[str, Buffer]
+    calls: int
+
+    def handle(self, h: Handle) -> Handle:
+        """Return ``h`` on its stacked buffer, whole, where it has one."""
+        stacked = self.buffers.get(h.buffer.name)
+        if stacked is None:
+            return h
+        return dataclasses.replace(h, buffer=stacked, shape=stacked.shape)
+
+
+@dataclasses.dataclass(frozen=True)
+class _Placing:
+    """Where one call of a graph recorded at another capacity finds its buffers in the version it runs as (``Recording._over``).
+
+    Attributes:
+        held: The version's input and returned output buffers, by name.
+        moved: Those the call holds at another shape, each a run of it.
+        runs: Each moved buffer's run, in bytes.
+        buffers: The call's own intermediates, by its recording's names.
+        call: Which run of each moved buffer the call takes.
+    """
+
+    held: dict[str, Buffer]
+    moved: frozenset[str]
+    runs: dict[str, int]
+    buffers: dict[str, Buffer]
+    call: int
+
+    def handle(self, h: Handle) -> Handle:
+        """Return ``h`` on the version's buffer, a moved one's run as a contiguous part of it, or on the call's own.
+
+        Raises:
+            NotImplementedError: ``h`` views a moved buffer other than as a
+                contiguous run.
+        """
+        n = h.buffer.name
+        if n not in self.held:
+            return dataclasses.replace(h, buffer=self.buffers.get(n, h.buffer))
+        if n not in self.moved:
+            return dataclasses.replace(h, buffer=self.held[n])
+        if not isinstance(h.layout, Dense):
+            raise NotImplementedError(
+                f"recorded at another capacity, {h!r} views {n} other than as a "
+                f"contiguous run, which is not built yet"
+            )
+        start = (self.call * self.runs[n]) // bfp.itemsize(h.dtype)
+        return dataclasses.replace(
+            h, buffer=self.held[n], layout=Dense(start + (h.layout.offset or 0))
+        )
+
+
+def _rematched(
+    part: Configuration | Region | Member, ops: Iterator[Operator]
+) -> Configuration | Region | Member:
+    """Return ``part`` with each step it names, depth-first, naming the next of ``ops`` by the same dims.
+
+    Each member keeps the dims it names, each taken from its operator
+    (``Profile.dims``); its tunables, where and how it runs are its own.
+    """
+    if isinstance(part, Member):
+        op = next(ops)
+        dims = Profile.dims(type(op), vars(op))
+        return dataclasses.replace(
+            part, dims={k: dims.get(k, v) for k, v in part.dims.items()}
+        )
+    return dataclasses.replace(
+        part, parts=tuple(_rematched(sub, ops) for sub in part.parts)
+    )
+
+
+@dataclasses.dataclass
+class _Matcher:
+    """Places an entry's steps on recorded steps, every way ``Recording.occurrences`` admits.
+
+    Attributes:
+        fits: Each entry step's candidate recorded steps, ascending.
+        edges: Each edge as ``(producer, output, consumer, input)``, entry
+            step indices and operand names.
+        inflows: Each inflow as ``(buffer, consumer, input)``.
+        names: Each recorded step's buffer root by operand name.
+    """
+
+    fits: list[list[int]]
+    edges: list[tuple[int, str, int, str]]
+    inflows: list[tuple[str, int, str]]
+    names: list[dict[str, str]]
+    # Each entry step's fits by the root one of its operands names, built
+    # as an edge first asks for it.
+    _by_root: dict[tuple[int, str], dict[str, list[int]]] = dataclasses.field(
+        default_factory=dict
+    )
+
+    def matches(self) -> list[tuple[int, ...]]:
+        """Return every match, in ascending (lexicographic) order.
+
+        A match puts each entry step on one of its fits, in recorded order
+        (strictly ascending in entry order), each edge's producer writing
+        through its output the root its consumer reads through its input,
+        and each inflow's consumer reading its buffer. Steps are placed
+        joined to one already placed where one is (each then looked up by
+        the buffer the edge names), else the one with the fewest fits, so
+        an edge prunes as soon as its first end is placed.
+        """
+        count = len(self.fits)
+        joined = [set() for _ in range(count)]
+        for p, _, c, _ in self.edges:
+            joined[p].add(c)
+            joined[c].add(p)
+        order: list[int] = []
+        while len(order) < count:
+            free = [i for i in range(count) if i not in order]
+            near = [i for i in free if joined[i] & set(order)]
+            order.append(min(near or free, key=lambda i: (len(self.fits[i]), i)))
+        placed: dict[int, int] = {}
+        found: list[tuple[int, ...]] = []
+        levels = [iter(self.candidates(order[0], placed))]
+        while levels:
+            k = len(levels) - 1
+            placed.pop(order[k], None)
+            s = next(levels[k], None)
+            if s is None:
+                levels.pop()
+                continue
+            placed[order[k]] = s
+            if k + 1 == count:
+                found.append(tuple(placed[i] for i in range(count)))
+            else:
+                levels.append(iter(self.candidates(order[k + 1], placed)))
+        return sorted(found)
+
+    def candidates(self, i: int, placed: Mapping[int, int]) -> list[int]:
+        """Return the steps entry step ``i`` may take beside those ``placed``.
+
+        In recorded order with them, each edge to a placed step (or a
+        self-loop) joined, each of its inflows read.
+        """
+        pool = self.fits[i]
+        for p, output, c, input in self.edges:
+            if c == i and p in placed:
+                root = self.names[placed[p]].get(output)
+                pool = [] if root is None else self._rooted(i, input).get(root, [])
+                break
+            if p == i and c in placed:
+                root = self.names[placed[c]].get(input)
+                pool = [] if root is None else self._rooted(i, output).get(root, [])
+                break
+        lo = max((s for j, s in placed.items() if j < i), default=-1)
+        hi = min((s for j, s in placed.items() if j > i), default=len(self.names))
+        at = dict(placed)
+        kept = []
+        for s in pool:
+            if not lo < s < hi:
+                continue
+            at[i] = s
+            if all(
+                self.names[at[p]].get(output) is not None
+                and self.names[at[p]].get(output) == self.names[at[c]].get(input)
+                for p, output, c, input in self.edges
+                if i in (p, c) and p in at and c in at
+            ) and all(
+                self.names[s].get(input) == buffer
+                for buffer, c, input in self.inflows
+                if c == i
+            ):
+                kept.append(s)
+        return kept
+
+    def _rooted(self, i: int, operand: str) -> dict[str, list[int]]:
+        """Return entry step ``i``'s fits by the root they name through ``operand``, ascending."""
+        key = (i, operand)
+        if key not in self._by_root:
+            rooted: dict[str, list[int]] = {}
+            for s in self.fits[i]:
+                root = self.names[s].get(operand)
+                if root is not None:
+                    rooted.setdefault(root, []).append(s)
+            self._by_root[key] = rooted
+        return self._by_root[key]
+
+
+class NotLegalAtCapacity(ValueError):
+    """A variant's entry matches no step of the call recorded at its range's capacity (``Recording.selected``)."""
+
+
+def version_key(inputs: Mapping[str, tuple[tuple[int, ...], Any]]) -> Version:
+    """Return the key of a graph's version for ``inputs`` (each input's shape and dtype, by name, in the order its body takes them)."""
+    return tuple(
+        (name, tuple(int(n) for n in shape), bfp.dtype_name(dtype))
+        for name, (shape, dtype) in inputs.items()
+    )
 
 
 @dataclasses.dataclass
@@ -202,7 +468,7 @@ class Recording:
     # buffer name -> nbytes, for weights, states and slice parents
     pinned: dict[str, int] = dataclasses.field(default_factory=dict)
     values: list[PerCall] = dataclasses.field(default_factory=list)
-    weights: dict[int, tuple[object, Handle]] = dataclasses.field(
+    weights: dict[Hashable, tuple[object, Handle]] = dataclasses.field(
         default_factory=dict, repr=False
     )
     states: dict[int, tuple[State, Handle]] = dataclasses.field(default_factory=dict)
@@ -224,6 +490,967 @@ class Recording:
     limits: list[Limit] = dataclasses.field(default_factory=list)
     # Run between the steps, each ending a full ELF's command (``on_host``).
     host: list[HostStep] = dataclasses.field(default_factory=list)
+    # Each weight a coded read was given but which is read plain, and why.
+    read_plain: dict[str, str] = dataclasses.field(default_factory=dict)
+    # A derived version running this many calls of another in one command, back
+    # to back (``repeated``) or stacked into one call (``merged``, ``stacked``),
+    # and that version's key.
+    calls: int = 1
+    derived_from: Version | None = None
+    stacked: bool = False
+    # The graph that recorded it, which records it again at other shapes
+    # (``recorded_at``); None for one built of steps. Never part of a key.
+    graph: Graph | None = dataclasses.field(default=None, compare=False, repr=False)
+
+    @property
+    def version(self) -> Version:
+        """The key of the graph version this recording compiles to, a derived version's own."""
+        if self.derived_from is not None:
+            return self.derived_from
+        return version_key({h.name: (h.shape, h.dtype) for h in self.inputs})
+
+    def repeated(self, calls: int) -> Recording:
+        """Return the derived version running ``calls`` of this one's calls back to back, one command.
+
+        Call ``j``'s inputs, returned outputs, intermediates and per-call
+        values are its own, each named with the suffix
+        ``CALL_SUFFIX.format(j)``: each binding's word is written once a call,
+        the IRON-side layout of a slot set per call that mlir-aie's scratchpad
+        management replaces (PLAN step 2), and each call's regions compose as
+        one call's do, where an intermediate the next call writes again would
+        read, to a region, as read past it. Everything else (weights, states,
+        the buffers carried to the next call) is one buffer every call uses in
+        turn, so what one call carries the next reads on the device; but a
+        carried buffer one step writes whole is a buffer a link (each call's
+        reads up to that step one, its write and the reads after it the
+        next), the first the carried buffer, the last too, so each call's
+        carry into the next is a buffer between two steps.
+
+        Raises:
+            NotImplementedError: It carries values (their next a call's
+                Emit, between commands), runs a host step, gathers by ids, or
+                encodes an input from an address.
+        """
+        unbuilt = [
+            what
+            for what, kept in (
+                ("carried values", self.carry),
+                ("a host step", self.host),
+                ("an input encoded from an address", self.encoders or self.addresses),
+                (
+                    "a gather",
+                    any(
+                        isinstance(h.layout, Gather) or s.gather is not None
+                        for s in self.steps
+                        for h in s.slots
+                    ),
+                ),
+            )
+            if kept
+        ]
+        if unbuilt:
+            raise NotImplementedError(
+                f"{self.name}: {calls} calls in one command of a version with "
+                f"{unbuilt[0]} are not built yet"
+            )
+        kept = set(self.feedback) | {h.ref().root for _, h in self.states.values()}
+        own = {
+            h.buffer.name: h.buffer
+            for h in (
+                *self.inputs,
+                *self.returned,
+                *(h for s in self.steps for h in s.slots if h.role == "intermediate"),
+            )
+            if h.buffer.name not in kept
+        }
+        steps: list[Step] = []
+        inputs: list[Handle] = []
+        returned: list[Handle] = []
+        values: list[PerCall] = []
+        bindings: list[Binding] = []
+        limits: list[Limit] = []
+        writes: dict[str, list[tuple[int, Handle, bool]]] = {}
+        for i, step in enumerate(self.steps):
+            for h, b in zip(step.slots, step.op.buffers):
+                if b.drains:
+                    writes.setdefault(h.buffer.name, []).append((i, h, b.fills))
+        chained = {
+            name: ws[0][0]
+            for name, ws in writes.items()
+            if name in self.feedback
+            and len(ws) == 1
+            and not ws[0][2]
+            and ws[0][1].layout == Dense()
+            and ws[0][1].shape == ws[0][1].buffer.shape
+            and not ws[0][1].valid
+        }
+        links = {
+            name: [
+                (
+                    writes[name][0][1].buffer
+                    if k in (0, calls)
+                    else Buffer(
+                        name + CARRY_SUFFIX.format(k),
+                        "intermediate",
+                        writes[name][0][1].buffer.shape,
+                        writes[name][0][1].buffer.dtype,
+                    )
+                )
+                for k in range(calls + 1)
+            ]
+            for name in chained
+        }
+        for j in range(calls):
+            suffix = CALL_SUFFIX.format(j)
+            call = _CallNames(
+                {
+                    name: Buffer(name + suffix, b.role, b.shape, b.dtype)
+                    for name, b in own.items()
+                },
+                {},
+            )
+            for v in self.values:
+                copied = copy.copy(v)
+                copied.name = v.name + suffix
+                call.values[v.name] = copied
+            values += call.values.values()
+            ops: dict[int, Operator] = {}
+            for i, step in enumerate(self.steps):
+                op = step.op
+                if op.bound_values and id(op) not in ops:
+                    ops[id(op)] = op.replace(
+                        bound_values={
+                            name: call.expression(e)
+                            for name, e in op.bound_values.items()
+                        }
+                    )
+                # A carry's link this step reads, and the one it writes.
+                read = {name: links[name][j + (i > at)] for name, at in chained.items()}
+                wrote = {name: links[name][j + 1] for name in chained}
+                steps.append(
+                    Step(
+                        ops.get(id(op), op),
+                        [
+                            dataclasses.replace(
+                                call.handle(h),
+                                buffer=(wrote if b.drains else read).get(
+                                    h.buffer.name, call.handle(h).buffer
+                                ),
+                            )
+                            for h, b in zip(step.slots, op.buffers)
+                        ],
+                        [
+                            dataclasses.replace(
+                                call.handle(h),
+                                buffer=read.get(h.buffer.name, call.handle(h).buffer),
+                            )
+                            for h in step.inputs
+                        ],
+                        [
+                            dataclasses.replace(
+                                call.handle(h),
+                                buffer=wrote.get(h.buffer.name, call.handle(h).buffer),
+                            )
+                            for h in step.outputs
+                        ],
+                    )
+                )
+            inputs += [call.handle(h) for h in self.inputs]
+            returned += [call.handle(h) for h in self.returned]
+            for b in self.bindings:
+                op = ops.get(id(b.op), b.op)
+                expression = call.expression(b.expression)
+                assert expression is not None, "a binding writes an expression"
+                bindings.append(Binding(op, op.value(b.member.name), expression))
+            limits += [
+                dataclasses.replace(
+                    limit,
+                    expression=call.expression(limit.expression),
+                    plus=call.expression(limit.plus),
+                )
+                for limit in self.limits
+            ]
+        carried = [h for h in self.outputs if h.buffer.name in kept]
+        pinned = dict(self.pinned)
+        for name in own.keys() & self.pinned.keys():
+            del pinned[name]
+            pinned.update(
+                (name + CALL_SUFFIX.format(j), self.pinned[name]) for j in range(calls)
+            )
+        return dataclasses.replace(
+            self,
+            name=f"{self.name}_x{calls}",
+            pinned=pinned,
+            steps=steps,
+            inputs=inputs,
+            outputs=[*returned, *carried],
+            values=values,
+            bindings=bindings,
+            returned=returned,
+            limits=limits,
+            calls=calls,
+            derived_from=self.version,
+        )
+
+    def scheduled(self, profile: Profile) -> Recording:
+        """Return the version ``profile``'s schedules for this one build: its calls back to back, merged, split, or this one.
+
+        Back to back (``repeated``) or merged (``merged``) in the order
+        ``profile``'s regions take (``ordered``); each split in two
+        (``split``).
+
+        Raises:
+            NotImplementedError: A schedule names a derived version other than
+                calls merged into one or split, both merges or splits calls
+                and runs several a command, or merges or splits calls under
+                an entry naming their steps; or ``repeated``, ``merged`` or
+                ``split`` does not build it.
+        """
+        schedules = [s for s in profile.schedules() if s.version == self.version]
+        per = max((s.calls_per_command for s in schedules), default=1)
+        merged = max((s.merged_calls for s in schedules), default=1)
+        split = max((s.split_calls for s in schedules), default=1)
+        derived = [
+            s.size
+            for s in schedules
+            if s.size and s.merged_calls == 1 and s.split_calls == 1
+        ]
+        if derived:
+            raise NotImplementedError(
+                f"{self.name}: the derived version {derived[0]!r}, other than calls "
+                f"merged into one or split, is not built yet"
+            )
+        if (per > 1 or split > 1) and merged > 1 or per > 1 and split > 1:
+            raise NotImplementedError(
+                f"{self.name}: several merged or split calls a command, or calls "
+                f"both merged and split, are not built yet"
+            )
+        if (merged > 1 or split > 1) and any(
+            self.occurrences(e) for e in profile.entries()
+        ):
+            how = ("merged", "merge") if merged > 1 else ("split", "split")
+            raise NotImplementedError(
+                f"{self.name}: calls {how[0]} under an entry naming its steps are "
+                f"not built yet: an entry names a step's shape, which a {how[1]} "
+                f"changes"
+            )
+        if split > 1:
+            return self.split(split)
+        recording = self.ordered(profile)
+        if per > 1:
+            return recording.repeated(per)
+        if merged > 1:
+            return recording.merged(merged)
+        return recording
+
+    def reads_only_written(self, root: str) -> bool:
+        """Whether each step reading buffer ``root`` reads only bytes the steps before it wrote, in step order."""
+        written: list[tuple[int, int]] = []
+        for step in self.steps:
+            named = list(zip(step.refs(), step.op.buffers, strict=True))
+            for ref, b in named:
+                if not b.fills or ref.root != root:
+                    continue
+                start, end = ref.start, ref.start + (ref.nbytes or b.nbytes)
+                for lo, hi in sorted(written):
+                    if lo <= start < hi:
+                        start = hi
+                if start < end:
+                    return False
+            written += [
+                (ref.start, ref.start + (ref.nbytes or b.nbytes))
+                for ref, b in named
+                if b.drains and ref.root == root
+            ]
+        return True
+
+    def recorded_at(self, shapes: Mapping[str, tuple[int, ...]]) -> Recording:
+        """Return its graph recorded again, each input at its shape in ``shapes`` and the rest at their own.
+
+        The graph must still record this recording at its own shapes: the
+        same steps (``design_key``), the same weights (one object, or equal
+        contents for one its body makes) and the same states.
+
+        Raises:
+            ValueError: It was built of steps rather than recorded from a
+                graph, is a derived version, or its graph has changed since
+                (its profile, a param, a coded weight).
+            NotLegalAtCapacity: The graph refuses ``shapes`` as it records
+                them (a body or an operator refusing the size).
+            NotImplementedError: It reads a coded weight, or one coding
+                refused, which coding rewrites the recording for.
+        """
+        if self.graph is None or self.derived_from is not None:
+            raise ValueError(
+                f"{self.name}: only a graph's own recording is recorded again at "
+                f"other shapes; this one is "
+                + ("built of steps" if self.graph is None else "a derived version")
+            )
+        if self.read_plain or any(
+            isinstance(w, CodedWeight) for w, _ in self.weights.values()
+        ):
+            raise NotImplementedError(
+                f"{self.name}: recorded again at another capacity, a version "
+                f"with a coded weight is not built yet"
+            )
+        again = self.graph.record(
+            **{h.name: (tuple(h.shape), h.dtype) for h in self.inputs}
+        )
+        weights, kept = (
+            {h.name: w for w, h in r.weights.values()} for r in (again, self)
+        )
+        if (
+            [s.op.design_key() for s in again.steps]
+            != [s.op.design_key() for s in self.steps]
+            or weights.keys() != kept.keys()
+            or again.states.keys() != self.states.keys()
+            or not all(
+                w is k
+                or isinstance(w, np.ndarray)
+                and isinstance(k, np.ndarray)
+                and np.array_equal(w, k)
+                for w, k in ((w, kept[n]) for n, w in weights.items())
+            )
+        ):
+            raise ValueError(
+                f"{self.name}: its graph has changed since it was recorded (its "
+                f"profile, a param or a coded weight), so at other shapes it "
+                f"would record another design"
+            )
+        try:
+            return self.graph.record(
+                **{
+                    h.name: (tuple(shapes.get(h.name, h.shape)), h.dtype)
+                    for h in self.inputs
+                }
+            )
+        except (ValueError, IndexError) as e:
+            raise NotLegalAtCapacity(
+                f"{self.name} at {dict(shapes)} is not legal at that capacity: {e}"
+            ) from e
+
+    def at_capacity(self, bounds: Mapping[str, int]) -> Recording:
+        """Return this version as a call whose per-call values reach at most ``bounds`` runs it, recorded at that capacity.
+
+        Its graph recorded again with fewer leading rows of each input a
+        bounded value bounds (``recorded_at``), over the leading rows of this
+        version's buffers (``_over``).
+
+        Each input a value in ``bounds`` bounds on the leading axis of a whole
+        view of it (``x[:rows]``, or a reshape of ``x`` so bounded) holds the
+        rows its count needs at the bound; an input none bounds keeps its
+        shape. Where no input's shape changes, this recording.
+
+        Raises:
+            ValueError: A bound needs more rows than an input holds.
+            NotImplementedError: A value bounds no input, or bounds one other
+                than by a linear count on the leading axis of a whole view; a
+                step reads an input it shrinks other than through a bound by a
+                value in ``bounds``; or ``_over`` does not build it.
+        """
+        rows: dict[str, int] = {}
+        for value, bound in bounds.items():
+            bounded = [
+                (h, axis, count)
+                for step in self.steps
+                for h in step.slots
+                for axis, count in h.valid.items()
+                if h.role == "input" and count.value.name == value
+            ]
+            if not bounded:
+                raise NotImplementedError(
+                    f"{self.name}: a design at the capacity of {value} <= {bound}, "
+                    f"which bounds no input's rows, is not built yet"
+                )
+            for h, axis, count in bounded:
+                if (
+                    axis
+                    or h.layout != Dense()
+                    or not count.linear
+                    or count.scale < 1
+                    or bfp.dtype_name(h.dtype) != bfp.dtype_name(h.buffer.dtype)
+                ):
+                    raise NotImplementedError(
+                        f"{self.name}: a design at the capacity of {value} <= "
+                        f"{bound}, which bounds {h!r} other than on the leading "
+                        f"rows of a whole view, is not built yet"
+                    )
+                held = h.buffer.shape
+                elements = count.evaluate({value: bound}) * math.prod(h.shape[1:])
+                need = -(-elements // math.prod(held[1:]))
+                if need > held[0]:
+                    raise ValueError(
+                        f"{self.name}: {value} <= {bound} needs {need} rows of "
+                        f"{h.name}, which holds {held[0]}"
+                    )
+                rows[h.name] = max(rows.get(h.name, 0), need)
+        inputs = {h.name: h.shape for h in self.inputs}
+        shapes = {n: (r, *inputs[n][1:]) for n, r in rows.items() if r != inputs[n][0]}
+        if not shapes:
+            return self
+        unbounded = [
+            h
+            for step in self.steps
+            for h in (*step.slots, *([step.gather] if step.gather else []))
+            if h.name in shapes
+            and not (0 in h.valid and h.valid[0].value.name in bounds)
+        ]
+        if unbounded:
+            raise NotImplementedError(
+                f"{self.name}: a design at the capacity of {dict(bounds)} is not "
+                f"built where a step reads {unbounded[0]!r} other than through a "
+                f"bound one of them sets: its rows past the capacity would go "
+                f"unread"
+            )
+        return self._over(
+            self.recorded_at(shapes),
+            1,
+            f"{self.name}_at_" + "_".join(f"{n}{b}" for n, b in bounds.items()),
+        )
+
+    def split(self, calls: int) -> Recording:
+        """Return the derived version running one call of this one as ``calls`` calls back to back, in one command.
+
+        Each a call of its graph recorded at ``1/calls`` of every input's
+        leading rows (``recorded_at``), call ``j`` over the ``j``-th run of
+        each input and returned output (``_over``). That a call's rows are
+        independent of each other is not checked here: ``check`` holds the
+        split bit-identical to its base.
+
+        Raises:
+            ValueError: An input's leading rows do not divide into ``calls``.
+            NotImplementedError: ``_over`` does not build it.
+        """
+        uneven = [h.name for h in self.inputs if not h.shape or h.shape[0] % calls]
+        if uneven:
+            raise ValueError(
+                f"{self.name}: {uneven[0]}'s leading rows do not divide into "
+                f"{calls} calls"
+            )
+        return self._over(
+            self.recorded_at(
+                {h.name: (h.shape[0] // calls, *h.shape[1:]) for h in self.inputs}
+            ),
+            calls,
+            f"{self.name}_split{calls}",
+        )
+
+    def _over(self, part: Recording, calls: int, name: str) -> Recording:
+        """Return ``calls`` calls of ``part``, its graph recorded at other shapes, back to back as one call of this version over its buffers.
+
+        Call ``j`` takes the ``j``-th of ``calls`` equal leading runs of each
+        input and returned output ``part`` holds at another shape, which a
+        step then names in part (``pinned`` sizes it whole); past one call,
+        each call's intermediates are its own (``CALL_SUFFIX``). Its steps,
+        weights, states, per-call values and limits are ``part``'s; its
+        inputs, outputs and version this one's.
+
+        Raises:
+            NotImplementedError: It carries values or buffers, runs a host
+                step or encodes an input from an address; past one call, it
+                holds state, takes per-call values or gathers; or ``part``
+                holds an input or output other than as fewer leading rows, or
+                a step views one other than as a contiguous run.
+        """
+        unbuilt = [
+            what
+            for what, kept in (
+                ("carried values", self.carry or part.carry),
+                ("carried buffers", self.feedback or part.feedback),
+                ("a host step", self.host or part.host),
+                (
+                    "an input encoded from an address",
+                    self.encoders or self.addresses or part.encoders or part.addresses,
+                ),
+                (
+                    "a coded weight",
+                    any(isinstance(w, CodedWeight) for w, _ in part.weights.values()),
+                ),
+                ("state, run as several calls", calls > 1 and part.states),
+                ("per-call values, run as several calls", calls > 1 and part.values),
+                (
+                    "a gather, run as several calls",
+                    calls > 1 and any(s.gather is not None for s in part.steps),
+                ),
+            )
+            if kept
+        ]
+        if unbuilt:
+            raise NotImplementedError(
+                f"{self.name}: recorded at another capacity, a version with "
+                f"{unbuilt[0]} is not built yet"
+            )
+        held = {h.name: h.buffer for h in (*self.inputs, *self.returned)}
+        sizes = {h.name: h.buffer for h in (*part.inputs, *part.returned)}
+        for n, b in sizes.items():
+            whole = held[n]
+            leading = bool(b.shape) and b.shape[1:] == whole.shape[1:]
+            if not (
+                leading and b.shape[0] * calls == whole.shape[0]
+                if calls > 1
+                else b.shape == whole.shape or leading and b.shape[0] <= whole.shape[0]
+            ):
+                raise NotImplementedError(
+                    f"{self.name}: {n} at {b.shape} is not {calls} run(s) of the "
+                    f"leading rows of its {whole.shape}, which is not built yet"
+                )
+        moved = frozenset(
+            n for n, b in sizes.items() if calls > 1 or b.shape != held[n].shape
+        )
+        own = {
+            h.buffer.name: h.buffer
+            for s in part.steps
+            for h in s.slots
+            if h.role == "intermediate"
+        }
+        steps: list[Step] = []
+        pinned = {n: nbytes for n, nbytes in part.pinned.items() if n not in own}
+        for j in range(calls):
+            suffix = CALL_SUFFIX.format(j) if calls > 1 else ""
+            placing = _Placing(
+                held,
+                moved,
+                {n: sizes[n].nbytes for n in moved},
+                {
+                    n: Buffer(n + suffix, b.role, b.shape, b.dtype)
+                    for n, b in own.items()
+                },
+                j,
+            )
+            pinned.update(
+                (n + suffix, nbytes) for n, nbytes in part.pinned.items() if n in own
+            )
+            steps += [
+                dataclasses.replace(
+                    step,
+                    slots=[placing.handle(h) for h in step.slots],
+                    inputs=[placing.handle(h) for h in step.inputs],
+                    outputs=[placing.handle(h) for h in step.outputs],
+                    gather=None if step.gather is None else placing.handle(step.gather),
+                )
+                for step in part.steps
+            ]
+        pinned.update((n, held[n].nbytes) for n in moved)
+        return dataclasses.replace(
+            self,
+            name=name,
+            steps=steps,
+            pinned=pinned,
+            values=part.values,
+            weights=part.weights,
+            states=part.states,
+            bindings=part.bindings,
+            limits=part.limits,
+            read_plain=part.read_plain,
+            derived_from=self.version,
+        )
+
+    def ranges_at(
+        self, profile: Profile, values: Mapping[str, int]
+    ) -> tuple[tuple[tuple[tuple[int, int], ...], Entry], ...]:
+        """Return the range holding ``values``, and its entry, of each set of ``profile``'s variants over values this version takes.
+
+        In ``profile``'s order: what selects a call's design, so two points
+        with equal ranges run on one design.
+
+        Raises:
+            ValueError: No range of a set holds ``values``.
+            NotImplementedError: ``values`` does not give a value a set of
+                variants is over.
+        """
+        names = {v.name for v in self.values}
+        held = []
+        for variants in profile.variants():
+            if not set(variants.values) <= names:
+                continue
+            missing = [n for n in variants.values if n not in values]
+            if missing:
+                raise NotImplementedError(
+                    f"{self.name}: selecting a variant for a call that does not "
+                    f"give {missing[0]} is not built yet"
+                )
+            holding = [
+                (box, entry)
+                for box, entry in variants.ranges
+                if all(
+                    lo <= values[n] <= hi
+                    for n, (lo, hi) in zip(variants.values, box, strict=True)
+                )
+            ]
+            if not holding:
+                raise ValueError(
+                    f"{self.name}: no range over {', '.join(variants.values)} holds "
+                    f"{[values[n] for n in variants.values]}"
+                )
+            held.append(holding[0])
+        return tuple(held)
+
+    def selected(
+        self,
+        profile: Profile,
+        values: Mapping[str, int],
+        points: Sequence[Mapping[str, int]] = (),
+    ) -> tuple[Recording, Profile]:
+        """Return how ``profile`` runs a call of this version at ``values``: each set of its variants' design at its range.
+
+        The design of the range holding ``values`` (``ranges_at``), for each
+        set of variants over values this version takes: this version at
+        those ranges' capacity (``at_capacity``, each value at its range's
+        top), and ``profile`` with its variants replaced by those ranges'
+        entries; an entry rooted at a step gives that step's tunables as a
+        tunable entry does (``Profile.add``). A composition entry of
+        ``profile`` that matches this recording's steps and not those at the
+        capacity names the same steps there (each member's dims taken from
+        its step at the capacity), so a design per range keeps what the
+        profile composes. With no variants, this recording and a copy of
+        ``profile``. Each of ``points``, the values
+        the one build is run at too, must select the same ranges.
+
+        Raises:
+            ValueError: No range holds ``values``.
+            NotLegalAtCapacity: A range's entry matches no step at its
+                capacity: its design is not legal there.
+            NotImplementedError: ``values`` does not give a value the
+                variants are over, or a point selects other ranges (one build
+                runs one design; a caller splits a call by its points'
+                ranges), a range's entry rooted at a step is scoped, runs on
+                the host or is split by fission, or ``at_capacity`` does not
+                build its capacity.
+        """
+        chosen = profile.copy()
+        for variants in profile.variants():
+            chosen.remove_variants(variants)
+        held = self.ranges_at(profile, values)
+        outside = [p for p in points if self.ranges_at(profile, p) != held]
+        if outside:
+            raise NotImplementedError(
+                f"{self.name}: one build whose points span more than one range "
+                f"({[box for box, _ in held]} and "
+                f"{[box for box, _ in self.ranges_at(profile, outside[0])]}) is not "
+                f"built: each point selects its own design"
+            )
+        names = {v.name for v in self.values}
+        sets = [v for v in profile.variants() if set(v.values) <= names]
+        bounds = {
+            n: hi
+            for variants, (box, _) in zip(sets, held, strict=True)
+            for n, (_, hi) in zip(variants.values, box, strict=True)
+        }
+        recording = self.at_capacity(bounds) if bounds else self
+        if recording is not self:
+            for entry in profile.entries():
+                found = self.occurrences(entry)
+                if not found or recording.occurrences(entry):
+                    continue
+                moved: list[Entry] = []
+                for match in found:
+                    named = dataclasses.replace(
+                        entry,
+                        root=_rematched(
+                            entry.root, iter(recording.steps[i].op for i in match)
+                        ),
+                    )
+                    if named not in moved:
+                        moved.append(named)
+                chosen.replace_entry(entry, moved[0])
+                for other in moved[1:]:
+                    chosen.add_entry(other)
+        for _, entry in held:
+            if not recording.occurrences(entry):
+                raise NotLegalAtCapacity(
+                    f"{recording.name}: {entry.root} matches no step at its range's "
+                    f"capacity, so its design is not legal there"
+                )
+            root = entry.root
+            if not isinstance(root, Member):
+                chosen.add_entry(entry)
+                continue
+            if entry.scope != Scope() or root.runs_on != "npu" or root.part:
+                raise NotImplementedError(
+                    f"{recording.name}: a variant's entry rooted at a step that is "
+                    f"scoped, runs on the host or is split by fission is not built "
+                    f"yet"
+                )
+            if root.tunables:
+                chosen.add(root.cls, **root.dims, **root.tunables)
+        return recording, chosen
+
+    def ordered(self, profile: Profile) -> Recording:
+        """Return this recording reordered so each region the composer builds runs its steps together.
+
+        The regions are the composer's matches of ``profile``'s region
+        entries: each entry's in turn, each but those overlapping one before
+        it, those an order can gather (``gatherable``); and the steps of the
+        configurations run at once under each id, the composer's one pack.
+        Each is contracted to one node of the steps' dependences, the nodes
+        run in topological order, earliest recorded first, and each region's
+        steps in recorded order: so steps move only where a region needs
+        them to. A match no order gathers stays as it is, for ``fit`` to
+        refuse or the composer to wait on.
+
+        Raises:
+            ValueError: Two regions each depend on the other through their
+                steps, so their contraction is cyclic and no order runs each
+                one's steps together.
+        """
+        regions: list[tuple[int, ...]] = []
+        taken: set[int] = set()
+        at_once: dict[int, set[int]] = {}
+        for entry in profile.entries():
+            root = entry.root
+            if isinstance(root, Configuration) and root.concurrent is not None:
+                for match in self.occurrences(entry):
+                    at_once.setdefault(root.concurrent, set()).update(match)
+            if not isinstance(root, Region):
+                continue
+            for match in self.occurrences(entry):
+                if taken & set(match):
+                    continue
+                taken.update(match)
+                if len(match) > 1 and self.gatherable(match):
+                    regions.append(match)
+        # Configurations run at once are the composer's one pack.
+        for together in at_once.values():
+            steps = tuple(sorted(together))
+            if len(steps) > 1 and not taken & together and self.gatherable(steps):
+                regions.append(steps)
+        if all(r == tuple(range(r[0], r[-1] + 1)) for r in regions):
+            return self
+        node = list(range(len(self.steps)))
+        members: dict[int, tuple[int, ...]] = {s: (s,) for s in node}
+        for steps in regions:
+            for s in steps:
+                node[s] = steps[0]
+            members[steps[0]] = steps
+            for s in steps[1:]:
+                del members[s]
+        after: dict[int, set[int]] = {n: set() for n in members}
+        needs = {n: 0 for n in members}
+        for i, j in self.dependences():
+            a, b = node[i], node[j]
+            if a != b and b not in after[a]:
+                after[a].add(b)
+                needs[b] += 1
+        ready = [n for n, k in needs.items() if k == 0]
+        heapq.heapify(ready)
+        order: list[int] = []
+        while ready:
+            n = heapq.heappop(ready)
+            order += members[n]
+            for m in after[n]:
+                needs[m] -= 1
+                if needs[m] == 0:
+                    heapq.heappush(ready, m)
+        if len(order) < len(self.steps):
+            stuck = [members[n] for n, k in needs.items() if k and len(members[n]) > 1]
+            raise ValueError(
+                f"{self.name}: the regions over steps {stuck[0]} and "
+                f"{stuck[-1]} each depend on the other: their contraction is "
+                f"cyclic, so no order runs each one's steps together"
+            )
+        if order == list(range(len(self.steps))):
+            return self
+        return dataclasses.replace(self, steps=[self.steps[s] for s in order])
+
+    def spanned(self, entry: Entry) -> tuple[Region, tuple[int, ...]] | None:
+        """Return the region one command of this repeated version runs for ``entry``, and its steps, where ``entry`` carries a value across calls.
+
+        Each call's first match of ``entry`` but for its edges across calls,
+        in turn, as one region (``Region.repeated``): each such edge runs from
+        a call's producer into the next call's consumer, the carry's link
+        between them (``repeated``). None where this runs one call a command,
+        merged ones, or ``entry`` carries nothing across calls.
+
+        Raises:
+            ValueError: A call's producer does not write what the next call's
+                consumer reads: a carry across calls is a buffer the
+                recording carries, read where it was written.
+            NotImplementedError: A call holds no match of ``entry``.
+        """
+        root = entry.root
+        if (
+            self.calls == 1
+            or self.stacked
+            or not isinstance(root, Region)
+            or not any(e.across_calls for e in root.edges)
+        ):
+            return None
+        within = Entry(
+            dataclasses.replace(
+                root,
+                edges=tuple(e for e in root.edges if not e.across_calls),
+                phases=None,
+            ),
+            entry.scope,
+        )
+        n = len(self.steps) // self.calls
+        found = self.occurrences(within)
+        matches = []
+        for j in range(self.calls):
+            mine = [m for m in found if j * n <= m[0] and m[-1] < (j + 1) * n]
+            if not mine:
+                raise NotImplementedError(
+                    f"{self.name}: call {j} holds no match of {entry}: carrying "
+                    f"across some calls of a command only is not built yet"
+                )
+            matches.append(mine[0])
+        for e in root.edges:
+            if not e.across_calls:
+                continue
+            for made, reads in itertools.pairwise(matches):
+                wrote, read = (
+                    {
+                        ref.root
+                        for ref, b in zip(step.refs(), step.op.buffers)
+                        if b.name == name
+                    }
+                    for step, name in (
+                        (self.steps[made[e.producer]], e.output),
+                        (self.steps[reads[e.consumer]], e.input),
+                    )
+                )
+                if wrote != read:
+                    raise ValueError(
+                        f"{e} carries {sorted(wrote)} into the next call, which "
+                        f"reads {sorted(read)}: a carry across calls is a buffer "
+                        f"the recording carries, read where it was written"
+                    )
+        return root.repeated(self.calls), tuple(s for m in matches for s in m)
+
+    def merged(self, calls: int) -> Recording:
+        """Return the derived version running ``calls`` of this one's calls as one call, each step over the calls' data at once (``Operator.merged``).
+
+        Every buffer a step reads or writes but a weight is the calls' stacked
+        along its leading axis, inputs and returned outputs included, which
+        ``CarriedLoop.calls`` stacks and splits; a weight stays one, which
+        every call reads.
+
+        Raises:
+            NotImplementedError: It carries values, buffers or state, takes
+                per-call values, runs a host step or encodes an input from an
+                address; a step reads or writes part of a buffer that is not
+                a weight (a slice, a stride, a gather); or a step's operator
+                does not merge calls.
+        """
+        unbuilt = [
+            what
+            for what, kept in (
+                ("carried values", self.carry),
+                ("carried buffers or state", self.feedback or self.states),
+                ("per-call values", self.values or self.bindings),
+                ("a host step", self.host),
+                ("an input encoded from an address", self.encoders or self.addresses),
+            )
+            if kept
+        ]
+        if unbuilt:
+            raise NotImplementedError(
+                f"{self.name}: {calls} calls merged into one of a version with "
+                f"{unbuilt[0]} are not built yet"
+            )
+        weights = {h.buffer.name for _, h in self.weights.values()}
+        buffers: dict[str, Buffer] = {}
+        for i, step in enumerate(self.steps):
+            for h in step.slots:
+                if h.buffer.name in weights:
+                    continue
+                if h.layout != Dense() or h.shape != h.buffer.shape or not h.shape:
+                    raise NotImplementedError(
+                        f"{self.name}: {calls} calls merged into one, where step "
+                        f"{i} ({type(step.op).__name__}) reads or writes part of "
+                        f"{h.buffer.name}, are not built yet"
+                    )
+                b = h.buffer
+                buffers[b.name] = dataclasses.replace(
+                    b, shape=(calls * b.shape[0], *b.shape[1:])
+                )
+        stacking = _Stacking(buffers, calls)
+        ops: dict[int, Operator] = {}
+        steps = []
+        for step in self.steps:
+            if id(step.op) not in ops:
+                ops[id(step.op)] = step.op.merged(calls)
+            steps.append(
+                dataclasses.replace(
+                    step,
+                    op=ops[id(step.op)],
+                    slots=[stacking.handle(h) for h in step.slots],
+                    inputs=[stacking.handle(h) for h in step.inputs],
+                    outputs=[stacking.handle(h) for h in step.outputs],
+                )
+            )
+        return dataclasses.replace(
+            self,
+            name=f"{self.name}_merged{calls}",
+            pinned={
+                n: nbytes * calls if n in buffers else nbytes
+                for n, nbytes in self.pinned.items()
+            },
+            steps=steps,
+            inputs=[stacking.handle(h) for h in self.inputs],
+            outputs=[stacking.handle(h) for h in self.outputs],
+            returned=[stacking.handle(h) for h in self.returned],
+            calls=calls,
+            derived_from=self.version,
+            stacked=True,
+        )
+
+    def occurrences(self, entry: Entry) -> tuple[tuple[int, ...], ...]:
+        """Return each match of ``entry`` in this recording: the step each of its steps is, depth-first.
+
+        A match puts the entry's steps, in recorded order, on steps of their
+        classes whose dims they name (their tunables are what the entry sets,
+        not what it matches); each edge's producer writes, through its output,
+        the buffer its consumer reads through its input; and each inflow's
+        consumer reads the inflow's buffer. Overlapping matches are each
+        returned. ``entry.scope`` keeps those of its versions and the runs of
+        its shape it names; its device part is the build's to apply
+        (``Profile.for_part``).
+
+        Raises:
+            ValueError: A step's dims name one of its class's tunables, or
+                an edge or an inflow names an operand its step's class does
+                not have.
+        """
+        members = entry.root.steps()
+        for m in members:
+            named = sorted(m.dims.keys() & set(m.cls.declaration.tunables))
+            if named:
+                raise ValueError(
+                    f"{m.cls.__name__}'s dims name its tunables {named}; an "
+                    f"entry sets those in tunables"
+                )
+        if (
+            entry.scope.versions is not None
+            and self.version not in entry.scope.versions
+        ):
+            return ()
+        wired, fed = entry.root.wiring()
+        edges = [(p, e.output, c, e.input) for e, p, c in wired]
+        inflows = [(i.buffer, c, i.input) for i, c in fed]
+        names = [
+            {b.name: ref.root for ref, b in zip(step.refs(), step.op.buffers)}
+            for step in self.steps
+        ]
+        fits = [
+            [
+                s
+                for s, step in enumerate(self.steps)
+                if isinstance(step.op, m.cls)
+                and Profile.matches(m.dims, Profile.dims(type(step.op), vars(step.op)))
+            ]
+            for m in members
+        ]
+        for producer, output, consumer, input in edges:
+            for i, name in ((producer, output), (consumer, input)):
+                if fits[i] and not any(name in names[s] for s in fits[i]):
+                    raise ValueError(
+                        f"{members[i].cls.__name__} has no operand {name!r}"
+                    )
+        found = _Matcher(fits, edges, inflows, names).matches()
+        if entry.scope.occurrences is None:
+            return tuple(found)
+        return tuple(found[k] for k in entry.scope.occurrences if k < len(found))
 
     @property
     def reads(self) -> set[str]:
@@ -260,26 +1487,47 @@ class Recording:
         pinned: Mapping[str, int] | None = None,
         feedback: Iterable[str] = (),
     ) -> Recording:
-        """Build a graph of ``steps`` over buffers known by name alone, as bytes.
+        """Build a graph of ``steps`` over buffers known by name.
 
-        The host writes ``inputs`` and reads ``outputs``, and ``pinned``
-        sizes a buffer a step names only in part or holds at a size of
-        its own.
+        A buffer some step names whole takes that step's declared shape and
+        type (a block float's, its bytes), and each other step naming it whole
+        sees it in its own shape (``Handle.reshape``); one named only in part
+        is bytes, as many as ``pinned`` gives it. The host writes ``inputs``
+        and reads ``outputs``, and
+        ``pinned`` sizes a buffer a step names only in part or holds at a
+        size of its own; what it reads is what a call returns.
         """
         pinned = dict(pinned or {})
+        steps = list(steps)
+        typed: dict[str, tuple[tuple[int, ...], Any]] = {}
+        for step in steps:
+            for ref, b in zip(step.buffers, step.op.buffers, strict=True):
+                if ref.nbytes is None:
+                    typed.setdefault(
+                        ref.root,
+                        (
+                            ((b.nbytes,), np.uint8)
+                            if bfp.is_bfp(b.dtype)
+                            else (b.shape, b.dtype)
+                        ),
+                    )
         roots: dict[str, Handle] = {}
         recording = []
         for step in steps:
             slots = []
-            for ref in step.buffers:
+            for ref, b in zip(step.buffers, step.op.buffers, strict=True):
                 root = roots.setdefault(
                     ref.root,
                     Handle.whole(
-                        (pinned.get(ref.root, 0),), np.uint8, ref.root, "intermediate"
+                        *typed.get(ref.root, ((pinned.get(ref.root, 0),), np.uint8)),
+                        ref.root,
+                        "intermediate",
                     ),
                 )
                 if ref.nbytes is None:
-                    slots.append(root)
+                    shape = (b.nbytes,) if bfp.is_bfp(b.dtype) else tuple(b.shape)
+                    seen = shape != root.shape and math.prod(shape) == root.elements
+                    slots.append(root.reshape(shape) if seen else root)
                     continue
                 slots.append(
                     Handle(root.buffer, (ref.nbytes,), np.uint8, {}, Dense(ref.start))
@@ -293,13 +1541,21 @@ class Recording:
                     [h for h, b in declared if b.drains],
                 )
             )
+        returned = [
+            Handle.whole(*typed.get(n, ((pinned.get(n, 0),), np.uint8)), n, "output")
+            for n in outputs
+        ]
         return cls(
             name,
             recording,
-            [Handle.whole((), np.uint8, n, "input") for n in inputs],
-            [Handle.whole((), np.uint8, n, "output") for n in outputs],
+            [
+                Handle.whole(*typed.get(n, ((pinned.get(n, 0),), np.uint8)), n, "input")
+                for n in inputs
+            ],
+            returned,
             pinned,
             feedback=list(feedback),
+            returned=list(returned),
         )
 
     @classmethod
@@ -327,6 +1583,116 @@ class Recording:
         found.update((h.name, key) for key, (_, h) in self.states.items())
         return found
 
+    @property
+    def held(self) -> set[str]:
+        """The buffer roots the host or a later call holds: outputs, feedback, pinned and resident buffers."""
+        return (
+            {h.name for h in self.outputs}
+            | set(self.feedback)
+            | set(self.pinned)
+            | set(self.residents)
+        )
+
+    def users(self) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
+        """Return the steps reading and writing each buffer root, a host step's index -1.
+
+        In step order, a step once per buffer it names the root with.
+        """
+        readers: dict[str, list[int]] = {}
+        writers: dict[str, list[int]] = {}
+        for i, step in enumerate(self.steps):
+            reads, writes = step.roots()
+            for root in reads:
+                readers.setdefault(root, []).append(i)
+            for root in writes:
+                writers.setdefault(root, []).append(i)
+        for host_step in self.host:
+            for h in host_step.reads:
+                readers.setdefault(h.ref().root, []).append(-1)
+            for h in host_step.writes:
+                writers.setdefault(h.ref().root, []).append(-1)
+        return readers, writers
+
+    def dependences(self) -> set[tuple[int, int]]:
+        """Index pairs ``(i, j)``, ``i < j``, whose steps are not independent: one writes a host buffer root the other reads or writes too."""
+        uses = [step.roots() for step in self.steps]
+        reads = [set(r) for r, _ in uses]
+        writes = [set(w) for _, w in uses]
+        return {
+            (i, j)
+            for i in range(len(self.steps))
+            for j in range(i + 1, len(self.steps))
+            if writes[i] & (reads[j] | writes[j]) or writes[j] & reads[i]
+        }
+
+    def gatherable(self, steps: Sequence[int]) -> bool:
+        """Whether an order keeping every dependence (``dependences``) runs ``steps`` together.
+
+        Their set is convex, no step outside it depending on one of them and
+        having one depend on it, and no host step runs among them.
+        """
+        lo, hi = steps[0], steps[-1]
+        if self.crosses_host(lo, hi):
+            return False
+        if list(steps) == list(range(lo, hi + 1)):
+            return True
+        inside = set(steps)
+        preds: dict[int, set[int]] = {}
+        succs: dict[int, set[int]] = {}
+        for i, j in self.dependences():
+            if lo <= i and j <= hi:
+                preds.setdefault(j, set()).add(i)
+                succs.setdefault(i, set()).add(j)
+        ancestors: set[int] = set()
+        descendants: set[int] = set()
+        for found, links in ((ancestors, preds), (descendants, succs)):
+            frontier = list(steps)
+            while frontier:
+                for nxt in links.get(frontier.pop(), set()) - inside - found:
+                    found.add(nxt)
+                    frontier.append(nxt)
+        return not ancestors & descendants
+
+    def crosses_host(self, lo: int, hi: int) -> bool:
+        """Whether a host step runs between steps ``lo`` and ``hi`` (inclusive).
+
+        Host code the model's own graph runs between two device dispatches, which neither
+        packing concurrently nor merging back to back nor folding may skip past.
+        """
+        return any(lo < s.at <= hi for s in self.host)
+
+    def value_range(self, name: str) -> tuple[int, int] | None:
+        """Return the least and the largest per-call value ``name`` every limit on it alone admits, or None where no limit bounds it.
+
+        Raises:
+            ValueError: The limits on it admit no value.
+        """
+        on = [
+            limit
+            for limit in self.limits
+            if limit.plus is None
+            and limit.expression.value.name == name
+            and limit.expression.linear
+            and limit.expression.scale > 0
+        ]
+        if not on:
+            return None
+        least = max(
+            -(-(limit.lo - limit.expression.bias) // limit.expression.scale)
+            for limit in on
+        )
+        most = min(
+            (limit.hi - 1 - limit.expression.bias) // limit.expression.scale
+            for limit in on
+        )
+        if least > most or not all(
+            limit.lo <= limit.evaluate({name: at}) < limit.hi
+            for limit in on
+            for at in (least, most)
+        ):
+            raise ValueError(f"{self.name}: the limits on {name} admit no value")
+        return least, most
+
     def check_limits(self, values: Mapping[str, int]) -> None:
         """Raise ``IndexError`` if ``values`` index or bound a view outside it."""
         for limit in self.limits:
@@ -336,6 +1702,24 @@ class Recording:
                     f"{self.name}: {limit} is {at}, outside "
                     f"[{limit.lo}, {limit.hi}) for {limit.view}"
                 )
+
+    def rebind(self, replaced: Mapping[int, Sequence[Operator]]) -> None:
+        """Bind each per-call value of an operator ``replaced`` names (by ``id``) to each of its replacements too.
+
+        Run once ``steps`` hold the replacements: a replaced operator keeps its own
+        bindings only while a step still runs it (one instance called at several
+        steps, only some of them replaced).
+        """
+        running = {id(s.op) for s in self.steps}
+        bindings = []
+        for b in self.bindings:
+            if id(b.op) in running or id(b.op) not in replaced:
+                bindings.append(b)
+            bindings += [
+                dataclasses.replace(b, op=new, member=new.value(b.member.name))
+                for new in replaced.get(id(b.op), ())
+            ]
+        self.bindings = bindings
 
     def reference(
         self, tensors: Mapping[str, np.ndarray], values: Mapping[str, int]
@@ -357,8 +1741,13 @@ class Recording:
 
         for h in self.inputs:
             store(h.name, tensors[h.name])
+        # A coded weight's readers read the weight it codes, as their reference does.
+        logical: dict[str, np.ndarray] = {}
         for array, h in self.weights.values():
-            store(h.name, array)
+            if isinstance(array, CodedWeight):
+                logical[h.name] = np.asarray(array.array)
+            else:
+                store(h.name, array)
         for state, h in self.states.values():
             if state.host is None:
                 state.host = np.zeros(state.shape, state.dtype)
@@ -370,12 +1759,6 @@ class Recording:
                 buffers[ref.root] = np.zeros(h.buffer.nbytes, np.uint8)
             raw = buffers[ref.root][ref.start : ref.start + h.nbytes]
             return raw if bfp.is_bfp(h.dtype) else raw.view(h.dtype).reshape(h.shape)
-
-        def valid(h: Handle) -> tuple:
-            key = [slice(None)] * len(h.shape)
-            for axis, count in h.valid.items():
-                key[axis] = slice(count.evaluate(values))
-            return tuple(key)
 
         bound: dict[int, list[Binding]] = {}
         for b in self.bindings:
@@ -406,14 +1789,16 @@ class Recording:
                 buffers.pop(root, None)
             for s in host.get(i, ()):
                 s.fn(
-                    *(view(h)[valid(h)] for h in s.reads),
+                    *(view(h)[h.valid_index(values)] for h in s.reads),
                     *(view(h) for h in s.writes),
                 )
             if step is None:
                 break
             if step.gather is not None:
                 if step.inputs[0] is not step.gather:
-                    _gather_reference(step, view(step.gather)[valid(step.gather)], view)
+                    _gather_reference(
+                        step, view(step.gather)[step.gather.valid_index(values)], view
+                    )
                 continue
             op = step.op
             given = {
@@ -425,7 +1810,11 @@ class Recording:
                 # Each extent reads as this call's in the reference.
                 op = op._at_extents(**extents)
             declared = list(zip(op.buffers, step.slots))
-            inputs = {b.name: view(h) for b, h in declared if b.fills}
+            inputs = {
+                b.name: logical[h.name] if h.name in logical else view(h)
+                for b, h in declared
+                if b.fills
+            }
             outputs = {b.name: view(h) for b, h in declared if not b.fills}
             results = op._call_reference(inputs, outputs, given)
             for b, h in declared:
@@ -433,10 +1822,10 @@ class Recording:
                     continue
                 target = outputs[b.name] if b.name in outputs else inputs[b.name]
                 if results[b.name] is not target:
-                    rows = valid(h)
+                    rows = h.valid_index(values)
                     result = np.asarray(results[b.name]).reshape(target.shape)
                     target[rows] = result[rows]
-        returned = [view(h)[valid(h)] for h in self.returned]
+        returned = [view(h)[h.valid_index(values)] for h in self.returned]
         carry = {
             name: (
                 nxt.evaluate(values)
@@ -446,6 +1835,106 @@ class Recording:
             for name, nxt in self.carry.items()
         }
         return returned, carry
+
+    def code_weights(self) -> None:
+        """Encode every coded weight, a thread each, falling a refused one back to reading it plain.
+
+        What a compile runs; a reference, which reads the weights themselves, does
+        not. A weight with a row past its capacity is read plain instead, with a
+        warning: a profile keyed by shape may meet a checkpoint whose weights its
+        capacity does not hold.
+
+        Raises:
+            ValueError: A refused weight's reader has no coded flag to clear.
+        """
+        refused = encode_all(
+            w for w, _ in self.weights.values() if isinstance(w, CodedWeight)
+        )
+        for key, (weight, h) in list(self.weights.items()):
+            if isinstance(weight, CodedWeight) and weight in refused:
+                logger.warning(
+                    "%s: %s is read plain: %s", self.name, weight.name, refused[weight]
+                )
+                self.read_plain[weight.name] = str(refused[weight])
+                self._read_plain(key, str(refused[weight]))
+        read = {
+            h.ref().root
+            for step in self.steps
+            for h in (*step.slots, *step.inputs, *step.outputs)
+        }
+        read |= {h.ref().root for s in self.host for h in (*s.reads, *s.writes)}
+        coded_from = {k[0] for k in self.weights if isinstance(k, tuple)}
+        unread = {
+            key: h.name
+            for key, (_, h) in self.weights.items()
+            if key in coded_from and h.name not in read
+        }
+        for key, name in unread.items():
+            del self.weights[key]
+            del self.pinned[name]
+
+    def coded_report(self) -> list[str]:
+        """Return a line per weight read as coded rows, and per weight a coded read was given but which is read plain, with why."""
+        lines = []
+        for weight, h in self.weights.values():
+            if isinstance(weight, CodedWeight):
+                origin = "from the cache" if weight.from_cache else "encoded"
+                lines.append(
+                    f"{weight.name}: coded rows {h.shape} uint8 ({origin}), "
+                    f"{weight.array.nbytes - h.nbytes} bytes fewer"
+                )
+        lines += [f"{name}: read plain: {why}" for name, why in self.read_plain.items()]
+        return lines
+
+    def report(self, plan: Plan, name: str) -> str:
+        """Return ``plan``'s report for this recording as ``name``, then its ``coded_report``."""
+        return "\n".join(
+            [plan.report(name)] + [f"  {line}" for line in self.coded_report()]
+        )
+
+    def declared_coded(self, derived: Handle) -> list[Operator]:
+        """Return each step's operator that reads the coded weight ``derived`` coded by declaration, with no flag to read it plain."""
+        return [
+            step.op
+            for step in self.steps
+            if any(
+                h is derived and not isinstance(b.declared_coded, OperatorParam)
+                for b, h in zip(step.op.buffers, step.slots)
+            )
+        ]
+
+    def _read_plain(self, key, why: str) -> None:
+        """Point every reader of the coded weight ``key`` back at the weight it codes, each reader rebuilt with its operand's coded flag cleared.
+
+        Raises:
+            ValueError: A reader reads it coded by declaration (``declared_coded``),
+                with ``why`` it is read plain.
+        """
+        derived = self.weights.pop(key)[1]
+        self.pinned.pop(derived.name, None)
+        plain = self.weights[key[0]][1]
+        declared = self.declared_coded(derived)
+        if declared:
+            raise ValueError(
+                f"{self.name}: {type(declared[0]).__name__} reads {plain.name} coded "
+                f"by declaration, with no flag to read it plain: {why}"
+            )
+        rebuilt: dict[int, Operator] = {}
+        for step in self.steps:
+            if not any(h is derived for h in step.slots):
+                continue
+            op = step.op
+            if id(op) not in rebuilt:
+                names = {
+                    b.declared_coded.name
+                    for b, h in zip(op.buffers, step.slots)
+                    if h is derived
+                }
+                rebuilt[id(op)] = op.replace(**dict.fromkeys(names, False))
+            step.op = rebuilt[id(op)]
+            step.slots = [plain if h is derived else h for h in step.slots]
+            step.inputs = [plain if h is derived else h for h in step.inputs]
+        self.rebind({k: [op] for k, op in rebuilt.items()})
 
     @property
     def operators(self) -> list:
@@ -486,9 +1975,13 @@ class Recorder:
         profile: Profile | None = None,
         held: Mapping[int, tuple[str, object]] | None = None,
         inputs: Iterable[str] = (),
+        coded: dict[Hashable, CodedWeight] | None = None,
     ) -> None:
         self.name = name
         self.profile = profile
+        # The graph's coded weights, shared by its versions, so each is
+        # encoded once.
+        self.coded = {} if coded is None else coded
         held = held or {}
         self._held_arrays = [
             x.array if isinstance(x, Weight) else x
@@ -496,7 +1989,7 @@ class Recorder:
             if isinstance(x, (Weight, np.ndarray))
         ]
         self.steps: list[Step] = []
-        self.weights: dict[int, tuple[object, Handle]] = {}
+        self.weights: dict[Hashable, tuple[object, Handle]] = {}
         self.states: dict[int, tuple[State, Handle]] = {}
         self.bindings: list[Binding] = []
         self.limits: list[Limit] = []
@@ -875,6 +2368,10 @@ class Recorder:
         buffers = op.buffers
         ins = [b for b in buffers if b.fills]
         outs = [b for b in buffers if b.role is Out]
+        operands = [
+            self._coded_weight(op, b, h) if b.coded else h
+            for h, b in zip(operands, ins)
+        ] + list(operands[len(ins) :])
         given_outs = operands[len(ins) :]
         for h, b in zip(operands, ins + outs):
             shape = tuple(b.shape)
@@ -883,10 +2380,8 @@ class Recorder:
                     f"{type(op).__name__}.{b.name} is {bfp.dtype_name(b.dtype)}; "
                     f"operand {h!r} is {bfp.dtype_name(h.dtype)}"
                 )
-            bounds = (
-                h.valid if len(h.shape) == len(shape) else _rescale_bounds(h, shape)
-            )
-            for axis, count in bounds.items():
+            given = h.valid if len(h.shape) == len(shape) else _rescale_bounds(h, shape)
+            for axis, count in given.items():
                 extent = next(
                     (
                         m
@@ -937,17 +2432,56 @@ class Recorder:
             return None
         return outputs[0] if len(outputs) == 1 else tuple(outputs)
 
+    def _coded_weight(self, op, b, h: Handle) -> Handle:
+        """Return the derived weight a coded input ``b`` of ``op`` reads in place of ``h``.
+
+        The weight's coded rows, one buffer for every coded read of it at one capacity.
+
+        Raises:
+            TypeError: ``h`` is not a whole weight of ``b``'s logical shape.
+        """
+        source = next(
+            ((key, array) for key, (array, w) in self.weights.items() if w is h),
+            None,
+        )
+        # A leading unit dimension (one matrix, one batch) is the weight's alone.
+        if (
+            source is None
+            or h.layout != Dense()
+            or h.elements != math.prod(b.logical_shape)
+            or h.shape[-1] != b.logical_shape[-1]
+        ):
+            raise TypeError(
+                f"{type(op).__name__}.{b.name} streams a weight as coded rows; "
+                f"{h!r} is not a whole weight of shape {b.logical_shape}"
+            )
+        key, array = source
+        assert isinstance(array, np.ndarray), "a weight holds its array"
+        derived = (key, "coded", b.capacity)
+        if derived not in self.weights:
+            read_from = array.source if isinstance(array, _Param) else None
+            weight = self.coded.setdefault(
+                derived, CodedWeight(array, h.name, b.capacity, read_from)
+            )
+            self.weights[derived] = (
+                weight,
+                Handle.whole(weight.shape, np.uint8, f"{h.name}.coded", "weight"),
+            )
+        return self.weights[derived][1]
+
     def finish(
         self,
         inputs,
         outputs,
         values,
         carry: Mapping[str, Handle | Affine] | None = None,
+        graph: Graph | None = None,
     ) -> Recording:
         """Return the recorded graph.
 
         ``carry`` is the next value of each carried value, whose handles
-        are outputs too.
+        are outputs too; ``graph`` is the graph recorded, kept to record it
+        again at other shapes.
         """
         next_values = dict(carry or {})
         returned = list(outputs)
@@ -993,6 +2527,7 @@ class Recorder:
             addresses=self.addresses,
             limits=self.limits,
             host=self.host,
+            graph=graph,
         )
 
     def limit(

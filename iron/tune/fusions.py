@@ -1,0 +1,1603 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Choosing which on-chip fusions to take.
+
+A graph admits more fusions (``iron.common.graph.fusion.candidates``) than a
+profile should name: fusing one may cost more than it saves, or two may
+overlap at one step. ``price_fusions`` times each fusion the calls' graphs
+admit, as a whole, against the same steps run apart (``measure_fusion``), and
+keeps those that gain beyond the noise, cheapest first, skipping one that
+would share a step with a fusion already taken (``select_rewrites``, kept
+kind-agnostic: a fold or a pack prices and selects the same way, over its
+own ``Candidate``).
+
+A ``PACK`` group often co-resides only at narrower tunables
+than its members' own standalone best (fewer columns, say): ``narrow_group``
+searches the members' settings for the fused form (``narrowings``) and
+prices the fastest that co-resides against the members run apart at their
+own; a member narrowed writes its own tunables into the fusion entry itself
+(``FusionGroup.dims``, ``Profile.add_fusion``), applied only inside this
+fusion (``iron.common.graph.fusion_tunables``), so the same shape running
+unfused, or fused differently, elsewhere is untouched.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import dataclasses
+import hashlib
+import heapq
+import json
+import logging
+import math
+import os
+import re
+import statistics
+import time
+from collections.abc import Callable, Hashable, Mapping, Sequence
+from pathlib import Path
+from typing import Any, Protocol, TypeVar
+
+import numpy as np
+from aie import ir
+from aie.iron import Program
+from aie.iron.device import Device
+
+from iron.common.declare import Operator, Profile
+from iron.common.declare.profile import Version
+from iron.common.design import BuiltArray, OperatorDesign, configuration
+from iron.common.graph.compiled import (
+    CompiledGraph,
+    _step_words,
+    apply_profile,
+    packaged,
+)
+from iron.common.graph.fusion import admits, candidates
+from iron.common.graph.record import Recording
+from iron.common.image.compose import (
+    CORE_SHORT,
+    SEQUENTIAL,
+    SHIM_SHORT,
+    Packing,
+    fused_configuration,
+    transports,
+    unvalued,
+)
+from iron.common.image.packaging import plan
+from iron.common.image.step import Edge, EdgeKind, Fusion, FusionKind
+from iron.common.testing import draws
+
+from .autotune import (
+    CONFIDENCE,
+    FIT_CACHE,
+    Shape,
+    Timed,
+    Trial,
+    _identity,
+    _json_safe,
+    line,
+    settings,
+)
+from .failures import Kind, Ledger, device_timeout, first_error, place
+from .measure import (
+    Budget,
+    Cache,
+    CheckTooLong,
+    CpuWaitRefused,
+    NpuLock,
+    Spent,
+    Timing,
+    _sample,
+    measure_fusion,
+    sized,
+    standard_error,
+    time_interleaved,
+    write,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class FusionGroup:
+    """Every occurrence of one fusion shape - its steps' shapes, in order, and the edges wiring them - across a tuner's calls.
+
+    What ``time_fusion_group`` prices as a whole, and one fusion entry covers
+    (``Profile.add_fusion``).
+    """
+
+    def __init__(
+        self,
+        kind: FusionKind,
+        steps: Sequence[Operator],
+        edges: Sequence[tuple[int, str, int, str]],
+    ):
+        self.kind = kind
+        self.steps = list(steps)
+        self.shapes = [Shape(op) for op in steps]
+        self.edges = tuple(edges)
+        # Each distinct identity's weighted points: every step's per-call
+        # values, as an operator's own time is weighed (``Timed.op_points``).
+        self.points: list[tuple[float, list[dict[str, int]]]] = []
+        self.inputs: list[dict[str, np.ndarray]] = [{} for _ in steps]
+        # (recording id, first step's index): every occurrence of this
+        # fusion, so a group sharing a step with one taken first is seen to.
+        self.occurrences: list[tuple[int, int]] = []
+        # By member shape key, the dimensions a host sizes (``Timed.varying``),
+        # and every step its calls run, resolved: what ``dims`` leaves out of
+        # an entry and checks the rest still name only that member's shape by.
+        self.varying: dict[Hashable, frozenset[str]] = {}
+        self.ran: list[Operator] = []
+        # The versions (``Recording.version``) it occurs in: what its entry is scoped to.
+        self.versions: set[Version] = set()
+
+    @property
+    def key(self) -> Hashable:
+        return (self.kind, tuple(s.key for s in self.shapes), self.edges)
+
+    def claims(self) -> set[tuple[int, int]]:
+        """Return the (recording, step) pairs this fusion's steps occupy, in every recording it runs in."""
+        out: set[tuple[int, int]] = set()
+        for rid, first in self.occurrences:
+            out.update((rid, first + i) for i in range(len(self.steps)))
+        return out
+
+    def occurs_in(self, recording) -> bool:
+        """Whether this fusion runs in ``recording``."""
+        rid = id(recording)
+        return any(r == rid for r, _ in self.occurrences)
+
+    def dims(
+        self, combo: Sequence[Mapping[str, Any]] | None = None
+    ) -> list[tuple[type, dict[str, Any], Mapping[str, Any] | None]]:
+        """Return this fusion's steps as a profile entry names them (``Profile.add_fusion``).
+
+        Each with the tunables ``combo`` (a joint narrowing search's chosen setting,
+        ``narrow_group``'s) gives it; None throughout where ``combo`` is, a group that
+        needed no narrowing. A member is named without the dimensions a host sizes
+        wherever that still names only its own shape.
+        """
+        out = []
+        for i, (op, shape) in enumerate(zip(self.steps, self.shapes)):
+            named = shape.named((), derived=True)
+            drop = self.varying.get(shape.key, frozenset())
+            kept = {n: v for n, v in named.items() if n not in drop}
+            if any(
+                isinstance(r, type(op))
+                and Shape(r).key != shape.key
+                and Profile.matches(kept, Profile.dims(type(r), vars(r)))
+                for r in self.ran
+            ):
+                kept = named
+            out.append(
+                (type(op), _json_safe(kept), None if combo is None else combo[i])
+            )
+        return out
+
+    def __str__(self) -> str:
+        return " -> ".join(str(s) for s in self.shapes)
+
+
+def fusion_groups(
+    calls: Sequence[Timed], dev, kinds: Sequence[FusionKind] = tuple(FusionKind)
+) -> list[FusionGroup]:
+    """Return the fusions of ``kinds`` ``calls``' recordings admit (``candidates``), grouped by kind, steps' shapes and wiring, in the order first seen.
+
+    A shape's points and inputs are taken from its first distinct identity alone, as
+    ``autotune.shapes`` takes an operator's; every occurrence is kept, so a fusion
+    sharing a step with another is seen regardless of how many times either recurs.
+    Every kind by default, so a kind ``iron.common.graph.fusion`` adds later is priced
+    the same way without a change here.
+    """
+    found: dict[Hashable, FusionGroup] = {}
+    seen: set[tuple[str, ...]] = set()
+    ran = [s.op.resolved(dev) for call in calls for s in call.recording.steps]
+    for call in calls:
+        rid = id(call.recording)
+        points = (
+            [(1.0, call.values)]
+            if not call.points
+            else [(p.weight, p.values) for p in call.points]
+        )
+        for fusion in candidates(call.recording, kinds=kinds):
+            # op_values/op_inputs match a binding's op by identity: the
+            # recording's own (unresolved) op, not a resolved copy of it.
+            raw_steps = [call.recording.steps[i].op for i in fusion.steps]
+            resolved = [op.resolved(dev) for op in raw_steps]
+            local = {step: i for i, step in enumerate(fusion.steps)}
+            edges = tuple(
+                (local[e.producer], e.output, local[e.consumer], e.input)
+                for e in fusion.edges
+            )
+            group = FusionGroup(fusion.kind, resolved, edges)
+            group = found.setdefault(group.key, group)
+            group.occurrences.append((rid, fusion.steps[0]))
+            group.versions.add(call.recording.version)
+            group.ran = ran
+            for shape in group.shapes:
+                moved = call.varying.get(shape.key, frozenset())
+                group.varying[shape.key] = (
+                    group.varying.get(shape.key, frozenset()) | moved
+                )
+            identity = tuple(OperatorDesign(op).identity for op in resolved)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            group.inputs = [call.op_inputs(op) for op in raw_steps]
+            for weight, point_values in points:
+                group.points.append(
+                    (weight, [call.op_values(op, point_values) for op in raw_steps])
+                )
+    return list(found.values())
+
+
+def time_fusion_group(
+    group: FusionGroup,
+    *,
+    full_elf: bool,
+    timing: Timing = Timing(),
+    repeats: int = 9,
+    cache: Cache | None = None,
+    remeasure: bool = False,
+    fused: Sequence[Operator] | None = None,
+    log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
+) -> Trial:
+    """``group`` priced as a whole.
+
+    ``measure_fusion`` at each of its points, weighted as ``autotune._time`` weighs an
+    operator's; refused where any point's fusion is. ``fused``, a joint narrowing
+    search's on-chip combination of the members' tunables (``narrow_group``), prices
+    them fused at that setting against ``group.steps`` run apart at their own; defaults
+    to ``group.steps`` themselves.
+    """
+    delta = 0.0
+    variance: float | None = 0.0
+    refused: str | None = None
+    for weight, values in group.points:
+        m = measure_fusion(
+            group.steps,
+            group.edges,
+            full_elf=full_elf,
+            timing=timing,
+            repeats=repeats,
+            values=values,
+            inputs=group.inputs,
+            cache=cache,
+            remeasure=remeasure,
+            kind=group.kind,
+            fused_steps=fused,
+            log=log,
+            lock=lock,
+        )
+        if m.refused is not None:
+            refused = refused or m.refused
+            continue
+        d, noise = m.difference()
+        delta += weight * d
+        variance = (
+            None
+            if variance is None or noise is None
+            else variance + (weight * noise) ** 2
+        )
+    noise_us = None if variance is None else math.sqrt(variance)
+    return Trial({}, delta, noise_us, refused)
+
+
+def _widths(op: Operator, dev) -> list[dict[str, Any]]:
+    """``op``'s settings (``autotune.settings``), one per value of ``num_aie_columns`` it resolves at.
+
+    Each the setting otherwise closest to its own (``autotune.line``), widest first:
+    ``autotune`` already timed every member alone and took its fastest, so narrowing a
+    member only ever trades its own speed for co-residence, never gains either.
+    """
+    found = settings(op, dev, op.pinned)
+    if "num_aie_columns" not in found[0]:
+        return [found[0]]
+    return sorted(
+        line(found, found[0], "num_aie_columns"),
+        key=lambda s: -s["num_aie_columns"],
+    )
+
+
+def _fed_widths(op: Operator, dev) -> list[dict[str, Any]]:
+    """``op``'s settings with ``feed_b`` held true, only.
+
+    An edge into its ``B`` can only be fed there (an unfed ``B`` is not a streamed input
+    at all, so ``feed_b=False`` never builds for this member): searching those would
+    only build what never can.
+    """
+    if "feed_b" not in op.declaration.tunables:
+        return _widths(op, dev)
+    fed = op.replace(pinned=op.pinned | {"feed_b"}, feed_b=True)
+    found = []
+    # feed_b is pinned on fed, so _widths leaves it out of what it found;
+    # put it back so _with_tunables(**s) overrides it rather than keeping
+    # op's own.
+    for s in ({**s, "feed_b": True} for s in _widths(fed, dev)):
+        # fed's own resolution re-resolves its columns from the unresolved
+        # operator; held at op's, a streamed B may not fit the shim budget.
+        try:
+            op._with_tunables(**s).resolved(dev)
+        except ValueError:
+            continue
+        found.append(s)
+    return found
+
+
+def _composed_module(
+    designs: Mapping[str, OperatorDesign],
+    kind: FusionKind | None = None,
+    edges: Sequence[tuple[int, str, int, str]] = (),
+    kept: Sequence[tuple[int, str]] = (),
+    depths: Mapping[tuple[int, str], int] | None = None,
+    waits: Sequence[tuple[int, int]] = (),
+    workers: Sequence[tuple[int, ...]] = (),
+    cascades: Sequence[tuple[int, str, int, str]] = (),
+    packets: bool = False,
+    phases: Sequence[int] | None = None,
+    drains: int = 1,
+    slices: Sequence[tuple[int, str, int]] = (),
+) -> ir.Module:
+    """Return the one module ``fits`` places ``designs`` as, built the same way it does.
+
+    Plain (``configuration``), or, given ``kind``, as ``kind``'s own fusion wires
+    ``edges`` (and ``cascades`` over the cascade), each output ``kept`` drained
+    to the host too, each of ``waits`` a phase apart, each member at its
+    chosen ``phases``, each of ``slices`` read off a memtile (``Fusion.slices``),
+    its host fills packet flows given ``packets`` and its
+    drains joined in runs of ``drains`` (``fused_configuration``,
+    which also tells a pack's or a stream's own array per member, fuse=True, from a
+    merge's shared one). Composing is cheap next to
+    running the placement pipeline on the result, so a group-fit verdict's cache key is
+    this module's own text: it reflects every code path composing takes
+    (``configuration``, ``BuiltArray``, ...), not only ``compose.py``'s.
+    """
+    unvalued(designs)
+    if kind is None:
+        arrays = {n: BuiltArray(d) for n, d in designs.items()}
+        configured = configuration(next(iter(arrays)), arrays)
+    else:
+        fusion = Fusion(
+            kind,
+            tuple(range(len(designs))),
+            tuple(
+                Edge(p, out, c, inp, depth=(depths or {}).get((p, out)))
+                for p, out, c, inp in edges
+            )
+            + tuple(
+                Edge(p, out, c, inp, kind=EdgeKind.CASCADE)
+                for p, out, c, inp in cascades
+            ),
+            phased=bool(waits) or phases is not None,
+            kept=tuple(kept),
+            waits=tuple(waits),
+            workers=tuple(workers),
+            packets=packets,
+            phases=None if phases is None else tuple(phases),
+            drains=drains,
+            slices=tuple(slices),
+        )
+        configured, _ = fused_configuration("fused", fusion, list(designs.values()))
+    return Program.compose([configured], entry=configured.runtimes[0]).resolve_program()
+
+
+def design_cores(op: Operator) -> int:
+    """Return the cores ``op``'s design places."""
+    return len(re.findall(r"aie\.core\(", str(OperatorDesign(op).module())))
+
+
+def group_fit_verdict(
+    ops: Sequence[Operator],
+    fit_cache: Path = FIT_CACHE,
+    kind: FusionKind | None = None,
+    edges: Sequence[tuple[int, str, int, str]] = (),
+    ledger: Ledger | None = None,
+    kept: Sequence[tuple[int, str]] = (),
+    depths: Mapping[tuple[int, str], int] | None = None,
+    waits: Sequence[tuple[int, int]] = (),
+    workers: Sequence[tuple[int, ...]] = (),
+    cascades: Sequence[tuple[int, str, int, str]] = (),
+    phases: Sequence[int] | None = None,
+    packet_fills: bool = True,
+    placer: str = SEQUENTIAL,
+    slices: Sequence[tuple[int, str, int]] = (),
+) -> str | None:
+    """Why ``placer`` refuses ``ops``' resolved designs sharing one device configuration (plain, or as ``kind``'s fusion wires ``edges``).
+
+    Each output ``kept`` drains to the host too (``Fusion.kept``), each
+    output ``depths`` names is built at that depth, and each of ``waits``
+    runs its consumer a phase after its producer (``Fusion.waits``); each of
+    ``workers`` shares its members' cores (``Fusion.workers``); each of
+    ``cascades`` carries an output to an input over the cascade. A fusion whose
+    circuits run the shim's DMA channels short is placed again as its build
+    would take it (``compose.transports``): its host fills as packet flows,
+    its drains joined in memtiles, unless ``packet_fills`` is False: a
+    search pruning on "never faster narrower" holds that of circuits, not of
+    fills sharing a channel. ``phases`` are its members' chosen
+    phases (``Fusion.phases``), and each of ``slices`` reads part of an output
+    off a memtile (``Fusion.slices``).
+
+    Or None if they co-reside; kept under ``fit_cache``, keyed on the composed module's
+    own text (``_composed_module``) and each design's build (``artifact_hash``, as
+    ``autotune.refusal`` keeps a single design's): a change to any code path composing
+    takes invalidates it by construction, not only one to ``compose.py``'s own source.
+    The placer runs in a process of its own (``failures.place``): a compiler crash
+    refuses the group, recorded in ``ledger`` where one is given.
+
+    Raises:
+        NotImplementedError: Composing them is not built yet.
+    """
+    refusal = None
+    # A fusion short of shim channels is retried as its build would be
+    # (``compose.transports``), and refused for why the last try is.
+    tries = (
+        transports([OperatorDesign(op.resolved()) for op in ops])
+        if kind is not None and packet_fills
+        else iter([(False, 1)])
+    )
+    for packets, drains in tries:
+        found = _fit_record(
+            ops,
+            fit_cache,
+            kind,
+            edges,
+            kept,
+            depths,
+            waits,
+            workers,
+            cascades,
+            packets,
+            phases,
+            drains,
+            slices,
+        )
+        if isinstance(found, str):
+            return found  # composing itself refused; no placement pass to cache
+        text, record = found
+        if placer != SEQUENTIAL:
+            record = record.with_name(f"{record.name}-{placer}")
+        if record.exists():
+            verdict = record.read_text()
+        else:
+            outcome, diagnostic = place(text, placer)
+            if outcome in ("crash", "hang"):
+                if ledger is not None:
+                    dev = ops[0].dev
+                    ledger.record(
+                        Kind.CRASH,
+                        "?" if dev is None else dev.name,
+                        diagnostic or "",
+                        "placing "
+                        + ", ".join(type(op).__name__ for op in ops)
+                        + " in one device",
+                        module=text,
+                    )
+                diagnostic = (
+                    f"the compiler hung: {diagnostic}"
+                    if outcome == "hang"
+                    else f"the compiler crashed: {first_error(diagnostic or '')}"
+                )
+            verdict = "fits" if outcome == "fits" else f"refused: {diagnostic}"
+            write(record, verdict)
+        if verdict == "fits":
+            return None
+        refusal = verdict.removeprefix("refused: ")
+        if SHIM_SHORT not in refusal and CORE_SHORT not in refusal:
+            break
+    return refusal
+
+
+def refuse_group(
+    ops: Sequence[Operator],
+    reason: str,
+    fit_cache: Path = FIT_CACHE,
+    kind: FusionKind | None = None,
+    edges: Sequence[tuple[int, str, int, str]] = (),
+) -> None:
+    """Record ``ops`` as refused to share one device for ``reason`` (a build, a run or a comparison that failed past placement).
+
+    So ``group_fit_verdict`` answers it so until the toolchain changes.
+    """
+    found = _fit_record(ops, fit_cache, kind, edges)
+    if not isinstance(found, str):
+        write(found[1], f"refused: {reason}")
+
+
+def _fit_record(
+    ops: Sequence[Operator],
+    fit_cache: Path,
+    kind: FusionKind | None,
+    edges: Sequence[tuple[int, str, int, str]],
+    kept: Sequence[tuple[int, str]] = (),
+    depths: Mapping[tuple[int, str], int] | None = None,
+    waits: Sequence[tuple[int, int]] = (),
+    workers: Sequence[tuple[int, ...]] = (),
+    cascades: Sequence[tuple[int, str, int, str]] = (),
+    packets: bool = False,
+    phases: Sequence[int] | None = None,
+    drains: int = 1,
+    slices: Sequence[tuple[int, str, int]] = (),
+) -> tuple[str, Path] | str:
+    """``ops`` composed into one module, its text and its verdict's file under ``fit_cache``; or why composing them refused.
+
+    Raises:
+        NotImplementedError: Composing them is not built yet.
+    """
+    designs = {str(i): OperatorDesign(op.resolved()) for i, op in enumerate(ops)}
+    try:
+        module = _composed_module(
+            designs,
+            kind,
+            edges,
+            kept,
+            depths,
+            waits,
+            workers,
+            cascades,
+            packets,
+            phases,
+            drains,
+            slices,
+        )
+    except NotImplementedError:
+        raise
+    except (ValueError, RuntimeError, ir.MLIRError) as e:
+        return str(e)
+    text = str(module)
+    key = hashlib.sha256(
+        repr(
+            (text, sorted(d.compilable().artifact_hash for d in designs.values()))
+        ).encode()
+    ).hexdigest()[:24]
+    return text, fit_cache / key
+
+
+def _group_key(group: FusionGroup) -> str:
+    """Return ``group``'s content-hash identity in a progress file.
+
+    Stable across a restart, unlike ``id(group)``, and over ``group.key`` alone so a
+    progress file holds it as a plain string.
+    """
+    return hashlib.sha256(repr(group.key).encode()).hexdigest()[:32]
+
+
+def _load_by_group(path: Path) -> dict[str, Any]:
+    """Return what ``path`` holds by ``_group_key``, empty where it holds nothing yet."""
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def _save_by_group(by_group: Mapping[str, Any], path: Path) -> None:
+    """``by_group`` written atomically, as ``_checkpoint`` writes a profile.
+
+    Another process may be reading ``path``.
+    """
+    partial = path.with_suffix(f".{os.getpid()}")
+    partial.write_text(json.dumps(by_group))
+    partial.replace(path)
+
+
+def _dominates(a: Sequence[Mapping[str, Any]], b: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether combination ``a`` is at least as wide as ``b`` in every member, strictly in one.
+
+    ``b`` can then never be faster than ``a`` and so, narrower, can never be the fastest
+    combination that fits.
+    """
+    cols_a = [s.get("num_aie_columns") for s in a]
+    cols_b = [s.get("num_aie_columns") for s in b]
+    return all(
+        x is None or y is None or x >= y for x, y in zip(cols_a, cols_b)
+    ) and any(x is not None and y is not None and x > y for x, y in zip(cols_a, cols_b))
+
+
+def narrowings(
+    group: FusionGroup,
+    dev: Device,
+    feasible: Callable[[tuple[dict[str, Any], ...]], bool],
+) -> list[tuple[dict[str, Any], ...]]:
+    """Return every widest combination of the group's members' widths that is ``feasible``.
+
+    Searched from every member at its widest (``_widths``) down, one member one step
+    narrower at a time, widest total first: a member is never faster narrower than
+    ``autotune`` already found it alone, so nothing below a feasible combination needs
+    trying, and none it dominates (``_dominates``) is returned. The search stops where
+    feasibility does, whatever the number of members.
+
+    A member an edge feeds into its ``B`` searches ``feed_b`` true too
+    (``_fed_widths``): the edge may only be admissible there, a setting its own
+    (unfused) width never takes.
+
+    Args:
+        group: The fusion whose members are narrowed.
+        dev: The device they run on.
+        feasible: Whether a combination co-resides (a pack's fit) or
+            builds (an edge's, which a fit check does not model).
+    """
+    fed = {e[2] for e in group.edges if e[3] == "B"}
+    per_member = [
+        _fed_widths(op, dev) if i in fed else _widths(op, dev)
+        for i, op in enumerate(group.steps)
+    ]
+    # A state is each member's index into its widths, widest (0) first.
+    columns = [[w.get("num_aie_columns", 0) for w in widths] for widths in per_member]
+    start: tuple[int, ...] = (0,) * len(per_member)
+    frontier: list[tuple[int, tuple[int, ...]]] = [(-sum(c[0] for c in columns), start)]
+    seen: set[tuple[int, ...]] = {start}
+    found: list[tuple[int, ...]] = []
+    while frontier:
+        _, state = heapq.heappop(frontier)
+        if any(all(a <= b for a, b in zip(f, state)) for f in found):
+            continue
+        if feasible(tuple(w[k] for w, k in zip(per_member, state))):
+            found.append(state)
+            continue
+        for m, widths in enumerate(per_member):
+            if state[m] + 1 < len(widths):
+                below = (*state[:m], state[m] + 1, *state[m + 1 :])
+                if below not in seen:
+                    seen.add(below)
+                    total = sum(c[k] for c, k in zip(columns, below))
+                    heapq.heappush(frontier, (-total, below))
+    return [tuple(w[k] for w, k in zip(per_member, state)) for state in found]
+
+
+def narrow_group(
+    group: FusionGroup,
+    dev,
+    *,
+    full_elf: bool,
+    timing: Timing = Timing(),
+    repeats: int = 9,
+    cache: Cache | None = None,
+    remeasure: bool = False,
+    fit_cache: Path = FIT_CACHE,
+    log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
+) -> tuple[Trial, tuple[dict[str, Any], ...] | None]:
+    """Return ``group`` priced at the fastest setting of its members that co-resides, against ``group.steps`` run apart at their own.
+
+    Its own (as recorded) setting where that already co-resides, so a group that already
+    fits is never searched or narrowed; otherwise each Pareto-maximal combination
+    ``narrowings`` finds, widest first, timed (``time_fusion_group``) until one is not
+    refused, the fastest of those kept. A fusion with edges shares its buffer rather
+    than needing one of its own per member (``group_fit_verdict``'s generic placement
+    check does not see this), so its own width is tried first and taken without a
+    search where that builds.
+
+    A device command timeout refuses the group outright, without trying another
+    setting or being caught past here: a hang is a property of actually running it,
+    which another setting may share.
+
+    Returns:
+        The trial, and the settings taken for each of the group's members in order, or
+        None where its own setting already co-resides or builds, or none of its
+        members' widths co-reside (or build fused) at all (refused).
+    """
+    if group.edges:
+        try:
+            own = time_fusion_group(
+                group,
+                full_elf=full_elf,
+                timing=timing,
+                repeats=repeats,
+                cache=cache,
+                remeasure=remeasure,
+                log=log,
+                lock=lock,
+            )
+        except (ValueError, RuntimeError, ir.MLIRError) as e:
+            if device_timeout(e):
+                return Trial({}, 0.0, None, refused=f"hung on the device: {e}"), None
+            log(f"  {group}: does not build at its own width: {e}")
+        else:
+            if own.refused is None:
+                return own, None
+            log(f"  {group}: refused at its own width: {own.refused}")
+    elif (
+        group_fit_verdict(
+            group.steps,
+            fit_cache,
+            kind=group.kind,
+            edges=group.edges,
+            packet_fills=False,
+        )
+        is None
+    ):
+        try:
+            return (
+                time_fusion_group(
+                    group,
+                    full_elf=full_elf,
+                    timing=timing,
+                    repeats=repeats,
+                    cache=cache,
+                    remeasure=remeasure,
+                    log=log,
+                    lock=lock,
+                ),
+                None,
+            )
+        except (ValueError, RuntimeError, ir.MLIRError) as e:
+            if device_timeout(e):
+                return Trial({}, 0.0, None, refused=f"hung on the device: {e}"), None
+            log(f"  {group}: does not build at its own (fitting) width: {e}")
+    # By each member's settings: an edge's combinations are timed as they are found.
+    trials: dict[tuple, Trial | None] = {}
+
+    def timed(combo: tuple[dict[str, Any], ...]) -> Trial | None:
+        """Time ``group`` at ``combo``, or None where it does not build or is refused."""
+        fused = tuple(
+            op._with_tunables(**s).resolved(dev) for op, s in zip(group.steps, combo)
+        )
+        cols = [s.get("num_aie_columns") for s in combo]
+        try:
+            trial = time_fusion_group(
+                group,
+                full_elf=full_elf,
+                timing=timing,
+                repeats=repeats,
+                cache=cache,
+                remeasure=remeasure,
+                fused=fused,
+                log=log,
+                lock=lock,
+            )
+        except (ValueError, RuntimeError, ir.MLIRError) as e:
+            if device_timeout(e):
+                raise
+            # fits() places each design alone; narrowed together they may
+            # still not build (a feed's lanes, say).
+            log(f"  {group} narrowed to {cols}: does not build: {e}")
+            return None
+        if trial.refused is not None:
+            log(f"  {group} narrowed to {cols}: refused: {trial.refused}")
+            return None
+        noise = "?" if trial.noise_us is None else f"{trial.noise_us:.1f}"
+        log(f"  {group} narrowed to {cols}: {trial.delta_us:+.1f} ± {noise} us")
+        return trial
+
+    def feasible(combo: tuple[dict[str, Any], ...]) -> bool:
+        if not group.edges:
+            fused = [
+                op._with_tunables(**s).resolved(dev)
+                for op, s in zip(group.steps, combo)
+            ]
+            return (
+                group_fit_verdict(
+                    fused,
+                    fit_cache,
+                    kind=group.kind,
+                    edges=group.edges,
+                    packet_fills=False,
+                )
+                is None
+            )
+        # An edge's fit is its build: time it here, once, where its steps' cores
+        # fit the array (each runs on its own) and every edge feeds at these widths,
+        # which need no build of the whole.
+        key = tuple(tuple(sorted(c.items())) for c in combo)
+        fused = [
+            op._with_tunables(**s).resolved(dev) for op, s in zip(group.steps, combo)
+        ]
+        if sum(map(design_cores, fused)) > dev.cols * len(dev.core_rows):
+            trials[key] = None
+            return False
+        fed = [admits(fused[p], out, fused[c], inp) for p, out, c, inp in group.edges]
+        if any(
+            kind is None
+            or group.kind is FusionKind.STREAM
+            and kind is not FusionKind.STREAM
+            for kind in fed
+        ):
+            trials[key] = None
+            return False
+        trials[key] = timed(combo)
+        return trials[key] is not None
+
+    try:
+        combos = narrowings(group, dev, feasible)
+        if not combos:
+            return (
+                Trial({}, 0.0, None, refused="no setting of its members co-resides"),
+                None,
+            )
+        best: Trial | None = None
+        best_combo: tuple[dict[str, Any], ...] | None = None
+        for combo in combos:
+            key = tuple(tuple(sorted(c.items())) for c in combo)
+            trial = trials[key] if key in trials else timed(combo)
+            if trial is not None and (best is None or trial.delta_us < best.delta_us):
+                best, best_combo = trial, combo
+    except (RuntimeError, ir.MLIRError) as e:
+        if not device_timeout(e):
+            raise
+        return Trial({}, 0.0, None, refused=f"hung on the device: {e}"), None
+    if best is None:
+        return (
+            Trial(
+                {},
+                0.0,
+                None,
+                refused="no narrowing of its members both co-resides "
+                "and matches the steps run apart",
+            ),
+            None,
+        )
+    return best, best_combo
+
+
+class Candidate(Protocol):
+    """What ``select_rewrites`` needs of a priced rewrite, a fusion or otherwise.
+
+    The steps it would claim, by (recording, step index).
+    """
+
+    def claims(self) -> set[tuple[int, int]]: ...
+
+    def __str__(self) -> str: ...
+
+
+CandidateT = TypeVar("CandidateT", bound=Candidate)
+
+
+def select_rewrites(
+    priced: Sequence[tuple[CandidateT, Trial]], log: Callable[[str], None] = print
+) -> list[CandidateT]:
+    """Of ``priced`` candidates and their trials, those that gain beyond the noise (``Trial.gains``).
+
+    Cheapest first, skipping one whose steps overlap a candidate already taken.
+    Kind-agnostic: a fusion, a fold or a pack is a ``Candidate`` the same way.
+    """
+    taken: list[CandidateT] = []
+    claimed: set[tuple[int, int]] = set()
+    for candidate, trial in sorted(
+        (ct for ct in priced if ct[1].gains), key=lambda ct: ct[1].delta_us
+    ):
+        if candidate.claims() & claimed:
+            log(f"  {candidate}: skipped, overlaps an edge already taken")
+            continue
+        taken.append(candidate)
+        claimed |= candidate.claims()
+        log(f"  {candidate}: taken")
+    return taken
+
+
+def drawn_inputs(recording: Recording, seed: int) -> list[np.ndarray]:
+    """Return each of ``recording``'s inputs, drawn as the first step reading it whole draws it.
+
+    That step's operator's own test draw (``testing.draws`` with its
+    ``test.draw``), so an input with preconditions meets them (a draw row's
+    temperature and top-k), a coded one as its draw's coded rows
+    (``Operand.device_form``); a gather's ids in its table's rows; any other,
+    or one whose draw is not its shape and type, seeded random bytes
+    (``_random_tensor``).
+    """
+    rng = np.random.default_rng(seed)
+    table_rows = _gather_table_rows(recording)
+    out = []
+    for h in recording.inputs:
+        if h.name in table_rows:
+            out.append(rng.integers(0, table_rows[h.name], h.shape).astype(h.dtype))
+            continue
+        reader = next(
+            (
+                (step.op, b)
+                for step in recording.steps
+                for b, slot in zip(step.op.buffers, step.slots, strict=True)
+                if b.fills
+                and slot.ref().root == h.ref().root
+                and slot.ref().nbytes is None
+            ),
+            None,
+        )
+        if reader is not None:
+            op, b = reader
+            spec = {} if op.test is None or op.test.draw is None else op.test.draw(op)
+            t = b.device_form(draws(op, seed=seed, **spec)[b.name])
+            if t.size == math.prod(h.shape) and np.dtype(t.dtype) == np.dtype(h.dtype):
+                out.append(t.reshape(h.shape))
+                continue
+        out.append(_random_tensor(h, rng))
+    return out
+
+
+def _random_tensor(handle, rng: np.random.Generator) -> np.ndarray:
+    """Return ``handle``'s shape and dtype, filled with ``rng``'s bytes.
+
+    An end to end confirmation only compares a fused version's output to the same
+    recording's unfused one, not a numpy reference, so the content need not be
+    representative.
+    """
+    sampled = _sample(handle.dtype, handle.nbytes, rng)
+    return sampled.view(handle.dtype).reshape(handle.shape)
+
+
+def _gather_table_rows(recording) -> dict[str, int]:
+    """Return an input ids handle's buffer name to the table row count a ``Gather`` holds it to.
+
+    Random bytes are not valid ids (``Gather.control_words`` raises past the table), so
+    these need drawing in range instead. Keyed by name, not identity: the handle a
+    step's ``gather`` holds is its own view, a different object from
+    ``recording.inputs``' of the same buffer.
+    """
+    return {
+        step.gather.name: step.op.table_rows
+        for step in recording.steps
+        if step.gather is not None and step.gather.role == "input"
+    }
+
+
+def _bound_points(recording, values: Mapping[str, int]) -> list[dict[str, int]]:
+    """``values`` with each per-call value that bounds an extent halved, one at a time.
+
+    Where the recording's limits allow it and every bounded operator derives its
+    per-call words there: a design reading a bound wrongly agrees with the right one
+    when every bound is at its largest, as it is in a full prompt chunk.
+    """
+    bounded = [b for b in recording.bindings if b.member.bounds is not None]
+    bounding = sorted({b.expression.value.name for b in bounded if b.expression.linear})
+    points = []
+    for name in bounding:
+        if values.get(name, 0) < 2:
+            continue
+        point = {**values, name: values[name] // 2}
+        try:
+            recording.check_limits(point)
+            for op in {id(b.op): b.op for b in bounded}.values():
+                extents = {
+                    b.member.name: b.expression.evaluate(point)
+                    for b in bounded
+                    if b.op is op
+                }
+                resolved = op.resolved()
+                for word in resolved._per_call_derived() - resolved.bound_values.keys():
+                    resolved.derived_at(word, **extents)
+        except (IndexError, ValueError):
+            continue
+        points.append(point)
+    return points
+
+
+class NotBitIdentical(RuntimeError):
+    """``compare_graphs``.
+
+    Two builds of one recording, run on the same seeded inputs, did not agree. A
+    ``RuntimeError`` of its own kind (not a device timeout, nor a build failure), so a
+    caller tells the two apart by type rather than guessing from the message.
+    """
+
+
+@dataclasses.dataclass(frozen=True)
+class Applied:
+    """A call's recording as a profile compiles it, its weights coded.
+
+    Attributes:
+        recording: The recording with the profile applied.
+        fused: The fusions it takes.
+        packing: The packing it takes.
+        full_elf: One full ELF, else an xclbin per step; None for the
+            device's default (``packaged``).
+        teardown: Whether a full ELF undoes each configuration once done.
+        commands_in_flight: The commands its version's schedule keeps in
+            flight from the host (``CarriedLoop``).
+    """
+
+    recording: Recording
+    fused: tuple[Fusion, ...]
+    packing: Packing
+    full_elf: bool | None = None
+    teardown: bool = False
+    commands_in_flight: int = 1
+
+    @classmethod
+    def of(
+        cls, call: Timed, profile: Profile, dev, *, required: bool = False
+    ) -> Applied:
+        """Return ``call`` under ``profile`` on ``dev``.
+
+        The design its values select where ``profile`` has variants
+        (``Recording.selected``), refused where a point it is timed at lies
+        in another range, the version its schedule builds
+        (``Recording.scheduled``), and the commands it keeps in flight.
+
+        Its weights coded as ``Graph.compile`` codes them (``Recording.code_weights``),
+        in ``call``'s recording itself: how a weight is read is its recording's, the
+        same under every profile. ``required``: a packing group that does not place
+        refuses the build rather than running unpacked (``Packing.required``).
+
+        Raises:
+            NotImplementedError: Its variant or its schedule's version is not
+                built yet (``Recording.selected``, ``Recording.scheduled``).
+        """
+        begun = time.perf_counter()
+        call.recording.code_weights()
+        selected, profile = call.recording.selected(
+            profile, call.values, [values for _, values in call.timed_points()]
+        )
+        recording, fused, packing = apply_profile(
+            selected.scheduled(profile), profile, dev
+        )
+        out = cls(
+            recording,
+            fused,
+            dataclasses.replace(packing, required=required),
+            *packaged(recording, profile),
+            commands_in_flight=max(
+                (
+                    s.commands_in_flight
+                    for s in profile.schedules()
+                    if s.version == recording.version
+                ),
+                default=1,
+            ),
+        )
+        Spent.charge(build_s=time.perf_counter() - begun)
+        return out
+
+    def fingerprint(self, dev) -> Hashable:
+        """Return what this builds and how it is run: two with one fingerprint build one image and dispatch it alike."""
+        steps = tuple(_identity(s.op, dev) for s in self.recording.steps)
+        return (
+            steps,
+            self.fused,
+            self.packing,
+            self.full_elf,
+            self.teardown,
+            self.commands_in_flight,
+        )
+
+    def built(self, dev) -> CompiledGraph:
+        """Return the version, packaged as ``dev`` does."""
+        begun = time.perf_counter()
+        chosen = plan(
+            dev,
+            self.recording,
+            self.full_elf,
+            False,
+            step_words=_step_words(self.recording),
+            fusions=self.fused,
+            teardown=self.teardown,
+        )
+        out = CompiledGraph(
+            self.recording, chosen, fusions=self.fused, packing=self.packing
+        )
+        Spent.charge(build_s=time.perf_counter() - begun)
+        return out
+
+
+@dataclasses.dataclass
+class Compared:
+    """Two builds' figures at each point they were timed at, so a tune times a pair once a point.
+
+    Attributes:
+        points: Each point's delta and its standard error, unweighted, by the
+            point's values as sorted items.
+        medians: Each timed point's two medians, before then after, in
+            microseconds.
+        ratios: Each timed point's median of the paired ratios, after over
+            before.
+    """
+
+    points: dict[tuple, tuple[float, float | None]] = dataclasses.field(
+        default_factory=dict
+    )
+    medians: dict[tuple, tuple[float, float]] = dataclasses.field(default_factory=dict)
+    ratios: dict[tuple, float] = dataclasses.field(default_factory=dict)
+
+    def weighted(self, call: Timed) -> tuple[float, float | None] | None:
+        """Return ``call``'s delta over its points (``Timed.timed_points``) and its standard error; None where a point is not held."""
+        delta, variance = 0.0, 0.0
+        for weight, values in call.timed_points():
+            held = self.points.get(tuple(sorted(values.items())))
+            if held is None:
+                return None
+            delta += weight * held[0]
+            variance = (
+                None
+                if variance is None or held[1] is None
+                else variance + (weight * held[1]) ** 2
+            )
+        return delta, None if variance is None else math.sqrt(variance)
+
+
+def compare_graphs(
+    call: Timed,
+    before: CompiledGraph,
+    after: CompiledGraph,
+    *,
+    timing: Timing,
+    seed: int = 0,
+    log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
+    known: Compared | None = None,
+    cap_s: float = math.inf,
+    exact: bool = True,
+) -> tuple[float, float | None]:
+    """How much longer ``after`` takes than ``before``, two builds of ``call``'s recording.
+
+    Run interleaved on the same seeded inputs and states at each of the call's points
+    (``Timed.timed_points``), weighted, and that difference's standard error; both are
+    released after. A point ``known`` holds is checked bit-identical but not timed
+    again; one timed is added to it. Its timing takes at most ``cap_s``, each point
+    not yet timed an equal share of what is left (``sized``).
+
+    Raises:
+        NotBitIdentical: ``exact``, and ``after``'s outputs, each within its
+            bound (past it an operator may write whole tiles), its carried
+            buffers or its states are not bit-identical to ``before``'s at a
+            point, the call's values or one of its bounds halved
+            (``_bound_points``).
+        CheckTooLong: One call a round would take a point past its share of
+            ``cap_s``.
+        RuntimeError: A device timeout propagates as it is raised.
+        ValueError: ``before`` or ``after`` takes, returns or holds a handle
+            the call's recording does not, by name, role, shape and dtype.
+    """
+    known = Compared() if known is None else known
+    begun = time.perf_counter()
+    recording = call.recording
+    inputs = drawn_inputs(recording, seed)
+    rng = np.random.default_rng(seed + 1)
+    states = {h.name: _random_tensor(h, rng) for _, h in recording.states.values()}
+    # Two recordings of one call (under two profiles) hold their own States.
+    own = [{h.name: s for s, h in g.recording.states.values()} for g in (before, after)]
+    held = [
+        {
+            h.name: (role, h.shape, np.dtype(h.dtype))
+            for role, handles in (
+                *((f"input {i}", [h]) for i, h in enumerate(r.inputs)),
+                ("output", r.returned),
+                ("state", [h for _, h in r.states.values()]),
+            )
+            for h in handles
+        }
+        for r in (recording, before.recording, after.recording)
+    ]
+    for build, found in zip(("before", "after"), held[1:]):
+        differ = {
+            n: (held[0].get(n), found.get(n))
+            for n in held[0].keys() | found.keys()
+            if held[0].get(n) != found.get(n)
+        }
+        if differ:
+            raise ValueError(
+                f"{recording.name}: {build} is not the call's build; each handle as "
+                f"(call's, {build}'s) (role, shape, dtype): {differ}"
+            )
+    carried = {
+        h.ref().root: h
+        for step in recording.steps
+        for h in step.slots
+        if h.ref().root in recording.feedback and h.ref().nbytes is None
+    }
+    timed = call.timed_points()
+    # A timed point right after it is staged: timing dispatches what was
+    # staged last.
+    staged = [(None, v) for v in _bound_points(recording, call.values)] + timed
+    untimed = sum(tuple(sorted(v.items())) not in known.points for _, v in timed)
+    with lock or contextlib.nullcontext():
+        try:
+            for weight, values in staged:
+                for name, content in states.items():
+                    before.write(own[0][name], content)
+                    after.write(own[1][name], content)
+                before(*inputs, **values)
+                after(*inputs, **values)
+                # Everything a call leaves the host: every output, not only
+                # those returned, every buffer carried to the next call, and
+                # every state.
+                differ = (
+                    [
+                        h.name
+                        for h in recording.outputs
+                        if not np.array_equal(
+                            before.read(h)[h.valid_index(values)],
+                            after.read(h)[h.valid_index(values)],
+                        )
+                    ]
+                    + [
+                        name
+                        for name, h in carried.items()
+                        if not np.array_equal(before.read(h), after.read(h))
+                    ]
+                    + [
+                        name
+                        for name in states
+                        if not np.array_equal(
+                            before.read(own[0][name]), after.read(own[1][name])
+                        )
+                    ]
+                )
+                if differ and exact:
+                    raise NotBitIdentical(
+                        f"{recording.name}: {', '.join(differ)} not bit-identical "
+                        f"to it as before at {values}"
+                    )
+                point = tuple(sorted(values.items()))
+                if weight is None or point in known.points:
+                    continue
+                share_us = (cap_s - (time.perf_counter() - begun)) * 1e6 / untimed
+                untimed -= 1
+                runs = [before.callable, after.callable]
+                fitted = sized(timing, runs, share_us)
+                # Half the rounds each way round: the second run of a round
+                # finds the device warmer, which would favour one side.
+                ahead = -(-fitted.rounds // 2)
+                times = time_interleaved(
+                    runs, dataclasses.replace(fitted, rounds=ahead), log=log, lock=lock
+                )
+                samples = [list(times[0].samples_us), list(times[1].samples_us)]
+                if fitted.rounds > ahead:
+                    back = time_interleaved(
+                        runs[::-1],
+                        dataclasses.replace(fitted, rounds=fitted.rounds - ahead),
+                        log=log,
+                        lock=lock,
+                    )
+                    samples[0] += back[1].samples_us
+                    samples[1] += back[0].samples_us
+                paired = [a - b for b, a in zip(*samples)]
+                known.points[point] = (
+                    statistics.median(paired),
+                    standard_error(paired),
+                )
+                known.medians[point] = (
+                    statistics.median(samples[0]),
+                    statistics.median(samples[1]),
+                )
+                known.ratios[point] = statistics.median(a / b for b, a in zip(*samples))
+        finally:
+            before.release()
+            after.release()
+            Spent.charge(timing_s=time.perf_counter() - begun)
+    found = known.weighted(call)
+    assert found is not None, "every point is timed above or was known"
+    return found
+
+
+def confirm_fusions(
+    calls: Sequence[Timed],
+    dev: Device,
+    taken: Sequence[FusionGroup],
+    priced: Mapping[FusionGroup, Trial],
+    profile: Profile,
+    combos: Mapping[FusionGroup, tuple[dict[str, Any], ...] | None],
+    *,
+    full_elf: bool,
+    timing: Timing = Timing(rounds=3, calls=10),
+    seed: int = 0,
+    refused: dict[str, str] | None = None,
+    log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
+    cap_s: float = math.inf,
+) -> dict[FusionGroup, frozenset[Version]]:
+    """Return each of ``taken`` with the versions it runs in that gain from it beyond the noise.
+
+    Times each recording's version with every group of ``taken`` it runs fused (at
+    ``combos``' narrowing, where it has one) against the same version unfused, at the
+    call's shortest point (``Timed.shortest``; the final ``verify`` times every point),
+    dropping the smallest predicted gain (``priced``) among those active in a version
+    that regresses and retrying, until what is left gains or none is left to drop. A
+    group no version keeps is left out.
+
+    Args:
+        calls: The calls whose versions are confirmed.
+        dev: The device they run on.
+        taken: The groups ``select_rewrites`` took.
+        priced: Each group's standalone price.
+        profile: The profile the versions are built under.
+        combos: Each group's narrowing, or None.
+        full_elf: How the versions are packaged.
+        timing: How each version is timed end to end.
+        seed: The seed the inputs are drawn at.
+        log: Where each version's verdict is logged.
+        refused: A hang's reason recorded here, by ``_group_key``, for
+            every group dropped on it, in every version: a caller persists
+            this so the group is never retried past this run either.
+        lock: Held from each version's first dispatch through releasing its
+            graphs' contexts; none taken where None.
+        cap_s: The most each version's timing takes (``compare_graphs``); one
+            that would take longer is not confirmed.
+
+    Raises:
+        NotBitIdentical: A version's fused output is not bit-identical to
+            its unfused one, at the call's values or at one of its bounds
+            halved (``_bound_points``).
+    """
+    confirmed: dict[FusionGroup, set[Version]] = {}
+    hung: set[FusionGroup] = set()
+    for call in calls:
+        recording = call.recording
+        version = recording.version
+        active = [g for g in taken if g.occurs_in(recording) and g not in hung]
+        while active:
+            # Both sides as the profile builds the version, its packings
+            # included: a fusion that pays alone can cost the packing it
+            # splits, and only the packed version shows it.
+            trial_profile = Profile()
+            for cls, dims, tunables in profile:
+                trial_profile.add(cls, **dims, **tunables)
+            for f in profile.fusions():
+                trial_profile.add_fusion(f.kind, f.steps, f.edges, f.versions, f.phased)
+            for group in active:
+                trial_profile.add_fusion(
+                    group.kind, group.dims(combos.get(group)), group.edges, [version]
+                )
+            for entry in profile.packings():
+                trial_profile.add_packing(entry.members, entry.versions)
+            try:
+                plain_cg = Applied.of(call, profile, dev).built(dev)
+                fused_cg = Applied.of(call, trial_profile, dev).built(dev)
+            except (ValueError, RuntimeError, ir.MLIRError) as e:
+                # A build failure is a property of this version (this
+                # particular combination of active groups' fusions), not of
+                # any one group alone; drop the one predicted to gain least
+                # and retry, as for a version that regresses once run.
+                worst = max(active, key=lambda g: priced[g].delta_us)
+                log(f"  {worst}: dropped, {recording.name} does not build fused: {e}")
+                active.remove(worst)
+                continue
+            try:
+                delta, noise = compare_graphs(
+                    call.shortest(),
+                    plain_cg,
+                    fused_cg,
+                    timing=timing,
+                    seed=seed,
+                    log=log,
+                    lock=lock,
+                    cap_s=cap_s,
+                )
+            except (CpuWaitRefused, CheckTooLong) as e:
+                log(f"  {recording.name}: not confirmed, its timing was refused: {e}")
+                break
+            except (RuntimeError, ir.MLIRError) as e:
+                if not device_timeout(e):
+                    raise
+                # A hang is a property of this version running at all,
+                # which dropping only one of several active groups may not
+                # fix; none of them is retried in this run.
+                names = ", ".join(str(g) for g in active)
+                log(f"  {names}: dropped, {recording.name} hung on the device: {e}")
+                hung.update(active)
+                for g in active:
+                    if refused is not None:
+                        refused[_group_key(g)] = f"hung on the device: {e}"
+                break
+            noise_s = "?" if noise is None else f"{noise:.1f}"
+            log(
+                f"{recording.name}: [{', '.join(str(g) for g in active)}] "
+                f"{delta:+.1f} ± {noise_s} us end to end"
+            )
+            if noise is not None and delta < -CONFIDENCE * noise:
+                for g in active:
+                    confirmed.setdefault(g, set()).add(version)
+                break
+            worst = max(active, key=lambda g: priced[g].delta_us)
+            log(f"  {worst}: dropped, {recording.name} does not gain from it")
+            active.remove(worst)
+    return {
+        g: frozenset(confirmed[g]) for g in taken if g in confirmed and g not in hung
+    }
+
+
+def _checkpoint(
+    profile: Profile | None,
+    priced: Sequence[tuple[FusionGroup, Trial]],
+    combos: Mapping[FusionGroup, tuple[dict[str, Any], ...] | None],
+    checkpoint: Path,
+) -> None:
+    """Write ``profile`` with an entry for each fusion priced so far to gain, to ``checkpoint``.
+
+    The groups ``select_rewrites`` takes, not yet confirmed end to end, which needs its
+    own device time this does not spend. Written atomically: a restart after a run dies partway at least starts from every
+    group already priced (``price_fusions``'s own cache does that regardless), and
+    whoever is waiting on it can see the decisions so far.
+    """
+    out = Profile()
+    for cls, dims, tunables in profile or ():
+        out.add(cls, **dims, **tunables)
+    for group in select_rewrites(priced, log=lambda _: None):
+        out.add_fusion(
+            group.kind, group.dims(combos.get(group)), group.edges, group.versions
+        )
+    # Profile.save() writes in place; another process reading checkpoint
+    # must never see a half-written file, so write beside it and rename.
+    partial = checkpoint.with_suffix(f".{os.getpid()}")
+    out.save(partial)
+    partial.replace(checkpoint)
+
+
+def price_fusions(
+    calls: Sequence[Timed],
+    dev: Device,
+    profile: Profile | None = None,
+    *,
+    full_elf: bool,
+    timing: Timing = Timing(),
+    repeats: int = 9,
+    cache: Cache | None = None,
+    remeasure: bool = False,
+    confirm: bool = True,
+    confirm_timing: Timing = Timing(rounds=3, calls=10),
+    fit_cache: Path = FIT_CACHE,
+    checkpoint: Path | None = None,
+    max_price: int | None = None,
+    kinds: Sequence[FusionKind] = tuple(FusionKind),
+    log: Callable[[str], None] = print,
+    lock: NpuLock | None = None,
+    budget: Budget | None = None,
+) -> Profile | None:
+    """``profile`` with a fusion entry for each fusion ``calls``' graphs admit that gains beyond the noise.
+
+    Each priced at the fastest setting of its members that co-resides (``narrow_group``)
+    and, unless ``confirm`` is False, still gains each version it runs in end to end
+    (``confirm_fusions``), taken cheapest first, skipping one that would share a step
+    with a fusion already taken (``select_rewrites``).
+
+    A member narrowed to co-reside writes its own tunables into the fusion entry itself
+    (``FusionGroup.dims``, ``Profile.add_fusion``), applied only inside this fusion
+    (``iron.common.graph.fusion_tunables``). A taken fusion's entry names the versions
+    it gains in; an existing entry covering a shape found is replaced in those
+    versions, kept in every other (``Timed.versions``). Everything else in ``profile``
+    is kept as it is.
+
+    Args:
+        calls: The calls whose graphs' fusions are priced.
+        dev: The device they run on.
+        profile: The profile they were recorded under.
+        full_elf: How the graphs are packaged.
+        timing: How each fusion is timed against its steps apart.
+        repeats: Steps in each long run a step's time is taken from.
+        cache: Where each figure is kept across runs.
+        remeasure: Time again what ``cache`` holds.
+        confirm: Confirm the taken groups end to end (``confirm_fusions``).
+        confirm_timing: How each version is timed end to end.
+        fit_cache: Where each group's fit verdict is kept.
+        log: Where each group's price is logged.
+        kinds: The kinds priced, every kind the graphs admit by default.
+        checkpoint: Where to write the decisions so far (``_checkpoint``) after every
+            group is priced, so a run that dies partway still leaves something behind.
+            Each group's price is also written beside it
+            (``checkpoint.with_suffix(".priced.json")``) and taken from there by a
+            later call until every group is priced; a group refused by a device
+            timeout (``.refused.json``) is never retried.
+        max_price: Price at most this many groups not yet priced in this call; where
+            that leaves any unpriced, return None without selecting, confirming or
+            saving. Lets a caller batch a multi-hour sweep across short device-lock
+            holds instead of one long one.
+        lock: Held for each measurement's own lifetime; none taken where None.
+        budget: The tune's time: past the first group, one not yet priced
+            once it ends is left unpriced, so not taken; each confirming
+            check's timing takes at most ``budget.check_s``.
+
+    Returns:
+        The profile, or None where ``max_price`` left groups unpriced.
+
+    Raises:
+        ValueError: ``max_price`` is given without a ``checkpoint`` to carry
+            the prices between calls.
+    """
+    if max_price is not None and checkpoint is None:
+        raise ValueError("max_price prices in batches through a checkpoint; give one")
+    refused_path = (
+        None if checkpoint is None else checkpoint.with_suffix(".refused.json")
+    )
+    priced_path = None if checkpoint is None else checkpoint.with_suffix(".priced.json")
+    refused = {} if refused_path is None else _load_by_group(refused_path)
+    earlier = {} if priced_path is None else _load_by_group(priced_path)
+
+    all_found = fusion_groups(calls, dev, kinds)
+    priced: list[tuple[FusionGroup, Trial]] = []
+    combos: dict[FusionGroup, tuple[dict[str, Any], ...] | None] = {}
+    unpriced = []
+    for group in all_found:
+        why = refused.get(_group_key(group))
+        record = earlier.get(_group_key(group))
+        if why is not None:
+            log(f"{group}: skipped, refused earlier: {why}")
+        elif record is None:
+            unpriced.append(group)
+        else:
+            trial = Trial({}, record["delta_us"], record["noise_us"], record["refused"])
+            priced.append((group, trial))
+            combos[group] = None if record["combo"] is None else tuple(record["combo"])
+            log(f"{group}: {trial.delta_us:+.1f} us, priced earlier")
+    found_now, rest = (
+        (unpriced, [])
+        if max_price is None
+        else (unpriced[:max_price], unpriced[max_price:])
+    )
+
+    budget = Budget() if budget is None else budget
+    for n, group in enumerate(found_now):
+        if n and budget.ends("the fusion search"):
+            log(f"{len(found_now) - n} group(s) left unpriced: the budget ended")
+            break
+        trial, combo = narrow_group(
+            group,
+            dev,
+            full_elf=full_elf,
+            timing=timing,
+            repeats=repeats,
+            cache=cache,
+            remeasure=remeasure,
+            fit_cache=fit_cache,
+            log=log,
+            lock=lock,
+        )
+        noise = "?" if trial.noise_us is None else f"{trial.noise_us:.1f}"
+        why = "" if trial.refused is None else f"  refused: {trial.refused}"
+        log(f"{group}: {trial.delta_us:+.1f} ± {noise} us{why}")
+        priced.append((group, trial))
+        combos[group] = combo
+        if trial.refused is not None and trial.refused.startswith("hung on the device"):
+            refused[_group_key(group)] = trial.refused
+            if refused_path is not None:
+                _save_by_group(refused, refused_path)
+        if priced_path is not None:
+            earlier[_group_key(group)] = {
+                "delta_us": trial.delta_us,
+                "noise_us": trial.noise_us,
+                "refused": trial.refused,
+                "combo": None if combo is None else list(combo),
+            }
+            _save_by_group(earlier, priced_path)
+        if checkpoint is not None:
+            _checkpoint(profile, priced, combos, checkpoint)
+
+    if rest:
+        log(f"{len(rest)} group(s) left unpriced this batch; call again for them")
+        return None
+    if priced_path is not None:
+        priced_path.unlink(missing_ok=True)
+
+    taken = select_rewrites(priced, log)
+    priced_dict = dict(priced)
+
+    out = Profile()
+    for cls, dims, tunables in profile or ():
+        out.add(cls, **dims, **tunables)
+    for entry in profile.packings() if profile is not None else ():
+        out.add_packing(entry.members, entry.versions)
+
+    every = frozenset(c.recording.version for c in calls).union(
+        *(c.versions for c in calls)
+    )
+    existing = profile.fusions() if profile is not None else []
+    for f in existing:
+        probe = Profile()
+        probe.add_fusion(f.kind, f.steps, f.edges, f.versions)
+        replaced = {
+            v
+            for g in all_found
+            for v in g.versions
+            if probe.fused(g.kind, g.steps, g.edges, v)
+        }
+        scope = every if f.versions is None else f.versions
+        if f.versions is None and not replaced:
+            out.add_fusion(f.kind, f.steps, f.edges, phased=f.phased)
+        elif scope - replaced:
+            out.add_fusion(f.kind, f.steps, f.edges, scope - replaced, f.phased)
+
+    kept = {g: frozenset(g.versions) for g in taken}
+    if confirm:
+        kept = confirm_fusions(
+            calls,
+            dev,
+            taken,
+            priced_dict,
+            out,
+            combos,
+            full_elf=full_elf,
+            timing=confirm_timing,
+            refused=refused,
+            log=log,
+            lock=lock,
+            cap_s=budget.check_s,
+        )
+        if refused_path is not None:
+            _save_by_group(refused, refused_path)
+    for group, versions in kept.items():
+        out.add_fusion(group.kind, group.dims(combos[group]), group.edges, versions)
+    return out

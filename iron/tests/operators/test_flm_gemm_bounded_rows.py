@@ -8,10 +8,12 @@ A prompt chunk projects ``x[:n]``: A and C move, and the cores compute, the
 block's B replay without computing. One compiled graph is driven at bounds
 on both sides of a unit, long ones before short ones and back, so a count
 or a replay one call leaves must not reach the next. B is resident in the
-memtile at the first shape and streamed per unit at the second; the last
-two are Qwen2.5 1.5B's up and down projections at a prompt chunk's bounds,
-past 8192 wide, where the second half of the core rows starts at a per-call
-offset into A and C.
+memtile at the first shape and streamed per unit at the second; the third
+is Llama 3.2 1B's q projection, resident over a prompt chunk's eight
+units, its memtile replaying B as many times as a call's bound reaches;
+the last two are Qwen2.5 1.5B's up and down projections at a prompt
+chunk's bounds, past 8192 wide, where the second half of the core rows
+starts at a per-call offset into A and C.
 """
 
 import numpy as np
@@ -25,6 +27,7 @@ from iron.tests.support.graphs import ProjectAsStored
 
 SHORT = (512, 1, 300, 256, 257, 512, 17, 3)
 CHUNK = (2048, 1, 15, 512, 2048, 15)
+UNITS = (2048, 1, 293, 769, 2048, 300, 1792, 257, 1)
 
 
 @pytest.mark.parametrize(
@@ -32,10 +35,11 @@ CHUNK = (2048, 1, 15, 512, 2048, 15)
     [
         (512, 512, 1024, SHORT),
         (512, 3072, 512, SHORT),
+        (2048, 2048, 2048, UNITS),
         (2048, 1536, 8960, CHUNK),
         (2048, 8960, 1536, CHUNK),
     ],
-    ids=["resident_b", "streamed_b", "qwen2_up", "qwen2_down"],
+    ids=["resident_b", "streamed_b", "llama_q", "qwen2_up", "qwen2_down"],
 )
 @pytest.mark.parametrize(
     "full_elf",

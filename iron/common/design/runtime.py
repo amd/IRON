@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from math import prod
 from typing import Any, cast
 
@@ -60,9 +60,20 @@ class OperatorRuntime(Runtime):
         self.buffers = [b for b in built.objects if isinstance(b, Buffer)]
         self._tensors: dict[str, Any] = {}
         self._queues: dict[str, list[Task]] = {}
-        # Raises if any stream of a built array is unbound.
+        self._deferred: list[Task] = []
+        self.group: TaskGroup | None = None
+        # A phased fusion's phase awaits its fills too: its descriptors and shim
+        # channels are reused by the next phase's sequence only once they complete.
+        self.await_fills = False
+        # A fused region's chosen shim burst length, in bytes; 0 for the longest.
+        self.burst_length = 0
+        # Raises if any stream of a built array is unbound. A stream kept
+        # on-chip has no host end.
         lanes = [
-            (b, i, h) for b in op.buffers if b.streamed for i, h in enumerate(b.handles)
+            (b, i, h)
+            for b in op.buffers
+            if b.streamed and not b.on_chip
+            for i, h in enumerate(b.handles)
         ]
         # A shared array's pins are declared by the runtime of the array that built them.
         ours = {id(e) for e in built.objects if isinstance(e, DmaEndpoint)}
@@ -76,7 +87,7 @@ class OperatorRuntime(Runtime):
         super().__init__(
             self.body,
             [
-                *(b.flat_type for b in op.buffers),
+                *(b.flat_type for b in self.host_buffers),
                 handles,
                 *(v.param for v in op.values),
             ],
@@ -97,16 +108,17 @@ class OperatorRuntime(Runtime):
                     f"and Buffers; got {obj!r}"
                 )
 
+    @property
+    def host_buffers(self) -> list[Operand]:
+        """The operands the host passes: all but those kept on-chip."""
+        return [b for b in self.op.buffers if not b.on_chip]
+
     def body(self, *args) -> None:
         """Record the sequence body, given the operator's runtime tensors, its lanes' handles.
 
         Then each per-call value not in the scratchpad as its scalar.
         """
-        buffers = self.op.buffers
-        self._tensors = {b.name: a for b, a in zip(buffers, args)}
-        for value, arg in zip(self.op.values, args[len(buffers) + 1 :]):
-            if not value.in_scratchpad:
-                value.ssa = arg
+        self.take(*args)
         token = active_runtime.set(self)
         try:
             if not self.op.own_preamble:
@@ -114,9 +126,33 @@ class OperatorRuntime(Runtime):
             self.run()
         finally:
             active_runtime.reset(token)
+        self.await_queues()
+
+    def take(self, *args) -> None:
+        """Hold ``body``'s arguments: the host tensors and per-call scalars."""
+        buffers = self.host_buffers
+        self._tensors = {b.name: a for b, a in zip(buffers, args)}
+        for value, arg in zip(self.op.values, args[len(buffers) + 1 :]):
+            if not value.in_scratchpad:
+                value.ssa = arg
+
+    def await_queues(self) -> None:
+        """Await every managed transfer still in flight, and every await a fused sequence deferred."""
         for queue in self._queues.values():
             for task in queue:
                 task.await_()
+        for task in self._deferred:
+            task.await_()
+        self._deferred = []
+
+    def await_tasks(self, tasks: Iterable[Task | None]) -> None:
+        """Await a sequence's own ``tasks`` (a None emitted nothing), in a fused sequence once every operator in it has issued."""
+        issued = [t for t in tasks if t is not None]
+        if self.group is not None:
+            self._deferred += issued
+            return
+        for task in issued:
+            task.await_()
 
     def resolve(self, loc=None, ip=None, *, device=None, **options) -> None:
         self.declare(device)
@@ -135,11 +171,32 @@ class OperatorRuntime(Runtime):
             device.resolve_tile(buffer.tile)
             buffer.resolve()
 
+    def task_group(self) -> TaskGroup:
+        """Return the group a sequence issues transfers in.
+
+        A fused sequence's own while it runs, else a new one.
+        """
+        return TaskGroup() if self.group is None else self.group
+
+    def finish(self, tg: TaskGroup) -> None:
+        """Finish ``tg``, unless it is a fused sequence's, finished once every operator in it has issued."""
+        if tg is not self.group:
+            tg.finish()
+
     def run(self) -> None:
         if self.op.has_sequence_override():
             self.op.sequence(self)
             return
-        tg = TaskGroup()
+        tg = self.task_group()
+        self.issue(tg)
+        self.finish(tg)
+
+    def issue(self, tg: TaskGroup) -> None:
+        """Fill every host input and drain every host output in ``tg``.
+
+        The drains awaited when ``tg`` finishes; an on-chip operand's fill/drain emit
+        nothing.
+        """
         for buf in self.op.inputs:
             for lane, tap, word, unit in buf.transfers():
                 buf.fill(
@@ -155,7 +212,6 @@ class OperatorRuntime(Runtime):
                     length_parameter=word,
                     length_unit=unit,
                 )
-        tg.finish()
 
     def transfer(
         self,
@@ -252,11 +308,13 @@ class OperatorRuntime(Runtime):
                 queue.pop(0).await_()
             common = dict(wait=True, managed=False)
         elif managed:
-            common = dict(wait=wait, group=group)
+            waited = wait or (verb == "fill" and self.await_fills)
+            common = dict(wait=waited, group=group)
         else:
             if group is not None:
                 raise ValueError("an unmanaged transfer joins no group")
             common = dict(wait=wait, managed=False)
+        common["burst_length"] = self.burst_length
         # A per-call size lands in one descriptor's length, a repeat count in
         # its push; an offset patches every split piece.
         per_call = length_parameter is not None or repeat_parameter is not None
@@ -369,6 +427,33 @@ class OperatorRuntime(Runtime):
             rtp.barrier.set(1)
 
 
+class SplicedRuntime(OperatorRuntime):
+    """A spliced step's sequence: each core's stage takes its runtime parameters, then the step's own host transfers.
+
+    Args:
+        op: The step, its host operands moving along its producer's lanes.
+        built: The step's build, which makes nothing of its own.
+        stages: Each stage's sequence, whose preamble alone runs.
+        name: The sequence's symbol; the Program names it when None.
+    """
+
+    def __init__(
+        self,
+        op: Operator,
+        built: Built,
+        stages: Sequence[OperatorRuntime],
+        name: str | None = None,
+    ) -> None:
+        super().__init__(op, built, name=name)
+        self.stages = list(stages)
+
+    def preamble(self, **values) -> None:
+        """Write the step's own parameters, then each stage's."""
+        super().preamble(**values)
+        for stage in self.stages:
+            stage.preamble()
+
+
 class MergedRuntime(Runtime):
     """Operator runtimes run back to back as one sequence (``Runtime.merge``).
 
@@ -395,6 +480,56 @@ class MergedRuntime(Runtime):
             checked.append(runtime)
         merged.runtimes = checked
         return merged
+
+    @classmethod
+    def fuse(
+        cls,
+        runtimes,
+        name=None,
+        await_fills: bool = False,
+        burst_length: int = 0,
+    ) -> MergedRuntime:
+        """Operator runtimes whose streams meet on-chip, as one sequence.
+
+        Each runs its preamble, then all their transfers go in one task group that
+        finishes once (``task_group``), since an operator's input completes only once a
+        later operator drains. With ``await_fills`` (a phase of a phased fusion) the
+        group awaits the fills as well as the drains, so the next phase's sequence,
+        which may take the same shim channels and descriptors, runs once they are done.
+        Every transfer takes ``burst_length`` bytes a burst (0: the longest).
+        An unmanaged fill (a sequence an operator writes itself, GEMV's) is never freed,
+        so its descriptors are never reused; its channel's next tasks queue behind it,
+        and ``compose.phases`` keeps every member a phase feeds able to finish without
+        the next phase.
+        """
+
+        def run(calls) -> None:
+            for runtime, args in calls:
+                runtime.take(*args)
+                token = active_runtime.set(runtime)
+                try:
+                    if not runtime.op.own_preamble:
+                        runtime.preamble()
+                finally:
+                    active_runtime.reset(token)
+            tg = TaskGroup()
+            for runtime, _ in calls:
+                token = active_runtime.set(runtime)
+                runtime.group = tg
+                runtime.await_fills = await_fills
+                runtime.burst_length = burst_length
+                try:
+                    runtime.run()
+                finally:
+                    runtime.group = None
+                    runtime.await_fills = False
+                    runtime.burst_length = 0
+                    active_runtime.reset(token)
+            tg.finish()
+            for runtime, _ in calls:
+                runtime.await_queues()
+
+        return cls.merge(runtimes, name, run)
 
     def resolve(self, loc=None, ip=None, *, device=None, **options) -> None:
         # Steps of one design share its array: one runtime declares it.

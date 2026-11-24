@@ -176,6 +176,16 @@ class Decoder:
             for step in model.record(**call).steps:
                 step.op.resolved(npu2)
 
+    def test_a_sibling_context_records_the_same_steps(self, npu2):
+        """``CausalLM.sibling`` rebuilds the model through its own constructor, at another context taking the same steps."""
+        toy = type(self)
+        model = self.model(toy.config, toy.weights())
+        twin = model.sibling(toy.weights())
+        assert twin.config.max_seq_len != model.config.max_seq_len
+        for here, there in zip(model.shapes(), twin.shapes()):
+            steps = model.record(**here).steps
+            assert len(twin.record(**there).steps) == len(steps)
+
     def test_decode_from_an_empty_cache_matches_the_forward_token_by_token(self, cpu):
         """Check that decode from an empty cache matches the forward token by token.
 

@@ -8,13 +8,20 @@
 each ``BuiltArray`` and its sequences into one ``DeviceConfiguration``.
 """
 
-from .design import BuiltArray, OperatorDesign, configuration, identities
+from .design import (
+    BuiltArray,
+    OperatorDesign,
+    SplicedArray,
+    configuration,
+    identities,
+)
 from .runtime import OperatorRuntime
 
 __all__ = [
     "BuiltArray",
     "OperatorDesign",
     "OperatorRuntime",
+    "SplicedArray",
     "configuration",
     "identities",
 ]

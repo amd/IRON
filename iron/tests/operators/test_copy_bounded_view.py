@@ -200,6 +200,34 @@ def test_bounded_rows_past_a_wrap_fill_either_half():
         assert np.array_equal(got[:n], want), f"{n=}"
 
 
+class Prefix(iron.Graph):
+    """The first ``n`` rows of ``x``, ``n`` per call."""
+
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        return Copy.step(x[:n])
+
+
+@pytest.mark.parametrize("n", [0, 1, ROWS])
+def test_a_copy_bounded_at_zero_is_its_reference(n):
+    """A call bounded at 0 is a call: its reference moves no rows, as at 1 it moves one."""
+    x = np.random.default_rng(0).standard_normal((ROWS, HALF)).astype(bfloat16)
+    got = np.asarray(Prefix().reference(x, n=n), dtype=np.float32)
+    np.testing.assert_array_equal(got, x[:n].astype(np.float32))
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_copy_bounded_at_zero_runs_as_its_reference():
+    """A call bounded at 0 runs on the device and moves what its reference does: no rows."""
+    graph = Prefix()
+    net = graph.compile(x=(ROWS, HALF))
+    x = np.random.default_rng(1).standard_normal((ROWS, HALF)).astype(bfloat16)
+    for n in (0, 1):
+        got = np.asarray(net(x, n=n), dtype=np.float32).reshape(ROWS, HALF)
+        want = np.asarray(graph.reference(x, n=n), dtype=np.float32)
+        assert want.shape == (n, HALF)
+        np.testing.assert_array_equal(got[:n], want)
+
+
 @pytest.mark.parametrize("band_stride", [0, 1])
 def test_a_walk_by_a_per_call_repeat_and_length_is_its_reference(band_stride):
     table = np.arange(HK * WK * K2 * E, dtype=np.float32)
@@ -243,3 +271,27 @@ def test_bounded_rows_past_a_wrap_halve_the_run():
     got = np.asarray(graph.reference(x, y, n=1500), dtype=np.float32)
     want = np.concatenate([x[:1500], y[:1500]], axis=1).astype(np.float32)
     np.testing.assert_array_equal(got[:1500], want)
+
+
+# A ring of one KV head's paired keys and values, as Gemma 4's sliding
+# layers keep it.
+RING, PAIR = 512, 2 * 256
+
+
+class Stage(iron.Graph):
+    """The window ``[first, first + RING // 2)`` of a paired ring, its first ``n`` positions staged."""
+
+    def __init__(self):
+        self.ring = iron.state((RING, 1, 2, PAIR // 2), name="ring")
+        self.staged = iron.state((RING // 2, 1, 2, PAIR // 2), name="staged")
+
+    def body(self, *, first: Scratchpad[np.int32], n: Scratchpad[np.int32]):
+        Copy.step(self.ring[first : first + RING // 2][:n], self.staged)
+
+
+def test_a_bounded_view_s_contiguous_axes_are_one_run(npu2):
+    """Below the bounded axis, ``(1, 2, d)`` is one run of ``2 d``, so the bound takes D2."""
+    (step,) = Stage().record().steps
+    op = step.op.resolved(npu2)
+    ((tap, unit),) = op._taps(op.src, op.src_bound, op.x)
+    assert (list(tap.sizes), unit) == ([1, RING // 2, 1, PAIR], PAIR)

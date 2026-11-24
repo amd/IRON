@@ -76,8 +76,8 @@ def test_rows_past_the_valid_length_are_zero(
             q, k, v = q[:rows], k[:rows], v[:rows]
             return MHA.step(
                 q,
-                k,
-                v,
+                K=k,
+                V=v,
                 heads_interleaved=True,
                 kv_interleaved=True,
                 s_q=n,
@@ -128,9 +128,10 @@ class Chunk(iron.Graph):
     ):
         return MHA.step(
             q[:rows],
-            k[:, : position + 1],
-            v[:, : position + 1],
+            K=k[:, : position + 1],
+            V=v[:, : position + 1],
             heads_interleaved=True,
+            kv_interleaved=False,
             window=self.window,
             num_pipelines=self.pipelines,
         )

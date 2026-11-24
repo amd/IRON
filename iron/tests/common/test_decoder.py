@@ -112,8 +112,8 @@ def test_a_context_no_chunk_divides_is_allocated_exactly():
     cfg = model.config
     assert cfg.angles().shape == (300, cfg.head_dim)
     t = model.record(**model.shapes()[1])
-    row = cfg.num_key_value_heads * cfg.head_dim * np.dtype(bfloat16).itemsize
-    layers = "model.layers.0.cache.keys", "model.layers.1.cache.values"
+    row = 2 * cfg.num_key_value_heads * cfg.head_dim * np.dtype(bfloat16).itemsize
+    layers = "model.layers.0.cache.kv", "model.layers.1.cache.kv"
     assert t.pinned[layers[0]] == t.pinned[layers[1]] == 300 * row
     assert t.pinned["drawn"] == 300 * np.dtype(np.int32).itemsize
     with pytest.raises(ValueError, match="301 tokens do not fit 300 rows"):

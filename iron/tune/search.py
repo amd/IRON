@@ -1,0 +1,4571 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""The tuner as one search over compositions.
+
+Each takes a graph's calls (``Timed``, every version) rather than one
+recording. ``candidates`` yields every edit the calls admit, of every kind;
+``fit`` refuses an edit
+that cannot fit before any build (counts from the target model, then the
+dataflow analysis, then the placer); ``check`` holds a built edit to the
+untuned build (bit identity, or no input worse against the operators'
+references); ``measure`` times a profile against another in pairs;
+``search`` starts from the shipped profile, prices each edit in place
+against the incumbent, and keeps the set that gains most.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import itertools
+import logging
+import math
+import subprocess
+import time
+from collections import Counter
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
+from fractions import Fraction
+from typing import Literal, Protocol
+
+import numpy as np
+from aie import ir
+from aie.dialects.aie import WireBundle, get_target_model
+from aie.helpers.taplib import Affine
+from aie.iron import Worker
+from aie.iron.dataflow.objectfifo import ObjectFifo, ObjectFifoHandle
+from aie.iron.device import Device
+from aie.utils import bfp, set_current_device
+from aie.utils.compile.jit.params import OperatorParam
+
+from ..common.declare import Profile
+from ..common.declare.composition import (
+    Binding,
+    Configuration,
+    Entry,
+    Hold,
+    Member,
+    Refinement,
+    Region,
+    RuntimePlan,
+    Schedule,
+    Scope,
+    Switch,
+    Variants,
+    Version,
+    refinement,
+)
+from ..common.declare.operand import PastMemtile, Staging
+from ..common.design import OperatorDesign
+from ..common.graph.carried import CarriedLoop
+from ..common.graph.coded import CodedWeight, encode_all
+from ..common.graph.compiled import CompiledGraph, _words
+from ..common.graph.fold import apply_folds, composed_folds, fold_candidates
+from ..common.graph.fusion import composed, in_turn, memory_waits, narrowed
+from ..common.graph.record import Limit, NotLegalAtCapacity, Recording
+from ..common.graph.sdf import Derivation
+from ..common.image.compose import ANNEALED, SEQUENTIAL
+from ..common.image.packaging import SCRATCHPAD_WORDS, attached_part
+from ..common.image.step import Edge, EdgeKind, FusionKind, HandOff
+from .autotune import Point, Timed, refusal, settings
+from .cli import WATCHDOG_HEADROOM, watchdog_s
+from .costmodel import CostModel
+from .ddr import Ceiling
+from .fusions import (
+    Applied,
+    Compared,
+    NotBitIdentical,
+    _bound_points,
+    _random_tensor,
+    compare_graphs,
+    design_cores,
+    drawn_inputs,
+    group_fit_verdict,
+)
+from .measure import Cache, Spent, Timing, switch_cost
+
+
+class Edit(Protocol):
+    """One candidate change to a profile."""
+
+    @property
+    def touches(self) -> frozenset[int]:
+        """The steps the edit affects, by index in the recording."""
+        ...
+
+    @property
+    def refinement(self) -> Refinement:
+        """How the edited build relates to the untuned build."""
+        ...
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return ``profile`` with the edit made."""
+        ...
+
+
+@dataclass(frozen=True)
+class AddEntry:
+    """An edit adding one composition entry to a profile, in place of one it revises.
+
+    Attributes:
+        entry: The entry added.
+        touches: The steps it composes, by index in the recording it was
+            found in.
+        refinement: How the edited build relates to the untuned build.
+        replaces: The entry it revises (another scope, another member's
+            width), whose place it takes; None adds it after the rest.
+    """
+
+    entry: Entry
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+    replaces: Entry | None = None
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with ``entry`` added, in ``replaces``' place where given.
+
+        Raises:
+            ValueError: ``profile`` does not hold ``replaces``: an earlier
+                edit revised it, so this one gives way.
+        """
+        edited = profile.copy()
+        if self.replaces is None:
+            edited.add_entry(self.entry)
+        else:
+            edited.replace_entry(self.replaces, self.entry)
+        return edited
+
+
+@dataclass(frozen=True)
+class HoldEdge:
+    """An edit holding one edge of a region the profile composes at another place (``Region.held``).
+
+    Attributes:
+        entry: The entry, as the profile holds it.
+        index: The edge, by its index in the entry's root region.
+        place: Where its value waits.
+        touches: The steps the region composes, by index in the recording it
+            was found in.
+        refinement: How the edited build relates to the untuned build.
+    """
+
+    entry: Entry
+    index: int
+    place: Hold
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with ``entry`` replaced by itself, the edge held at ``place``."""
+        edited = profile.copy()
+        root = self.entry.root
+        assert isinstance(root, Region), "candidates yields it for regions alone"
+        held = dataclasses.replace(self.entry, root=root.held(self.index, self.place))
+        edited.replace_entry(self.entry, held)
+        return edited
+
+
+@dataclass(frozen=True)
+class DepthEdge:
+    """An edit holding one edge of a region the profile composes at another depth (``Region.deepened``).
+
+    Attributes:
+        entry: The entry, as the profile holds it.
+        index: The edge, by its index in the entry's root region.
+        depth: The objects it holds.
+        touches: The steps the region composes, by index in the recording it
+            was found in.
+        refinement: How the edited build relates to the untuned build.
+    """
+
+    entry: Entry
+    index: int
+    depth: int
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with ``entry`` replaced by itself, the edge ``depth`` deep."""
+        edited = profile.copy()
+        root = self.entry.root
+        assert isinstance(root, Region), "candidates yields it for regions alone"
+        deepened = dataclasses.replace(
+            self.entry, root=root.deepened(self.index, self.depth)
+        )
+        edited.replace_entry(self.entry, deepened)
+        return edited
+
+
+@dataclass(frozen=True)
+class PlanRegion:
+    """An edit setting one field of the runtime plan of a region the profile composes (``RuntimePlan``).
+
+    Attributes:
+        entry: The entry, as the profile holds it.
+        field: The ``RuntimePlan`` field set.
+        value: Its value.
+        touches: The steps the region composes, by index in the recording it
+            was found in.
+        refinement: How the edited build relates to the untuned build.
+    """
+
+    entry: Entry
+    field: str
+    value: object
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with ``entry`` replaced by itself, its plan's ``field`` at ``value``."""
+        edited = profile.copy()
+        root = self.entry.root
+        assert isinstance(root, Region), "candidates yields it for regions alone"
+        plan = dataclasses.replace(
+            root.runtime or RuntimePlan(), **{self.field: self.value}
+        )
+        planned = dataclasses.replace(
+            self.entry, root=dataclasses.replace(root, runtime=plan)
+        )
+        edited.replace_entry(self.entry, planned)
+        return edited
+
+
+@dataclass(frozen=True)
+class ScheduleVersion:
+    """An edit setting one field of a version's schedule (``Schedule``), the version's default schedule where the profile holds none.
+
+    Attributes:
+        version: The version scheduled.
+        field: The ``Schedule`` field set.
+        value: Its value.
+        touches: Every step of the version's recording.
+        refinement: How the edited build relates to the untuned build.
+    """
+
+    version: Version
+    field: str
+    value: object
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with ``version``'s schedule's ``field`` at ``value``."""
+        edited = profile.copy()
+        held = [s for s in profile.schedules() if s.version == self.version]
+        schedule = held[0] if held else Schedule(self.version)
+        changed = dataclasses.replace(schedule, **{self.field: self.value})
+        if held:
+            edited.replace_schedule(schedule, changed)
+        else:
+            edited.add_schedule(changed)
+        return edited
+
+
+@dataclass(frozen=True)
+class AddVariants:
+    """An edit adding a set of variants: a design per range of per-call values (``Variants``).
+
+    Attributes:
+        variants: The set added.
+        touches: The steps whose design a range changes, by index in the
+            recording it was found in.
+        refinement: How the edited build relates to the untuned build.
+    """
+
+    variants: Variants
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with ``variants`` added, in place of each set it holds over any of the same values."""
+        edited = profile.copy()
+        for held in profile.variants():
+            if set(held.values) & set(self.variants.values):
+                edited.remove_variants(held)
+        edited.add_variants(self.variants)
+        return edited
+
+
+@dataclass(frozen=True)
+class ConfigureEntries:
+    """An edit setting one field of the configurations some entries the profile holds are rooted at (``Configuration``).
+
+    Attributes:
+        entries: The entries, as the profile holds them; several where the
+            field relates them (``concurrent``: an id they share).
+        field: The ``Configuration`` field set.
+        value: Its value.
+        touches: The steps the configurations load, by index in the
+            recording they were found in.
+        refinement: How the edited build relates to the untuned build.
+    """
+
+    entries: tuple[Entry, ...]
+    field: str
+    value: object
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with each of ``entries`` replaced by itself, its configuration's ``field`` at ``value``.
+
+        Raises:
+            ValueError: The profile does not hold one of ``entries``.
+        """
+        edited = profile.copy()
+        for entry in self.entries:
+            root = entry.root
+            assert isinstance(root, Configuration), "candidates yields it for these"
+            edited.replace_entry(
+                entry,
+                dataclasses.replace(
+                    entry, root=dataclasses.replace(root, **{self.field: self.value})
+                ),
+            )
+        return edited
+
+
+@dataclass(frozen=True)
+class BindValue:
+    """An edit choosing how one per-call value reaches the design (``Binding``), in place of the binding the profile holds for it.
+
+    Attributes:
+        binding: The binding chosen.
+        touches: The steps reading the value, by index in the recording it
+            was found in.
+        refinement: How the edited build relates to the untuned build.
+    """
+
+    binding: Binding
+    touches: frozenset[int]
+    refinement: Refinement = Refinement.EXACT
+
+    def apply(self, profile: Profile) -> Profile:
+        """Return a copy of ``profile`` with ``binding`` its value's one binding."""
+        edited = profile.copy()
+        for held in profile.bindings():
+            if held.value == self.binding.value:
+                edited.remove_binding(held)
+        edited.add_binding(self.binding)
+        return edited
+
+
+# A chosen depth is an edge's minimum times a power of two up to this many
+# doublings, beside its knee; past what a core or memtile holds, fit refuses.
+DEPTH_DOUBLINGS = 4
+
+# A runtime plan's chunks, and a schedule's calls a command or merged into one,
+# are powers of two up to this many doublings.
+SCHEDULE_DOUBLINGS = 2
+
+logger = logging.getLogger(__name__)
+
+# A measured ratio under this gains: past the paired timing's noise.
+GAINS = 0.95
+# The most values of a per-call value fit analyses a region at to hold its
+# balance over the range (``_balanced_at``); past it, the region waits.
+BALANCED_POINTS = 512
+# How an edit is priced: IRON's verify timing, lighter than measure's own.
+PRICING = Timing(rounds=4, calls=10)
+
+# The seeded draws a no-worse change is held on, alternately typical and stress.
+NO_WORSE_DRAWS = 4
+
+# The |e| quantile a no-worse check compares beside the mean square.
+NO_WORSE_QUANTILE = 0.999
+
+# What candidates does not propose yet, named where it stops.
+_NOT_GENERATED = (
+    "inflows",
+    "a runtime plan's transfer sizes",
+    "a configuration's residency and switch",
+    "a value bound at compile time",
+    "state layouts",
+    "nested regions",
+    "fission",
+    "substitution",
+    "a schedule's order and recomputed steps",
+)
+
+
+@dataclass(frozen=True)
+class Fit:
+    """Whether a profile's compositions fit the device, decided before any build.
+
+    Attributes:
+        ok: Whether everything fits.
+        stage: Where a refusal came from: the counts, the dataflow analysis,
+            or the placer.
+        why: The refusal, naming what does not fit.
+        breakdown: The placer's penalty components, where it refused.
+    """
+
+    ok: bool
+    stage: Literal["counts", "analysis", "placer"] | None = None
+    why: str | None = None
+    breakdown: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Check:
+    """Whether a built profile computes what the untuned build does.
+
+    Attributes:
+        ok: Whether it passed.
+        refinement: The rule it was held to.
+        why: The first difference, where it failed.
+    """
+
+    ok: bool
+    refinement: Refinement
+    why: str | None = None
+
+
+@dataclass(frozen=True)
+class Measured:
+    """A profile's time against a base's, from paired runs.
+
+    Attributes:
+        ratio: The median of the paired ratios, profile over base, each
+            point's weighed by the base's time there.
+        seconds: The profile's median seconds a run of the calls.
+        base_seconds: The base's median seconds a run of the calls.
+    """
+
+    ratio: float
+    seconds: float
+    base_seconds: float
+
+
+PLACEMENTS: Sequence[str] = ("sequential", "sa:1", "sa:2", "sa:3")
+
+# The placer settings a build takes: the sequential placer, else the annealing
+# one at mlir-aie's default seed (``Composition.placed``). ``sa:N`` is seed N.
+BUILT_PLACERS: Mapping[str, str] = {"sequential": SEQUENTIAL, "sa:1": ANNEALED}
+
+
+def candidates(
+    calls: Sequence[Timed], profile: Profile, device: Device
+) -> Iterator[Edit]:
+    """Yield every edit of ``profile`` that ``calls`` admit on ``device``.
+
+    A region edit names a window of consecutive recorded steps, no host step
+    inside it and no more steps than the array has cores, or the steps of
+    such a window its edges join to both its ends, where a legal order moves
+    the others out of the way (``Recording.gatherable``), with an edge for
+    each hand-off the recording makes inside it: one step the only writer of
+    a whole, streamed buffer, a later step reading it whole or a slice of it,
+    the two ends one buffer (or the reader's a part of it); or, the buffer state the graph holds, any step of the window
+    reading it, the writer itself (a self-loop) or one before it in the
+    window reading what it wrote the call before. Its edges are ordered by producer, then
+    consumer, each a stream where the dataflow analysis finds the lanes meet
+    as they are (an equal or broadcast hand-off, one object size at both
+    ends) and staged otherwise, or
+    where the analysis does not model the pair yet; whether the composer
+    builds it is ``fit``'s to say, not this. Each member names its step's shape
+    and nothing else (``Profile.dims`` of it, tunables None), so a region
+    edit composes with an edit of the same steps' tunables. Each region
+    follows at every other column count its members' domains share, every
+    member at it, whatever its call gave (a region's widths override those, as a
+    fusion's tunables do). Then each buffer's readers, as many as the array
+    has cores and independent of one another, as a region run at once where
+    a legal order gathers them and they are not consecutive already. Then
+    each fold IRON admits (``fold_candidates``),
+    its steps on one worker. Then each shape's tunables: a one-member region per setting
+    ``autotune.settings`` resolves (the recorded one first), touching every
+    step of that shape. Each entry is yielded once, from the first call that
+    admits it. First, for each region ``profile`` composes that a call's
+    recording runs, each edge held at each other place (``HoldEdge``) and at
+    each chosen depth, its analysis minimum times 2 to 2**DEPTH_DOUBLINGS
+    and its knee (``DepthEdge``): one edge an edit, so the search composes
+    several; the analysis's own kind and minimum are the region edit's. With
+    them, each other value of each field of its runtime plan (``PlanRegion``):
+    its awaits, its overlap, its chunks (powers of two up to
+    2**SCHEDULE_DOUBLINGS), its tasks in flight (one up to the target model's
+    task queue depth) and its chaining. Then, for each call's version, each
+    other value of each field of its schedule (``ScheduleVersion``): its calls a
+    command, calls overlapped (fewer than its calls a command), commands in
+    flight, calls merged into one (``"merged_<k>x"``), each other version
+    interleaved, and its packaging; ``fit`` refuses one that breaks a
+    dependence.
+
+    Before the schedules, after the configurations, each per-call value a
+    call takes and ``profile`` does not vary yet, split in two ranges at each
+    point of a grid inside its recorded range, each power of two, and three
+    times one where a point the call is timed at lies above twice that one
+    and within it (``AddVariants``): each range's
+    entry the first step whose design its capacity changes
+    (``Recording.at_capacity``), named by its ``Profile.dims``; a capacity
+    the graph does not record, or that changes no step, is passed over. Then
+    each two such values at once, each split at a power of two its own split
+    changed a design at: four ranges, each entry the first step any of their
+    capacities changes, as it is at its range's: only where the call's timed
+    points lie on both sides of each value's split (a split no point falls
+    below serves none), each capacity recorded once.
+
+    Last, the edits of what ``profile`` holds beyond its regions' edges and
+    plans (its entries' scopes, its configurations' teardown, widths and
+    concurrency, its regions' member widths and burst lengths) and of its
+    values' bindings, as ``_chosen`` lists them.
+
+    Before the schedules, after each call's tunables, its configurations,
+    each the designs it loads together (``Configuration``): designs that
+    share an array (IRON's ``array_key``) are one device, so each array's
+    shapes alone, then the designs of each window of consecutive steps a
+    region's window may be, two or more, a shape once and each region the
+    profile composes whole in it (at each match it runs in a row) one part.
+    Each is narrowed to co-reside (``narrowed``): as recorded where its
+    designs' cores fit the array, else at the widest width at which they
+    do, the narrowest where none does, for ``fit`` to refuse. They are
+    yielded most saving first, by what their switches save as the device's
+    cost model prices them (``CostModel``), every step of their designs
+    run in them.
+
+    Args:
+        calls: The graph's calls, every version.
+        profile: The profile the edits are of.
+        device: The device.
+
+    Raises:
+        NotImplementedError: After every edit it yields: the kinds of edit
+            it does not generate yet.
+    """
+    proposed: list[Entry] = []
+    holds: list[tuple[Entry, int, Hold]] = []
+    deepened: list[tuple[Entry, int, int]] = []
+    planned: list[tuple[Entry | Version, str, object]] = []
+    cores = device.cols * len(device.core_rows)
+    queue = get_target_model(device.resolve()).get_dma_task_queue_depth()
+    # Read once a region is analysed: it asks the NPU for its power mode.
+    ceiling: Ceiling | None = None
+    looked = False
+    for timed in calls:
+        recording = timed.recording
+        for entry in profile.entries():
+            root = entry.root
+            if not isinstance(root, Region):
+                continue
+            found = recording.occurrences(entry)
+            if not found:
+                continue
+            touches = frozenset(s for match in found for s in match)
+            for index in range(len(root.edges)):
+                for place in Hold:
+                    if (entry, index, place) in holds:
+                        continue
+                    if root.held(index, place) == root:
+                        continue
+                    holds.append((entry, index, place))
+                    yield HoldEdge(entry, index, place, touches)
+            plan = root.runtime or RuntimePlan()
+            for name, values in (
+                ("waits", ("barrier", "per_channel")),
+                ("overlap", ("none", "prefetch", "pipelined")),
+                ("chunks", [1 << k for k in range(SCHEDULE_DOUBLINGS + 1)]),
+                ("in_flight", range(1, queue + 1)),
+                ("chained", (False, True)),
+            ):
+                for value in values:
+                    if value == vars(plan)[name] or (entry, name, value) in planned:
+                        continue
+                    planned.append((entry, name, value))
+                    yield PlanRegion(entry, name, value, touches)
+            if not looked:
+                ceiling, looked = Ceiling.stored(device.name), True
+            try:
+                analysis = Derivation(
+                    root,
+                    recording,
+                    device,
+                    timed.values,
+                    None if ceiling is None else ceiling.mixed,
+                ).analysis()
+            except (NotImplementedError, ValueError):
+                continue  # depths wait on the analysis modelling the region
+            for index, edge in enumerate(root.edges):
+                least = analysis.min_depth.get(edge)
+                if least is None:
+                    continue
+                depths = [least << k for k in range(1, DEPTH_DOUBLINGS + 1)]
+                try:
+                    depths.append(analysis.knee_depth[edge])
+                except (NotImplementedError, KeyError):
+                    pass  # no knee yet: the doublings alone
+                for depth in sorted(set(depths)):
+                    if depth == edge.depth or (entry, index, depth) in deepened:
+                        continue
+                    deepened.append((entry, index, depth))
+                    yield DepthEdge(entry, index, depth, touches)
+        steps = recording.steps
+        _, writers = recording.users()
+        held = recording.held
+        members = [
+            Member(type(step.op), Profile.dims(type(step.op), vars(step.op)))
+            for step in steps
+        ]
+        kinds: dict[tuple[int, str, int, str], EdgeKind | None] = {}
+        columns = []
+        recorded = []
+        for step in steps:
+            # A region's widths override what a call gave, as a fusion's
+            # tunables do, so the domain is the unpinned one.
+            with set_current_device(device):
+                unpinned = step.op.replace(pinned=frozenset()).resolved(device)
+                domains = unpinned._domains(device)
+                recorded.append(vars(step.op.resolved(device)).get("num_aie_columns"))
+            columns.append(set(domains.get("num_aie_columns", ())))
+        for lo in range(len(steps)):
+            for hi in range(lo + 1, min(lo + cores, len(steps))):
+                if recording.crosses_host(lo, hi):
+                    break
+                edges: list[Edge] = []
+                for c in range(lo, hi + 1):
+                    for sink, read in zip(steps[c].op.buffers, steps[c].refs()):
+                        made = writers.get(read.root, [])
+                        if not sink.fills or not sink.streamed or len(made) != 1:
+                            continue
+                        p = made[0]
+                        # State a step of the window writes is carried: read
+                        # from its writer earlier this call, or (the writer
+                        # itself or later) from the call before.
+                        if not (
+                            lo <= p < c if read.root not in held else lo <= p <= hi
+                        ):
+                            continue
+                        for source, wrote in zip(steps[p].op.buffers, steps[p].refs()):
+                            if not (
+                                source.drains
+                                and source.streamed
+                                and wrote.root == read.root
+                                and wrote.nbytes is None
+                            ):
+                                continue
+                            pair = (p, source.name, c, sink.name)
+                            if pair not in kinds:
+                                loop = p == c
+                                edge = Edge(0, source.name, int(not loop), sink.name)
+                                try:
+                                    pair_of = Derivation(
+                                        Region(
+                                            (
+                                                (members[p],)
+                                                if loop
+                                                else (members[p], members[c])
+                                            ),
+                                            (edge,),
+                                        ),
+                                        recording,
+                                        device,
+                                        timed.values,
+                                    )
+                                    shape = pair_of.analysis().hand_off[edge]
+                                except NotImplementedError:
+                                    kinds[pair] = EdgeKind.STAGED
+                                except ValueError:
+                                    kinds[pair] = None
+                                else:
+                                    sizes = (
+                                        pair_of.obj_elements[0].get(source.name),
+                                        pair_of.obj_elements[int(not loop)].get(
+                                            sink.name
+                                        ),
+                                    )
+                                    kinds[pair] = (
+                                        EdgeKind.STREAM
+                                        if shape in (HandOff.EQUAL, HandOff.BROADCAST)
+                                        and sizes[0] == sizes[1]
+                                        else EdgeKind.STAGED
+                                    )
+                            if kinds[pair] is not None:
+                                edges.append(
+                                    Edge(
+                                        p - lo,
+                                        source.name,
+                                        c - lo,
+                                        sink.name,
+                                        kind=kinds[pair],
+                                    )
+                                )
+                entry = Entry(
+                    Region(
+                        tuple(members[lo : hi + 1]),
+                        tuple(
+                            sorted(
+                                edges,
+                                key=lambda e: (
+                                    e.producer,
+                                    e.consumer,
+                                    e.output,
+                                    e.input,
+                                ),
+                            )
+                        ),
+                    )
+                )
+                # The steps the window's edges join to both its ends, the
+                # others between moved out of the way where an order keeps
+                # every dependence.
+                joined = {0}
+                for _ in range(hi - lo):
+                    joined |= {
+                        end
+                        for e in entry.root.edges
+                        if {e.producer, e.consumer} & joined
+                        for end in (e.producer, e.consumer)
+                    }
+                if hi - lo in joined and len(joined) <= hi - lo:
+                    gathered = sorted(lo + i for i in joined)
+                    if recording.gatherable(gathered):
+                        at = {lo + i: k for k, i in enumerate(sorted(joined))}
+                        part = Entry(
+                            Region(
+                                tuple(members[s] for s in gathered),
+                                tuple(
+                                    dataclasses.replace(
+                                        e,
+                                        producer=at[lo + e.producer],
+                                        consumer=at[lo + e.consumer],
+                                    )
+                                    for e in entry.root.edges
+                                    if e.producer in joined
+                                ),
+                            )
+                        )
+                        if part not in proposed:
+                            proposed.append(part)
+                            yield AddEntry(part, frozenset(gathered))
+                if entry in proposed:
+                    continue
+                proposed.append(entry)
+                touches = frozenset(range(lo, hi + 1))
+                yield AddEntry(entry, touches)
+                for width in sorted(set.intersection(*columns[lo : hi + 1])):
+                    if all(w == width for w in recorded[lo : hi + 1]):
+                        continue  # the region as recorded, built once already
+                    widened = Entry(
+                        Region(
+                            tuple(
+                                dataclasses.replace(
+                                    m, tunables={"num_aie_columns": width}
+                                )
+                                for m in members[lo : hi + 1]
+                            ),
+                            entry.root.edges,
+                        )
+                    )
+                    if widened not in proposed:
+                        proposed.append(widened)
+                        yield AddEntry(widened, touches)
+        # Each buffer's readers independent of one another, run at once.
+        readers, _ = recording.users()
+        dependences = recording.dependences()
+        for reading in readers.values():
+            together: list[int] = []
+            for s in dict.fromkeys(r for r in reading if r >= 0):
+                if len(together) < cores and all(
+                    (t, s) not in dependences for t in together
+                ):
+                    together.append(s)
+            if (
+                len(together) < 2
+                or together == list(range(together[0], together[-1] + 1))
+                or not recording.gatherable(together)
+            ):
+                continue
+            entry = Entry(Region(tuple(members[s] for s in together)))
+            if entry not in proposed:
+                proposed.append(entry)
+                yield AddEntry(entry, frozenset(together))
+        with set_current_device(device):
+            folds = fold_candidates(recording)
+        for fold in folds:
+            lo = fold.steps[0]
+            entry = Entry(
+                Region(
+                    tuple(members[s] for s in fold.steps),
+                    tuple(
+                        Edge(e.producer - lo, e.output, e.consumer - lo, e.input)
+                        for e in fold.edges
+                    ),
+                    workers=(tuple(range(len(fold.steps))),),
+                )
+            )
+            if entry not in proposed:
+                proposed.append(entry)
+                yield AddEntry(entry, frozenset(fold.steps))
+        shapes: dict[int, list[int]] = {}
+        for i, m in enumerate(members):
+            first = next(k for k in range(i + 1) if members[k] == m)
+            shapes.setdefault(first, []).append(i)
+        for first, at in shapes.items():
+            with set_current_device(device):
+                found = settings(steps[first].op, device)
+            recorded = steps[first].op
+            for setting in found:
+                entry = Entry(
+                    Region((dataclasses.replace(members[first], tunables=setting),))
+                )
+                if entry not in proposed:
+                    proposed.append(entry)
+                    moved = [n for n, v in setting.items() if vars(recorded)[n] != v]
+                    yield AddEntry(
+                        entry,
+                        frozenset(at),
+                        (
+                            Refinement.NO_WORSE
+                            if any(
+                                refinement(type(recorded), n) is Refinement.NO_WORSE
+                                for n in moved
+                            )
+                            else Refinement.EXACT
+                        ),
+                    )
+        piece_of: dict[int, tuple[Region, tuple[int, ...]]] = {}
+        design_of: dict[int, tuple] = {}
+        for k, entry in enumerate(profile.entries()):
+            root = entry.root
+            if not isinstance(root, Region):
+                continue
+            for match in recording.occurrences(entry):
+                if match == tuple(
+                    range(match[0], match[0] + len(match))
+                ) and not piece_of.keys() & set(match):
+                    piece_of.update({s: (root, match) for s in match})
+                    design_of.update({s: ("region", k) for s in match})
+        with set_current_device(device):
+            resolved = [step.op.resolved(device) for step in steps]
+            for s, op in enumerate(resolved):
+                design_of.setdefault(s, ("array", op.array_key()))
+            placed: dict[tuple, int] = {}
+            for op in resolved:
+                if op.array_key() not in placed:
+                    placed[op.array_key()] = design_cores(op)
+            cores_of: dict[tuple, int] = {}
+            for s, design in design_of.items():
+                if design[0] == "region" or design not in cores_of:
+                    cores_of[design] = (
+                        cores_of.get(design, 0) + placed[resolved[s].array_key()]
+                    )
+        # By the designs it loads together: its parts, and the step each of
+        # their steps is.
+        memberships: dict[frozenset, tuple[tuple[Region | Member, ...], list[int]]] = {}
+        for s, design in design_of.items():
+            if design[0] == "array" and frozenset([design]) not in memberships:
+                at = []
+                for t in range(len(steps)):
+                    if design_of[t] == design and all(
+                        members[t] != members[u] for u in at
+                    ):
+                        at.append(t)
+                memberships[frozenset([design])] = (
+                    tuple(members[t] for t in at),
+                    at,
+                )
+        for lo in range(len(steps)):
+            for hi in range(lo + 1, min(lo + cores, len(steps))):
+                if recording.crosses_host(lo, hi):
+                    break
+                if lo in piece_of and piece_of[lo][1][0] < lo:
+                    break  # it cuts a region the profile composes
+                if hi in piece_of and piece_of[hi][1][-1] > hi:
+                    continue
+                parts: list[Region | Member] = []
+                at = []
+                s = lo
+                while s <= hi:
+                    if s in piece_of:
+                        root, match = piece_of[s]
+                        parts.append(root)
+                        at += match
+                        s = match[-1] + 1
+                        continue
+                    if members[s] not in parts:
+                        parts.append(members[s])
+                        at.append(s)
+                    s += 1
+                designs = frozenset(design_of[t] for t in at)
+                if len(designs) > 1:
+                    memberships.setdefault(designs, (tuple(parts), at))
+        model = CostModel.load(device.name)
+        if model is None:
+            model = CostModel()
+        offers: list[tuple[float, Configuration, frozenset[int]]] = []
+        for designs, (parts, at) in memberships.items():
+            configuration = Configuration(parts)
+            width = (
+                max(vars(resolved[s]).get("num_aie_columns") or 0 for s in at)
+                if len(designs) > 1
+                else 0
+            )
+            while True:
+                together: dict[tuple, int] = {}
+                with set_current_device(device):
+                    for s, m in zip(at, configuration.steps()):
+                        op = (
+                            steps[s].op._with_tunables(**m.tunables).resolved(device)
+                            if m.tunables
+                            else resolved[s]
+                        )
+                        if op.array_key() not in placed:
+                            placed[op.array_key()] = design_cores(op)
+                        together[design_of[s]] = placed[op.array_key()] + (
+                            together.get(design_of[s], 0)
+                            if design_of[s][0] == "region"
+                            else 0
+                        )
+                if sum(together.values()) <= cores or width <= 1:
+                    break
+                width -= 1
+                try:
+                    with set_current_device(device):
+                        narrow = narrowed(
+                            Configuration(parts, columns=width), tuple(at), recording
+                        )
+                except NotImplementedError:
+                    break  # a step declares no column count
+                configuration = dataclasses.replace(narrow, columns=None)
+            predicted = []
+            for merged in (frozenset(), designs):
+                group = {d: merged if d in merged else d for d in cores_of}
+                order = [group[design_of[s]] for s in range(len(steps))]
+                into = [b for a, b in zip([None, *order], order) if a != b]
+                predicted.append(
+                    model.predict(
+                        {
+                            "switches": len(into),
+                            "switch_cores": sum(
+                                sum(together.values()) if g == merged else cores_of[g]
+                                for g in into
+                            ),
+                            "packed_steps": sum(
+                                group[design_of[s]] == merged
+                                for s in range(len(steps))
+                                if len(merged) > 1
+                            ),
+                        }
+                    )
+                )
+            touches = frozenset(s for s in range(len(steps)) if design_of[s] in designs)
+            offers.append((predicted[0] - predicted[1], configuration, touches))
+        for _, configuration, touches in sorted(offers, key=lambda o: -o[0]):
+            entry = Entry(configuration)
+            if entry not in proposed:
+                proposed.append(entry)
+                yield AddEntry(entry, touches)
+    varied = {n for v in profile.variants() for n in v.values}
+    split: set[tuple[Version, tuple[str, ...], tuple[int, ...]]] = set()
+    proposed_splits = 0
+    for timed in calls:
+        recording = timed.recording
+        # Each value's span, and the powers of two a split changed a design at.
+        spans: dict[str, tuple[int, int]] = {}
+        points: dict[str, list[int]] = {}
+        # The call re-recorded at each capacity, by the values bounded below
+        # their tops: each capacity recorded once.
+        sized_at: dict[tuple[tuple[str, int], ...], Recording] = {(): recording}
+        for value in recording.values:
+            span = recording.value_range(value.name)
+            if value.name in varied or span is None:
+                continue
+            lo, top = span
+            spans[value.name] = span
+            # Three times a power of two where a point lies above the next
+            # power of two and within it, its design a quarter smaller there.
+            at = [v[value.name] for _, v in timed.timed_points() if value.name in v]
+            grid = sorted(
+                {1 << k for k in range(top.bit_length())}
+                | {
+                    3 << k
+                    for k in range(top.bit_length())
+                    if any(2 << k < v <= 3 << k for v in at)
+                }
+            )
+            for b in grid:
+                key = (recording.version, (value.name,), (b,))
+                if not lo <= b < top or key in split:
+                    continue
+                split.add(key)
+                try:
+                    with set_current_device(device):
+                        small = recording.at_capacity({value.name: b})
+                except (NotImplementedError, NotLegalAtCapacity):
+                    continue
+                sized_at[((value.name, b),)] = small
+                changed = [
+                    i
+                    for i, (a, c) in enumerate(
+                        zip(recording.steps, small.steps, strict=True)
+                    )
+                    if a.op.design_key() != c.op.design_key()
+                ]
+                if not changed:
+                    continue
+                if b & (b - 1) == 0:
+                    points.setdefault(value.name, []).append(b)
+                ops = [r.steps[changed[0]].op for r in (small, recording)]
+                ranges = tuple(
+                    (
+                        ((low, high),),
+                        Entry(Member(type(op), Profile.dims(type(op), vars(op)))),
+                    )
+                    for (low, high), op in zip(
+                        ((lo, b), (b + 1, top)), ops, strict=True
+                    )
+                )
+                proposed_splits += 1
+                yield AddVariants(
+                    Variants(values=(value.name,), ranges=ranges), frozenset(changed)
+                )
+        # Two values at once, where the call's timed points vary both: each
+        # split at a power of two its own split changed a design at with
+        # timed points on both sides, so each side serves some. Four boxes,
+        # each its capacity's design; a box at a value's top is that value's
+        # split alone (or the call itself), recorded once.
+        timed_at = timed.timed_points()
+        served = {
+            name: [
+                b
+                for b in at
+                if any(v.get(name, spans[name][1]) <= b for _, v in timed_at)
+                and any(v.get(name, spans[name][1]) > b for _, v in timed_at)
+            ]
+            for name, at in points.items()
+        }
+        for (first, (lo_a, top_a)), (second, (lo_b, top_b)) in itertools.combinations(
+            [(n, spans[n]) for n in served if served[n]], 2
+        ):
+            for at_a, at_b in itertools.product(served[first], served[second]):
+                key = (recording.version, (first, second), (at_a, at_b))
+                if key in split:
+                    continue
+                split.add(key)
+                boxes = [
+                    (box_a, box_b)
+                    for box_a in ((lo_a, at_a), (at_a + 1, top_a))
+                    for box_b in ((lo_b, at_b), (at_b + 1, top_b))
+                ]
+                sized = []
+                try:
+                    for box_a, box_b in boxes:
+                        bounds = tuple(
+                            (name, hi)
+                            for name, hi, top in (
+                                (first, box_a[1], top_a),
+                                (second, box_b[1], top_b),
+                            )
+                            if hi < top
+                        )
+                        if bounds not in sized_at:
+                            with set_current_device(device):
+                                sized_at[bounds] = recording.at_capacity(dict(bounds))
+                        sized.append(sized_at[bounds])
+                except (NotImplementedError, NotLegalAtCapacity):
+                    continue
+                changed = sorted(
+                    {
+                        i
+                        for r in sized
+                        for i, (a, c) in enumerate(
+                            zip(recording.steps, r.steps, strict=True)
+                        )
+                        if a.op.design_key() != c.op.design_key()
+                    }
+                )
+                if not changed:
+                    continue
+                ops = [r.steps[changed[0]].op for r in sized]
+                ranges = tuple(
+                    (box, Entry(Member(type(op), Profile.dims(type(op), vars(op)))))
+                    for box, op in zip(boxes, ops, strict=True)
+                )
+                proposed_splits += 1
+                yield AddVariants(
+                    Variants(values=(first, second), ranges=ranges),
+                    frozenset(changed),
+                )
+    logger.info("candidates: %d splits of a per-call value", proposed_splits)
+    versions = [t.recording.version for t in calls]
+    for timed in calls:
+        version = timed.recording.version
+        held = [s for s in profile.schedules() if s.version == version]
+        schedule = held[0] if held else Schedule(version)
+        doublings = [1 << k for k in range(SCHEDULE_DOUBLINGS + 1)]
+        for name, values in (
+            ("calls_per_command", doublings),
+            ("calls_overlapped", range(schedule.calls_per_command)),
+            ("commands_in_flight", doublings),
+            ("size", [None, *(f"merged_{k}x" for k in doublings[1:])]),
+            (
+                "interleave_with",
+                [(), *((v,) for v in dict.fromkeys(versions) if v != version)],
+            ),
+            (
+                "packaging",
+                [
+                    None,
+                    "xclbin",
+                    *(["full_elf"] if device.can_dispatch_full_elf else []),
+                ],
+            ),
+        ):
+            for value in values:
+                if value == vars(schedule)[name] or (version, name, value) in planned:
+                    continue
+                planned.append((version, name, value))
+                yield ScheduleVersion(
+                    version, name, value, frozenset(range(len(timed.recording.steps)))
+                )
+    yield from _chosen(calls, profile, device)
+    raise NotImplementedError(
+        "candidates does not generate yet: " + ", ".join(_NOT_GENERATED)
+    )
+
+
+def _chosen(calls: Sequence[Timed], profile: Profile, device: Device) -> Iterator[Edit]:
+    """Yield the edits of what ``profile`` holds beyond its regions' edges and plans, and of its choices beside its entries, as ``candidates`` orders them last.
+
+    For each entry a call's recording runs: its root at each other scope
+    (``AddEntry`` in its place): every run, the call's version, the first
+    and the last of several runs (a region or configuration of several
+    steps: a shape's tunables apply to every run), and the attached part
+    (``attached_part``). A configuration's each other teardown and partial
+    width (a power of two below the device's columns, or none)
+    (``ConfigureEntries``); and with each later configuration
+    independent of it, running at once under an id neither uses. A region
+    of several steps, each member at each other column count its domain
+    holds, the others as they are, each stream edge of it staged where the
+    lanes no longer meet as they are (``AddEntry`` in its place), but where
+    the dataflow analysis prices both at a call, one it says runs no faster
+    there (a tie too: timed alone, it never gains). Its runtime
+    plan's each burst length the target model lists, where it fuses several
+    steps (its longest too, which names what None leaves to mlir-aie)
+    (``PlanRegion``).
+
+    Beside the entries, each per-call value bound each other way it builds
+    (``BindValue``): at run time, and per range where the profile's
+    variants range over it.
+    """
+    model = get_target_model(device.resolve())
+    part = attached_part()
+    # Read once a region is priced: it asks the NPU for its power mode.
+    ceiling: Ceiling | None = None
+    looked = False
+    held_bindings = {b.value: b for b in profile.bindings()}
+    entries = profile.entries()
+    offered: list[tuple] = []
+    for timed in calls:
+        recording = timed.recording
+        steps = recording.steps
+        readers, writers = recording.users()
+        after = [
+            {
+                r
+                for root, ws in writers.items()
+                if s in ws
+                for r in readers.get(root, [])
+                if r > s
+            }
+            for s in range(len(steps))
+        ]
+        found_at = {k: recording.occurrences(entry) for k, entry in enumerate(entries)}
+        for k, entry in enumerate(entries):
+            found = found_at[k]
+            if not found:
+                continue
+            root = entry.root
+            touches = frozenset(s for match in found for s in match)
+            runs = recording.occurrences(dataclasses.replace(entry, scope=Scope()))
+            scopes = [Scope(), Scope(versions=frozenset({recording.version}))]
+            if len(runs) > 1 and len(root.steps()) > 1:
+                scopes += [Scope(occurrences=(0,)), Scope(occurrences=(len(runs) - 1,))]
+            if part is not None:
+                scopes.append(Scope(device_part=part))
+            for scope in scopes:
+                if scope == entry.scope or ("scope", entry, scope) in offered:
+                    continue
+                offered.append(("scope", entry, scope))
+                yield AddEntry(Entry(root, scope), touches, replaces=entry)
+            if isinstance(root, Configuration):
+                for name, values in (
+                    ("teardown", (None, True, False)),
+                    (
+                        "columns",
+                        (
+                            None,
+                            *(
+                                1 << j
+                                for j in range(device.cols.bit_length())
+                                if 1 << j < device.cols
+                            ),
+                        ),
+                    ),
+                ):
+                    held = vars(root)[name]
+                    for value in values:
+                        if value == held or (entry, name, value) in offered:
+                            continue
+                        offered.append((entry, name, value))
+                        yield ConfigureEntries((entry,), name, value, touches)
+                if root.concurrent is None:
+                    ids = [
+                        e.root.concurrent
+                        for e in entries
+                        if isinstance(e.root, Configuration)
+                        and e.root.concurrent is not None
+                    ]
+                    for j in range(k + 1, len(entries)):
+                        other = entries[j]
+                        if (
+                            not isinstance(other.root, Configuration)
+                            or other.root.concurrent is not None
+                            or not found_at[j]
+                            or ("concurrent", entry, other) in offered
+                            or _independent(
+                                [found[0], found_at[j][0]], after, recording, "they"
+                            )
+                            is not None
+                        ):
+                            continue
+                        offered.append(("concurrent", entry, other))
+                        yield ConfigureEntries(
+                            (entry, other),
+                            "concurrent",
+                            max(ids, default=0) + 1,
+                            touches | {s for match in found_at[j] for s in match},
+                        )
+            if not isinstance(root, Region):
+                continue
+            match = found[0]
+            given = root.step_tunables()
+            members = [p for p in root.parts if isinstance(p, Member)]
+            if len(members) == len(root.parts) > 1:
+                if not looked:
+                    ceiling, looked = Ceiling.stored(device.name), True
+                mixed = None if ceiling is None else ceiling.mixed
+                # Where the analysis prices the region, a width it says runs
+                # no faster never pays alone.
+                try:
+                    held = Derivation(
+                        root, recording, device, timed.values, mixed
+                    ).analysis()
+                    period: Fraction | None = held.period
+                except (NotImplementedError, ValueError):
+                    period = None
+                for i in range(len(members)):
+                    op = steps[match[i]].op
+                    with set_current_device(device):
+                        unpinned = op.replace(pinned=frozenset()).resolved(device)
+                        domain = set(
+                            unpinned._domains(device).get("num_aie_columns", ())
+                        )
+                        recorded = vars(op.resolved(device)).get("num_aie_columns")
+                    current = given[i].get("num_aie_columns", recorded)
+                    for width in sorted(domain - {current}):
+                        parts = tuple(
+                            (
+                                dataclasses.replace(
+                                    p,
+                                    tunables={
+                                        **(p.tunables or {}),
+                                        "num_aie_columns": width,
+                                    },
+                                )
+                                if j == i
+                                else p
+                            )
+                            for j, p in enumerate(members)
+                        )
+                        edges: list[Edge] = []
+                        for e in root.edges:
+                            kind: EdgeKind | None = e.kind
+                            if (
+                                e.kind is EdgeKind.STREAM
+                                and i in (e.producer, e.consumer)
+                                and not e.across_calls
+                            ):
+                                loop = e.producer == e.consumer
+                                pair = Edge(0, e.output, int(not loop), e.input)
+                                try:
+                                    pair_of = Derivation(
+                                        Region(
+                                            (
+                                                (parts[e.producer],)
+                                                if loop
+                                                else (
+                                                    parts[e.producer],
+                                                    parts[e.consumer],
+                                                )
+                                            ),
+                                            (pair,),
+                                        ),
+                                        recording,
+                                        device,
+                                        timed.values,
+                                    )
+                                    shape = pair_of.analysis().hand_off[pair]
+                                except NotImplementedError:
+                                    kind = EdgeKind.STAGED
+                                except ValueError:
+                                    kind = None
+                                else:
+                                    if shape not in (
+                                        HandOff.EQUAL,
+                                        HandOff.BROADCAST,
+                                    ) or pair_of.obj_elements[0].get(
+                                        e.output
+                                    ) != pair_of.obj_elements[
+                                        int(not loop)
+                                    ].get(
+                                        e.input
+                                    ):
+                                        kind = EdgeKind.STAGED
+                            if kind is None:
+                                break  # the pair does not balance at this width
+                            edges.append(dataclasses.replace(e, kind=kind))
+                        else:
+                            revised = Entry(
+                                dataclasses.replace(
+                                    root, parts=parts, edges=tuple(edges)
+                                ),
+                                entry.scope,
+                            )
+                            if ("width", revised) in offered:
+                                continue
+                            if period is not None:
+                                try:
+                                    faster = (
+                                        Derivation(
+                                            revised.root,
+                                            recording,
+                                            device,
+                                            timed.values,
+                                            mixed,
+                                        )
+                                        .analysis()
+                                        .period
+                                        < period
+                                    )
+                                except NotImplementedError:
+                                    faster = True  # not priced: the search times it
+                                except ValueError:
+                                    continue  # it cannot run at any depth
+                                # A tie runs no faster alone, which is how the
+                                # search times it: it would never keep one.
+                                if not faster:
+                                    continue
+                            offered.append(("width", revised))
+                            yield AddEntry(revised, touches, replaces=entry)
+            plan = root.runtime or RuntimePlan()
+            for value in model.get_shim_burst_lengths() if len(match) > 1 else ():
+                if value == plan.burst or (entry, "burst", value) in offered:
+                    continue
+                offered.append((entry, "burst", value))
+                yield PlanRegion(entry, "burst", value, touches)
+        for value in recording.values:
+            name = value.name
+            held = held_bindings.get(name)
+            hows: list[Literal["runtime", "per_range"]] = ["runtime"]
+            if any(name in v.values for v in profile.variants()):
+                hows.append("per_range")
+            for how in hows:
+                current = "runtime" if held is None else held.how
+                if how == current or ("binding", name, how) in offered:
+                    continue
+                offered.append(("binding", name, how))
+                yield BindValue(Binding(name, how), frozenset(range(len(steps))))
+
+
+def fit(
+    profile: Profile,
+    calls: Sequence[Timed],
+    device: Device,
+    placements: Sequence[str] = PLACEMENTS,
+    max_images: int | None = None,
+) -> Fit:
+    """Decide whether ``profile``'s compositions fit ``device``, before any build.
+
+    Each call's steps are first tuned as the profile's tunable entries name;
+    a setting its operator cannot resolve or validate is refused by the
+    counts, as is a region member's, and one that resolves is placed alone.
+    The rest holds the version the call's schedule builds
+    (``Recording.scheduled``): several calls a command, or calls merged into
+    one, composed and placed as built.
+    A region whose steps share one worker is IRON's fold of them
+    (``composed_folds``), placed as the one operator it folds into. Each other
+    region entry, at its first match in each call's recording, then passes
+    three stages in turn. The counts are
+    lower bounds from the target model, so they never refuse what fits: the
+    cores its steps record (steps sharing a worker counted once, at the most
+    any of them takes), each edge held at a chosen depth against one
+    tile's memory, and through a memtile against its buffer descriptors, each
+    core's fifo ends moved by DMA against its buffer descriptors, an object
+    each (``_bds_past``), each staged edge's rounds as ``Staging`` plans them
+    against a memtile's memory, and its cascades: each from one core to another, at most one into and one
+    out of a core, and a chain no longer than a path east and south across
+    the array. The
+    dataflow analysis then finds whether the region's steps are convex (no
+    step outside it on a path between two of them), whether it balances, whether each
+    stream or cascade edge's lanes meet as they are, and
+    whether it runs at its chosen
+    depths, the rest at their minimum. A stream between steps on one worker
+    may restage its lanes in L1, held to each core's channels, memory,
+    buffer descriptors and locks (``_restaged_on_cores``). The placer last places the composed
+    module, where the composer builds the region as IRON's fusions do: under
+    each of ``placements`` the build takes in turn (``BUILT_PLACERS``), the
+    sequential placer, then the annealing one where it refuses.
+
+    Before any call, a runtime plan's burst length must be one the target
+    model lists for a shim DMA (counts). Each state layout
+    (``StateLayout``): one whose tile does
+    not divide the axis it cuts is refused by the counts, and one laying its
+    buffer out other than as recorded waits. Then each entry's own choices:
+    a configuration resident into
+    the next across its own teardown, or wider than the array; a runtime
+    plan keeping more tasks in flight than a channel's queue holds, or
+    chaining more chunks than a shim tile has buffer descriptors; chosen
+    phases that put a consumer before its producer, or a stream across a
+    phase boundary. A configuration at its first match (``_configuration_fit``)
+    has parts run at once independent, its cores counted, what it keeps on
+    chip read or written by its steps and within its columns' memtiles, and
+    its steps placed
+    as one device configuration; configurations concurrent under one id must
+    be independent of each other, their chosen columns disjoint, and are
+    placed as one pack. A plan's per-channel awaits must not reuse a channel
+    the host fills in more tasks than it keeps in flight: a fill reports
+    done before its data leaves the shim. A version's schedule must not run a part before one it reads, nor
+    overlap or merge calls where a step writes a buffer that outlasts the
+    call, and on an xclbin per step it takes no phased region and no
+    teardown; its calls a command (``Recording.repeated``) must write no
+    more scratchpad words than a command holds, nor, where the driver's
+    watchdog is readable and every step has a cached standalone time
+    (``measure.Cache``), outrun the watchdog over ``WATCHDOG_HEADROOM`` as
+    the tuner's preflight holds a command; where either is unknown, as
+    there, nothing is refused and the log says which. A pack (a region of
+    no edges) on an xclbin per step reads no per-call value at run time: a
+    dispatch parameter, which a pack's one sequence does not carry.
+
+    Each call's weights an operator reads coded by declaration (``Decode``),
+    with no flag to read them plain, must each code within its rows'
+    capacity: the counts refuse the first row that does not. A step that
+    reads its weight coded (under its coded flag, or fed on chip by a step
+    reading coded by declaration) must share its array (``array_key`` as
+    recorded) with no step reading plain: coding is part of the array, so
+    coding part of a shared array splits it, and a packing that fit runs
+    out of cores. A split proposed with it would be taken, but a split is
+    not representable yet, so the counts refuse every such profile.
+
+    Its values' own choices, before any entry: no more values bound at run
+    time than a call's scratchpad holds (``SCRATCHPAD_WORDS``, a word
+    each); each set of variants' ranges tiling what a call may take of its
+    values (``Recording.value_range``, an extent's 0 included: a call
+    bounded at 0 runs), as boxes inside it, none
+    overlapping, holding all of it; a value bound at compile time served
+    by one design a value; a value bound per range ranged over by a set of
+    variants, whose designs it selects; and no more images held at once than
+    ``max_images``, a version holding a design per range of each set of
+    variants over its values. Then each range's design at its capacity:
+    the call re-recorded from its graph where each value takes at most its
+    range's top (``Recording.selected``), which the range's entry must
+    match, fitted under that entry and the rest of the profile as its build
+    applies it (its compositions named at that capacity, each its capacity
+    matches; another version's schedules and values' bindings left to that
+    version), at its range's values alone; a design not legal there
+    (``NotLegalAtCapacity``) is refused by the counts, or as its own fit
+    refuses it.
+
+    An entry scoped to some runs of its shape that sets a shape's tunables
+    (one step's region) is refused by the analysis: a shape's tunables apply
+    to every run of it. An entry scoped to a device part is fitted as any
+    other: the part decides only where a build applies it
+    (``Profile.for_part``).
+
+    A refusal from any stage of any entry wins over what is not fitted yet;
+    only where nothing refuses is the first of those raised.
+
+    Args:
+        profile: The profile whose compositions are fitted.
+        calls: The graph's calls, every version.
+        device: The device.
+        placements: The placer's settings a fit may try.
+        max_images: The images the host may hold loaded at once; None for no limit.
+
+    Raises:
+        ValueError: An entry matches none of the calls' steps, a schedule
+            none of their versions, a schedule orders a part its entries do
+            not name, a region names other than a phase per edge, a
+            binding or a set of variants names a value no call gives, a
+            state layout a buffer no call holds as state, or the calls hold
+            one state at two shapes.
+        NotImplementedError: What is not fitted yet, where nothing refuses:
+            a state laid out other than as recorded,
+            a schedule's choices past its packaging, a range's design at a
+            capacity ``Recording.selected`` does not record, a value bound
+            at compile time, fusion or packing entries, a configuration
+            the composer does not build, an entry rooted at a step, splitting a step by
+            fission, a placer setting the build does not take
+            (``BUILT_PLACERS``), a region the composer does not build, and
+            what the analysis does not model (``Derivation``).
+    """
+    waiting = [
+        f"fitting {kind} is not built yet"
+        for kind, kept in (
+            (
+                "a value bound at compile time",
+                any(b.how == "compile" for b in profile.bindings()),
+            ),
+            ("fusion entries", profile.fusions()),
+            ("packing entries", profile.packings()),
+        )
+        if kept
+    ]
+    runtime = [b.value for b in profile.bindings() if b.how == "runtime"]
+    if len(runtime) > SCRATCHPAD_WORDS:
+        return Fit(
+            False,
+            "counts",
+            f"{len(runtime)} values are bound at run time, a scratchpad word each; "
+            f"a call's scratchpad holds {SCRATCHPAD_WORDS}",
+        )
+    given = {v.name for timed in calls for v in timed.recording.values}
+    for name in [b.value for b in profile.bindings()] + [
+        n for variants in profile.variants() for n in variants.values
+    ]:
+        if name not in given:
+            raise ValueError(
+                f"the profile binds or varies {name!r}, which no call gives"
+            )
+    states: dict[str, tuple[int, ...]] = {}
+    for timed in calls:
+        for _, h in timed.recording.states.values():
+            if states.setdefault(h.name, h.shape) != h.shape:
+                raise ValueError(
+                    f"the calls hold state {h.name!r} as {states[h.name]} and "
+                    f"{h.shape}; one buffer has one shape in every version"
+                )
+    for layout in profile.state_layouts():
+        if layout.buffer not in states:
+            raise ValueError(
+                f"the profile lays out {layout.buffer!r}, which no call holds as state"
+            )
+        try:
+            kept = layout.kept(states[layout.buffer])
+        except ValueError as e:
+            return Fit(False, "counts", str(e))
+        if not kept:
+            waiting.append(
+                f"building {layout} is not built yet: a state laid out other than "
+                f"as recorded is read and written through strided views, which "
+                f"only a copy takes"
+            )
+    images = 0
+    versions: set[Version] = set()
+    ranged: list[tuple[Timed, Variants]] = []
+    # The knee's rates, read once a region is analysed (``candidates``).
+    ceiling: Ceiling | None = None
+    looked = False
+    for timed in calls:
+        recording = timed.recording
+        if recording.version in versions:
+            continue
+        versions.add(recording.version)
+        names = {v.name for v in recording.values}
+        admitted = {n: recording.value_range(n) for n in names}
+        designs = 1
+        spans: dict[str, list[tuple[int, int]]] = {}
+        twice = [
+            n
+            for n, k in Counter(
+                n for variants in profile.variants() for n in variants.values
+            ).items()
+            if k > 1 and n in names
+        ]
+        if twice:
+            return Fit(
+                False,
+                "counts",
+                f"{recording.name}: {twice[0]} is varied by two sets of variants; "
+                f"one set holds every range of a value",
+            )
+        for variants in profile.variants():
+            if not set(variants.values) <= names:
+                continue
+            spaces = [admitted[name] for name in variants.values]
+            unbounded = [n for n, s in zip(variants.values, spaces) if s is None]
+            if unbounded:
+                return Fit(
+                    False,
+                    "counts",
+                    f"{recording.name} bounds {unbounded[0]} by no limit, so no "
+                    f"ranges tile it",
+                )
+            boxes = [box for box, _ in variants.ranges]
+            why = _untiled(boxes, [s for s in spaces if s is not None])
+            if why is not None:
+                return Fit(
+                    False,
+                    "counts",
+                    f"the ranges over {', '.join(variants.values)} in "
+                    f"{recording.name} do not tile what a call may take: {why}",
+                )
+            designs += len(variants.ranges) - 1
+            ranged.append((timed, variants))
+            for k, name in enumerate(variants.values):
+                spans.setdefault(name, []).extend(box[k] for box in boxes)
+        images += designs
+        for binding in profile.bindings():
+            if binding.how == "per_range" and binding.value in names:
+                if binding.value not in spans:
+                    return Fit(
+                        False,
+                        "counts",
+                        f"{binding.value} is bound per range, but no variants range "
+                        f"over it in {recording.name}; a design per range is a set "
+                        f"of variants",
+                    )
+            if binding.how != "compile" or binding.value not in names:
+                continue
+            whole = admitted[binding.value]
+            for lo, hi in spans.get(binding.value) or (
+                [] if whole is None else [whole]
+            ):
+                if lo != hi:
+                    return Fit(
+                        False,
+                        "counts",
+                        f"{binding.value} is bound at compile time, a design a value, "
+                        f"but one design serves {lo} to {hi}; give it a design per "
+                        f"value (Variants)",
+                    )
+    if max_images is not None and images > max_images:
+        return Fit(
+            False,
+            "counts",
+            f"its calls hold {images} images at once, a design apiece; the host "
+            f"holds {max_images}",
+        )
+    for timed, variants in ranged:
+        recording = timed.recording
+        top = {
+            v.name: span[1]
+            for v in recording.values
+            if (span := recording.value_range(v.name)) is not None
+        }
+        # The profile but its other sets of variants and another version's
+        # schedules: each range's design is fitted with what the profile
+        # composes, at the range's capacity.
+        alone = profile.copy()
+        for other in profile.variants():
+            if other != variants:
+                alone.remove_variants(other)
+        for schedule in profile.schedules():
+            if schedule.version != recording.version:
+                alone.remove_schedule(schedule)
+        try:
+            for _, values in timed.timed_points():
+                recording.ranges_at(alone, values)
+        except NotImplementedError as e:
+            waiting.append(str(e))
+        for box, _ in variants.ranges:
+            at = {**top, **{n: hi for n, (_, hi) in zip(variants.values, box)}}
+            try:
+                with set_current_device(device):
+                    variant, chosen = recording.selected(alone, at)
+                # As its build applies the profile: the entries its capacity
+                # matches, and bindings of the values it takes.
+                for entry in chosen.entries():
+                    if not variant.occurrences(entry):
+                        chosen.remove_entry(entry)
+                per_call = {v.name: v for v in variant.values}
+                for binding in chosen.bindings():
+                    if binding.value not in per_call:
+                        chosen.remove_binding(binding)
+                # Its design runs only at its range's values.
+                within = dataclasses.replace(
+                    variant,
+                    limits=[
+                        *variant.limits,
+                        *(
+                            Limit(Affine(per_call[n]), lo, hi + 1, f"its range {box}")
+                            for n, (lo, hi) in zip(variants.values, box)
+                        ),
+                    ],
+                )
+                fitted = fit(
+                    chosen,
+                    [dataclasses.replace(timed, recording=within, values=at)],
+                    device,
+                    placements,
+                )
+            except NotImplementedError as e:
+                waiting.append(str(e))
+                continue
+            except NotLegalAtCapacity as e:
+                return Fit(False, "counts", f"its range {box}: {e}")
+            if not fitted.ok:
+                return dataclasses.replace(
+                    fitted, why=f"{recording.name}, its range {box}: {fitted.why}"
+                )
+    model = get_target_model(device.resolve())
+    rows = range(model.rows())
+    mem_row = next(r for r in rows if model.is_mem_tile(0, r))
+    cores_on_array = sum(
+        model.is_core_tile(c, r) for c in range(model.columns()) for r in rows
+    )
+    cascade_cols = model.columns()
+    cascade_rows = sum(model.is_core_tile(0, r) for r in rows)
+    held_in = {
+        EdgeKind.STREAM: ("a core tile", model.get_local_memory_size(), None),
+        EdgeKind.STAGED: (
+            "a memtile",
+            model.get_mem_tile_size(),
+            model.get_num_bds(0, mem_row),
+        ),
+    }
+    core_row = next(r for r in rows if model.is_core_tile(0, r))
+    core_bds = model.get_num_bds(0, core_row)
+    locks = model.get_max_lock_value()
+    shim_row = next(r for r in rows if model.is_shim_noc_tile(0, r))
+    queue = model.get_dma_task_queue_depth()
+    entries = profile.entries()
+    concurrent: dict[int, list[Configuration]] = {}
+    for entry in entries:
+        root = entry.root
+        if isinstance(root, Configuration):
+            if root.teardown and root.resident:
+                return Fit(
+                    False,
+                    "analysis",
+                    f"it keeps {', '.join(root.resident)} on chip into the next "
+                    f"configuration, across its own teardown",
+                )
+            if root.columns is not None and root.columns > model.columns():
+                return Fit(
+                    False,
+                    "counts",
+                    f"it takes {root.columns} columns; {device.resolve()} has "
+                    f"{model.columns()}",
+                )
+            if root.concurrent is not None:
+                concurrent.setdefault(root.concurrent, []).append(root)
+        parts: list[Configuration | Region | Member] = [root]
+        while parts:
+            part = parts.pop()
+            if isinstance(part, Member):
+                continue
+            parts += part.parts
+            if not isinstance(part, Region):
+                continue
+            plan = part.runtime
+            if (
+                plan is not None
+                and plan.burst is not None
+                and plan.burst not in model.get_shim_burst_lengths()
+            ):
+                return Fit(
+                    False,
+                    "counts",
+                    f"its runtime plan bursts {plan.burst} bytes; a shim DMA on "
+                    f"{device.resolve()} bursts "
+                    f"{', '.join(map(str, model.get_shim_burst_lengths()))}",
+                )
+            if plan is not None and (plan.in_flight or 0) > queue:
+                return Fit(
+                    False,
+                    "counts",
+                    f"its runtime plan keeps {plan.in_flight} tasks in flight a "
+                    f"channel; a channel's task queue holds {queue}",
+                )
+            if (
+                plan is not None
+                and plan.chained
+                and plan.chunks > model.get_num_bds(0, shim_row)
+            ):
+                return Fit(
+                    False,
+                    "counts",
+                    f"its runtime plan chains {plan.chunks} chunks into one task, a "
+                    f"buffer descriptor each; a shim tile has "
+                    f"{model.get_num_bds(0, shim_row)}",
+                )
+            if part.phases is None:
+                continue
+            if len(part.phases) != len(part.edges):
+                raise ValueError(
+                    f"{part} names {len(part.phases)} phases for "
+                    f"{len(part.edges)} edges, a phase per edge"
+                )
+            phase: dict[int, int] = {}
+            for e, p in zip(part.edges, part.phases):
+                if phase.setdefault(e.consumer, p) != p:
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"step {e.consumer}'s edges name phases "
+                        f"{phase[e.consumer]} and {p}; a step runs in one phase",
+                    )
+            for e, p in zip(part.edges, part.phases):
+                made = phase.get(e.producer, 0)
+                if not e.across_calls and made > p:
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"{e} runs its consumer in phase {p}, before its producer "
+                        f"in phase {made}",
+                    )
+                if e.kind is EdgeKind.STREAM and made < p:
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"{e} is a stream from phase {made} into phase {p}: a value "
+                        f"crossing a phase boundary waits in a memtile or DDR, "
+                        f"and a stream holds it in neither",
+                    )
+    for schedule in profile.schedules():
+        if schedule.packaging == "full_elf" and not device.can_dispatch_full_elf:
+            return Fit(
+                False,
+                "counts",
+                f"its schedule packages a full ELF; {device.resolve()} has no "
+                f"full-ELF dispatch",
+            )
+    matched: set[int] = set()
+    scheduled: set[int] = set()
+    for timed in calls:
+        recording = timed.recording
+        coded = {
+            weight: recording.declared_coded(h)
+            for weight, h in recording.weights.values()
+            if isinstance(weight, CodedWeight)
+        }
+        for weight, why in encode_all(w for w, ops in coded.items() if ops).items():
+            return Fit(
+                False,
+                "counts",
+                f"{recording.name}: {type(coded[weight][0]).__name__} reads "
+                f"{weight.name} coded by declaration, and {why}",
+            )
+        steps = list(recording.steps)
+        retuned: dict[int, list] = {}
+        for i, step in enumerate(steps):
+            op = step.op
+            given = {n: vars(op)[n] for n in op.given}
+            tunables = {
+                n: v
+                for n, v in profile.tunables_for(type(op), given).items()
+                if n not in op.pinned and vars(op)[n] != v
+            }
+            if not tunables:
+                continue
+            try:
+                with set_current_device(device):
+                    tuned = op._with_tunables(**tunables).resolved(device)
+            except ValueError as e:  # unresolvable or incompatible here
+                return Fit(False, "counts", f"{type(op).__name__} at {tunables}: {e}")
+            with set_current_device(device):
+                refused = refusal(tuned)
+            if refused is not None:
+                return Fit(
+                    False, "placer", f"{type(op).__name__} at {tunables}: {refused}"
+                )
+            retuned.setdefault(id(op), []).append(tuned)
+            steps[i] = dataclasses.replace(step, op=tuned)
+        if retuned:
+            recording = dataclasses.replace(recording, steps=steps)
+            recording.rebind(retuned)
+        # Each step that reads its weight coded: under its own flag, or fed
+        # on chip by a step reading coded by declaration (Decode).
+        coded = {
+            i
+            for i, step in enumerate(steps)
+            if any(
+                b.coded and isinstance(b.declared_coded, OperatorParam)
+                for b in step.op.buffers
+            )
+        }
+        for entry in profile.entries():
+            if isinstance(entry.root, Member):
+                continue
+            edges, _ = entry.root.wiring()
+            for match in timed.recording.occurrences(entry):
+                for k, m in enumerate(entry.root.steps()):
+                    if any(
+                        isinstance(b.declared_coded, OperatorParam)
+                        and (m.tunables or {}).get(b.declared_coded.name) is True
+                        for b in steps[match[k]].op.buffers
+                    ):
+                        coded.add(match[k])
+                for _, p, c in edges:
+                    if any(
+                        b.declared_coded is True for b in steps[match[p]].op.buffers
+                    ):
+                        coded.add(match[c])
+        with set_current_device(device):
+            arrays = [s.op.resolved(device).array_key() for s in timed.recording.steps]
+        for i in sorted(coded):
+            plain = [
+                j for j, key in enumerate(arrays) if key == arrays[i] and j not in coded
+            ]
+            if plain:
+                return Fit(
+                    False,
+                    "counts",
+                    f"{recording.name}: steps {i} and {plain[0]} share an array, and "
+                    f"coding the weight step {i} reads but not step {plain[0]}'s "
+                    f"splits it",
+                )
+        # The rest is fitted as built: its version as its schedule runs it,
+        # its regions' steps gathered (``Recording.ordered``).
+        single = recording
+        try:
+            single.ordered(profile)
+        except ValueError as e:
+            return Fit(False, "analysis", str(e))
+        try:
+            with set_current_device(device):
+                recording = single.scheduled(profile)
+        except NotImplementedError as e:
+            waiting.append(str(e))
+        except ValueError as e:
+            return Fit(False, "counts", f"{single.name} as its schedule builds it: {e}")
+        readers, writers = recording.users()
+        spans: list[tuple[int, ...]] = []
+        applied: list[Configuration | Region | Member] = []
+        together: dict[int, list[tuple[tuple[int, ...], Entry]]] = {}
+        after = [
+            {
+                r
+                for root, ws in writers.items()
+                if s in ws
+                for r in readers.get(root, [])
+                if r > s
+            }
+            for s in range(len(recording.steps))
+        ]
+        for index, entry in enumerate(profile.entries()):
+            region = entry.root
+            turns: tuple[tuple[int, int], ...] = ()
+            if any(m.part is not None for m in region.steps()):
+                matched.add(index)
+                waiting.append(
+                    "a step split by fission (Member.part) is not matched or "
+                    "built yet"
+                )
+                continue
+            # A carry across a command's calls is fitted as the one region
+            # over them the composer builds (``Recording.spanned``).
+            try:
+                spanned = recording.spanned(entry)
+            except NotImplementedError as e:
+                matched.add(index)
+                waiting.append(str(e))
+                continue
+            except ValueError as e:
+                return Fit(False, "analysis", str(e))
+            if spanned is not None:
+                region, found = spanned[0], (spanned[1],)
+            else:
+                found = recording.occurrences(entry)
+            if not found:
+                # Matched as recorded, its steps gathered into a region
+                # before it: it gives way, as an overlapping entry does.
+                if single.occurrences(entry):
+                    matched.add(index)
+                continue
+            matched.add(index)
+            inside = set(found[0])
+            applied.append(region)
+            xclbin = any(
+                s.version == recording.version and s.packaging == "xclbin"
+                for s in profile.schedules()
+            )
+            for part in (region, *(() if isinstance(region, Member) else region.parts)):
+                if xclbin and isinstance(part, Configuration) and part.teardown:
+                    return Fit(
+                        False,
+                        "analysis",
+                        "a configuration torn down after use on an xclbin per "
+                        "step, which leaves no configuration to undo",
+                    )
+                if (
+                    xclbin
+                    and isinstance(part, Region)
+                    and (
+                        part.phases is not None
+                        or any(
+                            e.kind is EdgeKind.DDR and not e.across_calls
+                            for e in part.edges
+                        )
+                        or (
+                            part is region
+                            and memory_waits(recording, found[0], part.edges)
+                        )
+                    )
+                ):
+                    return Fit(
+                        False,
+                        "analysis",
+                        "a phased region on an xclbin per step: phases run in turn "
+                        "as a full ELF's sequences",
+                    )
+                if (
+                    xclbin
+                    and part is region
+                    and isinstance(part, Region)
+                    and not part.edges
+                    and len(part.steps()) > 1
+                ):
+                    compiled = {
+                        b.value for b in profile.bindings() if b.how == "compile"
+                    }
+                    for s in found[0]:
+                        op = recording.steps[s].op
+                        read = [
+                            b.expression.value.name
+                            for b in recording.bindings
+                            if b.op is op and b.expression.value.name not in compiled
+                        ]
+                        if read:
+                            return Fit(
+                                False,
+                                "analysis",
+                                f"step {s} ({type(op).__name__}) reads per-call "
+                                f"value {read[0]!r} at run time, a dispatch parameter "
+                                f"on an xclbin per step, which a pack does not carry",
+                            )
+            at = 0
+            for part in region.parts if not isinstance(region, Member) else (region,):
+                spans.append(found[0][at : at + len(part.steps())])
+                at += len(part.steps())
+            frontier = [o for s in inside for o in after[s] if o not in inside]
+            seen = set(frontier)
+            # A configuration's parts run in turn, steps outside it between them.
+            while frontier and not (
+                isinstance(region, Configuration) and region.concurrent is None
+            ):
+                o = frontier.pop()
+                if after[o] & inside:
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"its steps are not convex: step {o} "
+                        f"({type(recording.steps[o].op).__name__}), outside it, lies "
+                        f"on a path between two of them",
+                    )
+                frontier += [n for n in after[o] - inside if n not in seen]
+                seen |= after[o] - inside
+            if isinstance(region, Member):
+                waiting.append("fitting an entry rooted at a Member is not built yet")
+                continue
+            if isinstance(region, Configuration) and region.concurrent is not None:
+                together.setdefault(region.concurrent, []).append((found[0], entry))
+            if isinstance(region, Configuration):
+                verdict = _configuration_fit(
+                    region,
+                    found[0],
+                    recording,
+                    timed.values,
+                    after,
+                    device,
+                    cores_on_array // model.columns(),
+                    placements,
+                )
+                if isinstance(verdict, Fit):
+                    return verdict
+                waiting += verdict
+                if region.concurrent is not None or all(
+                    isinstance(p, Member) for p in region.parts
+                ):
+                    continue
+                try:
+                    region, turns = in_turn(region)
+                except NotImplementedError as e:
+                    waiting.append(str(e))
+                    continue
+            if entry.scope.occurrences is not None:
+                steps_of = region.steps()
+                given = region.step_tunables()[0] if len(steps_of) == 1 else {}
+                if given:
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"it names runs {list(entry.scope.occurrences)} of "
+                        f"{steps_of[0].cls.__name__}'s shape and sets "
+                        f"{sorted(given)}: a shape's tunables apply to every run "
+                        f"of it, in every version, so one width set must fit "
+                        f"every run",
+                    )
+            if region.workers:
+                alone = Profile()
+                alone.add_entry(entry)
+                try:
+                    with set_current_device(device):
+                        folds = composed_folds(recording, alone)
+                except ValueError as e:  # IRON's fold, unresolvable here
+                    return Fit(False, "counts", f"the fold of its steps: {e}")
+                # Not a fold: the composer joins its cores, counted below.
+                fold = folds[0] if folds else None
+                if fold is not None:
+                    with set_current_device(device):
+                        folded = apply_folds(recording, [fold]).steps[fold.steps[0]].op
+                        refused = refusal(folded)
+                    if refused is not None and set(placements) != {"sequential"}:
+                        waiting.append(
+                            f"the sequential placer refuses the fold ({refused}); "
+                            f"trying the others is not built yet"
+                        )
+                    elif refused is not None:
+                        return Fit(False, "placer", refused)
+                    continue
+            for s, m, given in zip(found[0], region.steps(), region.step_tunables()):
+                if not given:
+                    continue
+                try:
+                    with set_current_device(device):
+                        recording.steps[s].op._with_tunables(**given).resolved(device)
+                except ValueError as e:  # unresolvable or incompatible here
+                    return Fit(False, "counts", f"{m.cls.__name__} at {given}: {e}")
+            core = {s: min(worker) for worker in region.workers for s in worker}
+            links = [
+                (core.get(e.producer, e.producer), core.get(e.consumer, e.consumer))
+                for e in region.edges
+                if e.kind is EdgeKind.CASCADE
+            ]
+            for p, c in links:
+                if p == c:
+                    return Fit(
+                        False,
+                        "counts",
+                        f"a cascade runs from one core to the next; steps "
+                        f"{p} and {c} share one",
+                    )
+            for end, side in ((0, "output"), (1, "input")):
+                ends = Counter(link[end] for link in links)
+                if ends and max(ends.values()) > 1:
+                    step, n = ends.most_common(1)[0]
+                    return Fit(
+                        False,
+                        "counts",
+                        f"a core has one cascade {side}; step {step}'s takes {n}",
+                    )
+            following = dict(links)
+            reach = cascade_cols + cascade_rows - 1
+            for first in following:
+                chain, at = [first], first
+                while at in following and following[at] not in chain:
+                    at = following[at]
+                    chain.append(at)
+                if at in following or len(chain) > reach:
+                    return Fit(
+                        False,
+                        "counts",
+                        f"a cascade chain of {len(chain)} cores"
+                        + (", closing a cycle," if at in following else "")
+                        + f" runs only east or south, through at most {reach} "
+                        f"cores of {device.resolve()}'s {cascade_cols} columns and "
+                        f"{cascade_rows} rows",
+                    )
+            if not looked:
+                ceiling, looked = Ceiling.stored(device.name), True
+            try:
+                derivation = Derivation(
+                    region,
+                    recording,
+                    device,
+                    timed.values,
+                    None if ceiling is None else ceiling.mixed,
+                )
+            except NotImplementedError as e:
+                waiting.append(str(e))
+                continue
+            cores = [len(recorded.cores) for _, recorded in derivation.recorded]
+            shared = {s for worker in region.workers for s in worker}
+            needed = sum(k for s, k in enumerate(cores) if s not in shared) + sum(
+                max(cores[s] for s in worker) for worker in region.workers
+            )
+            if needed > cores_on_array:
+                return Fit(
+                    False,
+                    "counts",
+                    f"its steps take {needed} cores; {device.resolve()} has "
+                    f"{cores_on_array}",
+                )
+            plan = region.runtime
+            if plan is not None and plan.waits == "per_channel" and not plan.chained:
+                on_chip = {
+                    (p, e.output)
+                    for e, p, _ in derivation.wired
+                    if e.kind is not EdgeKind.DDR
+                } | {
+                    (c, e.input)
+                    for e, _, c in derivation.wired
+                    if e.kind is not EdgeKind.DDR
+                }
+                for s, ((_, recorded), lanes) in enumerate(
+                    zip(derivation.recorded, derivation.lanes)
+                ):
+                    owner = {f: name for name, fifos in lanes.items() for f in fifos}
+                    tasks = Counter(
+                        t.fifo
+                        for t in recorded.transfers
+                        if t.kind == "fill" and (s, owner.get(t.fifo)) not in on_chip
+                    )
+                    for fifo, n in tasks.items():
+                        if n * plan.chunks > (plan.in_flight or queue):
+                            return Fit(
+                                False,
+                                "analysis",
+                                f"step {s} ({type(derivation.ops[s]).__name__}) "
+                                f"fills {fifo.name} from the host in "
+                                f"{n * plan.chunks} tasks a call, "
+                                f"{plan.in_flight or queue} in flight, each "
+                                f"awaited on its own channel: the channel is "
+                                f"reused once a fill reports done, which it does "
+                                f"before its data leaves the shim, not a sure await",
+                            )
+            unplaceable = []
+            for edge, p, _ in derivation.wired:
+                if edge.depth is None:
+                    continue
+                why = _held_past(derivation, edge, p, edge.depth, held_in, locks)
+                if why is not None:
+                    return Fit(False, "counts", why)
+            # An edge with no chosen depth is built at least one object deep.
+            why = _bds_past(
+                derivation, {e: e.depth or 1 for e, _, _ in derivation.wired}, core_bds
+            )
+            if why is not None:
+                return Fit(False, "counts", why)
+            for edge, p, c in derivation.wired:
+                if edge.kind is not EdgeKind.STAGED or edge.across_calls:
+                    continue
+                (source,) = [
+                    b
+                    for b in derivation.recorded[p][0].op.buffers
+                    if b.name == edge.output
+                ]
+                (sink,) = [
+                    b
+                    for b in derivation.recorded[c][0].op.buffers
+                    if b.name == edge.input
+                ]
+                try:
+                    with set_current_device(device):
+                        Staging(source, sink)
+                except PastMemtile as e:
+                    return Fit(False, "counts", str(e))
+                except ValueError:
+                    # Staging's other refusals are the composer's, at the placer.
+                    continue
+            # Restages held in L1, on the cores their two steps share.
+            on_cores: list[tuple[Edge, int, int]] = []
+            # A region with no edge hands nothing on-chip: nothing to analyse.
+            if region.edges:
+                try:
+                    analysis = derivation.analysis()
+                except NotImplementedError as e:
+                    waiting.append(str(e))
+                    continue
+                if analysis.why is not None:
+                    return Fit(False, "analysis", analysis.why)
+                # One image serves every call: its edges balance at each value
+                # the recording admits, not the call's alone.
+                unbalanced = waits = None
+                for name in sorted(v.name for v in recording.values):
+                    admitted = recording.value_range(name)
+                    if admitted is None:
+                        continue
+                    points = _balanced_at(derivation, recording, name, *admitted)
+                    if points is None:
+                        waits = waits or (
+                            f"holding its balance over {name} in "
+                            f"{list(admitted)} takes more than {BALANCED_POINTS} "
+                            f"analyses; it waits"
+                        )
+                        continue
+                    for at in points:
+                        if timed.values.get(name) == at:
+                            continue
+                        try:
+                            why = (
+                                Derivation(
+                                    region,
+                                    recording,
+                                    device,
+                                    {**timed.values, name: at},
+                                    derivation.rates,
+                                )
+                                .analysis()
+                                .why
+                            )
+                        except NotImplementedError as e:
+                            waits = waits or f"at {name} = {at}, {e}"
+                            continue
+                        if why is not None:
+                            unbalanced = f"at {name} = {at}, {why}"
+                            break
+                    if unbalanced is not None:
+                        break
+                if unbalanced is not None:
+                    return Fit(False, "analysis", unbalanced)
+                if waits is not None:
+                    waiting.append(waits)
+                    continue
+                for edge, p, c in derivation.wired:
+                    if edge.kind not in (EdgeKind.STREAM, EdgeKind.CASCADE):
+                        continue
+                    # A broadcast's lanes meet as they are, each read by
+                    # several: a cascade's relay is one of them.
+                    shape = analysis.hand_off[edge]
+                    if shape in (HandOff.EQUAL, HandOff.BROADCAST):
+                        continue
+                    if edge.kind is EdgeKind.STREAM and any(
+                        {p, c} <= set(group) for group in region.workers
+                    ):
+                        on_cores.append((edge, p, c))
+                        continue
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"{edge} is a {edge.kind.value}, whose lanes meet as "
+                        f"they are; its {shape.value} hand-off needs a restage",
+                    )
+                # Below its least depth an edge deadlocks however deep the rest.
+                below = [
+                    f"{e} is held {e.depth} deep, below its least depth, "
+                    f"{analysis.min_depth[e]}"
+                    for e, _, _ in derivation.wired
+                    if e.depth is not None
+                    and e in analysis.min_depth
+                    and e.depth < analysis.min_depth[e]
+                ]
+                if below:
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"at its chosen depths, it deadlocks: {below[0]}",
+                    )
+                why = analysis.deadlock(
+                    {e: e.depth for e, _, _ in derivation.wired if e.depth is not None}
+                )
+                if why is not None:
+                    return Fit(False, "analysis", f"at its chosen depths, it {why}")
+                # An edge with no chosen depth is built at the analysis's least.
+                for edge, p, _ in derivation.wired:
+                    least = analysis.min_depth.get(edge)
+                    if edge.depth is not None or least is None:
+                        continue
+                    why = _held_past(derivation, edge, p, least, held_in, locks)
+                    if why is not None:
+                        return Fit(
+                            False, "analysis", f"at the least depth it runs at, {why}"
+                        )
+            kept = sorted(
+                {
+                    (p, edge.output)
+                    for edge, p, _ in derivation.wired
+                    if edge.kind is not EdgeKind.DDR
+                    and not edge.across_calls
+                    and (
+                        set(readers.get(derivation.refs[p][edge.output].root, []))
+                        - inside
+                        or derivation.refs[p][edge.output].root in recording.held
+                        or any(
+                            (d.producer, d.output) == (edge.producer, edge.output)
+                            and d.kind is EdgeKind.DDR
+                            for d in region.edges
+                        )
+                    )
+                }
+            )
+            try:
+                past = [
+                    _restaged_on_cores(
+                        derivation, edge, (p, c), (p, edge.output) in kept, model
+                    )
+                    for edge, p, c in on_cores
+                ]
+            except NotImplementedError as e:
+                waiting.append(str(e))
+                continue
+            why = next((w for w in past if w is not None), None)
+            if why is not None:
+                return Fit(False, "counts", why)
+            for edge, p, c in derivation.wired:
+                made = derivation.obj_elements[p].get(edge.output)
+                taken = derivation.obj_elements[c].get(edge.input)
+                if (
+                    edge.kind not in (EdgeKind.STREAM, EdgeKind.CASCADE)
+                    or made is None
+                    or taken is None
+                    or made == taken
+                    or edge in [e for e, _, _ in on_cores]
+                ):
+                    continue
+                # One fifo delivers the producer's objects as the reader's
+                # (the dialect's asymmetric fifo), either a whole number of the
+                # other: a stream from one core to another, read nowhere else,
+                # in a region the composer streams
+                # (``compose.fused_configuration``).
+                if edge.kind is EdgeKind.CASCADE:
+                    why = "the cascade carries one object size"
+                elif made % taken and taken % made:
+                    why = (
+                        "an asymmetric fifo's ends each take a whole number of "
+                        "the other's objects"
+                    )
+                elif EdgeKind.STAGED in {e.kind for e in region.edges}:
+                    why = "beside staged edges the composer stages it too"
+                elif any({p, c} <= set(group) for group in region.workers):
+                    why = "on one worker its two ends are one buffer"
+                elif (p, edge.output) in kept or (
+                    sum(
+                        (q, e.output) == (p, edge.output)
+                        for e, q, _ in derivation.wired
+                    )
+                    > 1
+                ):
+                    why = "read elsewhere too, its fifo has one object size"
+                else:
+                    why = None
+                if why is not None:
+                    unplaceable.append(
+                        f"{edge}: a {edge.kind.value} whose ends' objects differ "
+                        f"({made} elements and {taken}) is not built yet: {why}"
+                    )
+            kinds = {e.kind for e in region.edges if not e.across_calls}
+            unplaceable += [
+                f"placing a region with {what} is not built yet: the composer "
+                f"does not build it"
+                for what, named in (
+                    ("inflows", region.inflows),
+                    (
+                        "nested regions",
+                        not all(isinstance(part, Member) for part in region.parts),
+                    ),
+                )
+                if named
+            ]
+            if "sequential" not in placements:
+                unplaceable.append(
+                    "placing with anything but the sequential placer is not built yet"
+                )
+            if not unplaceable:
+                alone = Profile()
+                alone.add_entry(entry)
+                try:
+                    with set_current_device(device):
+                        composed(recording, alone)
+                except NotImplementedError as e:
+                    unplaceable.append(str(e))
+            if unplaceable:
+                waiting += unplaceable
+                continue
+            position = {s: i for i, s in enumerate(found[0])}
+            ordered = [
+                (position[a], position[b])
+                for a, b in memory_waits(recording, found[0], region.edges)
+            ] + list(turns)
+            tried = [s for s in placements if s in BUILT_PLACERS]
+            refusals: list[str] = []
+            with set_current_device(device):
+                try:
+                    for setting in tried:
+                        refused = group_fit_verdict(
+                            derivation.ops,
+                            kind=(
+                                (
+                                    FusionKind.STAGED
+                                    if EdgeKind.STAGED in kinds
+                                    else FusionKind.STREAM
+                                )
+                                if kinds or ordered
+                                else None
+                            ),
+                            # A carry across calls is filled and drained
+                            # around the call, as the composer builds it.
+                            edges=[
+                                (e.producer, e.output, e.consumer, e.input)
+                                for e in region.edges
+                                if e.kind in (EdgeKind.STREAM, EdgeKind.STAGED)
+                                and not e.across_calls
+                            ],
+                            cascades=[
+                                (e.producer, e.output, e.consumer, e.input)
+                                for e in region.edges
+                                if e.kind is EdgeKind.CASCADE and not e.across_calls
+                            ],
+                            kept=kept,
+                            depths={
+                                (e.producer, e.output): e.depth
+                                for e in region.edges
+                                if e.depth is not None
+                                and e.kind is not EdgeKind.DDR
+                                and not e.across_calls
+                            },
+                            waits=[
+                                *(
+                                    (e.producer, e.consumer)
+                                    for e in region.edges
+                                    if e.kind is EdgeKind.DDR and not e.across_calls
+                                ),
+                                *ordered,
+                            ],
+                            workers=region.workers,
+                            phases=region.step_phases(),
+                            placer=BUILT_PLACERS[setting],
+                            slices=derivation.slices,
+                        )
+                        if refused is None:
+                            break
+                        refusals.append(refused)
+                except NotImplementedError as e:
+                    waiting.append(str(e))
+                    continue
+            if len(refusals) < len(tried):
+                continue
+            untried = [s for s in placements if s not in BUILT_PLACERS]
+            if untried:
+                waiting.append(
+                    f"the placer refuses it under {', '.join(tried)} ({refusals[0]}); "
+                    f"trying {', '.join(untried)} is not built yet: the build places "
+                    f"only as {', '.join(BUILT_PLACERS)} do"
+                )
+            else:
+                return Fit(False, "placer", refusals[0])
+        for group, at_once in together.items():
+            refused = _independent(
+                [span for span, _ in at_once],
+                after,
+                recording,
+                f"configurations concurrent as {group}",
+            )
+            if refused is not None:
+                return refused
+            alone = Profile()
+            for _, entry in at_once:
+                alone.add_entry(entry)
+            try:
+                with set_current_device(device):
+                    tunables, packs = composed(recording, alone)
+            except NotImplementedError as e:
+                waiting.append(str(e))
+                continue
+            for pack in packs:
+                with set_current_device(device):
+                    ops = [
+                        recording.steps[s]
+                        .op._with_tunables(**tunables.get(s, {}))
+                        .resolved(device)
+                        for s in pack.steps
+                    ]
+                    refused = group_fit_verdict(ops, kind=FusionKind.PACK)
+                if refused is not None and set(placements) != {"sequential"}:
+                    waiting.append(
+                        f"the sequential placer refuses steps {pack.steps} at once "
+                        f"({refused}); trying the others is not built yet"
+                    )
+                elif refused is not None:
+                    return Fit(False, "placer", refused)
+        # A returned output each step reads only where this call already wrote
+        # it is the host's after each call, though pinned as written in parts.
+        handed = {
+            root
+            for root in {h.ref().root for h in recording.returned}
+            if -1 not in writers.get(root, [-1]) + readers.get(root, [])
+            and recording.reads_only_written(root)
+        }
+        persist = (
+            set(recording.feedback)
+            | {h.ref().root for _, h in recording.states.values()}
+            | {h.ref().root for h in recording.inputs}
+            | set(recording.pinned) - handed
+            | set(recording.residents)
+        )
+        carried = [
+            (root, w)
+            for root, ws in writers.items()
+            if root in persist
+            for w in sorted(set(ws) - {-1})[:1]
+        ]
+        for number, schedule in enumerate(profile.schedules()):
+            if schedule.version != recording.version:
+                continue
+            scheduled.add(number)
+            for a, b in schedule.order:
+                if not 0 <= min(a, b) <= max(a, b) < len(spans):
+                    raise ValueError(
+                        f"{schedule} orders part {max(a, b)}; the entries in "
+                        f"{recording.name} name {len(spans)} parts"
+                    )
+                reads = sorted(_reached(spans[b], after) & set(spans[a]))
+                if reads:
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"its schedule runs part {a} (step {reads[0]}, "
+                        f"{type(recording.steps[reads[0]].op).__name__}) before part "
+                        f"{b}, whose output it reads",
+                    )
+            for what, kept in (
+                ("overlapping calls", schedule.calls_overlapped),
+                (f"a merge of calls into {schedule.size!r}", schedule.size),
+            ):
+                if kept and carried:
+                    root, w = carried[0]
+                    return Fit(
+                        False,
+                        "analysis",
+                        f"{what} breaks a dependence: step {w} "
+                        f"({type(recording.steps[w].op).__name__}) writes {root}, "
+                        f"which outlasts the call, so a call depends on the one "
+                        f"before",
+                    )
+            if schedule.calls_per_command > 1:
+                if recording.calls > 1:
+                    words, _ = _words(recording, share=True, extents=False)
+                    if len(words) > SCRATCHPAD_WORDS:
+                        return Fit(
+                            False,
+                            "counts",
+                            f"its {schedule.calls_per_command} calls a command "
+                            f"write {len(words)} scratchpad words; a command's "
+                            f"scratchpad holds {SCRATCHPAD_WORDS}",
+                        )
+                limit = watchdog_s()
+                unknown = (
+                    "the driver's watchdog is not readable" if limit is None else None
+                )
+                total_us = 0.0
+                if unknown is None:
+                    try:
+                        cache = Cache.here()
+                    except (OSError, subprocess.CalledProcessError, RuntimeError):
+                        unknown = "xrt-smi reports no platform to key cached times"
+                for i, step in enumerate(single.steps if unknown is None else ()):
+                    with set_current_device(device):
+                        measured = cache.get(cache.key(step.op, dict(timed.values)))
+                    if measured is None:
+                        unknown = f"step {i} has no cached standalone time"
+                        break
+                    total_us += measured.t_step_us
+                if unknown is not None:
+                    logger.info(
+                        "fit: %s's %d calls a command are not held to the "
+                        "watchdog: %s",
+                        recording.name,
+                        schedule.calls_per_command,
+                        unknown,
+                    )
+                elif (
+                    limit is not None
+                    and limit
+                    < WATCHDOG_HEADROOM * schedule.calls_per_command * total_us / 1e6
+                ):
+                    return Fit(
+                        False,
+                        "counts",
+                        f"its {schedule.calls_per_command} calls a command take "
+                        f"about {schedule.calls_per_command * total_us / 1e6:.2f} "
+                        f"s; the driver's watchdog ({limit:g} s) allows "
+                        f"1/{WATCHDOG_HEADROOM:g} of it",
+                    )
+            waiting += [
+                f"building a schedule's {what} is not built yet"
+                for what, kept in (
+                    ("order beyond dependences", schedule.order),
+                    ("recomputed steps", schedule.recompute),
+                    ("calls overlapped", schedule.calls_overlapped),
+                    (
+                        "several calls a command, merged calls or commands in "
+                        "flight on an xclbin per step",
+                        (
+                            schedule.commands_in_flight != 1
+                            or schedule.calls_per_command != 1
+                            or schedule.size is not None
+                        )
+                        and (
+                            schedule.packaging == "xclbin"
+                            or not device.can_dispatch_full_elf
+                        ),
+                    ),
+                    ("versions interleaved", schedule.interleave_with),
+                )
+                if kept
+            ]
+    # A width left to the placer was placed with its pack, above.
+    for group, at_once in concurrent.items():
+        taken = sum(c.columns for c in at_once if c.columns is not None)
+        if len(at_once) > 1 and taken > model.columns():
+            return Fit(
+                False,
+                "placer",
+                f"the configurations running at once as {group} take {taken} "
+                f"columns; {device.resolve()} has {model.columns()}, so they cannot "
+                f"be disjoint",
+            )
+    unmatched = [e for n, e in enumerate(profile.entries()) if n not in matched]
+    if unmatched:
+        raise ValueError(f"{unmatched[0]} matches none of the calls' steps")
+    unscheduled = [s for n, s in enumerate(profile.schedules()) if n not in scheduled]
+    if unscheduled:
+        raise ValueError(f"{unscheduled[0]} schedules none of the calls' versions")
+    if waiting:
+        raise NotImplementedError(waiting[0])
+    return Fit(True)
+
+
+def _reached(steps: Sequence[int], after: Sequence[set[int]]) -> set[int]:
+    """Return ``steps`` and every step on a path (``after``, each step's later readers) from one of them."""
+    reached = set(steps)
+    frontier = list(steps)
+    while frontier:
+        found = after[frontier.pop()] - reached
+        reached |= found
+        frontier += found
+    return reached
+
+
+def _independent(
+    spans: Sequence[tuple[int, ...]],
+    after: Sequence[set[int]],
+    recording: Recording,
+    what: str,
+) -> Fit | None:
+    """Return the refusal of ``spans``, steps run at once as ``what``, where a step of one is on a path from another's; None where they are independent."""
+    for k, span in enumerate(spans):
+        reached = _reached(span, after)
+        for j, other in enumerate(spans):
+            depends = sorted(reached & set(other)) if j != k else []
+            if depends:
+                return Fit(
+                    False,
+                    "analysis",
+                    f"{what} run at once, but step {depends[0]} "
+                    f"({type(recording.steps[depends[0]].op).__name__}) depends on "
+                    f"steps {span}: what runs at once must be independent, no "
+                    f"written data shared",
+                )
+    return None
+
+
+def _untiled(
+    boxes: Sequence[tuple[tuple[int, int], ...]], space: Sequence[tuple[int, int]]
+) -> str | None:
+    """Return how ``boxes``, ranges of per-call values, fail to tile ``space``, the values a call may take; None where they tile it.
+
+    Each lies inside it, none overlaps another, and together they hold as
+    many values as it does, so no value is left out.
+    """
+    for box in boxes:
+        if len(box) != len(space):
+            return f"a range names {len(box)} values, not {len(space)}"
+        if any(
+            lo > hi or lo < least or hi > most
+            for (lo, hi), (least, most) in zip(box, space)
+        ):
+            return f"{box} is not within {tuple(space)}"
+    for a, b in itertools.combinations(boxes, 2):
+        if all(max(x[0], y[0]) <= min(x[1], y[1]) for x, y in zip(a, b)):
+            return f"{a} and {b} overlap"
+    held = sum(math.prod(hi - lo + 1 for lo, hi in box) for box in boxes)
+    whole = math.prod(most - least + 1 for least, most in space)
+    if held != whole:
+        return f"they hold {held} of the {whole} values within {tuple(space)}"
+    return None
+
+
+def _balanced_at(
+    derivation: Derivation, recording: Recording, name: str, lo: int, hi: int
+) -> list[int] | None:
+    """Return the values of ``name`` in ``[lo, hi]`` at which a region's balance holds it at every one.
+
+    What a call moves varies with ``name`` only through its steps' per-call
+    words and the objects each lane a word sizes moves, each a step function
+    of it: past its first ``s`` values, ``f(n + p) - f(n)`` is constant for
+    some ``p``, both read off the function's own values (where its
+    differences settle into repeating, and their period), the pair taking
+    the fewest analyses. With ``S`` the most values any takes to settle and
+    ``L`` the least common multiple of every such ``p``, past the first
+    ``S`` a count an edge's two ends move differs by a polynomial in ``k``
+    on each class ``r + kL``, of degree two at most where two of a call's
+    varying counts multiply (a loop's trips by the objects in it): the
+    analysis at the first ``S`` values, then at three of each class's, ``L``
+    at each end of what is left and ``L`` from its middle, holds every
+    value. The whole range where that is no fewer.
+
+    Returns:
+        The values, in order; None where more than ``BALANCED_POINTS``.
+    """
+    match, *_ = recording.occurrences(Entry(derivation.region))
+    others = {k: v for k, v in derivation.values.items() if k != name}
+    series: list[list[int]] = []
+    for s, op, (array, _) in zip(match, derivation.ops, derivation.recorded):
+        bound = {
+            b.member.name: b.expression
+            for b in recording.bindings
+            if b.op is recording.steps[s].op
+        }
+        if not any(e.value.name == name for e in bound.values()):
+            continue
+        rows: list[list[int]] = []
+        for n in range(lo, hi + 1):
+            values = {**others, name: n}
+            try:
+                extents = {e: bound[e].evaluate(values) for e in op.bound_extents}
+                words = {
+                    v.name: (
+                        bound[v.name].evaluate(values)
+                        if v.name in bound
+                        else op.derived_at(v.name, **extents)
+                    )
+                    for v in op.values
+                    if v.name in bound or v.derive is not None
+                }
+            except (ValueError, TypeError):
+                return (
+                    None if hi - lo + 1 > BALANCED_POINTS else list(range(lo, hi + 1))
+                )
+            row = [words[k] for k in sorted(words)]
+            for b in array.op.buffers:
+                if not b.streamed or not b.lane_handles:
+                    continue
+                for _, _, length, unit in b.transfers():
+                    if length is not None and length.name in words:
+                        row.append(
+                            -(-words[length.name] * unit // math.prod(b.obj_shape))
+                        )
+            rows.append(row)
+        series += [list(column) for column in zip(*rows)]
+    settled, period = 0, 1
+    for values in series:
+        steps = np.diff(values)
+        # Per p, the s past which steps[i] == steps[i + p]: one past their
+        # last difference. p = len(steps) always holds, from s = 0.
+        found = [(0, max(len(steps), 1))]
+        for p in range(1, min(len(steps), BALANCED_POINTS // 3) + 1):
+            differ = np.flatnonzero(steps[:-p] != steps[p:])
+            found.append((int(differ[-1]) + 1 if len(differ) else 0, p))
+        s, p = min(found, key=lambda sp: sp[0] + 3 * sp[1])
+        settled, period = max(settled, s), math.lcm(period, p)
+    start = lo + settled
+    size = hi - start + 1
+    if 3 * period >= size:
+        points = list(range(lo, hi + 1))
+    else:
+        middle = start + (size // 2 // period) * period
+        points = sorted(
+            {
+                *range(lo, start + period),
+                *range(middle, middle + period),
+                *range(hi - period + 1, hi + 1),
+            }
+        )
+    return points if len(points) <= BALANCED_POINTS else None
+
+
+def _held_past(
+    derivation: Derivation,
+    edge: Edge,
+    producer: int,
+    depth: int,
+    held_in: Mapping[EdgeKind, tuple[str, int, int | None]],
+    locks: int,
+) -> str | None:
+    """Return why ``edge``, ``depth`` objects deep, is past where it is held: a tile's memory or descriptors, or a lock's count; else None.
+
+    A fifo end of ``depth`` objects starts its producer's lock at that many
+    free ones, so a lock's range bounds it as a tile's memory does. A staged
+    edge's memtile pools ``Staging``'s rounds, each taking a slot of whole
+    objects from every producer lane it joins: ``depth`` objects a lane are
+    as many rounds as it takes to hold them, a buffer descriptor and a lock
+    count each. A slot of one object is a round an object.
+    """
+    # Spliced, an edge holds each core's own tile.
+    elements = (
+        int(np.prod(derivation.spliced[edge][0][2].shape))
+        if edge in derivation.spliced
+        else derivation.obj_elements[producer].get(edge.output)
+    )
+    if edge.kind not in held_in or elements is None:
+        return None
+    tile, memory, bds = held_in[edge.kind]
+    (source,) = [b for b in derivation.ops[producer].buffers if b.name == edge.output]
+    held = depth * elements * np.dtype(source.dtype).itemsize
+    if held > memory:
+        return f"{edge} holds {depth} objects, {held} bytes; {tile} holds {memory}"
+    pooled = depth
+    if edge.kind is EdgeKind.STAGED and edge not in derivation.spliced:
+        (consumer,) = [c for e, _, c in derivation.wired if e == edge]
+        (made,) = [
+            b
+            for b in derivation.recorded[producer][0].op.buffers
+            if b.name == edge.output
+        ]
+        (taken,) = [
+            b
+            for b in derivation.recorded[consumer][0].op.buffers
+            if b.name == edge.input
+        ]
+        try:
+            with set_current_device(derivation.device):
+                staging = Staging(made, taken)
+        except ValueError:
+            # Its refusals are fit's Staging counts' and the composer's.
+            staging = None
+        if staging is not None:
+            pooled = max(
+                -(-depth * elements // slot)
+                for _, slots, _, _ in staging.groups
+                for slot in slots
+            )
+    held_as = f"{depth} objects" + (
+        "" if pooled == depth else f" in {pooled} of its memtile's rounds"
+    )
+    if bds is not None and pooled > bds:
+        return f"{edge} holds {held_as}, a buffer descriptor each; {tile} has {bds}"
+    if pooled > locks:
+        return f"{edge} holds {held_as}, more than a lock counts ({locks})"
+    return None
+
+
+def _restaged_on_cores(
+    derivation: Derivation,
+    edge: Edge,
+    ends: tuple[int, int],
+    kept: bool,
+    model,
+) -> str | None:
+    """Return why ``edge``'s restage, held in L1 on the cores its two steps share, is past one of them under every placement; else None.
+
+    Counted as ``Staging`` holds it lane by lane: a source lane cut into
+    several pieces distributes them from its core, and a sink lane taking
+    several joins them on its own core, on its source lane's where its first
+    piece leads that lane's slot (``Staging.pairs``), else alone. Each pool
+    is the edge's chosen depth in rounds, or the objects a source lane moves
+    a call as the composer chooses it, and a call's rounds at least. A piece
+    leading a pool, its sink lane's only one or its source lane whole, may
+    meet it in place (on the pool's core or a neighbour's); a distributed
+    piece a sink lane joins, and any other, takes a buffer descriptor a round
+    at each end and a channel, which the pieces into or out of one core share
+    out of order over packets, each pool holding a call. A pool holds a lock
+    pair a slot. Each core
+    also holds its steps' other fifos, once where both ends are on it, a
+    lock pair each, and a channel and descriptors for each with an end off
+    the array or in a memtile; one an on-chip stream or cascade carries, or
+    between two cores of a step, may be free in the fused build (in one
+    core, or a neighbour's memory), so it is not counted. These are lower bounds: what a placement adds the placer counts.
+
+    Args:
+        derivation: The region's derivation.
+        edge: The restaged edge.
+        ends: Its producer's and consumer's steps in ``derivation``.
+        kept: Whether the host drains the producer's output too.
+        model: The device's target model.
+
+    Returns:
+        The first core past a core tile's input or output channels,
+        memory, buffer descriptors or locks, or None.
+
+    Raises:
+        NotImplementedError: What ``Staging.held_fifos`` or the composer
+            does not build: a slice, a restage ``Staging`` does not plan, a round
+            read in another order than it is joined, a slot of several
+            objects, an output also read elsewhere, or pieces past a core's
+            channels on circuits that share one only where packets are not
+            built yet (out of one core, or into a join of whole source lanes
+            or of a pool read through a DMA).
+    """
+    p, c = ends
+    region = derivation.region
+    # Not built, yet still counted: what is past a core under every plan is
+    # refused all the same.
+    unbuilt = (
+        kept
+        or sum(
+            (e.producer, e.output) == (edge.producer, edge.output) for e in region.edges
+        )
+        != 1
+    )
+    (source,) = [
+        b for b in derivation.recorded[p][0].op.buffers if b.name == edge.output
+    ]
+    (sink,) = [b for b in derivation.recorded[c][0].op.buffers if b.name == edge.input]
+    produce, consume = math.prod(source.obj_shape), math.prod(sink.obj_shape)
+    sliced = (c, edge.input) in {(k, name) for k, name, _ in derivation.slices}
+    if sliced:
+        # A slice read in place on its producer's core: a view of its one
+        # object a call, the reader's one object (Slicing, held).
+        if (
+            source.lanes != 1
+            or sink.lanes != 1
+            or produce != source.elements
+            or consume != sink.elements
+            or kept
+        ):
+            raise NotImplementedError(
+                f"{edge}: a slice held in L1 is not built yet but as one lane's "
+                f"one object a call, read whole by one lane and drained nowhere "
+                f"else: {source.name} moves {source.elements // produce} objects "
+                f"of {produce} on {source.lanes} lanes and {sink.name} takes "
+                f"{sink.elements // consume} of {consume} on {sink.lanes}"
+            )
+        pairs, rounds, pieces, planned = [(0, 0)], [1], [], True
+        item = bfp.itemsize(sink.dtype)
+    else:
+        try:
+            with set_current_device(derivation.device):
+                staging = Staging(source, sink, held=True)
+        except ValueError as e:
+            raise NotImplementedError(
+                f"{edge}: a restage held in L1 that Staging does not plan is not "
+                f"built yet: {e}"
+            ) from e
+        planned = not (
+            any(walk is not None for walk in staging.walks)
+            or any(t != produce for _, taken, _, _ in staging.groups for t in taken)
+            or any(g != consume for _, _, _, given in staging.groups for g in given)
+        )
+        pairs, rounds, item = staging.pairs, staging.rounds, staging.item
+        # Unplanned, the steps' own fifos alone are counted.
+        pieces = staging.pieces if planned else []
+    chosen = edge.depth
+    if chosen is None:
+        chosen = max(-(-n // produce) for n in source.moved_per_lane().values())
+    deep = max([chosen, *rounds])
+    lanes = (derivation.lanes[p][edge.output], derivation.lanes[c][edge.input])
+    # Source lane k on core k; a sink lane on its pair's core, else its own.
+    paired = {j: k for k, j in pairs}
+    core = [paired.get(j, len(lanes[0]) + j) for j in range(len(lanes[1]))]
+    cores = len(lanes[0]) + len(lanes[1])
+    on_chip = {
+        fifo
+        for e, q, r in derivation.wired
+        if e.kind in (EdgeKind.STREAM, EdgeKind.CASCADE)
+        for fifo in (
+            *derivation.lanes[q].get(e.output, []),
+            *derivation.lanes[r].get(e.input, []),
+        )
+    }
+    # A fifo with an end off the array or in a memtile moves by DMA; one
+    # between two cores of a step may be a neighbour's memory.
+    off = {
+        f
+        for step in ends
+        for f in (
+            *(t.fifo for t in derivation.recorded[step][1].transfers),
+            *(
+                h.object_fifo
+                for link in derivation.recorded[step][1].links
+                for h in (*link.srcs, *link.dsts)
+            ),
+        )
+    }
+    on_core: list[list] = [[] for _ in range(cores)]
+    for step, fifos, at in ((p, lanes[0], range(len(lanes[0]))), (c, lanes[1], core)):
+        for k, fifo in zip(at, fifos):
+            # A lane several cores read: the first on core k, the rest apart.
+            for n, worker in enumerate(
+                w.owner
+                for w in derivation.recorded[step][1].cores
+                if any(h.object_fifo is fifo for h in w.owner.fifos)
+            ):
+                if n:
+                    on_core.append([])
+                on_core[len(on_core) - 1 if n else k] += [
+                    h
+                    for h in worker.fifos
+                    if h.object_fifo not in on_chip
+                    and h.object_fifo not in (*lanes[0], *lanes[1])
+                ]
+    inputs, outputs, held, bds, locks = ([0] * len(on_core) for _ in range(5))
+    for k, handles in enumerate(on_core):
+        here = Counter(h.object_fifo for h in handles)
+        for h in handles:
+            # Both ends on this core: one buffer and lock pair, no channel.
+            if here[h.object_fifo] > 1 and h.handle_type == "cons":
+                continue
+            held[k] += h.depth * math.prod(h.shape) * bfp.itemsize(h.dtype)
+            locks[k] += 2
+            if here[h.object_fifo] == 1 and h.object_fifo in off:
+                bds[k] += h.depth
+                inputs[k] += h.handle_type == "cons"
+                outputs[k] += h.handle_type == "prod"
+    cut = Counter(k for k, *_ in pieces)
+    taking = Counter(j for _, j, *_ in pieces)
+    for k in cut:
+        if cut[k] > 1:
+            held[k] += deep * produce * item
+            locks[k] += 2 * cut[k]
+    # A sink lane joins its pieces, or forwards a whole source lane, into a
+    # pool on its core; one distributed piece alone is the sink's fifo.
+    joins = {j for k, j, *_ in pieces if taking[j] > 1 or cut[k] == 1}
+    for j in joins:
+        held[core[j]] += deep * consume * item
+        locks[core[j]] += 2 * taking[j]
+    # Pieces moved by DMA take a channel each on circuits. Out of order over
+    # packets, those into one core share one channel (and those out of one
+    # core could, a queue pushed as the core releases): each pool holds a
+    # call, so no packet waits on a full pool and stalls the others.
+    taken, sent = [0] * len(on_core), [0] * len(on_core)
+    # A join shares its channel only into a pool its core reads in place, of
+    # pieces a distribute sends: a whole source lane's fifo is its producer's.
+    shares = [True] * len(on_core)
+    for k, j, at, to, size in pieces:
+        # In place at best: the leading piece of a distribute a sink lane
+        # reads whole, or a whole source lane leading a join.
+        whole = cut[k] == 1
+        if (not whole and at == 0 and taking[j] == 1) or (whole and to == 0):
+            continue
+        sent[k] += 1
+        taken[core[j]] += 1
+        if taking[j] > 1 and (whole or len(sink.obj_shape) != 1):
+            shares[core[j]] = False
+        bds[k] += deep
+        bds[core[j]] += deep
+        if whole:
+            held[k] += deep * produce * item
+            locks[k] += 2
+        elif taking[j] == 1:
+            held[core[j]] += deep * size * item
+            locks[core[j]] += 2
+    col, row = 0, next(r for r in range(model.rows()) if model.is_core_tile(0, r))
+    most_in = model.get_num_dest_switchbox_connections(col, row, WireBundle.DMA)
+    most_out = model.get_num_source_switchbox_connections(col, row, WireBundle.DMA)
+    waits = []
+    for k in range(len(on_core)):
+        for what, n, most in (
+            ("input channels", inputs[k] + min(taken[k], 1), most_in),
+            ("output channels", outputs[k] + min(sent[k], 1), most_out),
+            ("bytes", held[k], model.get_local_memory_size()),
+            ("buffer descriptors", bds[k], model.get_num_bds(col, row)),
+            ("locks", locks[k], model.get_num_locks(col, row)),
+        ):
+            if n > most:
+                shared = " even with its pieces sharing one by packets" * (
+                    what.endswith("channels")
+                )
+                return (
+                    f"{edge}, restaged in L1, takes {n} {what}{shared} on core {k} "
+                    f"of its steps' worker, however it is placed; a core tile has "
+                    f"{most}"
+                )
+        if inputs[k] + taken[k] > most_in and not shares[k]:
+            waits.append(f"{taken[k]} pieces joined on core {k} into one input channel")
+        if outputs[k] + sent[k] > most_out:
+            waits.append(f"{sent[k]} pieces sent from core {k} on one output channel")
+    if waits:
+        raise NotImplementedError(
+            f"{edge}: a restage held in L1 on packet-shared core channels "
+            f"({'; '.join(waits)}) is not built yet"
+        )
+    if not sliced and (unbuilt or not planned):
+        raise NotImplementedError(
+            f"{edge}: a restage held in L1 of an output read elsewhere too, "
+            f"reading a round in another order, or a slot of several objects, "
+            f"is not built yet"
+        )
+
+
+def _bds_past(
+    derivation: Derivation, depths: Mapping[Edge, int], bds: int
+) -> str | None:
+    """Return why a core of ``derivation``'s fused region moves more objects by DMA than a core tile has buffer descriptors; else None.
+
+    Each object of a fifo end a core moves by DMA is a buffer descriptor of
+    its tile. An end is counted where every other end of its fifo is off the
+    core array (a memtile link or the host): one meeting another core may
+    share its memory, free of the DMA, so it is not counted. A stream's
+    consumer reads its producer's lane fifo at the edge's depth in
+    ``depths``, counted where no core produces that fifo; a stream's
+    producer and a cascade's ends are on-chip. Steps sharing a worker are
+    one core a lane. A lower bound: what the placer adds it counts itself.
+
+    Args:
+        derivation: The region's derivation, each step built alone.
+        depths: Each edge's depth in the fused build.
+        bds: The buffer descriptors a core tile has.
+
+    Returns:
+        The first core past ``bds``, named by its steps and lane, or None.
+    """
+    region = derivation.region
+    group = {s: min(worker) for worker in region.workers for s in worker}
+    made_on_cores = {
+        h.object_fifo
+        for _, recorded in derivation.recorded
+        for core in recorded.cores
+        if isinstance(core.owner, Worker)
+        for h in core.owner.fifos
+        if isinstance(h, ObjectFifoHandle) and h.handle_type == "prod"
+    }
+    on_chip: set[ObjectFifo] = set()
+    read_at: dict[ObjectFifo, int] = {}
+    for edge, p, c in derivation.wired:
+        if edge.across_calls or edge.kind not in (EdgeKind.STREAM, EdgeKind.CASCADE):
+            continue
+        made = derivation.lanes[p].get(edge.output, [])
+        taken = derivation.lanes[c].get(edge.input, [])
+        on_chip.update(made)
+        if (
+            edge.kind is EdgeKind.CASCADE
+            or group.get(p, p) == group.get(c, c)
+            or any(f in made_on_cores for f in made)
+        ):
+            on_chip.update(taken)
+        else:
+            read_at |= {f: depths[edge] for f in taken}
+    moved: dict[tuple[int, int], int] = {}
+    for s, (_, recorded) in enumerate(derivation.recorded):
+        workers = list(
+            dict.fromkeys(
+                core.owner for core in recorded.cores if isinstance(core.owner, Worker)
+            )
+        )
+        for k, worker in enumerate(workers):
+            key = (group.get(s, s), k)
+            for h in worker.fifos:
+                if not isinstance(h, ObjectFifoHandle):
+                    continue
+                fifo = h.object_fifo
+                if fifo in read_at:
+                    moved[key] = moved.get(key, 0) + read_at[fifo]
+                elif fifo not in on_chip and not any(
+                    isinstance(e, Worker)
+                    for e in h.all_of_endpoints()
+                    if e is not worker
+                ):
+                    moved[key] = moved.get(key, 0) + h.depth
+    for (s, k), n in moved.items():
+        if n > bds:
+            steps = [t for t in range(len(derivation.ops)) if group.get(t, t) == s]
+            names = ", ".join(
+                f"{t} ({type(derivation.ops[t]).__name__})" for t in steps
+            )
+            return (
+                f"step{'s' if len(steps) > 1 else ''} {names}'s core {k} moves {n} "
+                f"objects by DMA, a buffer descriptor each; a core tile has {bds}"
+            )
+    return None
+
+
+def _configuration_fit(
+    configuration: Configuration,
+    match: tuple[int, ...],
+    recording: Recording,
+    values: Mapping[str, int],
+    after: Sequence[set[int]],
+    device: Device,
+    core_rows: int,
+    placements: Sequence[str],
+) -> Fit | list[str]:
+    """Return ``configuration``'s refusal at ``match``, its steps in ``recording``, or what is not fitted of it yet.
+
+    Parts that run at once (``Configuration.concurrent``) must be
+    independent: no step of one on a path (``after``) from another's. The
+    cores its steps take are then counted against the array, or the
+    ``columns`` it is given, ``core_rows`` cores each: steps of one array
+    share its cores unless they run at once, and a region's steps each take
+    their own, as a fusion's members do, steps sharing a worker counted once.
+    A configuration of steps alone is placed last, as one device
+    configuration, as a packing is.
+
+    Args:
+        configuration: The configuration fitted.
+        match: The recording's step each of its steps is, depth-first.
+        recording: The recording it is matched in.
+        values: The call's per-call values (``Timed.values``).
+        after: Each step's readers later in the recording.
+        device: The device.
+        core_rows: The core tiles a column holds.
+        placements: The placer's settings a fit may try.
+
+    Returns:
+        A ``Fit`` refusing it, or each thing not fitted yet.
+    """
+    spans = []
+    at = 0
+    for part in configuration.parts:
+        spans.append(match[at : at + len(part.steps())])
+        at += len(part.steps())
+    if configuration.concurrent is not None:
+        refused = _independent(spans, after, recording, "its parts")
+        if refused is not None:
+            return refused
+    try:
+        with set_current_device(device):
+            configuration = narrowed(configuration, match, recording)
+        derivation = Derivation(Region(configuration.parts), recording, device, values)
+    except NotImplementedError as e:
+        return [str(e)]
+    cores = [len(recorded.cores) for _, recorded in derivation.recorded]
+    arrays: dict[object, int] = {}
+    own = 0
+    at = 0
+    for part in configuration.parts:
+        steps = range(at, at + len(part.steps()))
+        at += len(part.steps())
+        if isinstance(part, Member) and configuration.concurrent is None:
+            key = derivation.ops[steps[0]].array_key()
+            arrays[key] = max(arrays.get(key, 0), cores[steps[0]])
+            continue
+        workers = part.workers if isinstance(part, Region) else ()
+        shared = {s for worker in workers for s in worker}
+        own += sum(cores[s] for k, s in enumerate(steps) if k not in shared)
+        own += sum(max(cores[steps[k]] for k in worker) for worker in workers)
+    needed = own + sum(arrays.values())
+    width = device.cols if configuration.columns is None else configuration.columns
+    wider = [
+        op
+        for op in derivation.ops
+        if "num_aie_columns" in op.declaration.tunables and op.num_aie_columns > width
+    ]
+    if wider:
+        return Fit(
+            False,
+            "counts",
+            f"{type(wider[0]).__name__} takes {wider[0].num_aie_columns} columns; "
+            f"its configuration has {width}",
+        )
+    if needed > width * core_rows:
+        return Fit(
+            False,
+            "counts",
+            f"its steps take {needed} cores; "
+            + (
+                f"{device.resolve()} has {width * core_rows}"
+                if configuration.columns is None
+                else f"its {width} columns hold {width * core_rows}"
+            ),
+        )
+    # The bytes of each buffer its steps read or write, the most one moves.
+    sizes: dict[str, int] = {}
+    for s in match:
+        step = recording.steps[s]
+        for ref, operand in zip(step.refs(), step.op.buffers):
+            sizes[ref.root] = max(sizes.get(ref.root, 0), operand.nbytes)
+    for name in configuration.resident:
+        if name not in sizes:
+            return Fit(
+                False,
+                "counts",
+                f"it keeps {name!r} on chip, which none of its steps reads or writes",
+            )
+    kept = sum(sizes[name] for name in configuration.resident)
+    model = get_target_model(device.resolve())
+    if kept > width * model.get_mem_tile_size():
+        return Fit(
+            False,
+            "counts",
+            f"it keeps {kept} bytes on chip ({', '.join(configuration.resident)}); "
+            f"the memtiles of its {width} columns hold "
+            f"{width * model.get_mem_tile_size()}",
+        )
+    unbuilt = [
+        f"building a configuration with {what} is not built yet"
+        for what, kept in (
+            ("buffers resident into the next", configuration.resident),
+            (
+                "a switch other than a reload",
+                configuration.switch not in (None, Switch.RELOAD),
+            ),
+        )
+        if kept
+    ]
+    if (
+        unbuilt
+        or configuration.concurrent is not None
+        or not all(isinstance(p, Member) for p in configuration.parts)
+    ):
+        # Parts run at once are placed as their pack, and regions among its
+        # parts as the one region they run in (``in_turn``), in fit.
+        return unbuilt
+    with set_current_device(device):
+        designs = {OperatorDesign(op).name: op for op in derivation.ops}
+        refused = group_fit_verdict(list(designs.values()))
+    if refused is not None and set(placements) != {"sequential"}:
+        return [
+            f"the sequential placer refuses it ({refused}); trying "
+            f"{', '.join(s for s in placements if s != 'sequential')} is not "
+            f"built yet"
+        ]
+    if refused is not None:
+        return Fit(False, "placer", refused)
+    return []
+
+
+def check(
+    profile: Profile,
+    base: Profile,
+    calls: Sequence[Timed],
+    device: Device,
+    refinement: Refinement,
+    base_calls: Sequence[Timed] | None = None,
+) -> Check:
+    """Hold ``calls`` built under ``profile`` to ``base_calls`` built under ``base``, run on the NPU on the same inputs.
+
+    ``profile`` must fit first (``fit``). Each call is built both ways
+    (``Applied``, the profile's composition entries included) and each side
+    run on the same seeded inputs and states at its own call's points: its
+    values (each of its points', ``Timed.timed_points``), then those with
+    each of its bounds halved (``_bound_points``). A base call's values pair
+    with its call's in order, and its halved bounds with the call's that cut
+    the same returned output extents (else by name); each pair must cut
+    every returned output alike. Every output within its bound, carried
+    buffer and state must be bit-identical (``_bit_identical``). A version
+    whose schedule runs several calls a command or keeps commands in flight
+    runs its draws so batched instead, against them called one at a time
+    (``_batched``). Calls that hold state run in order instead, each side at
+    its own values, its states carried into its next call (``_in_order``).
+    A call checked apart that carries values to the next
+    (``Recording.carry``) and is not given them starts each at both ends of
+    its recorded range (``_started``), as a first call may. Held to
+    ``NO_WORSE``, each call is instead no worse than the base's against its
+    reference at each pair of points (``_no_worse``), each side's calls one
+    at a time; a version the profile batches then holds its batches
+    bit-identical to its calls one at a time (``_batched``), as ``EXACT``
+    does. Where a profile has variants, each pair of points runs on the
+    design its values select (``Recording.ranges_at``): a call whose points
+    select several is checked as one call per design, each at its own pairs.
+
+    Args:
+        profile: The profile checked.
+        base: The profile it is held to.
+        calls: The graph's calls.
+        device: The device.
+        refinement: The rule it is held to.
+        base_calls: The calls ``base`` runs, where they are not ``calls``
+            (the operator a graph replaces): one for each of ``calls``, in
+            their order. Each returns its call's outputs; held ``EXACT`` it
+            takes its call's inputs as they are, held ``NO_WORSE`` it reads
+            some of them, by name.
+
+    Raises:
+        ValueError: ``profile`` does not fit, an entry matches none of the
+            calls (``fit``), a call leaves the host nothing to compare, or
+            ``base_calls`` does not pair with ``calls`` as above (or pairs
+            calls of one version with base calls of several, holds other
+            states, is checked at points that do not pair with its call's,
+            or, held ``EXACT``, batches calls its call runs one at a
+            time).
+        NotImplementedError: What is not checked yet: a no-worse call that
+            carries state (``_no_worse``), a call checked apart that carries
+            a value to the next with no range recorded to start it in, a call
+            holding state at points of several designs, and what ``fit`` or
+            the composer (``composed``) does not take yet.
+    """
+    fitted = fit(profile, calls, device)
+    if not fitted.ok:
+        raise ValueError(f"the profile does not fit ({fitted.stage}): {fitted.why}")
+    for call in calls:
+        recording = call.recording
+        if not (recording.outputs or recording.feedback or recording.states):
+            raise ValueError(
+                f"{recording.name} leaves the host no output, carried buffer or "
+                f"state to compare"
+            )
+    olds = list(calls if base_calls is None else base_calls)
+    if len(olds) != len(calls):
+        raise ValueError(
+            f"{len(calls)} calls and {len(olds)} base calls: base_calls holds one "
+            f"for each call, in their order"
+        )
+    pairs = list(zip(calls, olds, strict=True))
+    versions: dict[Version, Version] = {}
+    for call, old in pairs:
+        new, was = call.recording, old.recording
+        if versions.setdefault(new.version, was.version) != was.version:
+            raise ValueError(
+                f"{new.name}: calls of its version pair with base calls of several "
+                f"versions, so neither side builds the version once"
+            )
+        takes, gives = (
+            [(h.name, tuple(h.shape), np.dtype(h.dtype)) for h in r.inputs]
+            for r in (was, new)
+        )
+        if refinement is Refinement.NO_WORSE:
+            unread = [t[0] for t in takes if t not in gives]
+        else:
+            unread = [] if takes == gives else [t[0] for t in takes]
+        if unread:
+            raise ValueError(
+                f"{was.name} is held against {new.name}, which does not give it "
+                f"{', '.join(unread)} by name, shape and dtype"
+                + ("" if refinement is Refinement.NO_WORSE else ", in order")
+            )
+        returns, returned = (
+            {(h.name, tuple(h.shape), np.dtype(h.dtype)) for h in r.returned}
+            for r in (was, new)
+        )
+        if returns != returned:
+            raise ValueError(
+                f"{was.name} returns {sorted(n for n, *_ in returns)} and "
+                f"{new.name} {sorted(n for n, *_ in returned)}: not one result to "
+                f"hold them to"
+            )
+        holds, holding = (
+            {(h.name, tuple(h.shape), np.dtype(h.dtype)) for _, h in r.states.values()}
+            for r in (was, new)
+        )
+        if holds != holding:
+            raise ValueError(
+                f"{was.name} holds states {sorted(n for n, *_ in holds)} and "
+                f"{new.name} {sorted(n for n, *_ in holding)}: not one set of "
+                f"states to start them from"
+            )
+    checked = []
+    for call, old in pairs:
+        _, batching = _one_at_a_time(profile, call.recording.version)
+        merging = [
+            s
+            for s in base.schedules()
+            if s.version == old.recording.version
+            and (s.calls_per_command > 1 or s.size is not None)
+        ]
+        if refinement is Refinement.EXACT and merging and not batching:
+            raise ValueError(
+                f"{old.recording.name}: the base batches its calls and "
+                f"{call.recording.name}'s profile runs them one at a time; an "
+                f"exact check runs a base batched only beside a batched call"
+            )
+        if refinement is Refinement.EXACT and not batching:
+            call, old = _started(call), _started(old)
+        timed, halved = [], []
+        for side in (old, call):
+            timed.append([v for _, v in side.timed_points()])
+            # A halved bound is known across the two sides by the returned
+            # output extents it cuts, else by its name.
+            by = {}
+            for point in _bound_points(side.recording, side.values):
+                name = next(k for k in point if point[k] != side.values[k])
+                cuts = frozenset(
+                    (h.name, axis)
+                    for h in side.recording.returned
+                    for axis, bound in h.valid.items()
+                    if bound.value.name == name
+                )
+                by[cuts or name] = (name, point)
+            halved.append(by)
+        unpaired = [
+            sorted(n for k, (n, _) in mine.items() if k not in theirs)
+            for mine, theirs in ((halved[0], halved[1]), (halved[1], halved[0]))
+        ]
+        if len(timed[0]) != len(timed[1]) or any(unpaired):
+            raise ValueError(
+                f"{old.recording.name} is checked at "
+                f"{len(timed[0]) + len(halved[0])} points and "
+                f"{call.recording.name} at {len(timed[1]) + len(halved[1])}"
+                + (
+                    f", halving {unpaired[0]} and {unpaired[1]}, which cut no "
+                    f"output extent the other side's bounds cut"
+                    if any(unpaired)
+                    else ""
+                )
+                + ": a base call's points pair with its call's in order, one "
+                "for one"
+            )
+        at = list(zip(*timed, strict=True)) + [
+            (halved[0][k][1], point) for k, (_, point) in halved[1].items()
+        ]
+        returned = {h.name: h for h in call.recording.returned}
+        for values in [(old.values, call.values), *at]:
+            wrong = []
+            for h in old.recording.returned:
+                # An axis whose bound is not given (a call's points give it)
+                # is whole, as _bound_points leaves it.
+                cut = [
+                    tuple(
+                        (
+                            len(range(*slice(side.valid[axis].evaluate(v)).indices(n)))
+                            if axis in side.valid and side.valid[axis].value.name in v
+                            else n
+                        )
+                        for axis, n in enumerate(side.shape)
+                    )
+                    for side, v in ((h, values[0]), (returned[h.name], values[1]))
+                ]
+                if cut[0] != cut[1]:
+                    wrong.append(f"{h.name} ({cut[0]} against {cut[1]})")
+            if wrong:
+                raise ValueError(
+                    f"{old.recording.name} at {dict(values[0])} and "
+                    f"{call.recording.name} at {dict(values[1])} select other "
+                    f"extents of {', '.join(wrong)}: a pair of points cuts each "
+                    f"returned output alike"
+                )
+        checked.append((call, old, at, batching))
+    # A call whose points select several designs (Variants) is checked as one
+    # call per design, each at its own pairs of points.
+    split = []
+    for call, old, at, batching in checked:
+        designs: dict[tuple, list] = {}
+        for values in at:
+            key = tuple(
+                tuple(box for box, _ in side.recording.ranges_at(chosen, v))
+                for side, chosen, v in (
+                    (old, base, values[0]),
+                    (call, profile, values[1]),
+                )
+            )
+            designs.setdefault(key, []).append(values)
+        if len(designs) == 1:
+            split.append((call, old, at, batching))
+            continue
+        if call.recording.states or old.recording.states:
+            raise NotImplementedError(
+                f"{call.recording.name}: checking a call that holds state at points "
+                f"of several designs is not built yet: split by design, its calls "
+                f"would carry the state out of order"
+            )
+        split += [
+            (
+                dataclasses.replace(call, values=pairs[0][1], points=()),
+                dataclasses.replace(old, values=pairs[0][0], points=()),
+                pairs,
+                batching,
+            )
+            for pairs in designs.values()
+        ]
+    checked = split
+    if refinement is Refinement.NO_WORSE:
+        for call, old, at, batching in checked:
+            one, _ = _one_at_a_time(profile, call.recording.version)
+            held, _ = _one_at_a_time(base, old.recording.version)
+            why = _no_worse(one, held, call, old, device, at)
+            if why is None and batching:
+                why = _batched(
+                    profile,
+                    one,
+                    call,
+                    call,
+                    device,
+                    batching[0],
+                    [(v, v) for _, v in at],
+                )
+            if why is not None:
+                return Check(False, refinement, why)
+        return Check(True, refinement)
+    apart = []
+    for call, old, at, batching in checked:
+        if not batching:
+            apart.append((call, old, at))
+            continue
+        why = _batched(profile, base, call, old, device, batching[0], at)
+        if why is not None:
+            return Check(False, refinement, why)
+    if len(apart) > 1 and any(call.recording.states for call, _, _ in apart):
+        why = _in_order(profile, base, [(call, old) for call, old, _ in apart], device)
+        return Check(why is None, refinement, why)
+    for call, old, at in apart:
+        why = _bit_identical(profile, base, call, old, device, at)
+        if why is not None:
+            return Check(False, refinement, why)
+    return Check(True, refinement)
+
+
+def _started(call: Timed) -> Timed:
+    """Return ``call`` at its two points: each value it carries and is not given at both ends of its recorded range.
+
+    The carry is ``Recording.carry``, the range ``Recording.limits``. A
+    first call may start it anywhere in that range, so an offset read
+    wrongly at one end shows at the other.
+
+    Raises:
+        NotImplementedError: It carries a value it is not given and no
+            recorded range says where it may start.
+    """
+    recording = call.recording
+    unfed = sorted(set(recording.carry) - set(call.values))
+    ends = {
+        name: sorted(
+            {
+                k
+                for limit in recording.limits
+                if limit.plus is None and limit.expression.value.name == name
+                for k in (limit.lo, limit.hi - 1)
+                if limit.evaluate({name: k}) == k
+            }
+        )
+        for name in unfed
+    }
+    bare = [name for name, at in ends.items() if not at]
+    if bare:
+        raise NotImplementedError(
+            f"{recording.name}: checking calls that carry {', '.join(bare)} "
+            f"from one to the next, one call apart, is not built yet: no first "
+            f"call starts the carry, and no recorded range says where it may"
+        )
+    if not unfed:
+        return call
+    points = [
+        {**call.values, **{name: at[k] for name, at in ends.items()}} for k in (0, -1)
+    ]
+    for point in points:
+        recording.check_limits(point)
+    return dataclasses.replace(
+        call,
+        values=points[0],
+        points=tuple(Point(1 / len(points), p) for p in points),
+    )
+
+
+def _one_at_a_time(
+    profile: Profile, version: Version
+) -> tuple[Profile, list[Schedule]]:
+    """Return ``profile`` with ``version``'s calls run one a command, one in flight and unmerged, and the schedules that batched them."""
+    one = profile.copy()
+    batching = [
+        s
+        for s in profile.schedules()
+        if s.version == version
+        and (s.commands_in_flight > 1 or s.calls_per_command > 1 or s.size is not None)
+    ]
+    for s in batching:
+        one.replace_schedule(
+            s,
+            dataclasses.replace(
+                s, calls_per_command=1, commands_in_flight=1, size=None
+            ),
+        )
+    return one, batching
+
+
+def _batched(
+    profile: Profile,
+    base: Profile,
+    call: Timed,
+    old: Timed,
+    device: Device,
+    schedule: Schedule,
+    at: Sequence[tuple[Mapping[str, int], Mapping[str, int]]],
+) -> str | None:
+    """Return how ``call``'s draws, run as ``schedule`` batches them under ``profile``, first differ from ``old``'s apart under ``base``, or None.
+
+    ``calls * (2 * commands_in_flight + 1)`` calls, ``calls`` the version's
+    a command (``Recording.calls``: back to back, or merged into one), each on
+    its seeded draw, in turn at each pair of points ``at`` (``old``'s, then
+    ``call``'s), so calls of one command differ, from one set of seeded
+    states:
+    batched through ``CarriedLoop.calls`` (where the version carries values,
+    the first call's, the Emit giving the rest), ``calls`` a command and
+    ``commands_in_flight`` commands in flight; apart each an ordinary call.
+    Every returned output of each call within its bound, and every state
+    after the last, must be bit-identical.
+
+    Raises:
+        NotImplementedError: ``base`` batches the version's calls too.
+    """
+    recording = call.recording
+    with set_current_device(device):
+        graphs = (
+            Applied.of(old, base, device).built(device),
+            Applied.of(call, profile, device).built(device),
+        )
+    if graphs[0].recording.calls > 1:
+        raise NotImplementedError(
+            "checking a batched schedule against a base that batches too is not "
+            "built yet"
+        )
+    per, depth = graphs[1].recording.calls, schedule.commands_in_flight
+    draws = [drawn_inputs(recording, seed) for seed in range(per * (2 * depth + 1))]
+    paired = [at[k % len(at)] for k in range(len(draws))]
+    rng = np.random.default_rng(len(draws))
+    states = {h.name: _random_tensor(h, rng) for _, h in recording.states.values()}
+    owns = [{h.name: s for s, h in g.recording.states.values()} for g in graphs]
+    try:
+        for graph, own in zip(graphs, owns, strict=True):
+            for name, content in states.items():
+                graph.write(own[name], content)
+        apart = []
+        for tensors, (values, _) in zip(draws, paired, strict=True):
+            graphs[0](*tensors, **values)
+            returned = graphs[0].returned()
+            apart.append(
+                {
+                    h.name: returned[h.name][h.valid_index(values)]
+                    for h in old.recording.returned
+                }
+            )
+        with set_current_device(device):
+            loop = CarriedLoop(graphs[1], graphs[1], depth)
+            batched = loop.calls(
+                [
+                    (tensors, values) if k == 0 or graphs[1].emit is None else ((), {})
+                    for k, (tensors, (_, values)) in enumerate(
+                        zip(draws, paired, strict=True)
+                    )
+                ]
+            )
+        for k, (want, got, (_, values)) in enumerate(
+            zip(apart, batched, paired, strict=True)
+        ):
+            differ = [
+                h.name
+                for h in recording.returned
+                if not np.array_equal(want[h.name], got[h.name][h.valid_index(values)])
+            ]
+            if differ:
+                return (
+                    f"{recording.name}: call {k} of {len(draws)}, {per} a command "
+                    f"and {depth} in flight: {', '.join(differ)} not bit-identical"
+                )
+        differ = [
+            name
+            for name in states
+            if not np.array_equal(
+                graphs[0].read(owns[0][name]), graphs[1].read(owns[1][name])
+            )
+        ]
+        if differ:
+            return (
+                f"{recording.name}: after {len(draws)} calls, {per} a command and "
+                f"{depth} in flight: {', '.join(differ)} not bit-identical"
+            )
+    finally:
+        for graph in graphs:
+            graph.release()
+    return None
+
+
+def _bit_identical(
+    profile: Profile,
+    base: Profile,
+    call: Timed,
+    old: Timed,
+    device: Device,
+    at: Sequence[tuple[Mapping[str, int], Mapping[str, int]]],
+) -> str | None:
+    """Return how ``call`` under ``profile`` first differs from ``old`` under ``base``, or None.
+
+    Each runs at its own of each pair of points ``at`` (``old``'s, then
+    ``call``'s). Both take one seeded draw of ``old``'s inputs, and before
+    each point one set of seeded states, by name (``_differ``).
+    """
+    recording = old.recording
+    inputs = drawn_inputs(recording, 0)
+    rng = np.random.default_rng(1)
+    states = {h.name: _random_tensor(h, rng) for _, h in recording.states.values()}
+    with set_current_device(device):
+        graphs = (
+            Applied.of(old, base, device).built(device),
+            Applied.of(call, profile, device).built(device),
+        )
+        begun = time.perf_counter()
+        owns = [{h.name: s for s, h in g.recording.states.values()} for g in graphs]
+        try:
+            for values in at:
+                for graph, own, given in zip(graphs, owns, values, strict=True):
+                    for name, content in states.items():
+                        graph.write(own[name], content)
+                    graph(*inputs, **given)
+                differ = _differ(*graphs, old.recording, call.recording, values)
+                if differ:
+                    return (
+                        f"{call.recording.name}: {', '.join(differ)} not "
+                        f"bit-identical to it as before at {values[1]}"
+                        + ("" if values[0] == values[1] else f" (before {values[0]})")
+                    )
+        finally:
+            for graph in graphs:
+                graph.release()
+            Spent.charge(timing_s=time.perf_counter() - begun)
+    return None
+
+
+def _differ(
+    before: CompiledGraph,
+    after: CompiledGraph,
+    old: Recording,
+    new: Recording,
+    at: tuple[Mapping[str, int], Mapping[str, int]],
+) -> list[str]:
+    """Return what ``after``'s last call, built from ``new`` and run at ``at[1]``, left the host other than ``before``'s, from ``old`` at ``at[0]``, by name.
+
+    Each output within its bound (past it an operator may write whole
+    tiles), each buffer carried to the next call and each state; a name
+    only one side leaves differs too.
+    """
+    left = []
+    for graph, recording, values in ((before, old, at[0]), (after, new, at[1])):
+        held = {h.name: graph.read(h)[h.valid_index(values)] for h in recording.outputs}
+        held.update(
+            (h.ref().root, graph.read(h))
+            for step in recording.steps
+            for h in step.slots
+            if h.ref().root in recording.feedback and h.ref().nbytes is None
+        )
+        held.update((h.name, graph.read(s)) for s, h in graph.recording.states.values())
+        left.append(held)
+    return [
+        name
+        for name in dict.fromkeys([*left[0], *left[1]])
+        if name not in left[0]
+        or name not in left[1]
+        or not np.array_equal(left[0][name], left[1][name])
+    ]
+
+
+def _no_worse(
+    profile: Profile,
+    base: Profile,
+    call: Timed,
+    old: Timed,
+    device: Device,
+    at: Sequence[tuple[Mapping[str, int], Mapping[str, int]]],
+) -> str | None:
+    """Return why ``call`` under ``profile`` is worse than ``old`` under ``base`` against the recording's reference, or None where it is no worse.
+
+    Each runs at its own of each pair of points ``at`` (``old``'s, then
+    ``call``'s), on every draw.
+
+    A change upstream of a step that ``selects`` is held bit-identical
+    instead, in what the selecting step reads as in every output: an error
+    there, however small, can flip a choice. Otherwise, on each of
+    ``NO_WORSE_DRAWS`` seeded draws (odd ones stress, their floats scaled
+    over four decades), each returned output's error against
+    ``Recording.reference`` must be no larger than ``old``'s in mean square
+    and in its ``NO_WORSE_QUANTILE`` quantile of |e|, and finite; a
+    bit-identical output ties. The reference is ``old``'s recording's, the
+    untuned build's. An input whose contents ``call`` gives
+    (``Timed.contents``) holds them on every draw, unscaled, and ``old``
+    reads the inputs it takes by name.
+
+    Raises:
+        NotImplementedError: The call carries a buffer or a state to the
+            next, or the host writes coded rows, which this does not hold
+            yet.
+    """
+    recording = call.recording
+    if recording.states or recording.feedback:
+        raise NotImplementedError(
+            "holding a call that carries state to no-worse is not built yet"
+        )
+    hosted = {h.ref().root for h in recording.inputs}
+    if any(
+        b.coded and h.ref().root in hosted
+        for step in recording.steps
+        for b, h in zip(step.op.buffers, step.slots, strict=True)
+    ):
+        raise NotImplementedError(
+            "holding coded rows the host writes to no-worse (drawn as codes, "
+            "their reference decoding them) is not built yet"
+        )
+    with set_current_device(device):
+        before, after = Applied.of(old, base, device), Applied.of(call, profile, device)
+        olds, news = before.fingerprint(device), after.fingerprint(device)
+    if old.recording is recording:
+        changed = {
+            i for i, (a, b) in enumerate(zip(olds[0], news[0], strict=True)) if a != b
+        } | {i for f in set(olds[1]) ^ set(news[1]) for i in f.steps}
+    else:
+        changed = set(range(len(recording.steps)))
+    readers, _ = recording.users()
+    reached = set(changed)
+    frontier = list(changed)
+    while frontier:
+        for root in recording.steps[frontier.pop()].roots()[1]:
+            for j in readers.get(root, []):
+                if j >= 0 and j not in reached:
+                    reached.add(j)
+                    frontier.append(j)
+    selecting = sorted(j for j in reached if recording.steps[j].op.selects)
+    # Each buffer a selecting step reads, by root: held bit-identical, as
+    # every output then is.
+    watched = {
+        slot.ref().root
+        for j in selecting
+        for b, slot in zip(
+            recording.steps[j].op.buffers, recording.steps[j].slots, strict=True
+        )
+        if b.fills
+    }
+    given = {
+        h.name: call.contents[h.ref().root]
+        for h in recording.inputs
+        if h.ref().root in call.contents
+    }
+    with set_current_device(device):
+        graphs = before.built(device), after.built(device)
+    try:
+        for draw in range(NO_WORSE_DRAWS):
+            rng = np.random.default_rng(draw)
+            tensors = {
+                h.name: t
+                for h, t in zip(
+                    recording.inputs, drawn_inputs(recording, draw), strict=True
+                )
+            }
+            tensors.update(given)
+            if draw % 2:
+                for h in recording.inputs:
+                    if h.name in given:
+                        continue
+                    if np.dtype(h.dtype).kind == "f" or np.dtype(h.dtype).name == (
+                        "bfloat16"
+                    ):
+                        scale = 10.0 ** rng.uniform(-2, 2, h.shape)
+                        tensors[h.name] = (
+                            tensors[h.name].astype(np.float64) * scale
+                        ).astype(h.dtype)
+            for point in at:
+                where = f" at {dict(point[1])}" if point[1] else ""
+                got = []
+                for graph, side, values in zip(graphs, (old, call), point, strict=True):
+                    graph(*(tensors[h.name] for h in side.recording.inputs), **values)
+                    read = {
+                        h.name: np.array(graph.read(h)[h.valid_index(values)])
+                        for h in side.recording.returned
+                    }
+                    for step in side.recording.steps:
+                        for slot in step.slots:
+                            if slot.ref().root in watched and slot.ref().nbytes is None:
+                                read.setdefault(
+                                    f"{slot.ref().root} (selected from)",
+                                    np.array(graph.read(slot)),
+                                )
+                    got.append(read)
+                if watched:
+                    differ = sorted(
+                        name
+                        for name in got[0].keys() | got[1].keys()
+                        if name not in got[0]
+                        or name not in got[1]
+                        or got[0][name].view(np.uint8).tobytes()
+                        != got[1][name].view(np.uint8).tobytes()
+                    )
+                    if differ:
+                        return (
+                            f"{recording.name}: the change reaches step "
+                            f"{selecting[0]} "
+                            f"({type(recording.steps[selecting[0]].op).__name__}), "
+                            f"which selects, so only an exact change is taken "
+                            f"there; on draw {draw}{where} {', '.join(differ)} differ"
+                        )
+                    continue
+                want, _ = old.recording.reference(tensors, point[0])
+                for h, ref in zip(old.recording.returned, want, strict=True):
+                    u, t = got[0][h.name], got[1][h.name]
+                    if np.array_equal(u.view(np.uint8), t.view(np.uint8)):
+                        continue
+                    exact = np.asarray(ref, dtype=np.float64)
+                    errors = [np.abs(x.astype(np.float64) - exact) for x in (u, t)]
+                    ms = [float(np.mean(e**2)) for e in errors]
+                    tail = [float(np.quantile(e, NO_WORSE_QUANTILE)) for e in errors]
+                    if (
+                        not np.isfinite([*ms, *tail]).all()
+                        or ms[1] > ms[0]
+                        or tail[1] > tail[0]
+                    ):
+                        return (
+                            f"{recording.name}: {h.name} is worse than before on "
+                            f"draw {draw}{where}: mean square {ms[1]:.3g} against "
+                            f"{ms[0]:.3g}, {NO_WORSE_QUANTILE} |e| {tail[1]:.3g} "
+                            f"against {tail[0]:.3g}"
+                        )
+    finally:
+        for graph in graphs:
+            graph.release()
+    return None
+
+
+def _in_order(
+    profile: Profile,
+    base: Profile,
+    pairs: Sequence[tuple[Timed, Timed]],
+    device: Device,
+) -> str | None:
+    """Run each pair's call under ``profile`` and its base call under ``base``, in order, states carried; return the first difference, or None.
+
+    Each side carries its states into its next call. Each version is built
+    once each way, so a repeated call keeps what it carries. The calls start
+    from one set of seeded states, shared by name across versions, and each
+    side takes the call's seeded inputs at its own call's values; after
+    each, every output within its bound, carried buffer and state must be
+    bit-identical (``_differ``).
+    """
+    rng = np.random.default_rng(0)
+    seeded: dict[str, np.ndarray] = {}
+    for call, _ in pairs:
+        for _, h in call.recording.states.values():
+            seeded.setdefault(h.name, _random_tensor(h, rng))
+    sides = [dict(seeded), dict(seeded)]
+    built: dict = {}
+    try:
+        for k, (call, old) in enumerate(pairs):
+            recording = call.recording
+            version = recording.version
+            if version not in built:
+                with set_current_device(device):
+                    built[version] = (
+                        Applied.of(old, base, device).built(device),
+                        Applied.of(call, profile, device).built(device),
+                    )
+            graphs = built[version]
+            inputs = drawn_inputs(recording, k)
+            owns = [{h.name: s for s, h in g.recording.states.values()} for g in graphs]
+            at = (old.values, call.values)
+            for graph, own, states, values in zip(graphs, owns, sides, at, strict=True):
+                for name, state in own.items():
+                    graph.write(state, states[name])
+                graph(*inputs, **values)
+            differ = _differ(graphs[0], graphs[1], old.recording, recording, at)
+            for graph, own, states in zip(graphs, owns, sides):
+                states.update((n, graph.read(s).copy()) for n, s in own.items())
+            if differ:
+                return (
+                    f"{recording.name}, call {k} of {len(pairs)}: "
+                    f"{', '.join(differ)} not bit-identical"
+                )
+    finally:
+        for graphs in built.values():
+            for graph in graphs:
+                graph.release()
+    return None
+
+
+@dataclass(frozen=True)
+class Switches:
+    """How often a call's version switches design between calls, under a profile's variants.
+
+    Attributes:
+        rates: The switches into each design per call, by design (each set
+            of variants' range, ``Recording.ranges_at``).
+        at: Values selecting each design.
+        ordered: Counted along the calls' order; else estimated from the
+            points' shares as independent draws.
+    """
+
+    rates: dict[tuple, float]
+    at: dict[tuple, dict[str, int]]
+    ordered: bool
+
+    @classmethod
+    def of(cls, call: Timed, profile: Profile) -> Switches:
+        """Return ``call``'s switches under ``profile``.
+
+        In the calls' order where its recording carries every value a set
+        of variants is over to the next call as an expression of that value
+        alone (``Recording.carry``, as a decode position steps): from each
+        timed point, its varied values stepped call by call while they stay
+        in their recorded range (``Recording.value_range``), each change of
+        design counted into the new one, over the calls stepped, weighted
+        by the point. Else each pair of consecutive calls is taken as two
+        independent draws of the points: a design's share times the rest.
+        """
+        recording = call.recording
+        names = {v.name for v in recording.values}
+        varied = [
+            n
+            for variants in profile.variants()
+            if set(variants.values) <= names
+            for n in variants.values
+        ]
+        steps = {
+            n: e
+            for n in varied
+            if isinstance(e := recording.carry.get(n), Affine) and e.value.name == n
+        }
+        ordered = bool(varied) and len(steps) == len(varied)
+        spans = {n: recording.value_range(n) for n in varied}
+        rates: dict[tuple, float] = {}
+        at: dict[tuple, dict[str, int]] = {}
+        points = call.timed_points()
+        total = sum(w for w, _ in points)
+        if not ordered:
+            shares: dict[tuple, float] = {}
+            for weight, values in points:
+                key = tuple(box for box, _ in recording.ranges_at(profile, values))
+                shares[key] = shares.get(key, 0.0) + weight / total
+                at.setdefault(key, values)
+            rates = {k: share * (1 - share) for k, share in shares.items()}
+            return cls(rates, at, False)
+        length = max(hi - lo + 1 for lo, hi in (s for s in spans.values() if s))
+        for weight, values in points:
+            keys = []
+            current = dict(values)
+            while len(keys) < length and all(
+                span is None or span[0] <= current[n] <= span[1]
+                for n, span in spans.items()
+            ):
+                key = tuple(box for box, _ in recording.ranges_at(profile, current))
+                at.setdefault(key, dict(current))
+                keys.append(key)
+                current = {
+                    **current,
+                    **{n: e.evaluate(current) for n, e in steps.items()},
+                }
+            for before, after in zip(keys, keys[1:]):
+                if before != after:
+                    rates[after] = rates.get(after, 0.0) + weight / total / len(keys)
+            for key in keys:
+                rates.setdefault(key, 0.0)
+        return cls(rates, at, True)
+
+
+def measure(
+    profile: Profile,
+    base: Profile,
+    calls: Sequence[Timed],
+    device: Device,
+    timing: Timing = Timing(),
+    refinement: Refinement = Refinement.EXACT,
+) -> Measured:
+    """Time ``calls`` built under ``profile`` against them built under ``base``, in pairs.
+
+    ``profile`` must fit (``fit``). Each call is built both ways and timed
+    interleaved on the NPU at each of its points, checked bit-identical as
+    it goes where ``refinement`` is exact (``compare_graphs``); where either
+    way batches the call's version (several calls a command, or commands in
+    flight), batched, a call's time its batch's over its calls
+    (``_time_batched``). A call's time is its points' medians,
+    weighted; ``ratio`` weighs each point's median paired ratio by the
+    base's time there. Where ``profile`` has variants, each point runs on
+    the design its values select (``Recording.ranges_at``), a call timed as
+    one call per design; one that switches designs between calls
+    (``Switches``: along the calls' order where its recording carries the
+    varied values, else as independent draws of its points) adds what each
+    switch costs on the device (``measure.switch_cost``, measured, into the
+    cores of the design's first array, ``design_cores``).
+
+    Args:
+        profile: The profile timed.
+        base: The profile it is timed against.
+        calls: The graph's calls.
+        device: The device.
+        timing: How long each call is timed.
+        refinement: How ``profile`` relates to ``base``: a no-worse one is
+            timed without holding it bit-identical (``check`` holds it).
+
+    Raises:
+        ValueError: ``profile`` does not fit.
+        NotBitIdentical: An exact call is not bit-identical built both ways.
+        NotImplementedError: What ``fit`` or the composer does not take yet.
+    """
+    fitted = fit(profile, calls, device)
+    if not fitted.ok:
+        raise ValueError(f"the profile does not fit ({fitted.stage}): {fitted.why}")
+    seconds = base_seconds = weighted = 0.0
+    for call in calls:
+        known = Compared()
+        parts = _by_design(call, (base, profile))
+        switches = Switches.of(call, profile)
+        switch_us = 0.0
+        if any(switches.rates.values()):
+            with set_current_device(device):
+                fixed_us, per_core_us = switch_cost(
+                    device, cache=Cache.here(), log=logger.info
+                )
+            for key, rate in switches.rates.items():
+                if not rate:
+                    continue
+                into = dataclasses.replace(call, values=switches.at[key], points=())
+                with set_current_device(device):
+                    first = Applied.of(into, profile, device).recording.steps[0].op
+                    cores = design_cores(first.resolved(device))
+                switch_us += rate * (fixed_us + per_core_us * cores)
+        for part in parts:
+            with set_current_device(device):
+                applied = (
+                    Applied.of(part, base, device),
+                    Applied.of(part, profile, device),
+                )
+            if any(a.recording.calls > 1 or a.commands_in_flight > 1 for a in applied):
+                _time_batched(
+                    part, applied, device, timing, known, refinement is Refinement.EXACT
+                )
+            else:
+                with set_current_device(device):
+                    compare_graphs(
+                        part,
+                        applied[0].built(device),
+                        applied[1].built(device),
+                        timing=timing,
+                        known=known,
+                        log=logger.info,
+                        exact=refinement is Refinement.EXACT,
+                    )
+        for weight, values in call.timed_points():
+            point = tuple(sorted(values.items()))
+            was, now = known.medians[point]
+            base_seconds += weight * was / 1e6
+            seconds += weight * now / 1e6
+            weighted += weight * was * known.ratios[point] / 1e6
+        seconds += switch_us / 1e6
+        weighted += switch_us / 1e6
+    return Measured(weighted / base_seconds, seconds, base_seconds)
+
+
+def _by_design(call: Timed, profiles: Sequence[Profile]) -> list[Timed]:
+    """Return ``call`` as one call per design its timed points select under ``profiles`` together, or ``call`` where they select one.
+
+    A design is what ``Recording.ranges_at`` selects under each profile.
+
+    Each at its own points, its values its first's, so ``Applied.of`` builds
+    each as one design.
+    """
+    designs: dict[tuple, list[tuple[float, dict[str, int]]]] = {}
+    for weight, values in call.timed_points():
+        key = tuple(
+            tuple(box for box, _ in call.recording.ranges_at(profile, values))
+            for profile in profiles
+        )
+        designs.setdefault(key, []).append((weight, values))
+    if len(designs) == 1:
+        return [call]
+    return [
+        dataclasses.replace(
+            call,
+            values=points[0][1],
+            points=tuple(Point(w, v) for w, v in points),
+        )
+        for points in designs.values()
+    ]
+
+
+def _time_batched(
+    call: Timed,
+    applied: tuple[Applied, Applied],
+    device: Device,
+    timing: Timing,
+    known: Compared,
+    exact: bool,
+) -> None:
+    """Time ``call`` as each of ``applied`` (before, after) dispatches it, a call's time its batch's over its calls, into ``known``.
+
+    At each of the call's points (``Timed.timed_points``), one batch of at
+    least ``timing.calls`` calls, whole commands of both
+    (``Recording.repeated``), each on its own seeded draw, runs through
+    ``CarriedLoop.calls`` with each one's commands in flight, ``timing.rounds``
+    rounds interleaved, half each way round, each from the same seeded states.
+    A round before them is not timed: it makes each loop's runs, and where
+    ``exact`` every call's returned outputs, within their bounds, must be
+    bit-identical between the two. ``known`` takes each point's two medians,
+    their difference and the median of the paired ratios.
+
+    Raises:
+        NotBitIdentical: ``exact``, and a call's returned output differs.
+        NotImplementedError: One carries values, so its later calls take the
+            Emit's values rather than the batch's.
+    """
+    recording = call.recording
+    with set_current_device(device):
+        graphs = [a.built(device) for a in applied]
+    try:
+        if any(g.emit is not None for g in graphs):
+            raise NotImplementedError(
+                f"{recording.name}: pricing batched calls of a version that carries "
+                f"values is not built yet"
+            )
+        per = math.lcm(*(g.recording.calls for g in graphs))
+        count = per * max(1, math.ceil(timing.calls / per))
+        draws = [drawn_inputs(recording, seed) for seed in range(count)]
+        rng = np.random.default_rng(count)
+        states = {h.name: _random_tensor(h, rng) for _, h in recording.states.values()}
+        owns = [{h.name: s for s, h in g.recording.states.values()} for g in graphs]
+        with set_current_device(device):
+            loops = [
+                CarriedLoop(g, g, a.commands_in_flight)
+                for g, a in zip(graphs, applied, strict=True)
+            ]
+            for _, values in call.timed_points():
+                batch = [(tensors, values) for tensors in draws]
+                seconds: tuple[list[float], list[float]] = ([], [])
+                for r in range(timing.rounds + 1):
+                    got = {}
+                    for side in (1, 0) if r % 2 else (0, 1):
+                        for name, content in states.items():
+                            graphs[side].write(owns[side][name], content)
+                        begun = time.perf_counter()
+                        got[side] = loops[side].calls(batch)
+                        seconds[side].append((time.perf_counter() - begun) / count)
+                    if r or not exact:
+                        continue
+                    for k, (want, have) in enumerate(zip(got[0], got[1], strict=True)):
+                        differ = [
+                            h.name
+                            for h in recording.returned
+                            if not np.array_equal(
+                                want[h.name][h.valid_index(values)],
+                                have[h.name][h.valid_index(values)],
+                            )
+                        ]
+                        if differ:
+                            raise NotBitIdentical(
+                                f"{recording.name}: call {k} of {count} batched at "
+                                f"{values}: {', '.join(differ)} not bit-identical"
+                            )
+                was, now = (np.array(s[1:]) * 1e6 for s in seconds)
+                point = tuple(sorted(values.items()))
+                known.medians[point] = (float(np.median(was)), float(np.median(now)))
+                known.ratios[point] = float(np.median(now / was))
+                known.points[point] = (
+                    known.medians[point][1] - known.medians[point][0],
+                    None,
+                )
+                logger.info(
+                    "measure: %s batched at %s: %.1f us a call before, %.1f after "
+                    "(%d calls a command and %d in flight against %d and %d)",
+                    recording.name,
+                    values,
+                    *known.medians[point],
+                    graphs[1].recording.calls,
+                    applied[1].commands_in_flight,
+                    graphs[0].recording.calls,
+                    applied[0].commands_in_flight,
+                )
+    finally:
+        for graph in graphs:
+            graph.release()
+
+
+def search(
+    calls: Sequence[Timed],
+    start: Profile,
+    device: Device,
+    budget_s: float | None = None,
+    max_images: int | None = None,
+) -> Profile:
+    """Return the fastest profile found from ``start`` that passes every check.
+
+    In rounds, each from the profile the last one kept (``start`` first):
+    each edit ``candidates`` yields from it is applied to it, fitted
+    (``fit``; one that waits or is refused is passed over, as is one that
+    builds what the profile builds) and measured in place against it
+    (``measure``); one under ``GAINS`` gains, and one
+    that does not build, or builds wrong, is refused and logged. The gainers are
+    then taken best first, each applied to the profile so far (a region and
+    a tunable edit of the same steps compose; a region over steps an earlier
+    one holds gives way to it, as a tunable an earlier one sets does): one
+    the profile so far does not fit with (``fit``), or that builds what it
+    builds, is passed over; a take is
+    checked against ``start`` by its refinement (``check``) and measured
+    against the profile so far, and kept where it still gains. The next
+    round's ``candidates`` reach what composes on a take (a hold of an edge
+    of a region it adds); an edit an earlier round priced is not priced
+    again. The search ends at a round that keeps nothing, or at
+    ``budget_s``.
+
+    Args:
+        calls: The graph's calls, every version.
+        start: The profile searched from.
+        device: The device.
+        budget_s: The most the pricing takes, in seconds; None for no limit.
+        max_images: The images the host may hold loaded at once; None for no limit.
+
+    Raises:
+        NotImplementedError: ``max_images`` is given (counting the images a
+            profile loads is not built yet).
+    """
+    if max_images is not None:
+        raise NotImplementedError(
+            "counting the images a profile loads is not built yet"
+        )
+    begun = time.perf_counter()
+    incumbent = start
+    tried: set[str] = set()
+    while budget_s is None or time.perf_counter() - begun < budget_s:
+        base = incumbent
+        priced: list[tuple[float, Edit]] = []
+        edits = candidates(calls, base, device)
+        while budget_s is None or time.perf_counter() - begun < budget_s:
+            try:
+                edit = next(edits)
+            except StopIteration:
+                break
+            except NotImplementedError as e:
+                logger.info("search: %s", e)
+                break
+            # Entry is unhashable, so an edit is known by its repr.
+            if repr(edit) in tried:
+                continue
+            tried.add(repr(edit))
+            edited = edit.apply(base)
+            try:
+                fitted = fit(edited, calls, device)
+            except NotImplementedError as e:
+                logger.info("search: %s waits: %s", edit, e)
+                continue
+            if not fitted.ok:
+                logger.info(
+                    "search: %s refused at %s: %s", edit, fitted.stage, fitted.why
+                )
+                continue
+            try:
+                with set_current_device(device):
+                    same = all(
+                        Applied.of(c, edited, device).fingerprint(device)
+                        == Applied.of(c, base, device).fingerprint(device)
+                        for call in calls
+                        for c in _by_design(call, (base, edited))
+                    )
+                if same:
+                    continue  # it builds what its base builds
+                ratio = measure(
+                    edited,
+                    base,
+                    calls,
+                    device,
+                    timing=PRICING,
+                    refinement=edit.refinement,
+                ).ratio
+            except NotBitIdentical as e:
+                logger.warning("search: refused, built wrong: %s: %s", edit, e)
+                continue
+            except NotImplementedError as e:
+                logger.info("search: %s waits: %s", edit, e)
+                continue
+            except (ValueError, RuntimeError, ir.MLIRError) as e:
+                logger.warning("search: refused, does not build: %s: %s", edit, e)
+                continue
+            logger.info("search: %.3f for %s", ratio, edit)
+            if ratio < GAINS:
+                priced.append((ratio, edit))
+        for ratio, edit in sorted(priced, key=lambda pair: pair[0]):
+            try:
+                edited = edit.apply(incumbent)
+            except ValueError as e:
+                # An earlier take replaced the entry it edits; the next round
+                # proposes it again on what that take left.
+                logger.info("search: %s gives way: %s", edit, e)
+                continue
+            # Priced against the round's base, it joins what the takes before
+            # it left, which may not fit with it.
+            try:
+                fitted = fit(edited, calls, device)
+            except NotImplementedError as e:
+                logger.info("search: %s waits on what it joins: %s", edit, e)
+                continue
+            if not fitted.ok:
+                logger.info(
+                    "search: %s refused on what it joins at %s: %s",
+                    edit,
+                    fitted.stage,
+                    fitted.why,
+                )
+                continue
+            with set_current_device(device):
+                same = all(
+                    Applied.of(c, edited, device).fingerprint(device)
+                    == Applied.of(c, incumbent, device).fingerprint(device)
+                    for call in calls
+                    for c in _by_design(call, (incumbent, edited))
+                )
+            if same:
+                continue  # an earlier take decides what it names
+            checked = check(edited, start, calls, device, edit.refinement)
+            if not checked.ok:
+                logger.info("search: %s is not bit-identical: %s", edit, checked.why)
+                continue
+            ratio = measure(
+                edited,
+                incumbent,
+                calls,
+                device,
+                timing=PRICING,
+                refinement=edit.refinement,
+            ).ratio
+            logger.info("search: %.3f on what it joins for %s", ratio, edit)
+            if ratio >= GAINS:
+                continue
+            incumbent = edited
+        if incumbent is base:
+            break
+    return incumbent

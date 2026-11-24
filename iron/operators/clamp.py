@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.iron import ObjectFifo, Worker
+from aie.iron import Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise
 from aie.utils.compile.jit.params import param, per_call
@@ -63,8 +63,8 @@ class Clamp(UnaryElementwise):
         cores = self.cores
         kernel = self.kernel()
         depth = self.x.l1_depth
-        of_ins = [ObjectFifo(self.x.obj_type, depth=depth) for k in range(cores)]
-        of_outs = [ObjectFifo(self.y.obj_type, depth=depth) for k in range(cores)]
+        x_ends = self.x.fifos(depth)
+        y_ends = self.y.fifos(depth)
         rtps = [Rtp([self.count, self.low_bits, self.high_bits]) for _ in range(cores)]
 
         def core_fn(of_in, of_out, kernel_fn, rtp):
@@ -80,10 +80,8 @@ class Clamp(UnaryElementwise):
         workers = [
             Worker(
                 core_fn,
-                [of_ins[k].cons(), of_outs[k].prod(), kernel, rtps[k]],
+                [x_ends[k], y_ends[k], kernel, rtps[k]],
             )
             for k in range(cores)
         ]
-        self.x.bind([f.prod() for f in of_ins])
-        self.y.bind([f.cons() for f in of_outs])
         return Built(workers, rtps)

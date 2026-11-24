@@ -101,7 +101,27 @@ def vectors(
     centered: Iterable[Operand] = (),
     given: Mapping[Operand, np.ndarray | tuple[int, ...]] | None = None,
 ) -> Vectors:
-    """Random inputs for ``op``'s declared buffers, and ``op.reference()``'s outputs.
+    """Random inputs for ``op``'s declared buffers (``draws``), and ``op.reference()``'s outputs.
+
+    Raises:
+        ValueError: An operand named is not one of ``op``'s inputs.
+    """
+    inputs = draws(
+        op, seed=seed, scale=scale, normal=normal, centered=centered, given=given
+    )
+    return Vectors(inputs, op._call_reference(inputs))
+
+
+def draws(
+    op: Operator,
+    *,
+    seed: int = 42,
+    scale: float = 4.0,
+    normal: Iterable[Operand] = (),
+    centered: Iterable[Operand] = (),
+    given: Mapping[Operand, np.ndarray | tuple[int, ...]] | None = None,
+) -> dict[str, np.ndarray]:
+    """Random inputs for ``op``'s declared buffers, by name: what ``op.test.draw`` asks for, its preconditions met.
 
     Args:
         op: The operator whose declared buffers are drawn for.
@@ -130,9 +150,11 @@ def vectors(
         if isinstance(value, np.ndarray):
             inputs[b.name] = value
             continue
-        shape = b.host_shape if value is None else tuple(value)
+        # A coded operand is drawn as the logical tensor its reference reads.
+        drawn = b.logical_shape if b.coded else b.host_shape
+        shape = drawn if value is None else tuple(value)
         # A dtype that follows tuning is None until tuned; the unpacked operand is bf16.
-        dtype = np.dtype(bfloat16 if b.dtype is None else b.host_dtype)
+        dtype = np.dtype(bfloat16 if b.dtype is None or b.coded else b.host_dtype)
         if dtype.kind not in "fc" and dtype != bfloat16:
             t = rng.integers(0, int(scale) + 1, shape).astype(dtype)
         else:
@@ -141,7 +163,7 @@ def vectors(
             if b.name in centered_names:
                 t = (t.astype(np.float32) - scale / 2).astype(dtype)
         inputs[b.name] = t
-    return Vectors(inputs, op._call_reference(inputs))
+    return inputs
 
 
 def _report(buf_name: str, verdict: Verdict, tolerance: Tolerance) -> None:
@@ -270,7 +292,7 @@ def run_test(
     args, produced, total_bytes = [], {}, 0
     for b in operator.buffers:
         if b.fills:
-            buf = tensor_class(inputs[b.name])
+            buf = tensor_class(b.device_form(inputs[b.name]))
         else:
             buf = tensor_class(b.host_shape, dtype=b.host_dtype)
         if b.drains:

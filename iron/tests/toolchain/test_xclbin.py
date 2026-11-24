@@ -115,8 +115,8 @@ def test_shipped_fetches_its_image(npu2):
 
 
 @pytest.mark.extensive
-@pytest.mark.parametrize("chunk,pipelines", [(True, 4), (False, 2)])
-def test_llama_builds_xclbins_at_its_size_on_npu1(npu1, chunk, pipelines):
+@pytest.mark.parametrize("chunk", [True, False])
+def test_llama_builds_xclbins_at_its_size_on_npu1(npu1, chunk):
     """Check that Llama 3.2 1B's designs build into an xclbin chain on NPU1.
 
     Every design of a prompt chunk and of a decode step at Llama 3.2 1B's
@@ -128,7 +128,7 @@ def test_llama_builds_xclbins_at_its_size_on_npu1(npu1, chunk, pipelines):
     assert not version.plan.full_elf
     assert Path(version.image).stat().st_size > 0
     (mha,) = [op for op in version.sequence.unique_operators() if type(op) is MHA]
-    assert mha.width == 4 and mha.num_pipelines == pipelines
+    assert mha.width == 4 and mha.num_pipelines == 4
 
 
 def test_a_declared_operator_compiles_to_an_xclbin_on_npu1(npu1):

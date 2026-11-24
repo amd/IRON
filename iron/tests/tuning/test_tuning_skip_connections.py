@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Skip connections and reconvergent paths (diamonds).
+
+Every check calls the composition contract before any compile, build or
+device use, so nothing here touches the NPU; a test is ``@unbuilt`` while what it calls raises ``NotImplementedError`` (not built yet).
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from iron.common.declare import Profile
+from iron.common.declare.composition import Entry, Refinement, Region
+from iron.common.graph.sdf import analyze
+from iron.tests.support.toys_edges import (
+    HELDS,
+    diamond_qkv_merge,
+    realize_helds,
+    skip_add_gemv_add,
+    skip_add_gemv_add_edge,
+    skip_edge,
+    window_with_outside_reader,
+)
+from iron.tests.support.tuning import reached_by_candidates, unbuilt
+from iron.tune.autotune import Timed
+from iron.tune.search import candidates, check, fit, search
+
+
+def _residual_region(held: str | None = None):
+    """Return the two-transformer-layer-ish residual (add, norm, proj, add2), its skip edge held one way."""
+    recording, members, forward = window_with_outside_reader()
+    skip = skip_edge(depth=4)
+    # By producer, then consumer, as candidates orders a region's edges.
+    edges = tuple(sorted(forward + (skip,), key=lambda e: (e.producer, e.consumer)))
+    if held is None:
+        return recording, Region(members, edges)
+    edges, workers, phases = realize_helds(edges, {edges.index(skip): held})
+    return recording, Region(members, edges, workers=workers, phases=phases)
+
+
+def _short_skip_region(held: str | None = None, depth: int = 4):
+    recording, members, forward = skip_add_gemv_add()
+    edges = forward + (skip_add_gemv_add_edge(depth=depth),)
+    if held is None:
+        return recording, Region(members, edges)
+    edges, workers, phases = realize_helds(edges, {len(edges) - 1: held})
+    return recording, Region(members, edges, workers=workers, phases=phases)
+
+
+@pytest.mark.parametrize("held", HELDS)
+def test_a_residual_skip_round_trips_for_every_way_of_holding_it(
+    held, tmp_path, device
+):
+    """A region with a skip edge, its depth and held place realized, round-trips; composing ``candidates``' edits reaches each holding."""
+    recording, region = _residual_region(held=held)
+    entry = Entry(region)
+    profile = Profile()
+    profile.add_entry(entry)
+    profile.save(tmp_path / f"skip_{held}.json")
+    loaded = Profile.load(tmp_path / f"skip_{held}.json")
+    assert loaded.entries() == [entry]
+    reached = reached_by_candidates(region, [Timed(recording)], device)
+    assert reached.entries() == [entry]
+
+
+def test_a_reconvergent_diamond_round_trips(device):
+    """Attention's Q/K/V branches rejoining (a diamond) round-trips, and ``candidates`` proposes the fan-out and the merge."""
+    recording, region = diamond_qkv_merge()
+    entry = Entry(region)
+    profile = Profile()
+    profile.add_entry(entry)
+    start = Profile()
+    assert any(
+        entry in edit.apply(start).entries()
+        for edit in candidates([Timed(recording)], start, device)
+    )
+
+
+@pytest.mark.parametrize(
+    "held",
+    [
+        # One worker past IRON's folds and a DDR edge wait.
+        h if h in ("memtile", "later_phase") else pytest.param(h, marks=unbuilt)
+        for h in HELDS
+    ],
+)
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_residual_skip_is_bit_identical_for_every_way_of_holding_it(held, device):
+    """The residual window, held each way, is bit-identical to the same steps run apart."""
+    recording, region = _residual_region(held=held)
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    base = Profile()
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_reconvergent_diamond_is_bit_identical(device):
+    """The Q/K/V diamond is bit-identical to the norm, the two projections and the merge run apart."""
+    recording, region = diamond_qkv_merge()
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    base = Profile()
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_tuner_picks_the_way_of_holding_that_pays(device):
+    """The tuner, on the residual toy alone, picks the held place that pays."""
+    recording, _ = _residual_region()
+    start = Profile()
+    found = search([Timed(recording)], start, device, budget_s=60.0)
+    assert any(
+        isinstance(e.root, Region)
+        and (
+            e.root.workers or any(edge.kind.value != "stream" for edge in e.root.edges)
+        )
+        for e in found.entries()
+    )
+
+
+def test_a_depth_below_the_analyzed_minimum_is_refused_before_any_build(device):
+    """A skip edge shallower than the dataflow analysis's minimum is refused before any build.
+
+    Add -> GEMV -> Add, the GEMV's two-element objects delivered to the
+    second add whole (an asymmetric fifo): the skip's minimum is one, which
+    npu2 runs bit-identical, as it does four.
+    """
+    recording, region = _short_skip_region()
+    least = analyze(region, recording, device).min_depth[region.edges[-1]]
+    assert least == 1
+    recording, region = _short_skip_region(depth=least - 1)
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "analysis"
+    assert "deadlocks" in (result.why or "")
+
+
+def test_the_recorded_safe_depth_fits(device):
+    """The same skip edge at a depth of 4, which runs safely, is not refused by the analysis."""
+    recording, region = _short_skip_region(depth=4)
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    result = fit(profile, [Timed(recording)], device)
+    assert result.ok, result.why

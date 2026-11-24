@@ -13,6 +13,7 @@ SPDX-License-Identifier = "CC0-1.0"
 path = [
     "iron/applications/**/profiles/*.json",
     "iron/applications/llama/costs_*.json",
+    "iron/tune/costs/*.json",
     "iron/tests/support/*.json",
 ]
 precedence = "closest"

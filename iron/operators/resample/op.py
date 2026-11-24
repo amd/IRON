@@ -18,7 +18,7 @@ from typing import Any
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, ExternalFunction, In, ObjectFifo, Out, TaskGroup, Worker
+from aie.iron import Buffer, ExternalFunction, In, ObjectFifo, Out, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernel import ArgType
 from aie.iron.kernels import datamovement, vision
@@ -348,7 +348,7 @@ class ResampleTaps(Operator):
         per_call = self.count.per_call
         n, words = self.table.shape
         count = n // self.cores if per_call else self.residents["count"]
-        tg = TaskGroup()
+        tg = rt.task_group()
         for k in range(self.cores):
             tap = TensorAccessPattern(
                 (n, words),
@@ -364,7 +364,7 @@ class ResampleTaps(Operator):
                 length_parameter=self.count if per_call else None,
                 length_unit=words,
             )
-        tg.finish()
+        rt.finish(tg)
 
     def build(self) -> Built:
         cores = self.cores
@@ -385,7 +385,7 @@ class ResampleTaps(Operator):
         quantize_k = peak_k.object_file.bind(
             "resample_quantize", [peak_ty, self.table.obj_type] + [np.int32] * 5
         )
-        of_tables = [ObjectFifo(self.table.obj_type, depth=2) for k in range(cores)]
+        tables = self.table.fifos(self.table.depth)
         # The peak passes core to core; the last broadcasts it from a memtile.
         of_chain = [ObjectFifo(peak_ty, depth=1) for k in range(cores - 1)]
         of_peak = of_all = None
@@ -444,7 +444,7 @@ class ResampleTaps(Operator):
                     core_fn,
                     [
                         k,
-                        of_tables[k].prod(),
+                        tables[k],
                         of_chain[k - 1].cons() if k else None,
                         None if final else of_chain[k].prod(),
                         shared,
@@ -456,7 +456,6 @@ class ResampleTaps(Operator):
                     ],
                 )
             )
-        self.table.bind([f.cons() for f in of_tables])
         return Built(workers, rtps)
 
 
@@ -721,7 +720,7 @@ class Resample(Operator):
 
     def sequence(self, rt):
         """Run the image, then both tables down one stream, and each core's patches."""
-        tg = TaskGroup()
+        tg = rt.task_group()
         moves = [
             (self.image, None, self.image, "image_count", 0, 1),
             (self.taps_w, None, self.taps_w, "width_count", 0, 1),
@@ -756,7 +755,7 @@ class Resample(Operator):
                     length_parameter=length,
                     length_unit=width,
                 )
-        tg.finish()
+        rt.finish(tg)
 
     def build(self) -> Built:
         cores = self.cores
@@ -764,9 +763,11 @@ class Resample(Operator):
             self.words, chunk=self.chunk, patch_columns=self.patch_columns, cores=cores
         )
         counts_ty = np.ndarray[(5,), np.dtype[np.int32]]
-        of_image = ObjectFifo(self.image.obj_type, depth=2)
-        of_taps = ObjectFifo(self.taps_w.obj_type, depth=2)
-        of_patches = [ObjectFifo(self.patches.obj_type, depth=2) for k in range(cores)]
+        # image and taps are each one lane broadcast to every core: a fresh
+        # cons() per core.
+        (image_ends,) = self.image.fifos(self.image.depth, readers=cores)
+        (taps_ends,) = self.taps_w.fifos(self.taps_w.depth, readers=cores)
+        patches = self.patches.fifos(self.patches.depth)
 
         sizes = [self.src_rows, self.src_columns, self.dst_rows, self.dst_columns]
         rtps = [Rtp(sizes) for _ in range(cores)]
@@ -814,9 +815,9 @@ class Resample(Operator):
                 core_fn,
                 [
                     k,
-                    of_image.cons(),
-                    of_taps.cons(),
-                    of_patches[k].prod(),
+                    image_ends[k],
+                    taps_ends[k],
+                    patches[k],
                     Buffer(counts_ty),
                     resize.resize_setup,
                     resize.resize_take,
@@ -829,9 +830,6 @@ class Resample(Operator):
             )
             for k in range(cores)
         ]
-        self.patches.bind([f.cons() for f in of_patches])
-        self.image.bind(of_image.prod())
-        self.taps_w.bind(of_taps.prod())
         return Built(workers, rtps)
 
 
@@ -928,7 +926,7 @@ class PatchPositions(Operator):
         y into the second.
         """
         T, B = self.rows, self.block
-        tg = TaskGroup()
+        tg = rt.task_group()
         self.xy.drain(group=tg, wait=True)
         self.position_ids.drain(
             TensorAccessPattern((2, T), 0, [1, T // B, 2, B], [0, B, T, 1]),
@@ -936,7 +934,7 @@ class PatchPositions(Operator):
             wait=True,
         )
         self.order.drain(group=tg, wait=True)
-        tg.finish()
+        rt.finish(tg)
 
     def build(self) -> Built:
         B = self.block

@@ -32,6 +32,8 @@ from aie.iron.kernels.sample import draw_row
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
+from iron.common.declare import Precision
+from iron.common.graph.compiled import unbuilt_image
 from iron.common.graph.record import Recording
 from iron.common.image.compose import Composition
 from iron.common.image.link import FullELF, PerStep
@@ -39,6 +41,7 @@ from iron.common.image.packaging import Kind, plan
 from iron.common.image.sequence import Image
 from iron.common.image.step import BufferRef
 from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.gemm import GEMM
 from iron.operators.magnitude import Magnitude
 from iron.operators.relu import ReLU
 from iron.operators.sample import Sample
@@ -50,6 +53,7 @@ RELATIVE = Tolerance.relative(0.04, 1e-6)
 PACKAGINGS = {
     "separate": PerStep,
     "composed": FullELF,
+    "composed_teardown": lambda: FullELF(teardown=True),
     "compare": lambda: PerStep(check=True),
 }
 
@@ -81,8 +85,8 @@ _ADD_RELU_TILE = 1024
 _ADD_RELU_COLS = 4
 
 
-def _build_add_relu_sequence(name, packaging=None, inputs=("a", "b")):
-    """Out = relu(a + b), as a 2-step Image."""
+def _add_relu_recording(name, inputs=("a", "b")):
+    """Out = relu(a + b), as a 2-step Recording."""
     add = ElementwiseAdd(
         size=_ADD_RELU_SIZE,
         tile_size=_ADD_RELU_TILE,
@@ -94,12 +98,17 @@ def _build_add_relu_sequence(name, packaging=None, inputs=("a", "b")):
         num_channels=1,
         tile_size=_ADD_RELU_TILE,
     )
-    recording = Recording.of_steps(
+    return Recording.of_steps(
         name,
         sequences.steps((add, "a", "b", "temp"), (relu, "temp", "out")),
         inputs,
         ["out"],
     )
+
+
+def _build_add_relu_sequence(name, packaging=None, inputs=("a", "b")):
+    """Out = relu(a + b), as a 2-step Image."""
+    recording = _add_relu_recording(name, inputs)
     if packaging is None:
         full_elf = plan(aie_utils.get_current_device(), recording).full_elf
         packaging = FullELF() if full_elf else PerStep()
@@ -142,6 +151,30 @@ def test_auto_dispatch_selects_platform_default(size):
 # ---------------------------------------------------------------------------
 # 2. Compilation-only: the composed single-ELF MLIR is well formed.
 # ---------------------------------------------------------------------------
+
+
+def test_a_full_elf_whose_first_design_takes_part_of_the_device_composes_on_the_bound_one(
+    npu1,
+):
+    """An npu1 full ELF led by a one-column GEMM (alone, built for ``npu1_1col``) composes each configuration, its main one too, on the bound ``npu1``.
+
+    A full ELF configures each design from its main device, whose type theirs
+    must share; only a design alone keeps the part of the device it takes.
+    """
+    gemm = GEMM(
+        M=64, K=64, N=64, precision=Precision.MEDIUM, num_aie_columns=1
+    ).resolved(npu1)
+    add = ElementwiseAdd(size=64 * 64, num_aie_columns=4, tile_size=256).resolved(npu1)
+    assert gemm.array_device().resolve() != npu1.resolve()
+    recording = Recording.of_steps(
+        "infra_narrow_first",
+        sequences.steps((gemm, "A", "B", "mid"), (add, "mid", "r", "out")),
+        ["A", "B", "r"],
+        ["out"],
+    )
+    text = Composition(Image(recording, FullELF()).prepare()).text()
+    kinds = re.findall(r"aie\.device\((\w+)\)", text)
+    assert kinds == [str(npu1.resolve())] * 3
 
 
 @pytest.mark.parametrize("sequence", ["add_relu"])
@@ -233,7 +266,7 @@ def test_dispatch_modes_bit_identical(dispatch):
     platform).
     """
     if (
-        dispatch == "composed"
+        dispatch.startswith("composed")
         and not aie_utils.get_current_device().can_dispatch_full_elf
     ):
         pytest.skip("composed dispatch needs a full ELF, which this device lacks")
@@ -346,7 +379,7 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch):
     see what the NPU wrote there, with no explicit ``to()`` from the caller.
     """
     if (
-        dispatch == "composed"
+        dispatch.startswith("composed")
         and not aie_utils.get_current_device().can_dispatch_full_elf
     ):
         pytest.skip("composed dispatch needs a full ELF, which this device lacks")
@@ -381,11 +414,11 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch):
 # ---------------------------------------------------------------------------
 
 
-def _build_one_design_sequence(op, name, reconfigure=False):
+def _build_one_design_sequence(op, name, reconfigure=False, teardown=False):
     """Out = op(a), as a 1-step composed Image."""
     return Image(
         Recording.of_steps(name, sequences.steps((op, "a", "out")), ["a"], ["out"]),
-        FullELF(reconfigure=reconfigure),
+        FullELF(reconfigure=reconfigure, teardown=teardown),
     )
 
 
@@ -419,6 +452,40 @@ def test_one_design_expands_only_to_reconfigure(reconfigure, npu2):
     assert composition.expands == reconfigure
     # aiecc's --expand-load-pdis, which mlir-aie reads off the module.
     assert ("iron.expand_load_pdis = true" in composition.text()) == reconfigure
+
+
+@pytest.mark.parametrize("reconfigure", [False, True])
+def test_a_teardown_is_asked_only_where_loads_expand(reconfigure, npu2):
+    """Check that aiecc is asked to tear configurations down only where loads expand.
+
+    As ``--reconfig-teardown`` requires: one design configured once has none
+    to undo. Asked, it is part of the composition's identity.
+    """
+    name = f"infra_full_elf_relu_teardown_{reconfigure}"
+    seq = _build_one_design_sequence(_relu(), name, reconfigure, teardown=True)
+    seq._prepare()
+    composition = Composition(seq)
+    assert composition.teardown == reconfigure
+    assert ("iron.reconfig_teardown = true" in composition.text()) == reconfigure
+    plain = _build_one_design_sequence(_relu(), name, reconfigure)
+    plain._prepare()
+    differs = Composition(plain).identity != composition.identity
+    assert differs == reconfigure
+
+
+def test_a_plans_teardown_reaches_the_composition(npu2):
+    """Check that ``plan(teardown=True)`` reaches the full ELF a graph's image builds.
+
+    And its composition asks aiecc to tear each configuration down.
+    """
+    recording = _add_relu_recording("infra_teardown_plumbing")
+    for teardown in (False, True):
+        planned = plan(aie_utils.get_current_device(), recording, teardown=teardown)
+        image = unbuilt_image(recording, planned)
+        assert isinstance(image.packaging, FullELF)
+        assert image.packaging.teardown == teardown
+        text = Composition(image).text()
+        assert ("iron.reconfig_teardown = true" in text) == teardown
 
 
 @pytest.mark.supported_devices("npu1", "npu2")

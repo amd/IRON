@@ -18,6 +18,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+import aie.utils as aie_utils
+import pytest
+
 _ROOT_CONFTEST = Path(__file__).resolve().parents[3] / "conftest.py"
 _SCRIPTS = Path(__file__).resolve().parents[3] / "ci" / "scripts"
 
@@ -133,6 +136,41 @@ def test_a_session_that_dies_keeps_its_results_and_names_the_test(tmp_path):
         "test_aborts": "0/1",
     }
     assert float(rows["test_measured"]["Latency (mean)"]) == 2.5
+
+
+_DEVICE_BENCHED = """\
+import pytest
+
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.tracked_on("npu1")
+@pytest.mark.bench
+def test_npu1_only(record_property):
+    record_property("Latency", 1.0)
+
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.bench
+def test_everywhere(record_property):
+    record_property("Latency", 1.0)
+
+@pytest.mark.tracked_on("npu1")
+@pytest.mark.bench
+def test_tracked_alone(record_property):
+    record_property("Latency", 1.0)
+"""
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_bench_is_tracked_only_where_tracked_on_says(tmp_path):
+    """npu2 runs npu1's each-step form to check it, but its speed there is not npu2's own."""
+    out = tmp_path / "out.csv"
+    _pytest(tmp_path, f"--csv-output={out}", tests=_DEVICE_BENCHED, returncode=0)
+    with open(out) as f:
+        rows = {row["Test"]: row for row in csv.DictReader(f)}
+    device = aie_utils.DefaultNPURuntime.device().resolve().name
+    assert rows["test_everywhere"]["Bench"] == "yes"
+    assert rows["test_npu1_only"]["Bench"] == ("yes" if device == "npu1" else "no")
+    assert rows["test_tracked_alone"]["Bench"] == ("yes" if device == "npu1" else "no")
+    assert float(rows["test_npu1_only"]["Latency (mean)"]) == 1.0
 
 
 def test_a_session_not_asked_for_a_csv_writes_none(tmp_path):

@@ -37,5 +37,7 @@ has room for both (`Model.fit`).
 
 NPU1 runs `TestEachStep` from an empty `profiles/npu1.json` (every
 operator's device defaults), and all of it passes there: generation,
-accuracy and determinism. Not yet run on NPU1:
-`tests/applications/long_context`'s deep checks.
+accuracy (KL over 20 teacher-forced steps mean 0.0008, max 0.0044, every
+top-1 draw matching) and determinism. `tests/applications/long_context`'s
+deep checks pass there too, at 4096: deepest decode step KL 0.0009, deepest
+prompt chunk 2.0e-7, whole-context prompt's time to first token 37.0 s.

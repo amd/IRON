@@ -13,8 +13,11 @@ from __future__ import annotations
 import dataclasses
 import enum
 import os
+from collections.abc import Sequence
 
 import aie.utils as aie_utils
+
+from .step import Fusion
 
 # The command processor's state table: each word a command reads takes an entry.
 SCRATCHPAD_WORDS = 32
@@ -36,6 +39,9 @@ class Plan:
     values: list  # (name, kind, lowering)
     # The steps starting each command after the first, queued back to back.
     commands: tuple[int, ...] = ()
+    # A full ELF undoes each configuration once its steps are done, in place
+    # of resetting the array before the next (aiecc's --reconfig-teardown).
+    teardown: bool = False
 
     def idle(self, steps, values) -> frozenset[int]:
         """Return the commands a call with ``values`` leaves without work.
@@ -67,6 +73,19 @@ class Plan:
         return "\n".join(lines)
 
 
+def attached_part() -> str | None:
+    """Return the attached NPU's part as a ``Scope`` names it, None where no NPU runtime reads one.
+
+    The runtime's model name less its ``NPU`` prefix, lower-case, its words
+    joined by hyphens: ``"NPU Strix Halo"`` is ``"strix-halo"``.
+    """
+    runtime = aie_utils.DefaultNPURuntime
+    name = None if runtime is None else runtime.device_name()
+    if not name:
+        return None
+    return "-".join(name.removeprefix("NPU ").lower().split())
+
+
 def require_device():
     """Return the current device, bound if the runtime found one; ``RuntimeError`` if none."""
     dev = aie_utils.ensure_current_device()
@@ -87,12 +106,16 @@ def plan(
     full_elf: bool | None = None,
     check: bool = False,
     step_words: list[frozenset[str]] | None = None,
+    fusions: Sequence[Fusion] = (),
+    teardown: bool = False,
 ) -> Plan:
     """Derive the packaging for ``recording`` on ``dev``, refusing a shipped image.
 
-    ``full_elf=True`` where the device or ``check`` forbids it, or a step
-    reading over ``SCRATCHPAD_WORDS`` (``step_words``, each step's by its
-    shared symbol).
+    ``full_elf=True`` where the device or ``check`` forbids it, or a step reading over
+    ``SCRATCHPAD_WORDS`` (``step_words``, each step's by its shared symbol). A command
+    never starts within the span of one of ``fusions``: its members are one call.
+    ``teardown`` undoes each configuration of a full ELF once its steps are done,
+    rather than resetting the array before the next; refused for an xclbin per step.
     """
     shipped = [op for op in recording.operators if op.external is not None]
     if shipped:
@@ -120,6 +143,16 @@ def plan(
         reasons = forced or ["one sequence, one configuration set: a full ELF"]
     else:
         reasons = [f"full_elf={full_elf}: asked for", *forced]
+    if teardown and not full_elf:
+        raise ValueError(
+            f"{recording.name}: teardown=True undoes a full ELF's configurations; "
+            f"an xclbin per step has none to undo"
+        )
+    if teardown:
+        reasons.append(
+            "teardown=True: each configuration undone once done, not the array "
+            "reset before the next"
+        )
 
     values = []
     for v in recording.values:
@@ -135,15 +168,26 @@ def plan(
     # A version taking no tensor stays one command: a loop drains its values
     # into one. A host step ends one, and a version with one does not loop.
     commands: list[int] = []
-    hosted = {s.at for s in recording.host if 0 < s.at < len(recording.steps)}
+    n = len(recording.steps)
+    hosted = {s.at for s in recording.host if 0 < s.at < n}
+    starts = [i for i, _ in Fusion.dispatches(fusions, n)]
+    inside = set(range(n)) - set(starts)
+    if hosted & inside:
+        raise ValueError(
+            f"{recording.name}: a host step runs within a fusion, before steps "
+            f"{sorted(hosted & inside)}"
+        )
     if full_elf and (recording.inputs or recording.host):
+        per_step = step_words or [frozenset()] * n
         held: frozenset[str] = frozenset()
         split = []
-        for i, words in enumerate(step_words or [frozenset()] * len(recording.steps)):
+        for i, end in zip(starts, [*starts[1:], n]):
+            words = frozenset().union(*per_step[i:end])
             if len(words) > SCRATCHPAD_WORDS:
+                names = ", ".join(s.op.name for s in recording.steps[i:end])
                 raise ValueError(
-                    f"{recording.name}: step {i} ({recording.steps[i].op.name}) "
-                    f"reads {len(words)} scratchpad words; a command's "
+                    f"{recording.name}: steps {i} to {end - 1} ({names}), one "
+                    f"call, read {len(words)} scratchpad words; a command's "
                     f"scratchpad holds {SCRATCHPAD_WORDS}"
                 )
             full = len(held | words) > SCRATCHPAD_WORDS
@@ -163,4 +207,4 @@ def plan(
                 f"a host step runs between commands: one starts at steps "
                 f"{sorted(hosted)}"
             )
-    return Plan(full_elf, reasons, values, tuple(commands))
+    return Plan(full_elf, reasons, values, tuple(commands), teardown)

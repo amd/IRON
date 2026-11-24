@@ -1,0 +1,370 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Two actors on one core, over the composition contract."""
+
+from __future__ import annotations
+
+import logging
+
+import pytest
+from aie.dialects.aie import WireBundle, get_target_model
+from aie.utils import set_current_device
+
+from iron.common.declare.composition import (
+    Edge as CompositionEdge,
+)
+from iron.common.declare.composition import (
+    Entry,
+    Hold,
+    Member,
+    Refinement,
+    Region,
+)
+from iron.common.declare.profile import Profile
+from iron.common.graph.record import Recording
+from iron.operators import (
+    GEMV,
+    ElementwiseAdd,
+    ElementwiseMul,
+    RoPE,
+    SiLU,
+    Softmax,
+)
+from iron.tests.support import sequences, toys_schedule
+from iron.tests.support import toys_composition as toys
+from iron.tests.support.tools import DEVICES
+from iron.tests.support.toys_edges import member
+from iron.tests.support.tuning import reached_by_candidates, unbuilt
+from iron.tune.autotune import Timed
+from iron.tune.search import (
+    BUILT_PLACERS,
+    AddEntry,
+    HoldEdge,
+    candidates,
+    check,
+    fit,
+    measure,
+    search,
+)
+
+pytestmark = pytest.mark.usefixtures("device")
+
+M = 64
+
+
+# (producer dims, consumer dims), producer output, consumer input: the fold hook
+# replacements, each its own toy (``iron.tests.support.toys_composition.PAIR_TOYS``).
+def _joined_region(
+    producer: Member, consumer: Member, output: str, input: str
+) -> Region:
+    return Region(
+        parts=(producer, consumer),
+        edges=(CompositionEdge(0, output, 1, input),),
+        workers=((0, 1),),
+    )
+
+
+def _named_region_and_recording(name: str) -> tuple[Region, object]:
+    pair_fn, recording_fn, output, input = toys.PAIR_TOYS[name]
+    producer, consumer = pair_fn()
+    region = _joined_region(member(producer), member(consumer), output, input)
+    recording = recording_fn(name, producer, consumer)
+    return region, recording
+
+
+def test_a_fold_is_fitted_on_the_device_given_with_none_bound(device):
+    """IRON's fold of a ReLU into a Tanh, each at the array's width and two channels, is fitted on the device ``fit`` is given, none bound as current."""
+    recording = toys_schedule.Wide(device.cols).record(x=(8192,))
+    relu, tanh = (recording.steps[s].op for s in (0, 1))
+    profile = Profile()
+    profile.add_entry(Entry(_joined_region(member(relu), member(tanh), "y", "x")))
+    with set_current_device(None):
+        assert fit(profile, [Timed(recording)], device).ok
+
+
+@pytest.mark.parametrize("name", toys.PAIR_TOYS)
+def test_two_actors_on_one_core_round_trip_as_an_entry(name, tmp_path, device):
+    """Two actors on one core round-trip, and composing ``candidates``' edits reaches them: the region, then its edge held in L1."""
+    region, recording = _named_region_and_recording(name)
+    entry = Entry(root=region)
+    profile = Profile()
+    profile.add_entry(entry)
+    profile.save(tmp_path / "profile.json")
+    loaded = Profile.load(tmp_path / "profile.json")
+    assert loaded.entries() == profile.entries()
+    reached = reached_by_candidates(region, [Timed(recording)], device)
+    assert reached.entries() == [entry]
+
+
+@pytest.mark.parametrize(
+    "recording_fn, topology",
+    [
+        (lambda: toys.fan_in_recording("fan_in"), "fan-in"),
+        (lambda: toys.fan_out_recording("fan_out"), "fan-out"),
+        (
+            lambda: toys.partner_and_outside_recording("partner_outside"),
+            "partner-and-outside",
+        ),
+        (
+            lambda: toys.output_also_read_outside_recording("output_outside"),
+            "output-also-outside",
+        ),
+        (lambda: toys.multi_output_recording("multi_output"), "multi-output"),
+    ],
+    ids=[
+        "fan_in",
+        "fan_out",
+        "partner_and_outside",
+        "output_also_outside",
+        "multi_output",
+    ],
+)
+def test_every_topology_is_proposed_on_its_producer_s_core(
+    recording_fn, topology, device
+):
+    """Each topology's region, its producer and a consumer then held on one core (an L1 hold), is an edit ``candidates`` yields."""
+    calls = [Timed(recording_fn())]
+    profile = Profile()
+    for edit in candidates(calls, profile, device):
+        if (
+            isinstance(edit, AddEntry)
+            and isinstance(edit.entry.root, Region)
+            and edit.entry.root.edges
+            and not edit.entry.root.workers
+        ):
+            profile = edit.apply(profile)
+            break
+    assert any(
+        toys.has_worker_group(e)
+        for edit in candidates(calls, profile, device)
+        if isinstance(edit, HoldEdge) and edit.place is Hold.L1
+        for e in edit.apply(profile).entries()
+    )
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize(
+    ("name", "device"),
+    [
+        # Decode -> GEMV on one core built on npu2; npu1's waits on host 203.
+        pytest.param(
+            n,
+            d,
+            id=f"device_{d}-name_{n}",
+            marks=unbuilt if n == "decode_gemv" and d != "npu2" else (),
+        )
+        for n in toys.PAIR_TOYS
+        for d in sorted(DEVICES)
+    ],
+    indirect=["device"],
+)
+def test_two_actors_on_one_core_is_bit_identical_to_the_steps_run_apart(name, device):
+    region, recording = _named_region_and_recording(name)
+    profile, base = Profile(), Profile()
+    profile.add_entry(Entry(root=region))
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_per_call_size_below_the_recorded_one_still_runs_on_one_core(device):
+    """A valid KV length or a partial prompt chunk below the recorded size still joins."""
+    small = _joined_region(
+        Member(ElementwiseAdd, dict(size=16 * 64)),
+        Member(Softmax, dict(rows=16, cols=64)),
+        "y",
+        "x",
+    )
+    add, softmax = toys.add_softmax_pair(rows=16, cols=64)
+    recording = toys.add_softmax_recording("small_call", add, softmax)
+    profile, base = Profile(), Profile()
+    profile.add_entry(Entry(root=small))
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize(
+    ("name", "device"),
+    [
+        # Decode -> GEMV on one core built on npu2; npu1's waits on host 203.
+        pytest.param(
+            n,
+            d,
+            id=f"device_{d}-name_{n}",
+            marks=unbuilt if n == "decode_gemv" and d != "npu2" else (),
+        )
+        for n in toys.PAIR_TOYS
+        for d in sorted(DEVICES)
+    ],
+    indirect=["device"],
+)
+def test_search_keeps_the_pair_joined_where_it_pays(name, device):
+    region, recording = _named_region_and_recording(name)
+    entry = Entry(root=region)
+    calls = [Timed(recording)]
+    start = Profile()
+    with_entry = Profile()
+    with_entry.add_entry(entry)
+    ratio = measure(with_entry, start, calls, device).ratio
+    tuned = search(calls, start, device)
+    # Where the pair joined pays, what search keeps is at least as fast (it may
+    # join the pair otherwise, as a stream window, and pass this one over).
+    if ratio < 0.95:
+        assert measure(tuned, with_entry, calls, device).ratio < 1.05
+    if ratio > 1.05:
+        assert entry not in tuned.entries()
+    result = check(tuned, start, calls, device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu2")
+def test_search_prices_a_hold_on_the_window_it_took(device, caplog):
+    """A hold names an edge of a region the profile holds: search prices one only in a round after it takes the GEMV -> SiLU window."""
+    _, recording = _named_region_and_recording("gemv_silu")
+    with caplog.at_level(logging.INFO, logger="iron.tune.search"):
+        tuned = search([Timed(recording)], Profile(), device)
+    assert any(isinstance(e.root, Region) for e in tuned.entries())
+    assert any(
+        r.getMessage().startswith("search: ") and "HoldEdge(" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_pair_over_a_core_s_memory_is_refused(device):
+    """A GEMV and a SiLU that each fit a core's memory alone, but not together on one worker.
+
+    On one worker the SiLU folds into the GEMV, its kernel run on each
+    1024-element output tile. The GEMV alone holds 64640 of a core's 65536
+    bytes, npu1's and npu2's alike (one A tile of 4 rows of 5952, a line, its double-buffered output
+    and the stack) and builds; the fold's scratch tile adds 2048.
+    """
+    gemv = GEMV(M=6144, K=5952, tile_size_input=4, tile_size_output=1024)
+    silu = SiLU(size=6144, tile_size=1024)
+    region = _joined_region(member(gemv), member(silu), "C", "x")
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    recording = Recording.of_steps(
+        "oversized",
+        sequences.steps((gemv, "A", "B", "mid"), (silu, "mid", "out")),
+        ["A", "B"],
+        ["out"],
+    )
+    verdict = fit(profile, [Timed(recording)], device)
+    assert not verdict.ok and verdict.stage == "counts"
+
+
+@unbuilt
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_mismatched_tile_sizes_are_refused(device):
+    """AXPY's kernel takes tiles of a multiple of 64; a GEMV writing 2 at a time cannot carry it onto one worker."""
+    recording = toys.mismatched_tile_recording("mismatched")
+    composed = [
+        edit.apply(Profile())
+        for edit in candidates([Timed(recording)], Profile(), device)
+    ]
+    assert not any(
+        toys.has_worker_group(e) for profile in composed for e in profile.entries()
+    )
+
+
+def test_more_than_a_core_s_two_input_channels_is_refused(device):
+    """A consumer on its producer's core needing more input channels than the core has is refused by the placer, before any build.
+
+    RoPE has no fold hook, so a second RoPE on its core runs as an actor of
+    its own there: the first reads ``x`` and ``angles``, and the second its
+    own angles, one input more than the target model gives a core. Each on a
+    core of its own, the pair fits.
+    """
+    model = get_target_model(device.resolve())
+    row = next(r for r in range(model.rows()) if model.is_core_tile(0, r))
+    channels = model.get_num_dest_switchbox_connections(0, row, WireBundle.DMA)
+    producer = RoPE(rows=1, cols=M, angle_rows=1)
+    consumer = RoPE(rows=1, cols=M, angle_rows=1)
+    assert producer.fold(consumer, 0) is None
+    assert channels < 3
+    recording = Recording.of_steps(
+        "no_channel",
+        sequences.steps(
+            (producer, "x", "angles", "r"), (consumer, "r", "angles2", "out")
+        ),
+        ["x", "angles", "angles2"],
+        ["out"],
+    )
+    calls = [Timed(recording)]
+    apart = Profile()
+    apart.add_entry(
+        Entry(
+            root=Region(
+                parts=(member(producer), member(consumer)),
+                edges=(CompositionEdge(0, "y", 1, "x"),),
+            )
+        )
+    )
+    assert fit(apart, calls, device, placements=tuple(BUILT_PLACERS)).ok
+    joined = Profile()
+    joined.add_entry(
+        Entry(root=_joined_region(member(producer), member(consumer), "y", "x"))
+    )
+    verdict = fit(joined, calls, device, placements=tuple(BUILT_PLACERS))
+    assert not verdict.ok and verdict.stage == "placer"
+    assert "DMA channels" in (verdict.why or "")
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_fan_in_consumer_on_its_producer_s_core_rides_its_input_and_is_bit_identical(
+    device,
+):
+    """``gate`` and the multiply joined, ``up`` recorded between them, are bit-identical to the steps apart.
+
+    Gathered, the multiply folds into ``gate``'s GEMV, ``up``'s output its
+    extra input.
+    """
+    region = _joined_region(
+        Member(GEMV, dict(M=M, K=M)),
+        Member(ElementwiseMul, dict(size=M)),
+        "C",
+        "a",
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    recording = toys.fan_in_recording("fan_in_rides")
+    assert fit(profile, [Timed(recording)], device).ok
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="fit has no rule for repeat's channel state yet; it refuses this "
+    "pair only because GEMV's batch-major lanes need a restage into Add's",
+)
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_gemv_refuses_under_repeat(device):
+    """GEMV's ``repeat`` keeps its own channel state across calls, which a fold cannot share."""
+    region = _joined_region(
+        Member(GEMV, dict(M=2048, K=2048, repeat=2)),
+        Member(ElementwiseAdd, dict(size=2 * 2048)),
+        "C",
+        "b",
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    recording = toys.gemv_add_recording("repeat_refused", M=2048, K=2048, repeat=2)
+    verdict = fit(profile, [Timed(recording)], device)
+    assert not verdict.ok and verdict.stage == "analysis"
+    assert "repeat" in (verdict.why or "")
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_consumer_spliced_into_a_gemms_cores_is_bit_identical(device):
+    """A SiLU spliced into a GEMM's cores, each core running it on its own tiles before the memtile joins them, is bit-identical to the two steps run apart."""
+    recording, region = toys.gemm_silu_splice("gemm_silu_splice")
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why

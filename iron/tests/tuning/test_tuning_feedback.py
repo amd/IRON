@@ -1,0 +1,353 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Feedback loops: cycles carried by initial values.
+
+Token-level loop-carried values within a call (``SelectiveScan``'s running
+state, ``Sample``'s drawn token) and cycles across calls (``Trail``'s walk).
+A cycle's initial tokens are the recording's and the operators' own, which
+the dataflow analysis derives; the edge that carries a cycle names only the
+self-loop (its ``producer`` and ``consumer`` the same part). Every check
+calls the composition contract before any compile, build or device use;
+a test is ``@unbuilt`` while what it calls raises ``NotImplementedError`` (not built yet).
+"""
+
+from __future__ import annotations
+
+import dataclasses
+
+import pytest
+
+from iron.common.declare import Profile
+from iron.common.declare.composition import (
+    Configuration,
+    Entry,
+    Hold,
+    Refinement,
+    Region,
+    Schedule,
+)
+from iron.common.graph.record import Recording
+from iron.common.graph.sdf import analyze
+from iron.common.image.step import Edge
+from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.elementwise_mul import ElementwiseMul
+from iron.tests.support import sequences
+from iron.tests.support.toys_edges import (
+    cross_call_trail,
+    member,
+    sample_token_cycle,
+    scan_state_cycle,
+)
+from iron.tests.support.tuning import reached_by_candidates, unbuilt
+from iron.tune.autotune import Timed
+from iron.tune.search import BUILT_PLACERS, check, fit, search
+
+_ACCUMULATOR_SIZE = 256
+
+
+def _scan_region():
+    recording, members, forward, cycle = scan_state_cycle()
+    # By producer, then consumer: the self-loop first.
+    return recording, Region(members, (cycle,) + forward)
+
+
+def _sample_region():
+    recording, members, forward, cycle = sample_token_cycle()
+    return recording, Region(members, forward + (cycle,))
+
+
+def _running_accumulator(carried: bool):
+    """Return ``acc = acc + x`` as a one-step self-loop, ``acc`` marked carried (an initial value) only where ``carried``."""
+    add = ElementwiseAdd(
+        size=_ACCUMULATOR_SIZE, num_aie_columns=1, tile_size=_ACCUMULATOR_SIZE
+    )
+    steps = sequences.steps((add, "acc", "x", "acc"))
+    recording = Recording.of_steps(
+        "toy_running_accumulator",
+        steps,
+        ["x"],
+        [] if carried else ["acc"],
+        feedback=["acc"] if carried else [],
+    )
+    region = Region((member(add),), (Edge(0, "y", 0, "a"),))
+    return recording, region
+
+
+def _accumulator_into_mul():
+    """Return ``acc = acc + x`` carried, streamed on chip into a multiply by ``up``; the self-loop is edge 0."""
+    add = ElementwiseAdd(
+        size=_ACCUMULATOR_SIZE, num_aie_columns=1, tile_size=_ACCUMULATOR_SIZE
+    )
+    mul = ElementwiseMul(
+        size=_ACCUMULATOR_SIZE, num_aie_columns=1, tile_size=_ACCUMULATOR_SIZE
+    )
+    steps = sequences.steps((add, "acc", "x", "acc"), (mul, "acc", "up", "out"))
+    recording = Recording.of_steps(
+        "toy_accumulator_into_mul", steps, ["x", "up"], ["out"], feedback=["acc"]
+    )
+    region = Region(
+        (member(add), member(mul)), (Edge(0, "y", 0, "a"), Edge(0, "y", 1, "a"))
+    )
+    return recording, region
+
+
+CYCLES = {
+    "scan_running_state": _scan_region,
+    "sample_drawn_token": _sample_region,
+    "trail_across_calls": cross_call_trail,
+}
+
+# Each cycle whose carry is one buffer the recording carries: its self-loop
+# is edge 0.
+CARRIED = {
+    "running_accumulator": lambda: _running_accumulator(carried=True),
+    "accumulator_into_mul": _accumulator_into_mul,
+    "scan_running_state": _scan_region,
+}
+
+
+@pytest.mark.parametrize(
+    "cycle",
+    [
+        # The drawn token's carry into tokens is no recorded buffer, so no
+        # candidate edit reaches the cycle.
+        (pytest.param(c, marks=unbuilt) if c == "sample_drawn_token" else c)
+        for c in sorted(CYCLES)
+    ],
+)
+def test_a_cycle_with_its_initial_values_round_trips(cycle, tmp_path, device):
+    """A cycle with its initial values round-trips through the profile, and composing ``candidates``' edits reaches it."""
+    recording, region = CYCLES[cycle]()
+    entry = Entry(region)
+    profile = Profile()
+    profile.add_entry(entry)
+    profile.save(tmp_path / f"feedback_{cycle}.json")
+    loaded = Profile.load(tmp_path / f"feedback_{cycle}.json")
+    assert loaded.entries() == [entry]
+    reached = reached_by_candidates(region, [Timed(recording)], device)
+    assert reached.entries() == [entry]
+
+
+@pytest.mark.parametrize(
+    "cycle",
+    [
+        (
+            pytest.param(
+                c,
+                marks=pytest.mark.xfail(
+                    strict=True,
+                    raises=ValueError,
+                    reason="Sample's token reaches the next call's tokens through "
+                    "a carry no step-level recording names, so its self-loop "
+                    "matches no recorded buffer",
+                ),
+            )
+            if c == "sample_drawn_token"
+            else c
+        )
+        # Trail's carry is checked on its own below.
+        for c in sorted(CYCLES)
+        if c != "trail_across_calls"
+    ],
+)
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_a_cycle_is_bit_identical_to_the_steps_or_calls_run_apart(cycle, device):
+    """A cycle's output is bit-identical to the same steps, or calls, run apart one after another."""
+    recording, region = CYCLES[cycle]()
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    base = Profile()
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+# Its steps depend through memory, so they run a phase apart: a full ELF's.
+@pytest.mark.supported_devices("npu2")
+def test_a_carry_no_caller_starts_is_bit_identical_from_each_end_of_its_range(
+    device,
+):
+    """Trail's walk, its node and step count carried to the next call and given by no caller, is bit-identical started at each end of their recorded ranges."""
+    recording, region = cross_call_trail()
+    assert recording.carry, "the toy carries values across calls"
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+def test_a_carry_with_no_recorded_range_is_refused_by_name(device):
+    """A call checked apart that carries a value no caller starts and no recorded range bounds is not checked: nothing says where a first call starts it."""
+    recording, region = cross_call_trail()
+    unbounded = dataclasses.replace(
+        recording,
+        limits=[
+            limit for limit in recording.limits if limit.expression.value.name != "node"
+        ],
+    )
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    with pytest.raises(NotImplementedError, match="no recorded range"):
+        check(profile, Profile(), [Timed(unbounded)], device, Refinement.EXACT)
+
+
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_tuner_keeps_the_cycle_where_it_pays(device):
+    """The tuner, on the scan-state toy alone, keeps the cycle where it pays (fewer dispatches per token)."""
+    recording, _ = _scan_region()
+    start = Profile()
+    found = search([Timed(recording)], start, device, budget_s=60.0)
+    assert any(
+        isinstance(e.root, Region)
+        and any(edge.producer == edge.consumer for edge in e.root.edges)
+        for e in found.entries()
+    )
+
+
+def test_a_cycle_without_enough_initial_values_is_refused_before_any_build(device):
+    """A cycle whose recording carries no initial value for the accumulator is refused before any build: the deadlock the analysis catches."""
+    recording, region = _running_accumulator(carried=False)
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "analysis"
+    assert "deadlock" in (result.why or "") or "initial" in (result.why or "")
+
+
+@pytest.mark.parametrize("cycle", sorted(CARRIED))
+@pytest.mark.supported_devices("npu2")
+def test_a_carry_held_in_host_memory_is_bit_identical_to_the_calls_run_apart(
+    cycle, device
+):
+    """A cycle whose carry across calls waits in host memory builds, its other edges on chip, bit-identical to its steps run apart."""
+    recording, region = CARRIED[cycle]()
+    profile = Profile()
+    profile.add_entry(Entry(region.held(0, Hold.DDR)))
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+def test_a_carry_through_host_memory_with_no_initial_value_is_refused(device):
+    """A self-loop held in host memory over a buffer the recording does not carry is refused before any build: the first call has nothing to read."""
+    recording, region = _running_accumulator(carried=False)
+    profile = Profile()
+    profile.add_entry(Entry(region.held(0, Hold.DDR)))
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "analysis"
+    assert "no initial value" in (result.why or "")
+
+
+@pytest.mark.parametrize(
+    "hold, calls_per_command",
+    [(Hold.L1, 1), (Hold.MEMTILE, 1), (Hold.MEMTILE, 2), (Hold.MEMTILE, 3)],
+)
+@pytest.mark.supported_devices("npu2")
+def test_a_carry_held_on_chip_is_bit_identical_to_the_calls_run_apart(
+    hold, calls_per_command, device
+):
+    """A carry held on chip, its multiply on chip too, is bit-identical to the calls run apart one after another.
+
+    It is filled on a command's first call and drained after its last; in
+    between, each call's carry stays on chip into the next.
+    """
+    recording, region = _accumulator_into_mul()
+    profile = Profile()
+    profile.add_entry(Entry(region.held(0, hold)))
+    if calls_per_command > 1:
+        profile.add_schedule(
+            Schedule(version=recording.version, calls_per_command=calls_per_command)
+        )
+    assert fit(profile, [Timed(recording)], device).ok
+    result = check(profile, Profile(), [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+def test_a_carry_kept_in_one_core_across_calls_takes_each_call_s_inputs_there(device):
+    """Two calls a command, the carry kept in one core's memory, put both calls' adds on that core: the placer refuses it before any build.
+
+    Each call's add brings its own input stream to the one core: three
+    streams into a core tile's two input channels, which neither the
+    sequential placer nor the annealing one places.
+    """
+    recording, region = _accumulator_into_mul()
+    profile = Profile()
+    profile.add_entry(Entry(region.held(0, Hold.L1)))
+    profile.add_schedule(Schedule(version=recording.version, calls_per_command=2))
+    verdict = fit(profile, [Timed(recording)], device, placements=tuple(BUILT_PLACERS))
+    assert not verdict.ok and verdict.stage == "placer"
+    assert "DMA budget" in (verdict.why or "")
+
+
+def test_a_carry_on_a_step_sharing_its_core_gets_a_verdict(device):
+    """The accumulator and its multiply on one core, the carry a self-loop: fit gives the placer's verdict, before any build.
+
+    The analysis joins the two steps' actors within the call and leaves the
+    carry across calls to its initial objects; it neither splices the carry
+    into its own step nor joins that step to itself.
+    """
+    recording, region = _accumulator_into_mul()
+    profile = Profile()
+    profile.add_entry(Entry(dataclasses.replace(region, workers=((0, 1),))))
+    verdict = fit(profile, [Timed(recording)], device, placements=tuple(BUILT_PLACERS))
+    assert not verdict.ok and verdict.stage == "placer"
+    assert "DMA channels" in (verdict.why or "")
+
+
+@pytest.mark.parametrize("hold", [Hold.L1, Hold.MEMTILE])
+def test_a_carry_held_on_chip_between_commands_waits_on_residency(hold, device):
+    """A carry held on chip and kept resident into the next command is not built.
+
+    Within a command it is filled and drained; nothing keeps it on chip
+    between dispatches.
+    """
+    recording, region = _running_accumulator(carried=True)
+    profile = Profile()
+    profile.add_entry(Entry(region.held(0, hold)))
+    profile.add_entry(Entry(Configuration(parts=(region.parts[0],), resident=("acc",))))
+    with pytest.raises(NotImplementedError, match="resident"):
+        fit(profile, [Timed(recording)], device)
+
+
+def test_the_recorded_initial_value_fits(device):
+    """The same accumulator, its recording carrying the accumulator's initial value, is not refused by the analysis."""
+    recording, region = _running_accumulator(carried=True)
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    result = fit(profile, [Timed(recording)], device)
+    assert result.ok, result.why
+
+
+# Priced on its own NPU; npu1's waits on host 203.
+@unbuilt
+@pytest.mark.supported_devices("npu2")
+def test_the_analysis_bounds_the_cycles_throughput(device):
+    """The analysis's bound on a cycle's throughput is one trip around the loop.
+
+    The scan's state is carried from each call into the next: a call's period
+    is the time each lane's core takes around that loop, its own priced work
+    for a call, and the edge on the cycle held deeper does not lower it.
+    """
+    recording, region = _scan_region()
+    profile = Profile()
+    profile.add_entry(Entry(region))
+    assert fit(profile, [Timed(recording)], device).ok
+    analysis = analyze(region, recording, device)
+    cycle = region.edges[0]
+    trip = max(
+        sum(
+            sum(analysis.costs[actor])
+            for actor in {
+                analysis.flow.channels[c].producer,
+                analysis.flow.channels[c].consumer,
+            }
+        )
+        for c in analysis.channels[cycle]
+    )
+    assert analysis.period == trip
+    deeper = analyze(
+        region.deepened(0, analysis.min_depth[cycle] + 2), recording, device
+    )
+    assert deeper.period == analysis.period

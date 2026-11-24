@@ -31,7 +31,7 @@ from safetensors.numpy import load_file, save_file
 
 from iron.applications.llama.model import LlamaConfig
 from iron.lm import Checkpoint, Sampler
-from iron.lm.checkpoint import renamed
+from iron.lm.checkpoint import leaves, renamed
 from iron.lm.model import TokenizerJson, _cgroup_limit, prompt_text
 from iron.lm.testing import require, weights_dir
 from iron.operators import sample
@@ -138,6 +138,22 @@ def test_checkpoint_views_the_mapping_without_copying(toy_path):
     assert not a.flags.writeable and not a.flags.owndata
     with pytest.raises(ValueError):
         a[0] = 0
+
+
+@pytest.mark.parametrize(
+    "stack", ["", "model.", "language_model.", "model.language_model."]
+)
+def test_a_layer_cutoff_trims_the_text_stack_and_leaves_the_towers(tmp_path, stack):
+    tower = stack.replace("language_model.", "") + "audio_tower.layers"
+    one = np.zeros(2, np.float32)
+    path = tmp_path / "stack.safetensors"
+    save_file(
+        {f"{stack}layers.{i}.w": one for i in range(2)}
+        | {f"{tower}.{i}.w": one for i in range(2)},
+        path,
+    )
+    kept = {name for name, _ in leaves(Checkpoint(path).tree("unread", layers=1))}
+    assert kept == {f"{stack}layers.0.w", f"{tower}.0.w", f"{tower}.1.w"}
 
 
 def _resident_bytes(path: Path) -> int:

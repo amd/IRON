@@ -1,0 +1,195 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Applying a profile's packings (``Profile.add_packing``) and configurations to a recording.
+
+The steps of each packing's shapes, where it applies in the recording's version, rebuilt
+at the tunables it gives them, and their designs grouped into one device configuration,
+which a full ELF then configures once for every step of them in a row, and an xclbin
+dispatches once (``merges``).
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from ..declare import Profile
+from ..declare.composition import Configuration
+from ..design import OperatorDesign
+from ..image.compose import CoResidenceError, Packing, fits
+from ..image.step import Fusion, FusionKind
+from .fusion_tunables import rebuild
+from .record import Recording
+
+#: Host buffers one xclbin kernel takes at most (aiecc's ``kMaxHostBOs``).
+HOST_BUFFERS = 16
+
+
+def apply(
+    recording: Recording, profile: Profile, fused: Sequence[Fusion], dev
+) -> tuple[Recording, Packing]:
+    """Return ``recording`` with each step a packing entry applying in its version names (``Profile.packings_of``).
+
+    Rebuilt at its member's tunables, and the packing grouping their designs, one group
+    per entry that names two or more of them. A step inside a fusion in ``fused`` packs
+    by its fusion's own symbol (``compose.Composition``'s), every member riding beside
+    it in the one group its first matching member names; a later member matching
+    another entry does not move it. Where several entries name a step's shape, the one
+    naming most of the recording's shapes takes it, the earlier on a tie: the grouping
+    found for this graph, not another model's that shares one of its shapes.
+    """
+    fusion_of = {i: f for f in fused for i in f.steps}
+    version = recording.version
+    found = {
+        i: matches
+        for i, step in enumerate(recording.steps)
+        if (matches := profile.packings_of(step.op.resolved(dev), version))
+    }
+    covered: dict[int, set[int]] = {}
+    for matches in found.values():
+        for index, member, _ in matches:
+            covered.setdefault(index, set()).add(member)
+    members: dict[int, int] = {}
+    tunables: dict[int, Mapping[str, Any]] = {}
+    for i, matches in found.items():
+        index, _, given = max(matches, key=lambda m: (len(covered[m[0]]), -m[0]))
+        members[i] = index
+        if given:
+            tunables[i] = given
+    recording = rebuild(recording, tunables, dev)
+    groups: dict[int, dict[str, None]] = {}
+    claimed: dict[int, int] = {}  # id(fusion) -> the one entry it packs under
+    symbols: dict[int, str] = {}
+    for i, entry in members.items():
+        f = fusion_of.get(i)
+        if f is not None:
+            if id(f) in claimed and claimed[id(f)] != entry:
+                continue
+            claimed[id(f)] = entry
+            name = symbols.setdefault(
+                id(f),
+                f.name(
+                    [
+                        OperatorDesign(recording.steps[j].op.resolved(dev)).name
+                        for j in f.steps
+                    ]
+                ),
+            )
+        else:
+            name = OperatorDesign(recording.steps[i].op.resolved(dev)).name
+        groups.setdefault(entry, {})[name] = None
+    return recording, Packing(tuple(tuple(g) for g in groups.values() if len(g) > 1))
+
+
+def configured(
+    recording: Recording,
+    profile: Profile,
+    fused: Sequence[Fusion],
+    packing: Packing,
+    dev,
+) -> Packing:
+    """Return ``packing`` with each configuration ``profile``'s entries name loaded together.
+
+    At each match of a configuration entry (``Recording.occurrences``), its
+    steps' designs are one group, a step inside a fusion of ``fused`` by its
+    fusion's symbol, as ``apply`` packs it; groups sharing a design are one.
+    """
+    fusion_of = {i: f for f in fused for i in f.steps}
+    groups = [dict.fromkeys(g) for g in packing.groups]
+    for entry in profile.entries():
+        if not isinstance(entry.root, Configuration):
+            continue
+        for match in recording.occurrences(entry):
+            group: dict[str, None] = {}
+            for i in match:
+                f = fusion_of.get(i)
+                steps = (i,) if f is None else f.steps
+                names = [
+                    OperatorDesign(recording.steps[j].op.resolved(dev)).name
+                    for j in steps
+                ]
+                group[names[0] if f is None else f.name(names)] = None
+            for other in [g for g in groups if g.keys() & group.keys()]:
+                groups.remove(other)
+                group = other | group
+            groups.append(group)
+    return dataclasses.replace(
+        packing, groups=tuple(tuple(g) for g in groups if len(g) > 1)
+    )
+
+
+def merges(
+    recording: Recording, fused: Sequence[Fusion], packing: Packing, dev
+) -> tuple[Fusion, ...]:
+    """Return each run of two or more consecutive steps outside ``fused`` whose designs ``packing`` groups together, as one ``MERGE``.
+
+    An xclbin's form of a packing: the group configured once and its steps in a row
+    dispatched once, back to back. A host step between two ends a run, and so does a
+    step that would take the run past what one xclbin kernel carries: more host
+    buffers than ``HOST_BUFFERS`` (a merged sequence passes each step's own), or a
+    design that leaves its configuration unplaced, since one sequence keeps each shim
+    end sending into the array in flight to its end (mlir-aie's ``ShimTransferSpans``),
+    so its designs cannot take turns on a shim channel as a full ELF's separate
+    sequences do.
+
+    Raises:
+        CoResidenceError: ``packing.required``, and a design leaves its group's
+            run unplaced.
+    """
+    if not packing.groups:
+        return ()
+    inside = {i for f in fused for i in f.steps}
+    groups: list[tuple[str, ...] | None] = []
+    designs: list[OperatorDesign] = []
+    for i, step in enumerate(recording.steps):
+        op = step.op.resolved(dev)
+        designs.append(OperatorDesign(op))
+        group = (
+            None
+            if i in inside or op.reference_only
+            else packing.group_of(designs[i].name)
+        )
+        groups.append(group if group is not None and len(group) > 1 else None)
+    hosted = [sum(not b.on_chip for b in s.op.buffers) for s in recording.steps]
+    found: list[Fusion] = []
+    # By the run's designs: each layer repeats the last one's.
+    placed: dict[tuple[str, ...], bool] = {}
+    lo = 0
+    # Each design's first step in the run: a design's steps all run on its one array.
+    firsts: dict[str, int] = {designs[0].name: 0} if designs else {}
+    for hi in range(1, len(groups) + 1):
+        if (
+            hi < len(groups)
+            and groups[hi] is not None
+            and groups[hi] == groups[lo]
+            and not recording.crosses_host(hi - 1, hi)
+            and sum(hosted[lo : hi + 1]) <= HOST_BUFFERS
+        ):
+            if designs[hi].name in firsts:
+                continue
+            steps = (*firsts.values(), hi)
+            key = tuple(designs[j].name for j in steps)
+            if key not in placed:
+                # Placed as a full ELF builds it: the same arrays and shim ends,
+                # without the dispatch scalars an xclbin binds only at its build.
+                placed[key] = (
+                    fits(
+                        {str(j): designs[j] for j in steps},
+                        fusion=Fusion(FusionKind.MERGE, steps),
+                    )
+                    is None
+                )
+            if placed[key]:
+                firsts[designs[hi].name] = hi
+                continue
+            if packing.required:
+                raise CoResidenceError(
+                    f"packing {', '.join(key)} does not place as one xclbin's run"
+                )
+        if groups[lo] is not None and hi - lo > 1:
+            found.append(Fusion(FusionKind.MERGE, tuple(range(lo, hi))))
+        lo = hi
+        firsts = {designs[hi].name: hi} if hi < len(designs) else {}
+    return tuple(found)

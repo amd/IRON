@@ -1,0 +1,216 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Widths: per-member core and stream counts, fit before any build, placement left to the placer."""
+
+from __future__ import annotations
+
+import dataclasses
+
+import pytest
+from aie.dialects.aie import get_target_model
+from aie.utils import set_current_device
+
+from iron.common.declare.composition import Edge as CompositionEdge
+from iron.common.declare.composition import (
+    Entry,
+    Member,
+    Refinement,
+    Region,
+    Schedule,
+    Scope,
+)
+from iron.common.declare.profile import Profile
+from iron.common.design import OperatorDesign
+from iron.common.image.compose import SHIM_SHORT, fits
+from iron.common.image.step import Edge, EdgeKind, Fusion, FusionKind
+from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemv import GEMV
+from iron.operators.silu import SiLU
+from iron.tests.support import toys_dataflow as toys
+from iron.tests.support import toys_schedule
+from iron.tests.support.fusable import gemv_silu_mul_recording
+from iron.tests.support.toys_edges import member
+from iron.tune.autotune import Timed
+from iron.tune.fusions import Applied
+from iron.tune.search import PLACEMENTS, candidates, check, fit, search
+
+_SIZE = 2048  # divides evenly into 64-element tiles at 1, 2, 4 or 8 columns
+
+
+def _window(columns, channels=1, kind=EdgeKind.STREAM):
+    gemv = GEMV(
+        M=_SIZE,
+        K=_SIZE,
+        tile_size_input=4,
+        tile_size_output=64,
+        num_aie_columns=columns,
+        num_channels=channels,
+    )
+    silu = SiLU(size=_SIZE, tile_size=64, num_aie_columns=columns)
+    mul = ElementwiseMul(size=_SIZE, tile_size=64, num_aie_columns=columns)
+    members = tuple(
+        dataclasses.replace(member(op), tunables={"num_aie_columns": columns})
+        for op in (gemv, silu, mul)
+    )
+    edges = (
+        CompositionEdge(0, "C", 1, "x", kind=kind),
+        CompositionEdge(1, "y", 2, "a", kind=kind),
+    )
+    region = Region(parts=members, edges=edges)
+    recording = gemv_silu_mul_recording(
+        f"width_window_{columns}x{channels}", gemv, silu, mul
+    )
+    return region, recording
+
+
+def test_per_member_width_counts_round_trip_and_are_proposed(tmp_path, device):
+    """A window's per-member column counts round-trip through a profile and are a candidate.
+
+    The window recorded at two columns, proposed at four: a width the
+    recording already has is the region as recorded, not an edit of it.
+    """
+    _, recording = _window(columns=2)
+    region, _ = _window(columns=4)
+    entry = Entry(root=region)
+    profile = Profile()
+    profile.add_entry(entry)
+    profile.save(tmp_path / "widths.json")
+    loaded = Profile.load(tmp_path / "widths.json")
+    assert loaded.entries() == [entry]
+    start = Profile()
+    assert any(
+        entry in edit.apply(start).entries()
+        for edit in candidates([Timed(recording)], start, device)
+    )
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_narrowed_window_is_bit_identical_to_full_width(device):
+    """A window narrowed to fit the array is bit-identical to the same window at full width."""
+    full_region, recording = _window(
+        columns=min(4, get_target_model(device.resolve()).columns())
+    )
+    narrow_region, _ = _window(columns=1)
+    base = Profile()
+    base.add_entry(Entry(root=full_region))
+    profile = Profile()
+    profile.add_entry(Entry(root=narrow_region))
+    result = check(profile, base, [Timed(recording)], device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+@pytest.mark.extensive
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_tuner_keeps_widths_that_pay_and_bounds_builds(device):
+    """The tuner keeps the width setting that pays, builds stay bounded, and several placements are tried."""
+    _, recording = _window(columns=2)
+    start = Profile()
+    found = search([Timed(recording)], start, device, budget_s=60.0)
+    assert any(
+        isinstance(e.root, Region)
+        and len(e.root.steps()) > 1
+        and all("num_aie_columns" in (m.tunables or {}) for m in e.root.steps())
+        for e in found.entries()
+    )
+    assert len(PLACEMENTS) > 1
+
+
+def test_four_calls_a_command_fit_a_window_as_one_call_does(device):
+    """A window at the array's full width fits four calls a command as it fits one.
+
+    Each call's intermediates are its own, so no call's window keeps a drain
+    for the next call's reads.
+    """
+    if not device.can_dispatch_full_elf:
+        pytest.skip(
+            "several calls a command wait on an xclbin per step before any placement"
+        )
+    _, recording = _window(columns=2)
+    region, _ = _window(columns=get_target_model(device.resolve()).columns())
+    four = Profile()
+    four.add_entry(Entry(root=region))
+    four.add_schedule(Schedule(version=recording.version, calls_per_command=4))
+    assert fit(four, [Timed(recording)], device).ok
+    with set_current_device(device):
+        applied = Applied.of(Timed(recording), four, device)
+    assert len(applied.fused) == 4
+    assert not any(f.kept for f in applied.fused)
+
+
+@pytest.mark.usefixtures("device")
+def test_a_width_over_the_arrays_columns_is_refused_by_counts(device):
+    """A GEMM at the array's full width, four cores a column, with a norm beside it, is refused by counts, before any build.
+
+    Each member alone is a legal design; the GEMM claims every core, so the
+    window as a whole does not fit.
+    """
+    gemm, norm = toys.gemm_rowwise(
+        device, M=256, N=512, cols=get_target_model(device.resolve()).columns()
+    )
+    region = toys.gemm_rowwise_region(gemm, norm)
+    recording = toys.gemm_rowwise_recording("full_width", gemm, norm)
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "counts"
+    assert "column" in (result.why or "") or "core" in (result.why or "")
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_width_over_the_shims_sending_channels_builds_by_packets(device):
+    """C's narrow window (4 cores, 4 streams), whose fills outrun npu2's shim sending channels as circuits, builds bit-identical with them as packet flows."""
+    region, recording = _window(columns=4, channels=4, kind=EdgeKind.STAGED)
+    designs = {
+        str(i): OperatorDesign(step.op.resolved())
+        for i, step in enumerate(recording.steps)
+    }
+    fusion = Fusion(
+        FusionKind.STAGED, (0, 1, 2), (Edge(0, "C", 1, "x"), Edge(1, "y", 2, "a"))
+    )
+    with set_current_device(device):
+        assert SHIM_SHORT in (fits(designs, fusion=fusion) or "")
+        assert fits(designs, fusion=dataclasses.replace(fusion, packets=True)) is None
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    calls = [Timed(recording)]
+    fitted = fit(profile, calls, device)
+    assert fitted.ok, fitted.why
+    result = check(profile, Profile(), calls, device, Refinement.EXACT)
+    assert result.ok, result.why
+
+
+def test_a_by_shape_entry_claiming_fewer_runs_than_iron_applies_is_refused(device):
+    """A width entry naming only some runs of a shape two steps of the recording share is refused: one width set must fit every run."""
+    gemv, add = toys_schedule.decode_step()
+    recording = toys_schedule.decode_step_recording("width_shared_shape", gemv, add)
+    region = Region(
+        parts=(Member(type(gemv), {"M": gemv.M, "K": gemv.K}, {"num_aie_columns": 2}),)
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=region, scope=Scope(occurrences=(0,))))
+    result = fit(profile, [Timed(recording)], device)
+    assert not result.ok
+    assert result.stage == "analysis"
+    assert "apply to every run" in (result.why or "")
+
+
+@pytest.mark.skip(
+    reason="no witness toy yet: each window the placer refuses so far, the counts "
+    "refuse first"
+)
+def test_counts_the_fit_accepts_but_the_placer_refuses_need_a_witness(device):
+    """Counts that fit the array but the placer refuses need a witness placement before they count.
+
+    Such a refusal is a compiler-failure candidate, not a bare count refusal.
+    """
+    region, recording = _window(
+        columns=get_target_model(device.resolve()).columns(), channels=1
+    )
+    profile = Profile()
+    profile.add_entry(Entry(root=region))
+    result = fit(profile, [Timed(recording)], device, placements=PLACEMENTS)
+    assert not result.ok
+    assert result.stage == "placer"
+    assert result.breakdown

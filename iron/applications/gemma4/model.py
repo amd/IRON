@@ -11,6 +11,7 @@ the whole model is the decoder with its vision and audio towers
 """
 
 import dataclasses
+from pathlib import Path
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -189,6 +190,7 @@ class Gemma4(CausalLM):
     """
 
     config = Gemma4Config
+    profile = Path(__file__).with_name("profiles")
     decoder_class = Gemma4Decoder
     layer_class = Gemma4Layer
     model: Gemma4Decoder

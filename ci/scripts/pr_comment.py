@@ -9,8 +9,9 @@ suite, ``latest.csv``, treats it as data alone, and renders the report with the
 code in this checkout. It compares against ``all.csv`` on the results branch,
 which only a push to a trunk branch can write.
 
-A suite that reported nothing is named in the comment. Without that, a suite
-that crashed reads the same as a suite that moved no benchmark.
+Every suite is named in the comment: one that moved no benchmark says so, one
+whose workflow is still running is pending, and one that reported nothing is
+missing. Without that, a suite that crashed reads the same as a quiet one.
 """
 
 import argparse
@@ -21,7 +22,15 @@ from typing import Dict, List, Tuple
 
 from merge_all import limit_rows_by_date
 from pretty_common import ARCHS, PR_SUITES, results_dir, suite_label
-from pretty_trends import SIGMA, THRESHOLD, build_report
+from pretty_trends import (
+    DATE_FMT,
+    SIGMA,
+    THRESHOLD,
+    build_report,
+    cell,
+    gate,
+    parse_date,
+)
 
 # The posting step matches this to update its own comment.
 MARKER = "<!-- iron-ci-aggregate -->"
@@ -60,16 +69,27 @@ def read_status(path: str) -> Dict[str, str]:
 
 def suite_report(
     artifacts: str, history: str, directory: str, suite: str, args
-) -> List[str]:
-    """Render one suite, comparing its run against the results branch."""
+) -> Tuple[str, str]:
+    """Render one suite against the results branch: the body and the run it compares with.
+
+    The body is empty when no benchmark moved; the run is its commit and date,
+    or empty when the results branch holds none of this suite.
+    """
     latest, latest_columns = read_csv(os.path.join(artifacts, directory, "latest.csv"))
-    if not latest:
-        return []
     previous, previous_columns = read_csv(os.path.join(history, directory, "all.csv"))
+
+    dated = [(parse_date(row, DATE_FMT), row) for row in previous]
+    dated = [(date, row) for date, row in dated if date is not None]
+    baseline = ""
+    if dated:
+        date, row = max(dated, key=lambda pair: pair[0])
+        baseline = f"{cell((row.get('Commit') or '')[:7])} ({date:%Y-%m-%d %H:%M})"
+    if not latest:
+        return "", baseline
 
     columns = list(dict.fromkeys(previous_columns + latest_columns))
     rows = limit_rows_by_date(previous + latest, 2)
-    return build_report(
+    lines = build_report(
         rows,
         columns,
         threshold=args.threshold,
@@ -78,12 +98,8 @@ def suite_report(
         history=args.performance_checks_page,
         suite=suite,
     )
-
-
-def strip_title(lines: List[str]) -> str:
-    """Drop the report's own heading, and report whether anything is left."""
     body = "\n".join(line for line in lines if not line.startswith("# ")).strip()
-    return "" if body.startswith("No benchmark moved") else body
+    return ("" if body.startswith("No benchmark moved") else body), baseline
 
 
 def main():
@@ -121,38 +137,56 @@ def main():
     lines = [MARKER, "## CI performance trends", "", f"{commit} ({args.date})", ""]
 
     sections = []
-    reported = []
+    pending = []
     missing = []
     for arch in ARCHS:
         for suite in PR_SUITES:
             directory = results_dir(arch, suite)
             label = suite_label(arch, suite)
-            body = strip_title(
-                suite_report(args.artifacts, args.history, directory, suite, args)
-            )
             conclusion = status.get(directory, "missing")
+            if conclusion == "pending":
+                pending.append(label)
+                continue
             if conclusion != "success" or not os.path.exists(
                 os.path.join(args.artifacts, directory, "latest.csv")
             ):
                 missing.append(f"{label} ({conclusion})")
                 continue
-            reported.append(label)
+            body, baseline = suite_report(
+                args.artifacts, args.history, directory, suite, args
+            )
+            against = (
+                f"Previous: {baseline}, this suite's newest run on the results branch."
+                if baseline
+                else "Previous: none, the results branch holds no run of this suite."
+            )
             if body:
                 sections += [
                     "<details open>",
                     f"<summary><b>{label}</b></summary>",
+                    "",
+                    against,
                     "",
                     body,
                     "",
                     "</details>",
                     "",
                 ]
+            else:
+                sections += [
+                    f"**{label}**: no benchmark moved by {args.threshold:g}%"
+                    f"{gate(args.sigma)}. {against}",
+                    "",
+                ]
 
-    if sections:
-        lines += sections
-    elif reported:
-        lines += ["No benchmark moved past the reporting threshold.", ""]
+    lines += sections
 
+    if pending:
+        lines += [
+            f"⏳ Still running: {', '.join(pending)}. "
+            "This comment updates when each finishes.",
+            "",
+        ]
     if missing:
         lines += [
             f"⚠️ No results from: {', '.join(missing)}. "

@@ -34,8 +34,8 @@ class Decode(iron.Graph):
     def body(self, q, k, v, *, position: Scratchpad[np.int32]):
         return MHA.step(
             q.reshape(1, HEADS, D),
-            k[: position + 1],
-            v[: position + 1],
+            K=k[: position + 1],
+            V=v[: position + 1],
             heads_interleaved=True,
             kv_interleaved=True,
             num_pipelines=4,

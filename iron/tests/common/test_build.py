@@ -395,17 +395,13 @@ def test_on_an_xclbin_a_per_call_length_sizes_the_coalesced_descriptor(
 def test_flm_gemm_keyword_construction_tunes_from_the_device():
     # Keyword construction leaves every tunable to resolution, which reads the
     # device alone; the operator's extent is checked against the resolved
-    # tunables by compatible(), not folded into its defaults.
+    # tunables by compatible(), not folded into its defaults. B's host shape
+    # follows bfp16_b, never a tunable: it is known untuned.
     untuned = flm_gemm.ProjectionGEMM(
         M=512, K=1024, N=1024, precision=Precision.MEDIUM, bfp16_b=True
     )
     assert untuned.tile_n is None
-    # B's layout is the caller's, so its host shape is known before a device.
-    assert untuned.buffers[1].shape == (1024 * 1024 // bfp.BLOCK,)
-    with pytest.raises(ValueError, match="pass bfp16_b=True"):
-        flm_gemm.ProjectionGEMM(
-            M=512, K=1024, N=1024, precision=Precision.MEDIUM
-        ).resolved(from_name("npu2", n_cols=8))
+    assert untuned.buffers[1].shape == (1024 * 1024 // 8,)
     op = flm_gemm.ProjectionGEMM(
         M=512, K=1024, N=1024, precision=Precision.MEDIUM, bfp16_b=True
     ).resolved(from_name("npu2", n_cols=8))
@@ -444,7 +440,8 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
         "a_half": 2 * 128 * 1024,
         "c_half": 2 * 128 * 1024,
         "b_passes_repeat": 1,
-        "b_resident": 1,
+        "b_peek_repeat": 0,
+        "b_drained": 0,
     }
     with pytest.raises(ValueError, match="multiple of 256"):
         flm_gemm.ProjectionGEMM(

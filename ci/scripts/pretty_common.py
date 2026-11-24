@@ -33,6 +33,7 @@ METRICS = {
     "TPS": Metric("tokens/s", True),
     "GenerateTPS": Metric("tokens/s", True),
     "StreamTPS": Metric("tokens/s", True),
+    "DeepTPS": Metric("tokens/s", True),
     "DeepPromptSeconds": Metric("s", False),
     "Cosine": Metric("", True),
     "Worst cosine": Metric("", True),
@@ -124,6 +125,14 @@ SUITE_LABELS = {
     "extensive": "Operators, extensive",
     "examples": "Applications",
     "nightly": "Applications, nightly",
+}
+
+# What a suite's report names each row's benchmark.
+SUITE_SUBJECTS = {
+    "small": "Operator",
+    "extensive": "Operator",
+    "examples": "Model",
+    "nightly": "Model",
 }
 
 # A pull request runs the default and the example suites. The extensive and

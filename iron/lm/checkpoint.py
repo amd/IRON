@@ -11,7 +11,9 @@ import io
 import json
 import math
 import mmap
+import os
 import pickle
+import re
 import struct
 import zipfile
 from collections import OrderedDict
@@ -23,6 +25,7 @@ from typing import Any, Literal
 import numpy as np
 from ml_dtypes import bfloat16
 
+from ..common.graph.coded import Source
 from ..common.graph.compiled import param
 from ..common.graph.fill import filled
 from .golden import fingerprint
@@ -44,6 +47,8 @@ class _Shard:
         with open(self.path, "rb") as f:
             # The mapping holds its own reference to the file.
             self._map = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            stat = os.fstat(f.fileno())
+        self._identity = (str(self.path.resolve()), stat.st_size, stat.st_mtime_ns)
         data = np.frombuffer(self._map, dtype=np.uint8)
         self._address = data.ctypes.data
         if zipfile.is_zipfile(self.path):
@@ -103,6 +108,13 @@ class _Shard:
             elif isinstance(node, dict):
                 pending += [(f"{path}.{k}" if path else k, v) for k, v in node.items()]
         return tensors
+
+    def source(self, array: np.ndarray) -> Source | None:
+        """Where in this file ``array``, a contiguous view of it, is, or None."""
+        begin = array.ctypes.data - self._address
+        if not (array.flags.c_contiguous and 0 <= begin < len(self._map)):
+            return None
+        return Source(*self._identity, begin)
 
     def release(self, array: np.ndarray) -> bool:
         """Drop the process's pages of ``array`` if it is a view of this file.
@@ -249,6 +261,12 @@ class Checkpoint:
                     )
             self.tensors.update(shard.tensors)
 
+    def source(self, array: np.ndarray) -> Source | None:
+        """Where in the checkpoint's files ``array`` is, or None."""
+        return next(
+            (s for s in (shard.source(array) for shard in self._shards) if s), None
+        )
+
     def release(self, array: np.ndarray) -> None:
         """Drop the process's pages of ``array`` if it is a view of one of the files.
 
@@ -270,7 +288,10 @@ class Checkpoint:
         return fingerprint(ends)
 
     def tree(
-        self, fill: Literal["read", "random", "unread"] = "read", seed: int = 0
+        self,
+        fill: Literal["read", "random", "unread"] = "read",
+        seed: int = 0,
+        layers: int | None = None,
     ) -> SimpleNamespace:
         """Return the checkpoint's tensors as a tree of ``param``, split at the dots.
 
@@ -281,17 +302,32 @@ class Checkpoint:
                 ``"random"`` or ``"unread"`` ``filled``'s, which reads
                 nothing past the header.
             seed: The seed ``"random"`` draws at.
+            layers: Keep the text stack's first ``layers`` layers alone
+                (``[model.][language_model.]layers.<i>``): a shallow model's view of a deeper
+                checkpoint, whose other layers it would refuse as extra.
 
         Raises:
             ValueError: ``fill`` is none of these.
         """
         if fill not in ("read", "random", "unread"):
             raise ValueError(f"fill is read, random or unread, not {fill!r}")
-        tensors = self.tensors
+        kept = {
+            n: t
+            for n, t in self.tensors.items()
+            if layers is None
+            or not (
+                m := re.match(r"(?:model\.)?(?:language_model\.)?layers\.(\d+)\.", n)
+            )
+            or int(m.group(1)) < layers
+        }
         if fill != "read":
-            named = {n: (t.shape, t.dtype) for n, t in tensors.items()}
+            named = {n: (t.shape, t.dtype) for n, t in kept.items()}
             tensors = filled(fill, named, seed)
-        return nest({n: param(t) for n, t in tensors.items()}, file=self.path)
+            return nest({n: param(t) for n, t in tensors.items()}, file=self.path)
+        return nest(
+            {n: param(t, source=self.source(t)) for n, t in kept.items()},
+            file=self.path,
+        )
 
 
 def leaves(tree, prefix: str = "") -> Iterator[tuple[str, Any]]:

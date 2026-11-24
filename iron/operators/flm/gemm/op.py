@@ -15,7 +15,7 @@ from aie.dialects._aie_enum_gen import AIEArch, AIETileType, DMAChannelDir
 from aie.dialects.aie import (
     get_target_model,
 )
-from aie.helpers.taplib import TensorAccessPattern
+from aie.helpers.taplib import Affine, TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
 from aie.iron import (
     Acquire,
@@ -43,6 +43,8 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Built, Operator, Precision, Rtp, Unresolvable
+from iron.common.declare import Operand
+from iron.common.declare.operator import LaneTransfers
 from iron.operators.flm.gemm.design import (
     A_DEPTH,
     B_MAX_SLOTS,
@@ -85,6 +87,7 @@ class _BPool(NamedTuple):
     queue: int  # entries in a DMA channel's task queue, shim or memtile
     lock_max: int  # the largest value a lock holds
     passes: int  # passes one queue push makes over a memtile chain
+    bds: int  # runtime BD ids B's two memtile channels share
 
 
 # The kernel's clamp bounds as the int32 bit patterns the parameter words
@@ -123,6 +126,23 @@ def _units_valid(op) -> Any:
     if isinstance(rows, (int, np.integer)) and rows < 1:
         raise ValueError(f"flm.ProjectionGEMM: valid ({rows}) must be at least 1 row")
     return ceildiv(rows, M_TILE * op.rows * op.m_chunk)
+
+
+def _resident_passes(op) -> Any:
+    """Return the passes a bounded call's resident B makes over a column-block: the units reached, at least two.
+
+    Each but the last a peek, which leaves the slots full; the last frees them.
+    """
+    units = _units_valid(op)
+    return units.clamp(lo=2) if isinstance(units, Affine) else max(units, 2)
+
+
+def _resident_drained(op) -> Any:
+    """Return the passes past the units a bounded call reaches that the cores drain: one at one unit where B is resident, else none."""
+    if not op._b_resident:
+        return 0
+    spare = 2 - _units_valid(op)
+    return spare.clamp(lo=0) if isinstance(spare, Affine) else max(spare, 0)
 
 
 class ProjectionGEMM(Operator):
@@ -251,9 +271,11 @@ class ProjectionGEMM(Operator):
     b_passes_repeat = per_call(
         derive=lambda op: _units_valid(op) * op._k_iters // op._b_ring - 1
     )
-    # Whether the memtile replays B to every unit, as it does where B is
-    # resident, so that the cores drain the replays past a bound.
-    b_resident = per_call(derive=lambda op: int(op._b_resident))
+    # Under a bound where B is resident, a column-block's peek passes over
+    # it less one (the units reached, at least two, less the last pass), and
+    # the passes past the units reached, which the cores drain.
+    b_peek_repeat = per_call(derive=lambda op: _resident_passes(op) - 2)
+    b_drained = per_call(derive=lambda op: _resident_drained(op))
     # Under a bound, where the second half of the core rows starts in A and in
     # C: past the first half's share of the units it reaches.
     a_half = per_call(
@@ -323,16 +345,13 @@ class ProjectionGEMM(Operator):
                 "flm.ProjectionGEMM is sized from the device's L1 and grid"
             )
         rows, cols = compute_rows(dev), dev.cols
-        # B is packed to bfp16ebs8 where the macs are bfp16 and B is not read
-        # as stored; otherwise it is bf16. AIE2 has no BFP types, so its mmul
-        # lowers onto four native bf16 macs.
-        aie2p = dev.arch == AIEArch.AIE2p
-        emulate = aie2p and self.precision == Precision.MEDIUM
+        # AIE2 has no BFP types, so its mmul lowers onto four native bf16 macs.
+        emulate = dev.arch == AIEArch.AIE2p and self.precision == Precision.MEDIUM
         bfp16_b = self.bfp16_b
         if bfp16_b != (emulate and not self.b_col_maj):
             raise ValueError(
-                f"flm.ProjectionGEMM: bfp16_b ({bfp16_b}) on {type(dev).__name__}, "
-                f"which takes a {'bfp16' if emulate else 'bf16'} packed B at "
+                f"flm.ProjectionGEMM: bfp16_b ({bfp16_b}) on {dev.name}, which "
+                f"takes a {'bfp16' if emulate else 'bf16'} packed B at "
                 f"precision={str(self.precision)!r}: pass "
                 f"bfp16_b={emulate and not self.b_col_maj}"
             )
@@ -546,9 +565,8 @@ class ProjectionGEMM(Operator):
         ct_b_ty = np.ndarray[(CT_K * N_TILE // B_GROUP,), b_elem_ty]
         ct_out_ty = np.ndarray[(CT_OUT_LEN,), bf16_ty]
         ct_acc_ty = np.ndarray[(M_TILE * N_TILE,), f32]
-        # L2 (per memtile): the declared stream tiles.
+        # L2 (per memtile): the declared stream tile.
         mt_a_ty = self.A.obj_type
-        mt_out_ty = self.C.obj_type
 
         # Every field that changes the object reaches the factory, so its
         # object name keys the build. The activation is absent: the cores
@@ -600,18 +618,25 @@ class ProjectionGEMM(Operator):
         ]
 
         # C: a join per column and half of the core rows; each core drops its
-        # slice at its own offset in its half's memtile buffer.
+        # slice at its own offset in its half's memtile buffer. Placed at
+        # column c's shim, as the shared image has them: where the placer
+        # chose, a shape whose transfers differ would move them.
         HALF = ROWS // JOINS
-        c_l2l3_fifos, c_prod = [], {}
+        c_fifos = self.C.fifos(
+            C_DEPTH, tiles=[Tile(c, 0) for c in range(COLS) for _ in range(JOINS)]
+        )
+        c_prod = {}
         for c in range(COLS):
             for h in range(JOINS):
-                of_c = ObjectFifo(mt_out_ty, depth=C_DEPTH)
-                c_l2l3_fifos.append((c, of_c))
-                sub = of_c.prod().join(
-                    [C_SLICE_LEN * p for p in range(HALF)],
-                    tile=mt_tiles[c],
-                    obj_types=[ct_out_ty] * HALF,
-                    from_stream=[gather_dims] * HALF,
+                sub = (
+                    c_fifos[c * JOINS + h]
+                    .prod()
+                    .join(
+                        [C_SLICE_LEN * p for p in range(HALF)],
+                        tile=mt_tiles[c],
+                        obj_types=[ct_out_ty] * HALF,
+                        from_stream=[gather_dims] * HALF,
+                    )
                 )
                 for p in range(HALF):
                     c_prod[(h * HALF + p, c)] = sub[p]
@@ -720,6 +745,7 @@ class ProjectionGEMM(Operator):
             queue=tm.get_dma_task_queue_depth(),
             lock_max=tm.get_max_lock_value(),
             passes=tm.get_max_repeat_count() + 1,
+            bds=self._b_bds,
         )
 
         # Data, not an immediate folded into the program: the core programs
@@ -745,7 +771,7 @@ class ProjectionGEMM(Operator):
         if M_CHUNK > 1:
             read.append(self.n_units)
         if bounded:
-            read += [self.units_valid, self.b_resident]
+            read += [self.units_valid, self.b_drained]
         rtps = [Rtp(read) for _ in range(ROWS * COLS)]
 
         def core_fn(
@@ -820,13 +846,13 @@ class ProjectionGEMM(Operator):
                             o_h.release(1)
 
             for _ in range_(n_work):
-                # A unit past the bound has its B replay all the same where B
-                # is resident, its count in the memtile's locks; every replay
-                # is the same B, so those go first and the call's last C still
-                # comes after the cores' last acquire. A streamed ring stops at
-                # the bound.
+                # Where B is resident, a bound's one unit still takes two
+                # passes of it (a peek, then the last); every pass is the same
+                # B, so the spare goes first and the call's last C still comes
+                # after the cores' last acquire. A streamed ring stops at the
+                # bound.
                 if bounded:
-                    for _ in range_((n_units_rt - n_live) * words[self.b_resident]):
+                    for _ in range_(words[self.b_drained]):
                         for _ in range_(n_k_iters):
                             for _ in range_(B_ITERS // L1_B_DEPTH):
                                 for _ in b_bufs:
@@ -875,9 +901,6 @@ class ProjectionGEMM(Operator):
 
         self.A.bind([f.prod() for f in a_l3l2_fifos])
         self.B.bind(b_shim_flows)
-        # C's drains on column c's shim, as the shared image has them: where
-        # the placer chose, a shape whose transfers differ would move them.
-        self.C.bind([f.cons(tile=Tile(c, 0)) for c, f in c_l2l3_fifos])
         return _Built(workers + unrouted, rtps, b_pool=b_pool)
 
     @property
@@ -916,6 +939,23 @@ class ProjectionGEMM(Operator):
         )
 
     @property
+    def _b_bds(self) -> int:
+        """Return the runtime BD ids B's memtile fill and drain chains share.
+
+        A memtile channel reaches only its parity's half of the BD ids, and
+        B's two channels share theirs with one C join's ends. Past it, aiecc
+        reclaims a live fill's ids behind a poll that never returns.
+        """
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable(
+                "flm.ProjectionGEMM: B's memtile BD ids are per device; none is bound"
+            )
+        tm = get_target_model(dev.resolve())
+        row = next(r for r in range(tm.rows()) if tm.is_mem_tile(0, r))
+        return tm.get_num_bds(0, row) // 2 - 2 * C_DEPTH * (self.rows // self.joins)
+
+    @property
     def _b_resident(self) -> bool:
         """Whether a column-block of B stays in the memtile for all of M's units."""
         dev = self.dev
@@ -924,19 +964,26 @@ class ProjectionGEMM(Operator):
                 "flm.ProjectionGEMM: B's residency depends on the device; none is bound"
             )
         lock_max = get_target_model(dev.resolve()).get_max_lock_value()
-        return self._k_iters <= self._b_slots and self._n_units <= lock_max
+        # Fill and drain chains, and a bound's peeks.
+        chains = 3 if "valid" in self.bound_extents else 2
+        return (
+            self._k_iters <= self._b_slots
+            and self._n_units <= lock_max
+            and chains * self._k_iters <= self._b_bds
+        )
 
     @property
     def _b_ring(self) -> int:
         """Return the slots B's memtile ring uses under a bound.
 
         Every k tile where B is resident, else the most that one unit's k
-        tiles fill whole, so that a call's ring passes follow the units it
-        reaches.
+        tiles fill whole and B's BD ids hold, so that a call's ring passes
+        follow the units it reaches.
         """
         if self._b_resident:
             return self._k_iters
-        return max(s for s in range(1, self._b_slots + 1) if self._k_iters % s == 0)
+        most = min(self._b_slots, self._b_bds // 2)
+        return max(s for s in range(1, most + 1) if self._k_iters % s == 0)
 
     def sequence(self, rt):
         M, K, N = self.M, self.K, self.N
@@ -946,6 +993,12 @@ class ProjectionGEMM(Operator):
         pool = rt.built.b_pool
         B_SLOTS, b_slot_elems = pool.slots, pool.slot_elems
         bounded = "valid" in self.bound_extents
+        # Resident, B's chains are fill and drain, and a bound's peeks; each
+        # holds a BD id per slot (_b_bds).
+        fits_resident = k_iters <= B_SLOTS and (
+            (3 if bounded else 2) * k_iters <= pool.bds
+        )
+        ring_slots = min(B_SLOTS, pool.bds // 2)
         # Sweeps where all COLS columns have work, plus a trailing group of
         # rem_blocks columns (0 <= rem_blocks < COLS) that do one block more.
         n_full = N // (N_TILE * COLS)
@@ -980,7 +1033,10 @@ class ProjectionGEMM(Operator):
         # Each slot is filled when its producer lock reaches b_uses and
         # released by b_uses per fill, then drained once per use. So a
         # resident slot is not refilled until every unit has read it, while a
-        # streamed one turns over like a fifo object. Both return the
+        # streamed one turns over like a fifo object. Under a bound a resident
+        # slot is filled and freed once (b_uses 1), its passes but the last
+        # peeks that give back the consumer lock they take, so their count is
+        # a per-call repeat rather than a lock value. Each returns the
         # producer lock to b_uses by the end of the slab, which the sequence
         # re-arms per slab since the previous one may have been a different
         # shape.
@@ -989,8 +1045,8 @@ class ProjectionGEMM(Operator):
 
             Armed at once.
             """
-            if k_iters <= B_SLOTS and units <= pool.lock_max:
-                resident, b_slots, b_uses = True, k_iters, units
+            if fits_resident and units <= pool.lock_max:
+                resident, b_slots, b_uses = True, k_iters, 1 if bounded else units
             elif bounded:
                 # Streamed under a bound, the ring passes follow the units
                 # reached, so a pass covers part of one unit (_b_ring).
@@ -999,7 +1055,7 @@ class ProjectionGEMM(Operator):
                 # Streamed, a chain pass must cover whole units, so the ring
                 # must divide what one takes.
                 b_slots = max(
-                    s for s in range(1, B_SLOTS + 1) if (units * k_iters) % s == 0
+                    s for s in range(1, ring_slots + 1) if (units * k_iters) % s == 0
                 )
                 resident, b_uses = False, 1
             return _Slab(first, units, resident, b_slots, b_uses)
@@ -1039,7 +1095,7 @@ class ProjectionGEMM(Operator):
         for n_slabs in range(1, n_units + 1):
             slabs = cut(n_slabs)
             if all(map(slab_fits, slabs)) and (
-                k_iters > B_SLOTS or all(s.b_resident for s in slabs)
+                not fits_resident or all(s.b_resident for s in slabs)
             ):
                 break
         else:
@@ -1098,12 +1154,13 @@ class ProjectionGEMM(Operator):
         else:
             drains = slots
 
-        def b_mt_task(c, direction, passes, slab):
+        def b_mt_task(c, direction, passes, slab, peek=False):
             """Program one of column ``c``'s memtile B channels.
 
             One BD per used slot, walked ``passes`` times (re-pushed past
             one queue's carry); returned for starting but never awaited --
-            C completing implies it.
+            C completing implies it. A ``peek`` drain gives back the consumer
+            lock it takes, leaving the slots full.
             """
             fill = direction == DMAChannelDir.S2MM
             flow = (pool.shim_flows if fill else pool.bcast_flows)[c]
@@ -1111,7 +1168,7 @@ class ProjectionGEMM(Operator):
             chain = []
             for i in range(slab.b_slots):
                 prod, cons = pool.prod[c][i], pool.cons[c][i]
-                wait, post = (prod, cons) if fill else (cons, prod)
+                wait, post = (prod, cons) if fill else (cons, cons if peek else prod)
                 chain.append(
                     Bd(
                         pool.bufs[c],
@@ -1156,7 +1213,8 @@ class ProjectionGEMM(Operator):
                 A push covers as many whole blocks as its passes carry,
                 issued at the first of them, so the compiler only waits on
                 an earlier, already-issued block's queue slot. Under a bound
-                a streamed ring pushes one block a call.
+                a streamed ring pushes one block a call, and a resident one's
+                drain its peeks, a per-call repeat, then its last pass.
                 """
                 per_call = bounded and not slab.b_resident
                 for c in range(COLS):
@@ -1166,12 +1224,39 @@ class ProjectionGEMM(Operator):
                         (DMAChannelDir.S2MM, DMAChannelDir.MM2S),
                         b_mt_block_passes(slab),
                     ):
-                        per_push = 1 if per_call else max(1, pool.passes // passes)
+                        replay = (
+                            bounded
+                            and slab.b_resident
+                            and direction == DMAChannelDir.MM2S
+                        )
+                        per_push = (
+                            1 if per_call or replay else max(1, pool.passes // passes)
+                        )
                         if bi % per_push:
                             continue
                         count = min(per_push, n_work(c) - bi) * passes
                         task = b_mt_tasks.get((c, direction))
-                        if per_call:
+                        if replay:
+                            peek = b_mt_tasks.get((c, "peek"))
+                            if peek is None:
+                                peek = b_mt_tasks[c, "peek"] = b_mt_task(
+                                    c,
+                                    direction,
+                                    max(slab.units - 1, 1),
+                                    slab,
+                                    peek=True,
+                                )
+                            word = self.b_peek_repeat
+                            if word.ssa is None:
+                                peek.start(repeat_parameter=word.param)
+                            else:
+                                peek.start(repeat_count=word.ssa)
+                            if task is None:
+                                task = b_mt_tasks[c, direction] = b_mt_task(
+                                    c, direction, 1, slab
+                                )
+                            task.start()
+                        elif per_call:
                             if task is None:
                                 task = b_mt_tasks[c, direction] = b_mt_task(
                                     c, direction, count, slab
@@ -1273,6 +1358,75 @@ class ProjectionGEMM(Operator):
         # Back to back: a slab returns only once its C has all drained.
         for slab in slabs:
             emit_slab(slab)
+
+    def _single_slab(self) -> bool:
+        """Whether ``sequence`` arms M in one slab.
+
+        The same accept test ``cut()`` runs for ``n_slabs=1``, without a build to read
+        ``rt.built`` from (the hardware limits ``_BPool`` carries are the device's own).
+        """
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable("flm.ProjectionGEMM: the slab test needs a bound device")
+        tm = get_target_model(dev.resolve())
+        queue, passes_cap = tm.get_dma_task_queue_depth(), tm.get_max_repeat_count() + 1
+        k_iters, n_units, b_slots = self._k_iters, self._n_units, self._b_slots
+        bds = self._b_bds
+        if self._b_resident:
+            passes = (1, n_units)
+        elif k_iters > b_slots or 2 * k_iters > bds:
+            ring_slots = min(b_slots, bds // 2)
+            divisor = max(
+                s for s in range(1, ring_slots + 1) if (n_units * k_iters) % s == 0
+            )
+            passes = (n_units * k_iters // divisor,) * 2
+        else:
+            return False
+        return all(p <= queue * passes_cap for p in passes)
+
+    def lane_transfers(self, operand: Operand) -> LaneTransfers | None:
+        """Return A and C's order, one slab, ``m_chunk=1`` and unbounded.
+
+        Past that a second slab, or a row bound's dynamic start (the second half of the
+        core rows, ``a_half``/``c_half``) and its ``n_units`` axis truncation, are not
+        one of ``Operand.transfers()``'s tuples.
+        """
+        if operand is not self.A and operand is not self.C:
+            return None
+        if self.m_chunk > 1 or "valid" in self.bound_extents:
+            return None
+        COLS, ROWS, JOINS = self.cols, self.rows, self.joins
+        N_TILE, K_TILE = self.tile_n, self.k_tile
+        k_iters, n_units = self._k_iters, self._n_units
+        HALF = ROWS // JOINS
+        N = self.N
+        if N // N_TILE < COLS or not self._single_slab():
+            return None
+        n_full = N // (N_TILE * COLS)
+        rem_blocks = (N % (N_TILE * COLS)) // N_TILE
+        n_blocks = n_full + (1 if rem_blocks else 0)
+        if operand is self.A:
+            A = TensorAccessPattern.full(
+                (JOINS, n_units, 1, HALF, M_TILE, k_iters, K_TILE)
+            )
+            out = []
+            for r in range(ROWS):
+                half, p = divmod(r, HALF)
+                # B's column-block sweep resends A's K-sweep, unchanged, once
+                # a column-block (``n_blocks`` of them).
+                rows = A[half, :, :, p].permute((0, 3, 1, 2, 4))
+                out.append((r, rows.repeat(n_blocks), None, None))
+            return out
+        C = TensorAccessPattern.full(
+            (JOINS, n_units, HALF * M_TILE, N // N_TILE, N_TILE)
+        )
+        # The N-tile axis is outermost: C is resent column-block by
+        # column-block, each one's whole row range before the next.
+        return [
+            (c * JOINS + half, C[half, :, :, c::COLS].permute((2, 0, 1, 3)), None, None)
+            for c in range(COLS)
+            for half in range(JOINS)
+        ]
 
     @property
     def _reference_shape(self) -> tuple[int, int, int]:
