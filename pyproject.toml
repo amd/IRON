@@ -14,7 +14,7 @@ requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 dependencies = [
     "numpy",
-    "ml_dtypes",
+    "ml_dtypes==0.6.0",
 ]
 
 [project.optional-dependencies]
