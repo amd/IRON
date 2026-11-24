@@ -27,6 +27,7 @@ from aie.iron import DeviceConfiguration, Program, Runtime
 from aie.passmanager import PassManager
 from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
+from aie.utils.compile.jit.context import get_compile_arg
 
 from ..design import BuiltArray, OperatorDesign, configuration, identities
 from .step import BufferRef
@@ -218,7 +219,10 @@ class Composition:
         # first dispatch alone, as the firmware skips an unexpanded load of
         # the PDI it has loaded, unless the build is traced or asks to
         # reconfigure.
-        self.expands = len(self.designs) > 1 or seq.traced or full_elf.reconfigure
+        self.control_packets = get_compile_arg("iron_control_packets", False)
+        self.expands = not self.control_packets and (
+            len(self.designs) > 1 or seq.traced or full_elf.reconfigure
+        )
         self.layout = seq.layout
         self.buffer_sizes = seq.buffer_sizes
         self.commands = full_elf.commands
@@ -243,6 +247,7 @@ class Composition:
             # Absent when unsplit, so every one-command image keeps its key.
             *([self.commands] if self.commands else []),
             *(["expands"] if self.expands else []),
+            *(["control_packets"] if self.control_packets else []),
         )
         h.update(repr(state).encode())
         return h.hexdigest()[:24]

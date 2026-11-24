@@ -17,6 +17,7 @@ from math import prod
 
 import numpy as np
 import pytest
+from aie import ir
 from aie.dialects.aie import DMAChannelDir
 from aie.helpers.taplib import PerCall, TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
@@ -531,6 +532,66 @@ def test_flm_gemm_selects_its_activation_by_a_word():
     )
     assert silu.config_name == op.config_name
     assert silu.resolved().residents["mode"] == Epilogue.SILU.mode
+
+
+@pytest.mark.parametrize(
+    "operator,shape",
+    [
+        (
+            flm_gemm.ProjectionGEMM,
+            dict(M=512, K=512, N=1024, b_col_maj=True, precision=Precision.MEDIUM),
+        ),
+        (
+            flm_gemm.ProjectionGEMM,
+            dict(M=512, K=3072, N=1024, b_col_maj=True, precision=Precision.MEDIUM),
+        ),
+        (GEMV, dict(M=1024, K=512, num_aie_columns=4, tile_size_output=8)),
+    ],
+    ids=["resident_b", "streamed_b", "gemv"],
+)
+@pytest.mark.parametrize("bounded", [False, True])
+def test_projection_releases_each_task_after_output_completion(
+    operator, shape, bounded
+):
+    op = operator(**shape)
+    if bounded:
+        op.use_value("valid", N)
+    module = OperatorDesign(op).module()
+    operations = []
+
+    def collect(operation):
+        if operation.name.startswith("aiex.dma_"):
+            operations.append(operation)
+        return ir.WalkResult.ADVANCE
+
+    module.operation.walk(collect)
+    configured = {}
+    starts = {}
+    releases = {}
+    awaits = []
+    frees = []
+    for position, operation in enumerate(operations):
+        if operation.name in (
+            "aiex.dma_configure_task",
+            "aiex.dma_configure_task_for",
+        ):
+            configured[operation] = position
+        elif operation.name == "aiex.dma_start_task":
+            starts.setdefault(operation.operands[0].owner, []).append(position)
+        elif operation.name in ("aiex.dma_await_task", "aiex.dma_free_task"):
+            releases.setdefault(operation.operands[0].owner, []).append(position)
+            if operation.name == "aiex.dma_await_task":
+                awaits.append(position)
+            else:
+                frees.append(position)
+
+    assert configured.keys() == starts.keys() == releases.keys()
+    for handle, position in configured.items():
+        assert len(releases[handle]) == 1
+        assert position < min(starts[handle])
+        assert max(starts[handle]) < releases[handle][0]
+    assert awaits and frees
+    assert max(awaits) < min(frees)
 
 
 def _flm_gemm_moves(op, full_elf, rows):
