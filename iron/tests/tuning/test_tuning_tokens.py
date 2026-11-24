@@ -18,8 +18,6 @@ from iron.operators.gemm import GEMM
 from iron.operators.rms_norm import RMSNorm
 from iron.tests.support import toys_dataflow as toys
 from iron.tests.support import toys_edges
-from iron.tests.support.tools import DEVICES
-from iron.tests.support.tuning import unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.search import check, fit
 
@@ -49,16 +47,6 @@ def _gemm_into_rows(b_col_maj: bool, kind: EdgeKind) -> tuple[Region, GEMM, RMSN
     return region, gemm, norm
 
 
-# Where GEMM's tiles stream or restage into rows. npu1 builds GEMM on an array
-# narrower than the device, which a configuration beside another operator's
-# does not take.
-_LAYOUT_FITS = [
-    pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
-    for name in sorted(DEVICES)
-]
-
-
-@pytest.mark.parametrize("device", _LAYOUT_FITS, indirect=True)
 def test_row_tiles_into_a_rowwise_consumer_fit_as_is(device):
     """``GEMM``'s row-major ``C`` (one tile a row) feeding ``RMSNorm`` directly: the analysis derives ``HandOff.EQUAL``, no restage, and it fits.
 
@@ -82,7 +70,6 @@ def _tiles_into_rows(kind: EdgeKind) -> tuple[Recording, Region]:
     )
 
 
-@pytest.mark.parametrize("device", _LAYOUT_FITS, indirect=True)
 def test_column_tiles_into_a_rowwise_consumer_are_restaged_by_layout(device):
     """``GEMM``'s 32x32 ``C`` tiles feeding ``RMSNorm``, which reads whole rows, over a staged edge.
 
@@ -115,7 +102,6 @@ def test_column_tiles_with_no_restage_are_refused(device):
     assert "layout" in (result.why or "")
 
 
-@pytest.mark.parametrize("device", _LAYOUT_FITS, indirect=True)
 def test_32_row_tiles_into_64_row_tiles_balance_at_their_lcm(device):
     """A 32-row GEMM tile feeding a 64-row GEMM tile.
 

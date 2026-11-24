@@ -17,12 +17,18 @@ pytestmark = pytest.mark.usefixtures("device")
 
 @unbuilt
 def test_a_state_layout_round_trips_and_applies_to_every_version(tmp_path, device):
-    """One ``StateLayout`` for the persistent buffer every version that writes or reads it round-trips, and ``candidates`` proposes it."""
-    graph = shared_kv_state()
+    """One ``StateLayout`` for the persistent buffer every version that writes or reads it round-trips, and ``candidates`` proposes it.
+
+    The layout reorders ``kv``'s four positions of 64: its elements in runs of
+    32, the object every step reading or writing it moves, each run of every
+    position together.
+    """
+    graph = shared_kv_state(tile=32, positions=4)
     prefill = graph.record(x=(256,))
     decode = graph.record(x=(512,))
     assert prefill.residents["kv"] == decode.residents["kv"]
-    layout = StateLayout(buffer="kv", order=("position", "element"), tile=(64,))
+    layout = StateLayout(buffer="kv", order=("position", "element"), tile=(32,))
+    assert not layout.kept((4, 64))
     profile = Profile()
     profile.add_state_layout(layout)
     path = tmp_path / "profile.json"
@@ -38,16 +44,18 @@ def test_a_state_layout_round_trips_and_applies_to_every_version(tmp_path, devic
 @unbuilt
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_the_layout_holds_end_to_end_over_prefill_then_decode(device):
-    """The chosen layout is bit-identical to the untuned build over one real prefill-then-decode call sequence, state carried between them.
+    """A layout that reorders the state is bit-identical to the untuned build over one real prefill-then-decode call sequence, state carried between them.
 
     ``check`` takes the graph's calls in order, state carried between them, so the real
     two-version graph's prefill call and its decode call are held to the untuned build in
-    one end-to-end check rather than apart.
+    one end-to-end check rather than apart. ``kv``'s four positions of 64 lie
+    in runs of 32 elements, each run of every position together, not as recorded.
     """
-    graph = shared_kv_state()
+    graph = shared_kv_state(tile=32, positions=4)
     prefill = graph.record(x=(256,))
     decode = graph.record(x=(512,))
-    layout = StateLayout(buffer="kv", order=("position", "element"))
+    layout = StateLayout(buffer="kv", order=("position", "element"), tile=(32,))
+    assert not layout.kept((4, 64))
     base = Profile()
     tuned = Profile()
     tuned.add_state_layout(layout)

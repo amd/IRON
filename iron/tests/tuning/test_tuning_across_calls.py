@@ -19,6 +19,7 @@ from iron.common.declare.profile import Profile
 from iron.common.image.step import EdgeKind
 from iron.tests.support import toys_schedule
 from iron.tests.support.toys_edges import kv_write_then_read, member
+from iron.tests.support.toys_settings import shared_kv_state
 from iron.tests.support.tuning import scheduled_by_candidates, unbuilt
 from iron.tune.autotune import Timed
 from iron.tune.cli import watchdog_s
@@ -71,13 +72,18 @@ def test_calls_overlapped_round_trips_and_is_proposed(tmp_path, device):
     ).schedules() == [schedule]
 
 
-@unbuilt
 def test_interleave_with_decode_and_prefill_round_trips_and_is_proposed(
     tmp_path, device
 ):
-    """``Schedule.interleave_with`` (decode interleaved with prefill) round-trips and is a candidate."""
-    decode = _decode_recording()
-    prefill = _decode_recording()
+    """``Schedule.interleave_with`` (decode interleaved with prefill) round-trips and is a candidate.
+
+    One graph's two versions: its prefill-sized call writes the state its
+    decode-sized call reads.
+    """
+    graph = shared_kv_state()
+    prefill = graph.record(x=(256,))
+    decode = graph.record(x=(512,))
+    assert decode.version != prefill.version
     schedule = Schedule(version=decode.version, interleave_with=(prefill.version,))
     profile = Profile()
     profile.add_schedule(schedule)

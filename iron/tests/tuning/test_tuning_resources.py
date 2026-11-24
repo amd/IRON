@@ -24,8 +24,8 @@ from iron.tune.search import check, fit
 
 pytestmark = pytest.mark.usefixtures("device")
 
-# Where GEMM composes beside another operator: npu1 builds GEMM on an array
-# narrower than the device, which a configuration beside another's does not take.
+# Where GEMM composes beside another operator on the device: npu1's runs wait to
+# be checked on an npu1 host (they compile and fit here).
 _GEMM_BESIDE = [
     pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
     for name in sorted(DEVICES)

@@ -268,16 +268,14 @@ def test_decode_graph_holds_deep_cache_accuracy(position, device):
     assert result.ok, result.why
 
 
-# Where attention's GEMMs compose beside another operator. npu1 builds GEMM on
-# an array narrower than the device, which a configuration beside another
-# operator's does not take.
+# Where attention's GEMMs compose beside another operator on the device: npu1's
+# runs wait to be checked on an npu1 host (they compile and fit here).
 _GEMM_COMPOSED = [
     pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
     for name in sorted(DEVICES)
 ]
 
 
-@pytest.mark.parametrize("device", _GEMM_COMPOSED, indirect=True)
 def test_prefill_scores_stage_into_the_mask_add_and_fit(device):
     """Prefill's float32 scores, QK^T's column halves, staged into the mask add's rows, which stream into the softmax: the region fits.
 

@@ -28,6 +28,7 @@ from aie.iron import (
     ScratchpadParameter,
     Worker,
 )
+from aie.iron.device import Device
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from ..declare import Built, Operator
@@ -453,11 +454,14 @@ def configuration(
     steps: Sequence[str] = (),
     fuse: bool = False,
     phases: Sequence[Sequence[str]] = (),
+    burst: int | None = None,
+    device: Device | None = None,
 ) -> DeviceConfiguration:
     """Build ``arrays`` as one device configuration ``name``.
 
-    One array per identity, and each entry's sequence over it, ``sequence`` if it is
-    alone, else named for its key. Given ``steps`` (keys of ``arrays``), one
+    One array per identity, on ``device`` (where None, the device they are
+    bound to; one array alone, the part of it it takes), and each entry's
+    sequence over it, ``sequence`` if it is alone, else named for its key. Given ``steps`` (keys of ``arrays``), one
     ``sequence`` runs theirs in order, back to back (``MergedRuntime.merge``), or,
     ``fuse``, in one task group (``MergedRuntime.fuse``), each step on an array of its
     own; with ``phases`` (``steps`` split, in order), one fused sequence per phase,
@@ -465,6 +469,8 @@ def configuration(
     flight in two of them, so the phases take the shim's channels in turn. A key of
     ``arrays`` outside ``steps`` takes its own sequence beside them, named for its key,
     identity-shared with another such key the same way as when no ``steps`` are given.
+    ``burst`` is the shim DMA burst length, in bytes, the fused steps' host
+    transfers take; None leaves it to mlir-aie (the longest).
 
     Raises:
         ValueError: The arrays are built for different devices, traced with
@@ -475,6 +481,8 @@ def configuration(
         raise ValueError("fuse needs steps to fuse")
     if phases and (not fuse or [k for phase in phases for k in phase] != list(steps)):
         raise ValueError(f"phases {phases} are not the fused steps {steps} in order")
+    if burst is not None and not fuse:
+        raise ValueError("a burst length is chosen for fused steps")
     independent = [key for key in arrays if key not in steps]
     # Fused steps issue at once, so each keeps its own array: on one, a later
     # step's preamble would rewrite words an earlier step's core has not read yet.
@@ -490,9 +498,14 @@ def configuration(
         owners.setdefault(of[key], array)
     # A spliced step builds nothing: it runs on its producer's cores.
     built = [a for a in owners.values() if not isinstance(a, SplicedArray)]
-    kinds = {type(a.op.array_device()).__name__ for a in built}
+    # An array alone takes its own part of the device (npu1's GEMM, on as few
+    # columns as it spans); arrays loaded together take the device they are
+    # bound to, a part of it holding only the one.
+    kinds = {type(a.op.dev).__name__ for a in built}
     if len(kinds) != 1:
         raise ValueError(f"{list(arrays)} are built for different devices {kinds}")
+    if device is None:
+        device = built[0].op.array_device() if len(built) == 1 else built[0].op.dev
     traced = [owner for owner in owners.values() if owner.traced]
     sizes = set()
     for owner in traced:
@@ -506,7 +519,11 @@ def configuration(
             f"configuration has one trace buffer, so give them one size"
         )
     merge = (
-        functools.partial(MergedRuntime.fuse, await_fills=bool(phases))
+        functools.partial(
+            MergedRuntime.fuse,
+            await_fills=bool(phases),
+            burst_length=0 if burst is None else burst,
+        )
         if fuse
         else MergedRuntime.merge
     )
@@ -529,7 +546,7 @@ def configuration(
     ]
     configured = DeviceConfiguration(
         name,
-        built[0].op.array_device(),
+        device,
         workers=[w for owner in owners.values() for w in owner.workers],
         runtimes=runtimes,
     )

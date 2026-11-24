@@ -146,6 +146,8 @@ class Fusion:
     chosen rather than derived (``compose.phases``). ``slices`` names each
     ``(consumer, input, at)`` of an edge whose consumer reads part of what its
     producer makes, from the producer's element ``at`` on (``Slicing``).
+    ``burst`` is the shim DMA burst length, in bytes, every host transfer of
+    its members takes; None leaves it to mlir-aie (the longest).
     """
 
     kind: FusionKind
@@ -159,6 +161,7 @@ class Fusion:
     phases: tuple[int, ...] | None = None
     drains: int | None = None
     slices: tuple[tuple[int, str, int], ...] = ()
+    burst: int | None = None
 
     def __post_init__(self) -> None:
         if len(self.steps) < 2:
@@ -297,6 +300,8 @@ class Fusion:
         )
         if self.phases is not None:
             wiring += "%" + ",".join(map(str, self.phases))
+        if self.burst is not None:
+            wiring += f"^{self.burst}"
         kind = f"{self.kind.value}/phased" if self.phased else self.kind.value
         digest = hashlib.sha256(
             f"{kind}[{'|'.join(designs)}]({wiring})".encode()

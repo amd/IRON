@@ -185,8 +185,8 @@ def test_a_valid_kv_length_streamed_into_its_rows_is_refused_past_whole_tiles(de
         assert "objects written a call" in result.why
 
 
-# Where GEMM composes beside another operator: npu1 builds GEMM on an array
-# narrower than the device, which a configuration beside another's does not take.
+# Where GEMM composes beside another operator on the device: npu1's runs wait to
+# be checked on an npu1 host (they compile and fit here).
 _GEMM_BESIDE = [
     pytest.param(name, id=f"device_{name}", marks=() if name == "npu2" else unbuilt)
     for name in sorted(DEVICES)
@@ -207,7 +207,6 @@ def test_gemm_tiles_delivered_a_row_at_a_time_are_bit_identical(row_tile, device
     assert result.ok, result.why
 
 
-@pytest.mark.parametrize("device", _GEMM_BESIDE, indirect=True)
 def test_buffer_below_the_computed_minimum_is_refused(device):
     """A multi-rate stream (``16 : 1`` rows) one object short of its minimum buffer is refused by ``fit`` at stage ``"analysis"``, before any build.
 
@@ -338,16 +337,10 @@ def test_counts_that_settle_past_a_bounds_first_value_are_held_at_four_values(de
     assert _balanced_at(derivation, recording, "n", 0, 1536) == [0, 1, 769, 1536]
 
 
-# GEMM beside another operator waits on npu1 (see ``_GEMM_BESIDE``).
 @pytest.mark.parametrize(
     ("device", "reader"),
     [
-        pytest.param(
-            name,
-            reader,
-            id=f"device_{name}-reader_{reader}",
-            marks=unbuilt if (name, reader) == ("npu1", "smaller") else (),
-        )
+        pytest.param(name, reader, id=f"device_{name}-reader_{reader}")
         for name in sorted(DEVICES)
         for reader in ("smaller", "larger")
     ],

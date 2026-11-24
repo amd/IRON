@@ -298,10 +298,17 @@ def test_lossy_coding_is_never_proposed(device):
     )
     profile = Profile()
     found = list(candidates([Timed(recording)], profile, device))
+    # Every entry an edit leaves in the profile: its compositions and each
+    # range's of its variants.
+    edited = [e.apply(profile) for e in found]
     decode_members = [
         part
-        for e in found
-        for part in e.apply(profile).entries()[-1].root.parts
+        for p in edited
+        for entry in (
+            *p.entries(),
+            *(entry for v in p.variants() for _, entry in v.ranges),
+        )
+        for part in entry.root.steps()
         if part.cls is Decode
     ]
     assert all(

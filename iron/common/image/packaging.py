@@ -73,6 +73,19 @@ class Plan:
         return "\n".join(lines)
 
 
+def attached_part() -> str | None:
+    """Return the attached NPU's part as a ``Scope`` names it, None where no NPU runtime reads one.
+
+    The runtime's model name less its ``NPU`` prefix, lower-case, its words
+    joined by hyphens: ``"NPU Strix Halo"`` is ``"strix-halo"``.
+    """
+    runtime = aie_utils.DefaultNPURuntime
+    name = None if runtime is None else runtime.device_name()
+    if not name:
+        return None
+    return "-".join(name.removeprefix("NPU ").lower().split())
+
+
 def require_device():
     """Return the current device, bound if the runtime found one; ``RuntimeError`` if none."""
     dev = aie_utils.ensure_current_device()

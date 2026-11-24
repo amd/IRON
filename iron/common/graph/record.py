@@ -1404,7 +1404,8 @@ class Recording:
         the buffer its consumer reads through its input; and each inflow's
         consumer reads the inflow's buffer. Overlapping matches are each
         returned. ``entry.scope`` keeps those of its versions and the runs of
-        its shape it names.
+        its shape it names; its device part is the build's to apply
+        (``Profile.for_part``).
 
         Raises:
             ValueError: A step's dims name one of its class's tunables, or
