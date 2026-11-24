@@ -14,6 +14,7 @@ from pathlib import Path
 import aie.utils as aie_utils
 import pytest
 from aie.iron.device import from_name
+from aie.utils.compile.jit.context import compile_context
 
 from iron.common.design import OperatorDesign
 from iron.common.graph.record import Recording
@@ -100,6 +101,18 @@ def test_identity_is_what_the_text_is_a_function_of():
     assert _identity(SHAPES) == _identity(SHAPES)
     assert _identity(SHAPES) != _identity([(512, 1024), (256, 1024), (512, 4096)])
     assert _identity(SHAPES) != _identity(SHAPES[::-1])
+
+
+def test_control_packets_select_a_separate_composition():
+    sequence = _sequence(SHAPES)
+    expanded = Composition(sequence)
+    with compile_context(iron_control_packets=True):
+        packets = Composition(sequence)
+    assert expanded.expands
+    assert packets.control_packets and not packets.expands
+    assert expanded.identity != packets.identity
+    assert "iron.expand_load_pdis = true" in expanded.text()
+    assert "iron.expand_load_pdis" not in packets.text()
 
 
 def test_two_designs_whose_device_names_collide_are_refused():

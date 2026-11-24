@@ -16,6 +16,7 @@ tokenizer, and ``--max-seq-len`` at another context.
 
 import aie.utils as aie_utils
 import pytest
+from aie.utils.compile.jit.context import compile_context
 
 from iron.applications.llama import Llama
 from iron.lm.testing import (
@@ -53,7 +54,8 @@ def model(load):
 
     The runtime is released after its checkpoint's last test.
     """
-    model = load()
+    with compile_context(iron_control_packets=True):
+        model = load()
     yield model
     model.release()
     if aie_utils.DefaultNPURuntime is not None:

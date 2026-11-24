@@ -75,6 +75,11 @@ class FullELF:
             flags = [
                 *self.FLAGS,
                 *([self.TRACE_FLAG] if seq.traced else []),
+                *(
+                    ["--load-pdi-to-ctrl-pkt", "--reconfig-teardown=false"]
+                    if composition.control_packets
+                    else []
+                ),
             ]
 
             # The cache follows the modules a generator reaches, not the state
