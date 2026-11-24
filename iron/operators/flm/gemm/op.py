@@ -1203,12 +1203,10 @@ class ProjectionGEMM(Operator):
                     n_units=slab.units,
                 )
 
-            # Every transfer is unmanaged: the compiler meters each channel's
-            # queue and takes a descriptor back once a poll proves its
-            # transfer done. A column half's C drains in order on one channel,
-            # and its last one finishing means its cores' slab is done -- fills,
-            # memtile chains and cores -- so only that one carries a token.
+            # Each column half's final C transfer completes its slab's inputs
+            # and memory-tile tasks. Only that transfer issues a token.
             last_c = []
+            unawaited_tasks = []
 
             # A's transfers, one per lane. Bounded, each repeats over the
             # units the bound reaches, a per-call repeat count, and the second
@@ -1231,15 +1229,16 @@ class ProjectionGEMM(Operator):
             # with the other legs'.
             for bi, (mega_col, active_cols) in enumerate(blocks):
                 for r, (tap, offset) in enumerate(a_legs):
-                    self.A.fill(
+                    task = self.A.fill(
                         tap,
                         lane=r,
                         offset_parameter=offset,
                         repeat_parameter=self.units_repeat if bounded else None,
                         managed=False,
                     )
+                    unawaited_tasks.append(task)
                 for c in range(active_cols):
-                    self.B.fill(
+                    task = self.B.fill(
                         b_tap(mega_col, c, slab),
                         lane=c,
                         repeat_parameter=(
@@ -1249,6 +1248,7 @@ class ProjectionGEMM(Operator):
                         ),
                         managed=False,
                     )
+                    unawaited_tasks.append(task)
                 if bi == 0:
                     set_up()
                 else:
@@ -1267,8 +1267,14 @@ class ProjectionGEMM(Operator):
                         )
                         if last:
                             last_c.append(task)
+                        else:
+                            unawaited_tasks.append(task)
             for task in last_c:
                 task.await_()
+            for task in unawaited_tasks:
+                task.free()
+            for task in b_mt_tasks.values():
+                task.free()
 
         # Back to back: a slab returns only once its C has all drained.
         for slab in slabs:

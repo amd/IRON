@@ -378,13 +378,16 @@ class GEMV(Operator):
                 )
                 for k, tap, word, unit in rows
             ]
+        input_tasks = []
         for b in range(self.num_batches or 1):
             # B's row repeated over an A tile in the iteration dim (stride 0).
             head = TensorAccessPattern(
                 self.B.shape, b * K, [tsi, 1, 1, K], [0, 0, 0, 1]
             )
             for k, tap, word, unit in rows:
-                self.A.fill(head, lane=k, source=self.B, managed=False)
+                input_tasks.append(
+                    self.A.fill(head, lane=k, source=self.B, managed=False)
+                )
                 (offset,) = concrete((tap.offset,), tap)
                 matrix = TensorAccessPattern(
                     tap.tensor_dims,
@@ -392,15 +395,19 @@ class GEMV(Operator):
                     tap.sizes,
                     tap.strides,
                 )
-                self.A.fill(
-                    matrix,
-                    lane=k,
-                    length_parameter=word,
-                    length_unit=unit,
-                    managed=False,
+                input_tasks.append(
+                    self.A.fill(
+                        matrix,
+                        lane=k,
+                        length_parameter=word,
+                        length_unit=unit,
+                        managed=False,
+                    )
                 )
         for task in drains:
             task.await_()
+        for task in input_tasks:
+            task.free()
 
     def ops(self) -> int:
         return 2 * self.M * self.K * (self.num_batches or 1)
