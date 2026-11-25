@@ -13,12 +13,16 @@ Ported from the `attn` and `swa` overlays of [FastFlowLM](https://github.com/ROC
 > other operators in this repository are likely better examples.
 
 Causal prefill attention from a KV cache. The two operators reproduce
-FastFlowLM's prefill attention overlays for Gemma 4:
+FastFlowLM's prefill attention overlays for Gemma 4, and build them at a head
+dim of 128 too (Qwen3, the Llama-shaped models):
 
 | Operator | Overlay | Head dim | Keys of the query at position `p` |
 |---|---|---|---|
-| `PrefillAttention` | global attention | 512 | `0` to `p` |
-| `PrefillSlidingAttention` | sliding-window attention | 256 | `p - window + 1` to `p` |
+| `PrefillAttention` | global attention | 512 (default) or 128 | `0` to `p` |
+| `PrefillSlidingAttention` | sliding-window attention | 256 (default) or 128 | `p - window + 1` to `p` |
+
+At 128, both run the sliding-window design, 16 query rows per core;
+`PrefillAttention` sets its window to `max_context`, which no query sees past.
 
 ```python
 from iron.operators.flm import PrefillAttention, PrefillSlidingAttention
@@ -26,6 +30,8 @@ from iron.operators.flm import PrefillAttention, PrefillSlidingAttention
 op = PrefillAttention(max_context=32768, num_heads=8, num_kv_heads=1)
 # or
 op = PrefillSlidingAttention(max_context=32768, num_heads=8, num_kv_heads=1, window=512)
+# or, for a head dim of 128
+op = PrefillAttention(max_context=32768, num_heads=32, num_kv_heads=8, head_dim=128)
 op(o, q, kv, L_begin=0, L_end=2048, max_l=4096)
 ```
 
