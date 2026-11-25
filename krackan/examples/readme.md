@@ -1,7 +1,7 @@
 
 # IRON
 
-Tested on `2026_11_13_02_36_38` at commit `b7e8ea9`.
+Tested on `2026_11_25_10_45_28` at commit `de1a549`.
 
 <details>
 <summary>tests/applications/decoders</summary>
@@ -11,7 +11,7 @@ Tested on `2026_11_13_02_36_38` at commit `b7e8ea9`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_generation[gemma4-short-1]</td><td>✅ 1/1</td><td>5.46</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_generation[gemma4-short-1]</td><td>✅ 1/1</td><td>5.48</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -25,6 +25,7 @@ Tested on `2026_11_13_02_36_38` at commit `b7e8ea9`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
     </thead>
     <tbody>
+        <tr><td>test_embedding_request[test_embedding_request]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embeddinggemma_2_accuracy[document]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embeddinggemma_2_accuracy[long_document]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_embeddinggemma_2_accuracy[near_the_limit]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -34,6 +35,7 @@ Tested on `2026_11_13_02_36_38` at commit `b7e8ea9`.
         <tr><td>test_image_processor_refuses[shape_(5000, 4000)-tokens_280-refusal_does not fit]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_image_processor_refuses[shape_(97, 2003)-tokens_280-refusal_patch columns]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_image_processor_refuses_on_npu1[test_image_processor_refuses_on_npu1]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_text_task_defaults_and_validation[test_text_task_defaults_and_validation]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_vision_window_positions_are_each_patch_rows[hk_1-wk_1]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_vision_window_positions_are_each_patch_rows[hk_14-wk_19]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_vision_window_positions_are_each_patch_rows[hk_16-wk_16]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
@@ -41,6 +43,25 @@ Tested on `2026_11_13_02_36_38` at commit `b7e8ea9`.
         <tr><td>test_vision_window_positions_are_each_patch_rows[hk_6-wk_42]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_vision_window_positions_are_each_patch_rows[hk_65-wk_4]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_vision_window_positions_are_each_patch_rows[hk_8-wk_35]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+    </tbody>
+</table>
+
+</details>
+
+<details>
+<summary>tests/applications/fastflowlm_iron</summary>
+
+<table>
+    <thead>
+        <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
+    </thead>
+    <tbody>
+        <tr><td>test_build_reselects_revision[test_build_reselects_revision]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_installation_serializes_builds[test_installation_serializes_builds]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_installation_timeout_releases_lock[test_installation_timeout_releases_lock]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_model[tag_embeddinggemma-2:740m-name_embeddinggemma-2]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_model[tag_llama3.2-iron:1b-name_llama3.2-1b-instruct]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_model_directory[test_model_directory]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -83,7 +104,7 @@ Tested on `2026_11_13_02_36_38` at commit `b7e8ea9`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_granite_4_2_3b[granite_4_2_3b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>1.43</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_granite_4_2_3b[granite_4_2_3b_prompt_13_tokens_1]</td><td>✅ 1/1</td><td>1.44</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 
@@ -158,8 +179,8 @@ Tested on `2026_11_13_02_36_38` at commit `b7e8ea9`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td><td>Latency (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_llama_3_2[llama_3.2_1b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.45</td><td>n/a</td><td>n/a</td></tr>
-        <tr><td>test_llama_3_2[llama_3.2_3b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.95</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_llama_3_2[llama_3.2_1b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.43</td><td>n/a</td><td>n/a</td></tr>
+        <tr><td>test_llama_3_2[llama_3.2_3b-prompt_13_tokens_1]</td><td>✅ 1/1</td><td>0.96</td><td>n/a</td><td>n/a</td></tr>
     </tbody>
 </table>
 

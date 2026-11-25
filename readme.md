@@ -3795,6 +3795,7 @@
 
 | Test | Krackan Status | Krackan | Phoenix Status | Phoenix |
 |---|---|---|---|---|
+| test_embedding_request[test_embedding_request] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[document] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[long_document] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[near_the_limit] | ✅ | - | ✅ | - |
@@ -3804,6 +3805,7 @@
 | test_image_processor_refuses[shape_(5000, 4000)-tokens_280-refusal_does not fit] | ✅ | - | ✅ | - |
 | test_image_processor_refuses[shape_(97, 2003)-tokens_280-refusal_patch columns] | ✅ | - | ✅ | - |
 | test_image_processor_refuses_on_npu1[test_image_processor_refuses_on_npu1] | ✅ | - | ✅ | - |
+| test_text_task_defaults_and_validation[test_text_task_defaults_and_validation] | ✅ | - | ✅ | - |
 | test_vision_window_positions_are_each_patch_rows[hk_1-wk_1] | ✅ | - | ✅ | - |
 | test_vision_window_positions_are_each_patch_rows[hk_14-wk_19] | ✅ | - | ✅ | - |
 | test_vision_window_positions_are_each_patch_rows[hk_16-wk_16] | ✅ | - | ✅ | - |
@@ -3811,6 +3813,20 @@
 | test_vision_window_positions_are_each_patch_rows[hk_6-wk_42] | ✅ | - | ✅ | - |
 | test_vision_window_positions_are_each_patch_rows[hk_65-wk_4] | ✅ | - | ✅ | - |
 | test_vision_window_positions_are_each_patch_rows[hk_8-wk_35] | ✅ | - | ✅ | - |
+
+</details>
+
+<details>
+<summary>tests/applications/fastflowlm_iron</summary>
+
+| Test | Krackan Status | Krackan | Phoenix Status | Phoenix |
+|---|---|---|---|---|
+| test_build_reselects_revision[test_build_reselects_revision] | ✅ | - | ✅ | - |
+| test_installation_serializes_builds[test_installation_serializes_builds] | ✅ | - | ✅ | - |
+| test_installation_timeout_releases_lock[test_installation_timeout_releases_lock] | ✅ | - | ✅ | - |
+| test_model[tag_embeddinggemma-2:740m-name_embeddinggemma-2] | ✅ | - | - | - |
+| test_model[tag_llama3.2-iron:1b-name_llama3.2-1b-instruct] | ✅ | - | - | - |
+| test_model_directory[test_model_directory] | ✅ | - | ✅ | - |
 
 </details>
 
