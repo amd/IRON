@@ -14,12 +14,15 @@ requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 dependencies = [
     "numpy",
-    "ml_dtypes",
+    "ml_dtypes==0.6.0",
 ]
 
 [project.optional-dependencies]
 # Model.load: a Hugging Face download, its tokenizer and its chat template.
 models = ["huggingface_hub", "jinja2", "tokenizers"]
+
+[tool.setuptools]
+license-files = ["LICENSE", "LICENSES/*.txt"]
 
 [tool.setuptools.packages.find]
 include = ["iron*"]
@@ -28,6 +31,7 @@ exclude = ["iron.tests*"]
 
 [tool.setuptools.package-data]
 "iron.lm" = ["prompt.txt"]
+"iron.applications.fastflowlm_iron" = ["CMakeLists.txt", "*.cpp"]
 # In every package: what an application reads beside its code at run time.
 "*" = [
     "profiles/*.json",

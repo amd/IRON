@@ -165,19 +165,33 @@ class TextProcessor:
         self.config = config
 
     def encode(
-        self, text: str, task: str, audio_tokens: int = 0, image_tokens: int = 0
+        self,
+        text: str,
+        task: str = "",
+        audio_tokens: int = 0,
+        image_tokens: int = 0,
+        title: str | None = None,
     ) -> list[int]:
         """Encode `text` behind `task`'s prefix (`TASKS`), with BOS and EOS.
 
+        An omitted or empty task defaults to ``query``.
         Each `<|audio|>` and `<|image|>` in it is a run of that many
         placeholders between its markers.
         """
+        task = task or "query"
+        if task not in self.TASKS:
+            raise ValueError(f"Unsupported EmbeddingGemma task: {task}")
+        prefix = self.TASKS[task]
+        if title is not None:
+            if prefix != "title: none | text: ":
+                raise ValueError("title requires a document task")
+            prefix = f"title: {title} | text: "
         c, out = self.config, []
         runs = {
             c.audio_token: [c.boa, *[c.audio_token] * audio_tokens, c.eoa],
             c.image_token: [c.boi, *[c.image_token] * image_tokens, c.eoi],
         }
-        for t in self.tokenizer.encode(self.TASKS[task] + text).ids:
+        for t in self.tokenizer.encode(prefix + text).ids:
             out += runs.get(t, [t])
         return out
 
@@ -386,13 +400,47 @@ class EmbeddingGemma(Encoder):
             model.processor = TextProcessor(directory / "tokenizer.json", model.config)
         return model
 
-    def embed(self, text: str, task: str, dims: int = 768) -> np.ndarray:
+    def embed(self, text: str, task: str = "", dims: int = 768) -> np.ndarray:
         """Return the embedding of `text` for `task`, its first `dims` renormalized."""
         if self.processor is None:
             raise RuntimeError(
                 f"{type(self).__name__}: no tokenizer; give token ids to encode"
             )
         return self.encode(self.processor.encode(text, task), dims)
+
+    def embed_request(self, request: dict) -> tuple[np.ndarray, int]:
+        """Embed one text request with optional task, document title and dimensions.
+
+        Input is a string or an object with ``text``, optional ``task`` and ``title``.
+        Task names are ``TextProcessor.TASKS``; omitted or null tasks select query.
+        Return the vector and number of processed tokens, including the prompt.
+        """
+        if not isinstance(request, dict):
+            raise ValueError("Embedding request must be an object")
+        unknown = request.keys() - {"input", "dimensions"}
+        if unknown:
+            raise ValueError(f"Unsupported embedding options: {sorted(unknown)}")
+        content, task = request.get("input"), ""
+        title, dims = None, request.get("dimensions", 768)
+        if isinstance(content, dict):
+            if content.keys() - {"text", "task", "title"}:
+                raise ValueError("Input supports only text, task and title")
+            text, title = content.get("text"), content.get("title")
+            task = content.get("task")
+            if task is None:
+                task = ""
+        else:
+            text = content
+        if not isinstance(text, str) or not isinstance(task, str):
+            raise ValueError("text and task must be strings")
+        if title is not None and not isinstance(title, str):
+            raise ValueError("title must be a string")
+        if type(dims) is not int or dims not in self.config.mrl_dims:
+            raise ValueError(f"dimensions must be one of {self.config.mrl_dims}")
+        if self.processor is None:
+            raise RuntimeError("Embedding tokenizer is not loaded")
+        tokens = self.processor.encode(text, task, title=title)
+        return self.encode(tokens, dims), len(tokens)
 
 
 class Multimodal(lm.Multimodal):
@@ -441,7 +489,7 @@ class Multimodal(lm.Multimodal):
         return c.truncated(self.run(tokens, raw).numpy(), dims)
 
     def embed(
-        self, text: str, task: str, dims: int = 768, audio=None, image=None
+        self, text: str, task: str = "", dims: int = 768, audio=None, image=None
     ) -> np.ndarray:
         """Return the embedding of `text` for `task`, its first `dims` renormalized.
 

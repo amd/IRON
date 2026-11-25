@@ -179,6 +179,69 @@ def weights():
     return Checkpoint(DIRECTORY / "model.safetensors").tree()
 
 
+def test_text_task_defaults_and_validation():
+    """Keep default-task selection and task prefixes in the model's processor."""
+    processor = TextProcessor.__new__(TextProcessor)
+    processor.config = Config()
+    processor.tokenizer = SimpleNamespace(
+        encode=lambda text: SimpleNamespace(ids=list(text.encode()))
+    )
+    assert processor.encode("hello") == processor.encode("hello", "query")
+    for task in ("document", "QuestionAnswering"):
+        assert bytes(processor.encode("hello", task)).decode() == (
+            TextProcessor.TASKS[task] + "hello"
+        )
+    with pytest.raises(ValueError, match="Unsupported EmbeddingGemma task"):
+        processor.encode("hello", "unknown")
+
+
+def test_embedding_request():
+    """Format titles before tokenization and reject invalid request options."""
+    processor = TextProcessor.__new__(TextProcessor)
+    processor.config = Config()
+    processor.tokenizer = SimpleNamespace(
+        encode=lambda text: SimpleNamespace(ids=list(text.encode()))
+    )
+    model = SimpleNamespace(
+        config=Config(),
+        processor=processor,
+        encode=lambda tokens, dims: (bytes(tokens).decode(), dims),
+    )
+    request = {
+        "input": {"text": "hello", "title": "World", "task": "document"},
+        "dimensions": 128,
+    }
+    vector, count = EmbeddingGemma.embed_request(model, request)
+    assert vector == ("title: World | text: hello", 128)
+    assert count == len(vector[0])
+    default, _ = EmbeddingGemma.embed_request(model, {"input": "hello"})
+    assert default == ("task: search result | query: hello", 768)
+    for task in (None, "", "query"):
+        result, _ = EmbeddingGemma.embed_request(
+            model, {"input": {"text": "hello", "task": task}}
+        )
+        assert result == default
+    no_title, _ = EmbeddingGemma.embed_request(
+        model, {"input": {"text": "hello", "title": None, "task": "document"}}
+    )
+    assert no_title == ("title: none | text: hello", 768)
+    for field, value in (
+        ("input", {"text": "hello", "title": 7}),
+        ("input", {"text": "hello", "unknown": True}),
+        ("input", {"text": "hello", "task": 0}),
+        ("input", {"text": "hello", "task": "unknown"}),
+        ("input", {"text": "hello", "task": "query", "title": "World"}),
+        ("dimensions", 0),
+        ("dimensions", 128.0),
+        ("dimensions", True),
+        ("task", "query"),
+        ("input", {}),
+        ("unknown_option", True),
+    ):
+        with pytest.raises(ValueError):
+            EmbeddingGemma.embed_request(model, {**request, field: value})
+
+
 @pytest.fixture(scope="module")
 def processor():
     require(DIRECTORY / "tokenizer.json")
