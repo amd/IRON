@@ -723,7 +723,10 @@ def test_concurrent_fetches_of_a_shipped_image_each_get_the_whole_file(tmp_path)
     assert set(paths) == {tmp_path / image.filename}
     with open(paths[0], "rb") as f:
         assert hashlib.file_digest(f, "sha256").hexdigest() == image.sha256
-    assert [p.name for p in tmp_path.iterdir()] == [image.filename]
+    assert {p.name for p in tmp_path.iterdir()} == {
+        image.filename,
+        f".{image.filename}.lock",
+    }
 
 
 def test_one_configuration_records_at_one_size():
@@ -747,7 +750,7 @@ def test_a_fetch_refuses_plain_http_and_a_download_of_another_digest(tmp_path):
             Xclbin(url=url, sha256="0" * 64, filename="f").fetch(tmp_path)
     except urllib.error.URLError:
         pytest.skip(f"{url} is unreachable from here")
-    assert list(tmp_path.iterdir()) == []
+    assert not [p for p in tmp_path.iterdir() if p.suffix != ".lock"]
 
 
 def test_a_fetch_reuses_a_file_of_the_pinned_digest(tmp_path):

@@ -249,8 +249,8 @@ def test_section7_profile_on_device():
 def test_section8_toy_decoder_matches_numpy():
     mod = _example("section-8", "toy_decoder")
     with tempfile.TemporaryDirectory() as directory:
-        checkpoint = mod.toy_checkpoint(mod.TOY, directory)
-        model = mod.Llama(mod.TOY, checkpoint.tree("random", seed=0))
+        weights = mod.toy_checkpoint(mod.TOY, directory).tree("random", seed=0)
+        model = mod.Llama(mod.TOY, weights)
         rng = np.random.default_rng(1)
         tokens = rng.integers(0, mod.TOY.vocab_size, 8).astype(np.int64)
         ids = np.zeros(mod.TOY.prefill_chunk, dtype=np.int32)

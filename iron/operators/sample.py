@@ -69,14 +69,32 @@ def slices(vocab: int, cores: int, k_max: int) -> tuple[int, int]:
     return best[1], best[2]
 
 
-def reference(logits, draw_row, k_max: int | None = None) -> int:
+def reference(
+    logits,
+    draw_row,
+    k_max: int | None = None,
+    *,
+    max_ranges=0,
+    probability_rule=False,
+    columns=1,
+) -> int:
     """Return the token the device draws for one draw row; an all-zero row is greedy."""
     words = np.asarray(draw_row, dtype=np.int32)
     row = words.view(np.uint32)
     temperature = row[0:1].view(np.float32)[0]
     n53 = int(row[2]) | int(row[3]) << 32
     top_k = max(int(words[1]), 1)
-    return sample.sample_ref(logits, temperature, top_k, n53, k_max=k_max)
+    ranges = words[sample.ROW_WORDS : sample.ROW_WORDS + 2 * max_ranges]
+    return sample.sample_ref(
+        logits,
+        temperature,
+        top_k,
+        n53,
+        k_max=k_max,
+        ranges=list(map(tuple, ranges.reshape(-1, 2))),
+        probability_rule_split=int(words[-1]) if probability_rule else None,
+        columns=columns,
+    )
 
 
 def _logits(op: "Sample") -> dict:
@@ -94,6 +112,16 @@ def _logits(op: "Sample") -> dict:
             )
         ]
     )
+    if op.max_ranges or op.probability_rule:
+        rows = np.zeros((op.steps, op.row_words), np.int32)
+        rows[:, : sample.ROW_WORDS] = draws
+        if op.max_ranges:
+            rows[:, sample.ROW_WORDS : sample.ROW_WORDS + 2 * op.max_ranges] = (
+                sample.range_words([(0, op.vocab // 8)], op.max_ranges)
+            )
+        if op.probability_rule:
+            rows[:, -1] = op.vocab // 2
+        draws = rows
     return dict(
         given={
             op.logits: logits,
@@ -111,6 +139,14 @@ class Sample(Operator):
         [
             Case(dict(vocab=4096, cores=4, steps=3), id="small"),
             Case(dict(vocab=4096, cores=2, chunk=256), id="two_cores"),
+            Case(
+                dict(
+                    vocab=4096, cores=2, chunk=256, max_ranges=3, probability_rule=True
+                ),
+                id="timestamp_rules",
+                lower=True,
+            ),
+            Case(dict(vocab=4096, cores=2, max_ranges=3), id="ranges", lower=True),
             Case(dict(vocab=128256, cores=4), id="llama", bench=True),
             # No even split: three slices of 14560, and 8186 left for the last.
             Case(dict(vocab=51866, cores=4), id="uneven", lower=True),
@@ -122,6 +158,12 @@ class Sample(Operator):
 
     vocab: int = param(array=True)
     k_max: int = param(default=64, array=True)
+    max_ranges: int = param(default=0, array=True)
+    probability_rule: bool = param(default=False, array=True)
+    row_words: int = param(
+        derive=lambda op: sample.select_row_words(op.max_ranges, op.probability_rule),
+        array=True,
+    )
     # The logits that are tokens'; the rest pad an odd vocabulary to whole
     # words, and the last select core writes them -inf.
     drawable: int = param(default=lambda op: op.vocab, array=True)
@@ -136,9 +178,7 @@ class Sample(Operator):
     )
 
     logits = In(vocab, obj_shape=(chunk,), per=(cores,))
-    draws = In(
-        steps, sample.ROW_WORDS, dtype=np.int32, obj_shape=(sample.ROW_WORDS,), depth=1
-    )
+    draws = In(steps, row_words, dtype=np.int32, obj_shape=(row_words,), depth=1)
     tokens = InOut(steps, dtype=np.int32, obj_shape=(1,), depth=1)
     token = Out(1, dtype=np.int32, obj_shape=(1,), depth=1)
     # Element offsets of this position's draw row and record.
@@ -176,8 +216,8 @@ class Sample(Operator):
     def compatible(self) -> None:
         # The factories' own checks: chunk divides the slice, k_max fits.
         config = self.layout()
-        for run in config.runs:
-            config.select(*run)
+        for c, run in enumerate(config.runs):
+            config.select(c, *run)
         config.combine()
 
     @property
@@ -198,21 +238,38 @@ class Sample(Operator):
             (last, tail, last - padding)
         ]
 
-    def select(self, run: int, chunk: int, drawable: int):
+    def select(self, column: int, run: int, chunk: int, drawable: int):
         return sample.sample_select(
-            slice_size=run, chunk=chunk, k_max=self.k_max, valid=drawable
+            slice_size=run,
+            chunk=chunk,
+            k_max=self.k_max,
+            valid=drawable,
+            base=(
+                column * self.slice_size
+                if self.max_ranges or self.probability_rule
+                else 0
+            ),
+            max_ranges=self.max_ranges,
+            probability_rule=self.probability_rule,
         )
 
     def combine(self):
         size, last = slices(self.vocab, self.cores, self.k_max)
         return sample.sample_combine(
-            columns=self.cores, slice_size=size, k_max=self.k_max, last_slice=last
+            columns=self.cores,
+            slice_size=size,
+            k_max=self.k_max,
+            last_slice=last,
+            probability_rule=self.probability_rule,
         )
 
     def build(self) -> Built:
         runs, combine = self.runs, self.combine()
-        selects = {run: self.select(*run) for run in set(runs)}
-        words = sample.summary_words(self.slice_size, self.k_max)
+        selects = [self.select(c, *run) for c, run in enumerate(runs)]
+        column_words = (
+            sample.rule_column_words if self.probability_rule else sample.summary_words
+        )
+        words = column_words(self.slice_size, self.k_max)
         # Every core reads the draw row.
         of_draw = ObjectFifo(self.draws.obj_type, depth=self.draws.depth)
         self.draws.bind(of_draw.prod())
@@ -224,7 +281,7 @@ class Sample(Operator):
         # its object up to the next offset, so a shorter last summary ends it.
         of_summaries = ObjectFifo(
             np.ndarray[
-                (sum(sample.summary_words(run, self.k_max) for run, _, _ in runs),),
+                (sum(column_words(run, self.k_max) for run, _, _ in runs),),
                 np.dtype[np.int32],
             ],
             depth=1,
@@ -232,34 +289,66 @@ class Sample(Operator):
         of_summary = of_summaries.prod().join(
             [words * c for c in range(self.cores)],
             obj_types=[
-                np.ndarray[(sample.summary_words(run, self.k_max),), np.dtype[np.int32]]
+                np.ndarray[(column_words(run, self.k_max),), np.dtype[np.int32]]
                 for run, _, _ in runs
             ],
             depths=[1] * self.cores,
         )
 
-        def select_body(of_x, of_row, of_sum, kernel, state, calls):
+        def select_body(of_x, of_row, of_sum, kernel, state, calls, extra):
             row = of_row.acquire(1)
             summary = of_sum.acquire(1)
-            for _ in range_(calls):
-                x = of_x.acquire(1)
-                kernel(x, row, state, summary)
-                of_x.release(1)
+            if self.probability_rule:
+                plain, restricted_state, restricted, scratch, reduction, size = extra
+                for _ in range_(calls):
+                    x = of_x.acquire(1)
+                    kernel(
+                        x,
+                        row,
+                        state,
+                        plain,
+                        restricted_state,
+                        restricted,
+                        scratch,
+                        reduction,
+                    )
+                    of_x.release(1)
+                for i in range_(size):
+                    summary[i] = plain[i]
+                    summary[size + i] = restricted[i]
+                for i in range_(sample.REDUCTION_WORDS):
+                    summary[2 * size + i] = reduction[i]
+            else:
+                for _ in range_(calls):
+                    x = of_x.acquire(1)
+                    kernel(x, row, state, summary)
+                    of_x.release(1)
             of_sum.release(1)
             of_row.release(1)
 
-        def combine_body(of_sums, of_row, of_tok, of_rec, kernel):
+        def combine_body(of_sums, of_row, of_tok, of_rec, kernel, draw):
             summaries = of_sums.acquire(1)
             row = of_row.acquire(1)
             token = of_tok.acquire(1)
             record = of_rec.acquire(1)
-            kernel(summaries, row, token, record)
+            for i in range_(sample.ROW_WORDS):
+                draw[i] = row[i]
+            if self.probability_rule:
+                draw[sample.ROW_WORDS] = row[self.row_words - 1]
+            kernel(summaries, draw, token, record)
             of_sums.release(1)
             of_row.release(1)
             of_tok.release(1)
             of_rec.release(1)
 
         workers, logits = [], []
+
+        def local(size, dtype: type = np.int32):
+            return Buffer(
+                np.ndarray[(size,), np.dtype[dtype]],
+                initial_value=np.zeros(size, dtype=dtype),
+            )
+
         for c, (run, chunk, drawable) in enumerate(runs):
             of_x = ObjectFifo(
                 np.ndarray[(chunk,), np.dtype[self.logits.dtype]],
@@ -270,6 +359,17 @@ class Sample(Operator):
                 np.ndarray[(sample.SELECT_STATE_WORDS,), np.dtype[np.int32]],
                 initial_value=np.zeros(sample.SELECT_STATE_WORDS, dtype=np.int32),
             )
+            extra = ()
+            if self.probability_rule:
+                size = sample.summary_words(run, self.k_max)
+                extra = (
+                    local(size),
+                    local(sample.SELECT_STATE_WORDS),
+                    local(size),
+                    local(chunk, bfloat16),
+                    local(sample.REDUCTION_WORDS),
+                    size,
+                )
             workers.append(
                 Worker(
                     select_body,
@@ -277,9 +377,10 @@ class Sample(Operator):
                         of_x.cons(),
                         of_draw.cons(),
                         of_summary[c].prod(),
-                        selects[run, chunk, drawable],
+                        selects[c],
                         state,
                         sample.select_streams(run, chunk) * run // chunk,
+                        extra,
                     ],
                 )
             )
@@ -293,6 +394,7 @@ class Sample(Operator):
                     of_token.prod(),
                     of_record.prod(),
                     combine,
+                    local(sample.combine_row_words(self.probability_rule)),
                 ],
             )
         )
@@ -324,9 +426,16 @@ class Sample(Operator):
     def reference(self, logits, draws, tokens, *, row=0, at=0):
         """``(tokens, token)``: the draw at ``draws`` row ``row // 4``, recorded at ``at``."""
         token = reference(
-            np.asarray(logits).reshape(-1)[: self.drawable],
-            np.asarray(draws).reshape(-1)[row : row + sample.ROW_WORDS],
+            np.where(
+                np.arange(self.vocab) < self.drawable,
+                np.asarray(logits).reshape(-1),
+                -np.inf,
+            ),
+            np.asarray(draws).reshape(-1)[row : row + self.row_words],
             self.k_max,
+            max_ranges=self.max_ranges,
+            probability_rule=self.probability_rule,
+            columns=self.cores,
         )
         tokens = np.array(tokens, dtype=np.int32).reshape(-1)
         tokens[at] = token

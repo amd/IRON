@@ -46,7 +46,7 @@ class Small(Llama):
 
 def _directory(path, config=SMALL):
     """``path``, holding ``config``'s checkpoint as ``model.safetensors``."""
-    (path / "model.safetensors").symlink_to(checkpoint(config).path)
+    shutil.copyfile(checkpoint(config).path, path / "model.safetensors")
     return path
 
 
@@ -92,7 +92,7 @@ def test_from_checkpoint_draws_its_weights_at_a_seed(tmp_path):
 def test_from_checkpoint_opens_the_tokenizer_beside_it(tmp_path):
     require(TOKENIZER)
     directory = _directory(tmp_path)
-    (directory / "tokenizer.json").symlink_to(TOKENIZER)
+    shutil.copyfile(TOKENIZER, directory / "tokenizer.json")
     model = Small.from_checkpoint(directory)
     assert model.random_weights is None
     begin = TokenizerJson(TOKENIZER).encode("<|begin_of_text|>")

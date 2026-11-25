@@ -77,6 +77,17 @@ def block_sizes(op, dev, start: int) -> tuple[int, ...]:
 # At NPU2's eight pipelines; _cases halves them on a narrower array.
 _CASES = [
     Case(dict(num_heads=1, seq_len=16384, num_pipelines=8), bench=True),
+    Case(
+        dict(
+            num_heads=4,
+            seq_len=64,
+            kv_len=1536,
+            kv_seq_len=1500,
+            causal=False,
+            num_pipelines=1,
+        ),
+        lower=True,
+    ),
     # Grouped-query: 8 query heads over 2 KV heads.
     Case(
         dict(num_heads=8, num_KV_heads=2, seq_len=16384, num_pipelines=8),
@@ -202,6 +213,8 @@ class MHA(Operator):
     seq_pad: int = param(derive=lambda op: op.seq_padding(op.seq_len), repr=False)
     # A cache longer than the queries, whose last rows the queries are.
     kv_len: int = param(default=lambda op: op.seq_pad)
+    # A fixed encoder cache's valid rows, independent of the query chunk.
+    kv_seq_len: int | None = param(default=None)
     # ``(seq, heads, d)`` as a projection writes it, so no copy reorders the heads.
     heads_interleaved: bool = param(default=False)
     kv_interleaved: bool = param(default=False)
@@ -312,6 +325,8 @@ class MHA(Operator):
         kv_valid, q_tokens = self.kv_valid, self.q_tokens  # extents first
         if "kv_valid" in self.bound_extents:
             return kv_valid
+        if self.kv_seq_len is not None:
+            return self.kv_seq_len
         return self.kv_len - self.seq_pad + q_tokens
 
     @property
@@ -389,6 +404,12 @@ class MHA(Operator):
             )
 
     def compatible(self) -> None:
+        if self.kv_seq_len is not None and not 0 < self.kv_seq_len <= self.kv_len:
+            raise ValueError("MHA: kv_seq_len must be within the padded key buffer")
+        if 64 % self.B_q:
+            raise ValueError(
+                f"MHA: B_q ({self.B_q}) must divide 64, the block seq_pad is whole of"
+            )
         if self.pv_cores not in (1, 2) or self.pv_width * self.pv_cores != self.d:
             raise ValueError(
                 f"MHA: P*V takes one core or two, each a pv_width ({self.pv_width}) "
@@ -1063,7 +1084,7 @@ class MHA(Operator):
 
     def ops(self) -> int:
         """Q K^T and its product with V per head, over the keys each query keeps."""
-        keys = self.kv_len - self.seq_pad + self.seq_len
+        keys = self.kv_seq_len or self.kv_len - self.seq_pad + self.seq_len
         position = keys - self.seq_len + np.arange(self.seq_len)
         ahead = 0 if self.causal else (self.window or keys)
         lo = np.maximum(position - self.window, 0) if self.window else 0

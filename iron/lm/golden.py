@@ -18,7 +18,7 @@ import os
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import numpy as np
 
@@ -183,7 +183,7 @@ class HuggingFace:
         self.model = model.eval()
 
     @classmethod
-    def load(cls, directory) -> "HuggingFace":
+    def load(cls, directory) -> Self:
         import torch
         import transformers
 
@@ -191,7 +191,7 @@ class HuggingFace:
         return cls(auto.from_pretrained(directory, dtype=torch.float32))
 
     @classmethod
-    def build(cls, model_type: str, config, weights, **json) -> "HuggingFace":
+    def build(cls, model_type: str, config, weights, **json) -> Self:
         """Build ``model_type``'s model on ``config``'s fields as its ``config.json`` names them.
 
         ``json``'s merged in, over ``weights`` written to a checkpoint
@@ -217,7 +217,15 @@ class HuggingFace:
             model, info = auto.from_pretrained(
                 directory, dtype=torch.float32, output_loading_info=True
             )
-        missing, unexpected = info["missing_keys"], info["unexpected_keys"]
+        # A tied name may be absent from the file if another name of the
+        # very same parameter was loaded. Never excuse an entirely missing tie.
+        aliases: dict[int, set[str]] = {}
+        for name, parameter in model.named_parameters(remove_duplicate=False):
+            aliases.setdefault(id(parameter), set()).add(name)
+        loaded = state.keys() - set(info["missing_keys"]) - set(info["unexpected_keys"])
+        tied = set().union(*(names for names in aliases.values() if names & loaded))
+        missing = set(info["missing_keys"]) - tied
+        unexpected = info["unexpected_keys"]
         if missing or unexpected:
             raise ValueError(
                 f"{model_type}: the weights lack {sorted(missing)} and hold "

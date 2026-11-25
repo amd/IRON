@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from iron.tests.support.results import merge_results
+
 _ROOT_CONFTEST = Path(__file__).resolve().parents[3] / "conftest.py"
 _SCRIPTS = Path(__file__).resolve().parents[3] / "ci" / "scripts"
 
@@ -124,7 +126,7 @@ def test_a_session_that_dies_keeps_its_results_and_names_the_test(tmp_path):
         tmp_path,
         f"--csv-output={out}",
         tests=_CRASHING,
-        returncode=-signal.SIGABRT,
+        returncode=3 if sys.platform == "win32" else -signal.SIGABRT,
     )
     with open(out) as f:
         rows = {row["Test"]: row for row in csv.DictReader(f)}
@@ -186,7 +188,7 @@ def test_a_run_of_several_sessions_reads_as_one_run(tmp_path):
         writer.writeheader()
         for row in rows:
             writer.writerow(row | {"Date": "2026-10-29 10:00:00", "Latency (mean)": 1})
-    subprocess.run([_SCRIPTS / "merge_results.sh", run, suite], check=True)
+    merge_results(run, suite)
 
     trends = (suite / "trends.md").read_text()
     assert "`test_first`" in trends and "`test_second`" in trends, trends

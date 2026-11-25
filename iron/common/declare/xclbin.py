@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from aie.utils.compile import NPU_CACHE_HOME
+from aie.utils.compile.cache.utils import file_lock
 from aie.utils.npukernel import NPUKernel
 
 
@@ -62,7 +63,8 @@ class Xclbin(NPUKernel):
         """Return the downloaded file in ``directory``.
 
         ``NPU_CACHE_HOME``'s ``prebuilt/`` by default, fetched unless
-        the pinned content is there.
+        the pinned content is there. A sibling lock serializes validation
+        and replacement across threads and processes.
 
         Raises:
             ValueError: The URL is not https.
@@ -71,6 +73,12 @@ class Xclbin(NPUKernel):
         if directory is None:
             directory = Path(NPU_CACHE_HOME) / "prebuilt"
         target = Path(directory) / self.filename
+        # Windows cannot replace a target another fetch is reading to hash it.
+        with file_lock(target.with_name(f".{target.name}.lock").absolute()):
+            return self._fetch_locked(target)
+
+    def _fetch_locked(self, target: Path) -> Path:
+        """Validate or install the pinned content while holding its cache lock."""
         if target.exists():
             with open(target, "rb") as f:
                 if hashlib.file_digest(f, "sha256").hexdigest() == self.sha256:
@@ -82,8 +90,7 @@ class Xclbin(NPUKernel):
         if (got := hashlib.sha256(content).hexdigest()) != self.sha256:
             raise RuntimeError(f"{self.url} has SHA-256 {got}, expected {self.sha256}")
         target.parent.mkdir(parents=True, exist_ok=True)
-        # A file of this fetch's own, renamed over the target whole: concurrent
-        # fetches never share one, and none sees a partial target.
+        # An interrupted fetch never leaves a partial target.
         partial = tempfile.NamedTemporaryFile(
             dir=target.parent, prefix=f"{target.name}.", suffix=".part", delete=False
         )

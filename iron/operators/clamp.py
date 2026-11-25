@@ -28,9 +28,8 @@ class Clamp(UnaryElementwise):
         draw=lambda op: dict(centered=(op.x,)),
     )
 
-    low: float = param()
-    high: float = param()
-
+    low: float = param(default=-np.inf)
+    high: float = param(default=np.inf)
     low_bits = per_call(derive=lambda op: op.bits()[0])
     high_bits = per_call(derive=lambda op: op.bits()[1])
 
@@ -87,3 +86,10 @@ class Clamp(UnaryElementwise):
         self.x.bind([f.prod() for f in of_ins])
         self.y.bind([f.cons() for f in of_outs])
         return Built(workers, rtps)
+
+    def reference(self, x) -> np.ndarray:
+        return np.clip(
+            np.asarray(x, np.float32),
+            float(bfloat16(self.low)),
+            float(bfloat16(self.high)),
+        ).astype(bfloat16)

@@ -152,6 +152,7 @@ def _resident_bytes(path: Path) -> int:
     return total
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="RSS measured via Linux /proc")
 def test_release_drops_the_pages_and_keeps_the_bytes(toy_path):
     checkpoint = Checkpoint(toy_path)
     tree = checkpoint.tree()
@@ -168,12 +169,28 @@ def test_release_drops_the_pages_and_keeps_the_bytes(toy_path):
     assert _resident_bytes(toy_path) > 0
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="RSS measured via Linux /proc")
 def test_release_leaves_anything_else_alone(toy_path):
     checkpoint = Checkpoint(toy_path)
     elsewhere = np.zeros(8, dtype=bfloat16)
     checkpoint.release(elsewhere)
     checkpoint.release(checkpoint.tensors["model.embed_tokens.weight"][:, ::2])
     assert not elsewhere.any() and _resident_bytes(toy_path) > 0
+
+
+@pytest.mark.parametrize("fixture", ["toy_path", "sharded_toy_path"])
+def test_release_preserves_mapped_bytes_on_every_platform(request, fixture):
+    """Release leaves checkpoint views and unrelated arrays readable and unchanged."""
+    checkpoint = Checkpoint(request.getfixturevalue(fixture))
+    before = {name: np.array(a) for name, a in checkpoint.tensors.items()}
+    elsewhere = np.zeros(8, dtype=bfloat16)
+    checkpoint.release(elsewhere)
+    for array in checkpoint.tensors.values():
+        checkpoint.release(array[:, ::2] if array.ndim == 2 else array[::2])
+        checkpoint.release(array)
+    assert not elsewhere.any()
+    for name, array in checkpoint.tensors.items():
+        assert bitwise_equal(array, before[name]), name
 
 
 @pytest.mark.parametrize(
@@ -316,6 +333,7 @@ def test_checkpoint_refuses_a_shard_outside_the_index_s_directory(tmp_path, shar
         Checkpoint(index)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="RSS measured via Linux /proc")
 def test_checkpoint_release_drops_the_right_shard(sharded_toy_path):
     first_shard = sharded_toy_path.parent / "model-00001-of-00002.safetensors"
     second_shard = sharded_toy_path.parent / "model-00002-of-00002.safetensors"

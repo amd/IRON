@@ -45,8 +45,9 @@ def toy_shapes(config: LlamaConfig) -> dict[str, tuple[int, ...]]:
     The model's own, then each layer's.
     """
     E, F, V = config.hidden_size, config.intermediate_size, config.vocab_size
-    Q = config.num_attention_heads * config.head_dim
-    KV = config.num_key_value_heads * config.head_dim
+    head_dim = config.head_dim or config.hidden_size // config.num_attention_heads
+    Q = config.num_attention_heads * head_dim
+    KV = config.num_key_value_heads * head_dim
     named = {"model.embed_tokens.weight": (V, E), "model.norm.weight": (E,)}
     for i in range(config.num_hidden_layers):
         layer = f"model.layers.{i}"
@@ -96,8 +97,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     with tempfile.TemporaryDirectory() as directory:
-        checkpoint = toy_checkpoint(TOY, directory)
-        model = Llama(TOY, checkpoint.tree("random", seed=0))
+        weights = toy_checkpoint(TOY, directory).tree("random", seed=0)
+        model = Llama(TOY, weights)
 
         rng = np.random.default_rng(1)
         tokens = rng.integers(0, TOY.vocab_size, args.prompt_tokens).astype(np.int64)
@@ -131,7 +132,9 @@ def main(argv=None):
         print(f"host reference drew: {host_tokens}")
         assert device_tokens == host_tokens, (device_tokens, host_tokens)
 
-        checked = Llama(TOY, checkpoint.tree("random", seed=0))
+        checked = Llama(
+            TOY, Checkpoint(Path(directory) / "toy.safetensors").tree("random", seed=0)
+        )
         checked_decode = checked.compile(**checked.shapes()[0], check=True)
         checked_prompt = checked.compile(**checked.shapes()[1], check=True)
         _, checked_carry = checked_prompt(ids, **values)

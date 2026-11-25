@@ -1,0 +1,9 @@
+{"entries": [
+  {"operator": "MHA", "seq_pad": 1, "B_q": 8, "pv_cores": 1, "num_pipelines": 4},
+  {"operator": "MHA", "seq_pad": 64, "B_q": 64, "pv_cores": 1, "num_pipelines": 1},
+  {"operator": "MHA", "seq_pad": 1536, "B_q": 64, "pv_cores": 1, "num_pipelines": 4},
+  {"operator": "GEMV", "M": 768, "K": 768, "num_aie_columns": 8, "num_channels": 1, "tile_size_input": 4, "tile_size_output": 32},
+  {"operator": "GEMV", "M": 3072, "K": 768, "num_aie_columns": 8, "num_channels": 2, "tile_size_input": 4, "tile_size_output": 192},
+  {"operator": "GEMV", "M": 768, "K": 3072, "num_aie_columns": 8, "num_channels": 2, "tile_size_input": 1, "tile_size_output": 48},
+  {"operator": "GEMV", "M": 51968, "K": 768, "num_aie_columns": 8, "num_channels": 2, "tile_size_input": 4, "tile_size_output": 16}
+]}
