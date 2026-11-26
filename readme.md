@@ -3983,33 +3983,33 @@
 | TestAudio::test_audio_features[name_medium] | ✅ | - | ✅ | - |
 | TestAudio::test_audio_features[name_passage] | ✅ | - | ✅ | - |
 | TestAudio::test_audio_features[name_short] | ✅ | - | ✅ | - |
-| TestAudio::test_audio_latency[name_extended] | ✅ | 358139.76 | ✅ | 4907562.35 |
-| TestAudio::test_audio_latency[name_long] | ✅ | 423324.65 | ✅ | 4990071.57 |
-| TestAudio::test_audio_latency[name_medium] | ✅ | 301505.80 | ✅ | 4922664.15 |
-| TestAudio::test_audio_latency[name_passage] | ✅ | 348223.25 | ✅ | 4894932.52 |
-| TestAudio::test_audio_latency[name_short] | ✅ | 292503.70 | ✅ | 4667721.76 |
+| TestAudio::test_audio_latency[name_extended] | ✅ | 357793.63 | ✅ | 4820691.13 |
+| TestAudio::test_audio_latency[name_long] | ✅ | 423252.27 | ✅ | 4965437.95 |
+| TestAudio::test_audio_latency[name_medium] | ✅ | 300787.92 | ✅ | 4835851.38 |
+| TestAudio::test_audio_latency[name_passage] | ✅ | 348511.62 | ✅ | 4987851.19 |
+| TestAudio::test_audio_latency[name_short] | ✅ | 292657.41 | ✅ | 4687262.34 |
 | TestEachStep::test_embeddinggemma_2_each_step_accuracy[past_the_window] | ✅ | - | - | - |
 | TestEachStep::test_embeddinggemma_2_each_step_accuracy[query] | ✅ | - | - | - |
 | TestEachStep::test_embeddinggemma_2_each_step_multimodal[test_embeddinggemma_2_each_step_multimodal] | ✅ | - | - | - |
-| TestVision::test_image_processor[name_cats-shape_(1080, 1920)-tokens_140] | ✅ | 13800.70 | ✅ | 39108.24 |
-| TestVision::test_image_processor[name_cats-shape_(17, 23)-tokens_140] | ✅ | 8748.90 | ✅ | 26558.11 |
-| TestVision::test_image_processor[name_cats-shape_(2003, 97)-tokens_140] | ✅ | 11281.70 | ✅ | 32584.61 |
-| TestVision::test_image_processor[name_cats-shape_(3024, 4032)-tokens_280] | ✅ | 28270.98 | ✅ | 99042.72 |
-| TestVision::test_image_processor[name_cats-shape_(333, 517)-tokens_140] | ✅ | 8416.07 | ✅ | 20613.03 |
-| TestVision::test_image_processor[name_cats-shape_(4032, 3024)-tokens_280] | ✅ | 29547.95 | ✅ | 97107.04 |
-| TestVision::test_image_processor[name_cats-shape_(4096, 3072)-tokens_280] | ✅ | 29693.97 | ✅ | 100573.81 |
-| TestVision::test_image_processor[name_cats-shape_(480, 640)-tokens_280] | ✅ | 10822.32 | ✅ | 31409.87 |
-| TestVision::test_image_processor[name_cats-shape_(672, 517)-tokens_280] | ✅ | 10143.51 | ✅ | 34608.59 |
-| TestVision::test_image_processor[name_cats-shape_(672, 960)-tokens_280] | ✅ | 9633.56 | ✅ | 31210.98 |
-| TestVision::test_image_processor[name_cats-shape_None-tokens_280] | ✅ | 10024.07 | ✅ | 30594.22 |
-| TestVision::test_image_processor[name_living_room-shape_None-tokens_140] | ✅ | 8386.46 | ✅ | 28289.83 |
-| TestVision::test_image_processor[name_stop_sign-shape_None-tokens_280] | ✅ | 10593.47 | ✅ | 32140.35 |
-| TestVision::test_image_processor_npu2_only[test_image_processor_npu2_only] | ✅ | 11088.99 | - | - |
+| TestVision::test_image_processor[name_cats-shape_(1080, 1920)-tokens_140] | ✅ | 14178.60 | ✅ | 38885.05 |
+| TestVision::test_image_processor[name_cats-shape_(17, 23)-tokens_140] | ✅ | 7371.14 | ✅ | 16517.86 |
+| TestVision::test_image_processor[name_cats-shape_(2003, 97)-tokens_140] | ✅ | 11391.59 | ✅ | 34359.10 |
+| TestVision::test_image_processor[name_cats-shape_(3024, 4032)-tokens_280] | ✅ | 27885.25 | ✅ | 97865.32 |
+| TestVision::test_image_processor[name_cats-shape_(333, 517)-tokens_140] | ✅ | 8170.02 | ✅ | 22878.56 |
+| TestVision::test_image_processor[name_cats-shape_(4032, 3024)-tokens_280] | ✅ | 29629.64 | ✅ | 97566.63 |
+| TestVision::test_image_processor[name_cats-shape_(4096, 3072)-tokens_280] | ✅ | 29541.50 | ✅ | 93614.09 |
+| TestVision::test_image_processor[name_cats-shape_(480, 640)-tokens_280] | ✅ | 9677.96 | ✅ | 32404.90 |
+| TestVision::test_image_processor[name_cats-shape_(672, 517)-tokens_280] | ✅ | 11445.74 | ✅ | 26216.65 |
+| TestVision::test_image_processor[name_cats-shape_(672, 960)-tokens_280] | ✅ | 9456.87 | ✅ | 27395.99 |
+| TestVision::test_image_processor[name_cats-shape_None-tokens_280] | ✅ | 10013.96 | ✅ | 26063.86 |
+| TestVision::test_image_processor[name_living_room-shape_None-tokens_140] | ✅ | 9331.51 | ✅ | 19248.45 |
+| TestVision::test_image_processor[name_stop_sign-shape_None-tokens_280] | ✅ | 11013.07 | ✅ | 30286.11 |
+| TestVision::test_image_processor_npu2_only[test_image_processor_npu2_only] | ✅ | 9833.13 | - | - |
 | TestVision::test_vision_accuracy[name_cats] | ✅ | - | ✅ | - |
 | TestVision::test_vision_accuracy[name_living_room] | ✅ | - | ✅ | - |
 | TestVision::test_vision_accuracy[name_stop_sign] | ✅ | - | ✅ | - |
-| TestVision::test_vision_latency[name_cats] | ✅ | 720991.29 | ✅ | 2095759.62 |
-| TestVision::test_vision_latency[name_living_room] | ✅ | 411959.48 | ✅ | 1576573.13 |
+| TestVision::test_vision_latency[name_cats] | ✅ | 720928.00 | ✅ | 2107551.36 |
+| TestVision::test_vision_latency[name_living_room] | ✅ | 412322.49 | ✅ | 1536011.36 |
 | test_embedding_request[test_embedding_request] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[document] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[long_document] | ✅ | - | ✅ | - |
@@ -4017,9 +4017,9 @@
 | test_embeddinggemma_2_accuracy[past_the_window] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_accuracy[query] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_determinism[test_embeddinggemma_2_determinism] | ✅ | - | ✅ | - |
-| test_embeddinggemma_2_latency[long_document] | ✅ | 339664.08 | ✅ | 1888281.27 |
-| test_embeddinggemma_2_latency[past_the_window] | ✅ | 548883.74 | ✅ | 2958108.58 |
-| test_embeddinggemma_2_latency[query] | ✅ | 284799.68 | ✅ | 1259125.70 |
+| test_embeddinggemma_2_latency[long_document] | ✅ | 340381.28 | ✅ | 1723473.19 |
+| test_embeddinggemma_2_latency[past_the_window] | ✅ | 547532.62 | ✅ | 2963581.37 |
+| test_embeddinggemma_2_latency[query] | ✅ | 284983.03 | ✅ | 1243745.32 |
 | test_embeddinggemma_2_multimodal[case_audio] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_multimodal[case_both] | ✅ | - | ✅ | - |
 | test_embeddinggemma_2_multimodal[case_image] | ✅ | - | ✅ | - |
@@ -4263,7 +4263,7 @@
 | test_decode_deep_in_the_cache[llama_3.2_1b-4096] | ✅ | n/a | - | - |
 | test_decode_deep_in_the_cache[llama_3.2_1b-65536] | ✅ | n/a | - | - |
 | test_decode_deep_in_the_cache[llama_3.2_1b-whole] | ❌ | n/a | - | - |
-| test_decode_deep_in_the_cache[llama_3.2_1b_each_step-16384] | - | - | ✅ | n/a |
+| test_decode_deep_in_the_cache[llama_3.2_1b_each_step-16384] | - | - | ❌ | n/a |
 | test_decode_deep_in_the_cache[llama_3.2_1b_each_step-32768] | - | - | ✅ | n/a |
 | test_decode_deep_in_the_cache[llama_3.2_1b_each_step-4096] | - | - | ✅ | n/a |
 | test_decode_deep_in_the_cache[llama_3.2_1b_each_step-65536] | - | - | ✅ | n/a |
@@ -4297,7 +4297,7 @@
 | test_prompt_deep_in_the_cache[llama_3.2_1b-32768] | ❌ | n/a | - | - |
 | test_prompt_deep_in_the_cache[llama_3.2_1b-4096] | ✅ | n/a | - | - |
 | test_prompt_deep_in_the_cache[llama_3.2_1b-65536] | ❌ | n/a | - | - |
-| test_prompt_deep_in_the_cache[llama_3.2_1b_each_step-16384] | - | - | ✅ | n/a |
+| test_prompt_deep_in_the_cache[llama_3.2_1b_each_step-16384] | - | - | ❌ | n/a |
 | test_prompt_deep_in_the_cache[llama_3.2_1b_each_step-32768] | - | - | ✅ | n/a |
 | test_prompt_deep_in_the_cache[llama_3.2_1b_each_step-4096] | - | - | ✅ | n/a |
 | test_prompt_deep_in_the_cache[llama_3.2_1b_each_step-65536] | - | - | ✅ | n/a |
@@ -4317,7 +4317,7 @@
 | test_prompt_time_at_8k[llama_3.2_1b-16384] | ✅ | n/a | - | - |
 | test_prompt_time_at_8k[llama_3.2_1b-32768] | ❌ | n/a | - | - |
 | test_prompt_time_at_8k[llama_3.2_1b-65536] | ❌ | n/a | - | - |
-| test_prompt_time_at_8k[llama_3.2_1b_each_step-16384] | - | - | ✅ | n/a |
+| test_prompt_time_at_8k[llama_3.2_1b_each_step-16384] | - | - | ❌ | n/a |
 | test_prompt_time_at_8k[llama_3.2_1b_each_step-32768] | - | - | ✅ | n/a |
 | test_prompt_time_at_8k[llama_3.2_1b_each_step-65536] | - | - | ✅ | n/a |
 | test_prompt_time_at_8k[llama_3.2_1b_each_step-whole] | - | - | ✅ | n/a |
@@ -4338,7 +4338,7 @@
 | test_prompt_time_at_the_whole_context[llama_3.2_1b-32768] | ❌ | n/a | - | - |
 | test_prompt_time_at_the_whole_context[llama_3.2_1b-4096] | ✅ | n/a | - | - |
 | test_prompt_time_at_the_whole_context[llama_3.2_1b-65536] | ❌ | n/a | - | - |
-| test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-16384] | - | - | ✅ | n/a |
+| test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-16384] | - | - | ❌ | n/a |
 | test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-32768] | - | - | ✅ | n/a |
 | test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-4096] | - | - | ✅ | n/a |
 | test_prompt_time_at_the_whole_context[llama_3.2_1b_each_step-65536] | - | - | ✅ | n/a |
